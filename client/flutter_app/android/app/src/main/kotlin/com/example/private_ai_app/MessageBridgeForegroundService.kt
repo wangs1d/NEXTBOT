@@ -25,11 +25,30 @@ class MessageBridgeForegroundService : Service() {
         private const val TAG = "BridgeFgs"
         private const val CHANNEL_ID = "message_bridge"
         private const val NOTIFICATION_ID = 3408
+
+        /**
+         * 保活服务的真实运行态（2026-11-14 诊断修复）。
+         *
+         * 旧实现由 KeepAlivePlugin 在调用 startForegroundService() 成功后就置
+         * true——那只是「已请求启动」，startForeground() 抛异常时服务会 stopSelf，
+         * 标志却仍是 true。于是 ws.client_boot 上报的 fgsRunning 恒为真，把
+         * 「保活根本没起来、后台必被冻结」这条最可能的断连根因完全掩盖掉。
+         * 现在只在本服务真正进入前台态后置真，onDestroy 置假。
+         */
+        @Volatile
+        var running: Boolean = false
+            private set
     }
 
     override fun onCreate() {
         super.onCreate()
         startForegroundCompat()
+    }
+
+    override fun onDestroy() {
+        running = false
+        Log.i(TAG, "foreground service destroyed")
+        super.onDestroy()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -75,6 +94,7 @@ class MessageBridgeForegroundService : Service() {
             } else {
                 startForeground(NOTIFICATION_ID, builder.build())
             }
+            running = true
         } catch (e: Exception) {
             // Android 15 对 BOOT_COMPLETED 起 dataSync 类型 FGS 有限制；失败不致命，
             // 通知监听服务本身由系统绑定不受影响

@@ -356,79 +356,6 @@ class AgentResultCardVideo {
   final String? source;
 }
 
-/// price_compare 卡（跨平台实时比价 shopping.compare.prices）：
-/// 单个平台分组的最低价报价（同款归一后每组取最优报价）。
-class AgentResultPriceGroup {
-  const AgentResultPriceGroup({
-    required this.platform,
-    required this.title,
-    this.priceCny,
-    this.platformLabel,
-    this.shop,
-    this.image,
-    this.similar = false,
-    this.specTokens = const <String>[],
-    this.offerCount = 1,
-  });
-
-  factory AgentResultPriceGroup.fromJson(Map<String, dynamic> json) =>
-      AgentResultPriceGroup(
-        priceCny: (json["priceCny"] as num?)?.toDouble(),
-        platform: json["platform"]?.toString() ?? "",
-        platformLabel: json["platformLabel"]?.toString(),
-        title: json["title"]?.toString() ?? "",
-        shop: json["shop"]?.toString(),
-        image: json["image"]?.toString(),
-        similar: json["similar"] == true,
-        specTokens: (json["specTokens"] as List<dynamic>? ?? const <dynamic>[])
-            .map((s) => s.toString())
-            .toList(growable: false),
-        offerCount: (json["offerCount"] as num?)?.toInt() ?? 1,
-      );
-
-  /// 最低价（元）；抓取失败为 null（渲染「价格待查」）。
-  final double? priceCny;
-  final String platform;
-
-  /// 平台中文来源名（京东/淘宝/拼多多…）；缺省回退 [platform]。
-  final String? platformLabel;
-  final String title;
-  final String? shop;
-  final String? image;
-
-  /// 低置信同款标注。
-  final bool similar;
-
-  /// 组规格 token（如 ["256g"]），渲染规格 chip（同规格可比性可视化）。
-  final List<String> specTokens;
-
-  /// 组内报价数（>1 时渲染「等N家」）。
-  final int offerCount;
-
-  /// 展示用来源名：中文平台名优先，回退 platform id。
-  String get sourceLabel =>
-      (platformLabel ?? "").isNotEmpty ? platformLabel! : platform;
-}
-
-/// price_compare 卡：整体结构化载荷（分组报价）。
-class AgentResultPriceCompare {
-  const AgentResultPriceCompare({required this.groups, this.bestIndex});
-
-  factory AgentResultPriceCompare.fromJson(Map<String, dynamic> json) =>
-      AgentResultPriceCompare(
-        groups: (json["groups"] as List<dynamic>? ?? const <dynamic>[])
-            .whereType<Map<String, dynamic>>()
-            .map(AgentResultPriceGroup.fromJson)
-            .toList(growable: false),
-        bestIndex: (json["bestIndex"] as num?)?.toInt(),
-      );
-
-  final List<AgentResultPriceGroup> groups;
-
-  /// 「最低价」组下标；null = 各组规格不一致，不构成同规格比价，不打最低价章。
-  final int? bestIndex;
-}
-
 class AgentResultData {
   const AgentResultData({
     this.avatar = "NB",
@@ -522,9 +449,13 @@ class AgentResultData {
   /// product_pick 卡：真实口碑摘要（小红书 UGC，归属主推；无口碑为 null）。
   final AgentResultUgc? ugc;
 
-  /// price_compare 卡（跨平台实时比价）：分组报价 + 决策页入口。
-  /// 为 null 时客户端回退通用卡渲染（服务端旧形态兜底）。
-  final AgentResultPriceCompare? priceCompare;
+  /// price_compare 卡（跨平台实时比价）：分组报价原始载荷，**原样透传**。
+  ///
+  /// 2026-11-13：竖直列表卡（PriceCompareCard）已删除，比价统一由**横向
+  /// 轮播卡**承载（载荷在 [extra] 的 `shopping` 里）。这里保留 `priceCompare`
+  /// 只是为了**历史消息不丢数据**——旧消息落库时带着这个字段，本地序列化
+  /// 再写回时原样带走，不再解析成模型。
+  final Map<String, dynamic>? priceCompare;
 
   /// 卡片私有载荷透传（morning_briefing 等自渲染卡携带的原始数据）。
   /// 通用卡不读它；由对应 cardType 的渲染分支自行解析。
@@ -579,9 +510,8 @@ class AgentResultData {
       ugc: json["ugc"] is Map<String, dynamic>
           ? AgentResultUgc.fromJson(json["ugc"] as Map<String, dynamic>)
           : null,
-      priceCompare: json["priceCompare"] is Map<String, dynamic>
-          ? AgentResultPriceCompare.fromJson(
-              json["priceCompare"] as Map<String, dynamic>)
+      priceCompare: json["priceCompare"] is Map
+          ? Map<String, dynamic>.from(json["priceCompare"] as Map)
           : null,
     );
   }
@@ -656,23 +586,8 @@ class AgentResultData {
                     })
                 .toList(),
           },
-        if (priceCompare != null)
-          "priceCompare": <String, dynamic>{
-            "groups": priceCompare!.groups
-                .map((AgentResultPriceGroup g) => <String, dynamic>{
-                      if (g.priceCny != null) "priceCny": g.priceCny,
-                      "platform": g.platform,
-                      if (g.platformLabel != null) "platformLabel": g.platformLabel,
-                      "title": g.title,
-                      if (g.shop != null) "shop": g.shop,
-                      if (g.image != null) "image": g.image,
-                      if (g.similar) "similar": true,
-                      if (g.specTokens.isNotEmpty) "specTokens": g.specTokens,
-                      "offerCount": g.offerCount,
-                    })
-                .toList(),
-            if (priceCompare!.bestIndex != null) "bestIndex": priceCompare!.bestIndex,
-          },
+        // priceCompare 原样透传（竖直列表卡已删除，仅为历史消息保数据）
+        if (priceCompare != null) "priceCompare": priceCompare!,
         if (groupTitle != null) "groupTitle": groupTitle,
         if (sideA != null) "sideA": sideA,
         if (sideB != null) "sideB": sideB,

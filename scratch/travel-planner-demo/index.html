@@ -1,0 +1,559 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>旅游规划空间 · 根修效果实测（真后端驱动）</title>
+<style>
+  :root {
+    --bg:#0F0F0F; --card:#1C1C1C; --card-hi:#232323; --item:#1A1A1A;
+    --btn:#2C2C2C; --line:#2A2A2A; --txt:#E8E8E8; --t2:#A1A1AA; --t3:#6B6B72;
+    --green:#1ED7A6; --orange:#D7B85A; --purple:#8B5CF6;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { background:#101216; color:var(--txt); font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+    display:flex; flex-direction:column; align-items:center; padding:28px 16px 60px; gap:16px; }
+  .head { text-align:center; max-width:640px; }
+  .head h1 { font-size:18px; font-weight:600; }
+  .head .sub { font-size:12.5px; color:var(--t2); margin-top:6px; line-height:1.7; }
+  .head .sub b { color:var(--green); }
+  #backendBanner { display:none; max-width:390px; width:100%; background:rgba(215,184,90,.08);
+    border:1px solid rgba(215,184,90,.3); border-radius:12px; padding:10px 14px; font-size:12.5px;
+    color:var(--orange); line-height:1.6; text-align:center; }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; justify-content:center; max-width:520px; }
+  .chip { font-size:12.5px; padding:8px 14px; border-radius:999px; border:1px solid var(--line);
+    background:var(--card); color:var(--t2); cursor:pointer; }
+  .chip:hover { border-color:#3A3A3A; color:var(--txt); }
+  .phone { width:390px; max-width:100%; height:760px; background:var(--bg);
+    border:1px solid rgba(255,255,255,.12); border-radius:40px; padding:10px;
+    display:flex; flex-direction:column; overflow:hidden; box-shadow:0 30px 70px rgba(0,0,0,.5); }
+  .appbar { display:flex; align-items:center; gap:10px; padding:10px 14px 8px; border-bottom:1px solid #1C1C1C; flex:none; }
+  .appbar .name { font-size:15px; font-weight:600; }
+  .appbar .st { font-size:11px; color:var(--t3); margin-top:1px; }
+  .appbar .reset { margin-left:auto; font-size:11.5px; color:var(--t2); border:1px solid var(--line);
+    border-radius:999px; padding:6px 12px; cursor:pointer; background:none; }
+  .chat { flex:1; overflow-y:auto; padding:12px 12px 6px; display:flex; flex-direction:column; gap:10px; }
+  .chat::-webkit-scrollbar { width:0; }
+  .empty { text-align:center; color:var(--t3); font-size:12.5px; margin:auto; line-height:2; }
+  .empty .compass { font-size:34px; color:#3A3A3A; }
+  .msg { display:flex; }
+  .msg.user { justify-content:flex-end; }
+  .bubble { max-width:84%; border-radius:18px; padding:10px 14px; font-size:13.5px; line-height:1.6; white-space:pre-wrap; }
+  .msg.user .bubble { background:#000; color:#FFF; border-bottom-right-radius:6px; }
+  .msg.bot .bubble { background:transparent; color:#D4D4D8; padding:2px 4px; }
+  .typing { color:var(--t3); font-size:12.5px; padding:4px 8px; }
+  .rcard { background:var(--card-hi); border:1px solid rgba(255,255,255,.14); border-radius:14px; padding:12px; }
+  .stage { display:flex; align-items:center; gap:8px; font-size:11px; letter-spacing:1.6px; color:var(--t3); }
+  .stage i { width:5px; height:5px; border-radius:50%; background:var(--purple); flex:none; }
+  .stage.g i { background:var(--green); } .stage.w i { background:#4EA1FF; } .stage.b i { background:var(--purple); }
+  .stage.o i { background:var(--orange); }
+  .ctitle { font-size:14.5px; font-weight:600; margin-top:8px; line-height:1.45; }
+  .opts { display:flex; flex-wrap:wrap; gap:8px; margin-top:11px; }
+  .opt { font-size:13px; padding:8px 15px; border-radius:999px; border:1px solid var(--line);
+    color:var(--txt); background:#1A1A1A; cursor:pointer; }
+  .opt.on { border-color:rgba(139,92,246,.55); background:rgba(139,92,246,.10); }
+  .prefill { margin-top:10px; font-size:11.5px; color:var(--t3); line-height:1.5; }
+  .prefill em { color:var(--orange); font-style:normal; }
+  .cbtns { display:flex; gap:9px; margin-top:12px; }
+  .cbtn { flex:1; height:40px; border-radius:12px; display:flex; align-items:center; justify-content:center;
+    font-size:13.5px; font-weight:600; cursor:pointer; border:none; }
+  .cbtn.main { background:var(--btn); color:var(--E8E8E8); color:#E8E8E8; }
+  .cbtn.ghost { background:none; border:1px solid var(--line); color:var(--t2); }
+  .cbtn:disabled { opacity:.5; cursor:default; }
+  .wrow { display:flex; gap:8px; margin-top:11px; }
+  .wday { flex:1; background:#1A1A1A; border:1px solid #262626; border-radius:12px; padding:9px 4px; text-align:center; }
+  .wday .d { font-size:10px; color:var(--t3); }
+  .wday .hi { font-size:13px; font-weight:600; margin-top:4px; }
+  .wday .lo { font-size:11px; color:var(--t3); margin-top:1px; }
+  .wtip { margin-top:11px; font-size:11.5px; line-height:1.6; color:var(--t2);
+    background:rgba(215,184,90,.08); border:1px solid rgba(215,184,90,.25); border-radius:10px; padding:8px 11px; }
+  .gitem { display:flex; gap:10px; margin-top:10px; background:var(--item); border:1px solid #262626;
+    border-radius:14px; padding:10px; cursor:pointer; }
+  .gitem.picked { border-color:rgba(30,215,166,.4); background:rgba(30,215,166,.05); }
+  .gimg { width:62px; height:62px; border-radius:11px; object-fit:cover; flex-shrink:0; background:#262626; }
+  .gbody { flex:1; min-width:0; }
+  .gname { font-size:13.5px; font-weight:600; display:flex; align-items:center; }
+  .gname .ck { margin-left:auto; width:18px; height:18px; border-radius:6px; border:1.5px solid #3E3E3E; flex-shrink:0; }
+  .gitem.picked .ck { background:var(--green); border-color:var(--green); position:relative; }
+  .gitem.picked .ck::after { content:"✓"; position:absolute; inset:0; display:flex; align-items:center;
+    justify-content:center; color:#0A0A0A; font-size:12px; font-weight:800; }
+  .gmetric { font-size:10.5px; color:var(--t3); margin-top:5px; line-height:1.5; }
+  .gintro { font-size:11px; color:var(--t3); line-height:1.55; margin-top:4px;
+    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+  .gnote { font-size:10.5px; color:var(--t3); margin-top:10px; }
+  .brow { display:flex; gap:11px; margin-top:10px; background:var(--item); border:1px solid #262626;
+    border-radius:14px; padding:11px; cursor:pointer; }
+  .brow.sel { border-color:rgba(139,92,246,.5); background:rgba(139,92,246,.06); }
+  .bmeta { font-size:11px; color:var(--t3); margin-top:3px; line-height:1.5; }
+  .bprice { margin-left:auto; text-align:right; flex-shrink:0; }
+  .bprice .p { font-size:14px; font-weight:600; color:var(--orange); }
+  .bprice .u { font-size:10px; color:var(--t3); }
+  .rec { font-size:9.5px; padding:2px 7px; border-radius:999px; background:rgba(30,215,166,.14);
+    color:var(--green); font-weight:600; margin-left:7px; vertical-align:2px; }
+  .bsec { font-size:11px; letter-spacing:1.5px; color:var(--t3); margin-top:12px; }
+  .bi { display:flex; align-items:center; padding:9px 0; border-bottom:1px solid #232323; font-size:13px; }
+  .bi:last-of-type { border-bottom:none; }
+  .bi .lbl { color:var(--t2); }
+  .bi .note { font-size:10.5px; color:var(--t3); margin-left:8px; }
+  .bi .amt { margin-left:auto; font-weight:600; }
+  .bi .amt.pend { color:var(--t3); font-weight:400; font-size:11.5px; }
+  .btotal { display:flex; align-items:baseline; margin-top:10px; background:#1A1A1A; border-radius:12px; padding:12px 14px; }
+  .btotal .t { font-size:12px; color:var(--t2); }
+  .btotal .v { margin-left:auto; font-size:21px; font-weight:600; color:var(--orange); }
+  .bwarn { margin-top:10px; font-size:11.5px; line-height:1.6; color:var(--t2);
+    background:rgba(215,184,90,.08); border:1px solid rgba(215,184,90,.25); border-radius:10px; padding:8px 11px; }
+  .dsec { font-size:11px; letter-spacing:1.5px; color:var(--t3); margin-top:12px; }
+  .dline { font-size:12.5px; color:var(--t2); line-height:1.7; margin-top:6px; }
+  .dline b { color:var(--txt); font-weight:600; }
+  .inputbar { display:flex; gap:10px; padding:10px 12px 14px; flex:none; }
+  .inputpill { flex:1; display:flex; align-items:center; background:var(--card); border:1px solid var(--line);
+    border-radius:999px; padding:11px 16px; }
+  .inputpill input { background:none; border:none; outline:none; color:var(--txt); font-size:13.5px; width:100%;
+    font-family:inherit; }
+  .inputpill input::placeholder { color:var(--t3); }
+  .send { width:38px; height:38px; border-radius:50%; background:var(--btn); color:#E8E8E8; border:none;
+    font-size:16px; cursor:pointer; flex:none; }
+  .send:disabled { opacity:.5; }
+</style>
+</head>
+<body>
+<div class="head">
+  <h1>旅游规划空间 · 根修效果实测</h1>
+  <div class="sub">手机壳里是<b>真后端</b>驱动：每一张卡都来自 127.0.0.1:3000 的 /travel/plan-session 真实编排（LLM 生成题目与选项、真实天气 / POI / 报价）——就是本次修复后手机端「规划空间」页的同一条链路。</div>
+</div>
+<div id="backendBanner">后端（127.0.0.1:3000）未连接——请先启动 NextBot dev server（npm run dev:all），起好后点下面的重连按钮。</div>
+<div class="chips" id="chips">
+  <button class="chip" onclick="quick(this.textContent)">帮我规划一下去成都玩四天，12月1号出发，两个人，预算八千以内，能吃辣</button>
+  <button class="chip" onclick="quick(this.textContent)">想去大理玩三天，帮我安排下行程，预算五千</button>
+  <button class="chip" onclick="reconnect()">↻ 重连后端</button>
+</div>
+<div class="phone">
+  <div class="appbar">
+    <div>
+      <div class="name">规划空间</div>
+      <div class="st" id="stateLabel">未开始</div>
+    </div>
+    <button class="reset" onclick="resetAll()">新会话</button>
+  </div>
+  <div class="chat" id="chat">
+    <div class="empty" id="empty">
+      <div class="compass">🧭</div>
+      一句话说想去哪儿，我来逐项跟你确认<br>天数 · 出发地 · 想去的点 · 预算，确认后出完整方案
+    </div>
+  </div>
+  <div class="inputbar">
+    <div class="inputpill"><input id="input" placeholder="想去哪儿玩？直接说…" onkeydown="if(event.key==='Enter')submitInput()"></div>
+    <button class="send" id="sendBtn" onclick="submitInput()">↑</button>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const chat = $("chat");
+let sessionId = null;
+let busy = false;
+let pickedChoice = new Map();
+let pickedGuide = { view: new Set(), stay: new Set() };
+let pickedBooking = { transportKey: null, hotelKey: null };
+
+function scrollBottom() { chat.scrollTop = chat.scrollHeight; }
+function addUser(text) {
+  const div = document.createElement("div");
+  div.className = "msg user";
+  div.innerHTML = `<div class="bubble"></div>`;
+  div.firstChild.textContent = text;
+  chat.appendChild(div);
+  scrollBottom();
+}
+function addBot(text) {
+  if (!text) return;
+  const div = document.createElement("div");
+  div.className = "msg bot";
+  div.innerHTML = `<div class="bubble"></div>`;
+  div.firstChild.textContent = text;
+  chat.appendChild(div);
+  scrollBottom();
+}
+function addTyping() {
+  const div = document.createElement("div");
+  div.className = "typing"; div.id = "typing";
+  div.textContent = "正在想…";
+  chat.appendChild(div); scrollBottom();
+}
+function rmTyping() { const t = $("typing"); if (t) t.remove(); }
+function setState(s) { $("stateLabel").textContent = s ? `会话 ${sessionId || ""} · ${s}` : "未开始"; }
+
+async function api(method, path, body) {
+  const res = await fetch(`/api${path}`, {
+    method,
+    headers: { "content-type": "application/json" },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  return res.json();
+}
+
+async function submitInput() {
+  const input = $("input");
+  const text = input.value.trim();
+  if (!text || busy) return;
+  input.value = "";
+  await drive(text);
+}
+
+function quick(text) {
+  if (text.startsWith("↻")) { reconnect(); return; }
+  if (busy) return;
+  $("input").value = "";
+  drive(text);
+}
+
+async function drive(text) {
+  $("empty")?.remove();
+  $("backendBanner").style.display = "none";
+  addUser(text);
+  busy = true; $("sendBtn").disabled = true;
+  addTyping();
+  try {
+    const resp = sessionId
+      ? await api("POST", `/travel/plan-session/${sessionId}/turn`, { message: text })
+      : await api("POST", "/travel/plan-session", { message: text });
+    rmTyping();
+    if (!resp.ok) { addBot(`出错了：${resp.error ?? "未知错误"}`); return; }
+    sessionId = resp.sessionId;
+    renderTurn(resp);
+  } catch (e) {
+    rmTyping();
+    $("backendBanner").style.display = "block";
+    addBot("连不上后端——起好 dev server 后点「↻ 重连后端」再试。");
+  } finally {
+    busy = false; $("sendBtn").disabled = false;
+  }
+}
+
+async function step(fn) {
+  if (busy || !sessionId) return;
+  busy = true; $("sendBtn").disabled = true;
+  addTyping();
+  try {
+    const resp = await fn();
+    rmTyping();
+    if (!resp || !resp.ok) { addBot(`出错了：${resp?.error ?? "未知错误"}`); return; }
+    renderTurn(resp);
+  } catch (e) {
+    rmTyping();
+    addBot(`网络异常：${e.message}`);
+  } finally {
+    busy = false; $("sendBtn").disabled = false;
+  }
+}
+
+function renderTurn(resp) {
+  setState(resp.state);
+  addBot(resp.say || "");
+  for (const card of resp.cards ?? []) renderCard(card, resp);
+  renderBudget(resp);
+  renderDraft(resp);
+  if (resp.state === "ready" && (resp.cards ?? []).length === 0) {
+    renderReadyActions();
+  }
+  scrollBottom();
+}
+
+function el(html) {
+  const div = document.createElement("div");
+  div.innerHTML = html;
+  return div.firstElementChild;
+}
+
+function renderCard(card, resp) {
+  if (card.type === "choice") renderChoice(card);
+  else if (card.type === "weather") renderWeather(card);
+  else if (card.type === "guide") renderGuide(card);
+  else if (card.type === "wishlist") renderWishlist(card);
+  else if (card.type === "booking") renderBooking(card);
+}
+
+function renderChoice(card) {
+  pickedChoice.set(card.id, new Set());
+  const node = el(`<div class="rcard">
+    <div class="stage"><i></i>${card.stage || "确认"}${card.progress ? `<span style="margin-left:auto;letter-spacing:.4px">${card.progress.done ?? ""}/${card.progress.total ?? ""}</span>` : ""}</div>
+    <div class="ctitle"></div>
+    <div class="opts"></div>
+    ${card.allowNote ? `<div class="inputpill" style="margin-top:10px"><input id="note-${card.id}" placeholder="${card.placeholder || "也可以直接打字补充"}"></div>` : ""}
+    ${card.prefill?.length ? `<div class="prefill">按你的习惯，<em>先备着「${card.prefill.join("」「")}」</em>，不对随时改。</div>` : ""}
+    <div class="cbtns" id="btns-${card.id}"></div>
+  </div>`);
+  node.querySelector(".ctitle").textContent = card.title;
+  const opts = node.querySelector(".opts");
+  for (const opt of card.options ?? []) {
+    const b = el(`<button class="opt"></button>`);
+    b.textContent = opt;
+    b.onclick = () => {
+      const picked = pickedChoice.get(card.id);
+      if (card.multi) {
+        picked.has(opt) ? picked.delete(opt) : picked.add(opt);
+        b.classList.toggle("on", picked.has(opt));
+      } else {
+        picked.clear(); picked.add(opt);
+        opts.querySelectorAll(".opt").forEach((o) => o.classList.remove("on"));
+        b.classList.add("on");
+        const note = card.allowNote ? (node.querySelector(`#note-${card.id}`)?.value ?? "").trim() : "";
+        const noteNode = card.allowNote && note ? node.querySelector(`#note-${card.id}`).closest(".inputpill") : null;
+        if (noteNode) noteNode.remove();
+        submitChoice(card, [...picked], note);
+      }
+    };
+    opts.appendChild(b);
+  }
+  const btns = node.querySelector(`#btns-${card.id}`);
+  if (card.multi || card.allowNote) {
+    const main = el(`<button class="cbtn main">确认</button>`);
+    main.onclick = () => {
+      const picked = [...(pickedChoice.get(card.id) ?? [])];
+      const note = card.allowNote ? (node.querySelector(`#note-${card.id}`)?.value ?? "").trim() : "";
+      if (picked.length === 0 && !note) return;
+      submitChoice(card, picked, note);
+    };
+    btns.appendChild(main);
+  }
+  chat.appendChild(node);
+  scrollBottom();
+}
+
+async function submitChoice(card, values, note) {
+  const cardNode = [...chat.querySelectorAll(".rcard")].pop();
+  await step(() => api("POST", `/travel/plan-session/${sessionId}/turn`, {
+    cardId: card.id, values, ...(note ? { note } : {}),
+  }));
+}
+
+function renderWeather(card) {
+  const node = el(`<div class="rcard">
+    <div class="stage w"><i></i>出行窗口天气</div>
+    <div class="ctitle"></div>
+    <div class="wrow"></div>
+    <div class="wtip"></div>
+  </div>`);
+  node.querySelector(".ctitle").textContent = `${card.title}${card.sub ? " · " + card.sub : ""}`;
+  const row = node.querySelector(".wrow");
+  for (const d of card.days ?? []) {
+    row.appendChild(el(`<div class="wday"><div class="d"></div><div class="hi"></div><div class="lo"></div></div>`));
+    const last = row.lastElementChild;
+    last.querySelector(".d").textContent = d.dateLabel;
+    last.querySelector(".hi").textContent = `${d.hi}°`;
+    last.querySelector(".lo").textContent = `${d.lo}° ${d.text ?? ""}`;
+  }
+  node.querySelector(".wtip").textContent = card.tip ?? "";
+  chat.appendChild(node);
+  scrollBottom();
+}
+
+function renderGuide(card) {
+  pickedGuide = { view: new Set(), stay: new Set() };
+  const stage = card.cats?.[0]?.key === "stay" ? "stay" : "view";
+  const cat = card.cats?.find((c) => c.key === stage);
+  const node = el(`<div class="rcard">
+    <div class="stage g"><i></i>挑想去 · ${card.destination ?? ""}</div>
+    <div class="ctitle"></div>
+    <div class="glist"></div>
+    <div class="gnote">勾选想去的地方（可多选）；排序信号：${cat?.sortNote ?? "评分 · 热度 · 距离"}</div>
+    <div class="cbtns">
+      <button class="cbtn main" id="gmain">确认选择</button>
+      <button class="cbtn ghost" id="gdele">全部交给你</button>
+    </div>
+  </div>`);
+  node.querySelector(".ctitle").textContent = card.title;
+  const list = node.querySelector(".glist");
+  for (const item of cat?.items ?? []) {
+    const row = el(`<div class="gitem">
+      ${item.photos?.[0] ? `<img class="gimg" src="${item.photos[0]}" onerror="this.remove()">` : `<div class="gimg"></div>`}
+      <div class="gbody">
+        <div class="gname"><span class="nm"></span><span class="ck"></span></div>
+        ${item.metrics?.length ? `<div class="gmetric">${item.metrics.map((m) => m.label ?? "").filter((s) => s.trim()).join(" · ")}</div>` : ""}
+        <div class="gintro"></div>
+      </div>
+    </div>`);
+    row.querySelector(".nm").textContent = item.name;
+    row.querySelector(".gintro").textContent = item.intro ?? "";
+    row.onclick = () => {
+      const set = pickedGuide[stage];
+      set.has(item.name) ? set.delete(item.name) : set.add(item.name);
+      row.classList.toggle("picked", set.has(item.name));
+    };
+    list.appendChild(row);
+  }
+  node.querySelector("#gmain").onclick = () => step(() =>
+    api("POST", `/travel/plan-session/${sessionId}/guide`, { [stage]: [...pickedGuide[stage]] }));
+  node.querySelector("#gdele").onclick = () => step(() =>
+    api("POST", `/travel/plan-session/${sessionId}/guide`, { delegate: true }));
+  chat.appendChild(node);
+  scrollBottom();
+}
+
+function renderWishlist(card) {
+  const node = el(`<div class="rcard">
+    <div class="stage g"><i></i>补心愿</div>
+    <div class="ctitle"></div>
+    <div class="prefill">已选：${[...(card.selected?.view ?? []), ...(card.selected?.stay ?? [])].join("、") || "（无）"}</div>
+    <div class="cbtns">
+      <button class="cbtn main" id="wskip">没有了，直接算</button>
+      <button class="cbtn ghost" id="wadd">在下面输入框补充</button>
+    </div>
+  </div>`);
+  node.querySelector(".ctitle").textContent = card.title;
+  node.querySelector("#wskip").onclick = () =>
+    step(() => api("POST", `/travel/plan-session/${sessionId}/turn`, { message: "就这样，开始吧" }));
+  node.querySelector("#wadd").onclick = () => $("input").focus();
+  chat.appendChild(node);
+  scrollBottom();
+}
+
+function renderBooking(card) {
+  pickedBooking = { transportKey: null, hotelKey: null };
+  const node = el(`<div class="rcard">
+    <div class="stage b"><i></i>大交通 · 住宿</div>
+    <div class="ctitle"></div>
+    <div class="bsec">大交通（${card.origin ?? ""} → ${card.destination ?? ""}${card.nights ? ` · ${card.nights} 晚` : ""}）</div>
+    <div class="tlist"></div>
+    <div class="bsec">住宿</div>
+    <div class="hlist"></div>
+    <div class="cbtns"><button class="cbtn main" id="bmain">确认预订选择</button></div>
+    ${card.trial ? `<div class="gnote">部分价格为体验模式脱敏价，下单前会再核实。</div>` : ""}
+  </div>`);
+  node.querySelector(".ctitle").textContent = card.title;
+  const tlist = node.querySelector(".tlist");
+  for (const t of card.transports ?? []) {
+    const row = el(`<div class="brow">
+      <div style="flex:1;min-width:0">
+        <div class="bname" style="font-size:13.5px;font-weight:600"></div>
+        <div class="bmeta"></div>
+      </div>
+      <div class="bprice"><div class="p"></div><div class="u">/人 往返</div></div>
+    </div>`);
+    row.querySelector(".bname").innerHTML =
+      `${t.mode === "flight" ? "✈" : "🚄"} ${(t.no ?? "")} ${t.carrier ?? ""}${t.recommended ? `<span class="rec">推荐</span>` : ""}`;
+    const route = [t.outbound?.depTime, t.inbound?.depTime].filter(Boolean).join(" / ");
+    row.querySelector(".bmeta").textContent =
+      `${route || (t.durationMin ? `全程约 ${t.durationMin} 分钟` : "")}${t.viaHub ? ` · 经${t.viaHub}转机` : ""}`;
+    row.querySelector(".p").textContent = t.amount != null ? `¥${t.amount}` : "待核价";
+    row.onclick = () => {
+      pickedBooking.transportKey = pickedBooking.transportKey === t.key ? null : t.key;
+      tlist.querySelectorAll(".brow").forEach((r) => r.classList.remove("sel"));
+      if (pickedBooking.transportKey) row.classList.add("sel");
+    };
+    tlist.appendChild(row);
+  }
+  const hlist = node.querySelector(".hlist");
+  for (const h of card.hotels ?? []) {
+    const row = el(`<div class="brow">
+      <div style="flex:1;min-width:0">
+        <div class="bname" style="font-size:13.5px;font-weight:600"></div>
+        <div class="bmeta"></div>
+      </div>
+      <div class="bprice"><div class="p"></div><div class="u">/晚</div></div>
+    </div>`);
+    row.querySelector(".bname").innerHTML = `${h.name}${h.recommended ? `<span class="rec">推荐</span>` : ""}`;
+    row.querySelector(".bmeta").textContent =
+      [h.rating ? `${h.rating} 分` : "", h.near ?? ""].filter(Boolean).join(" · ");
+    row.querySelector(".p").textContent = h.amount != null ? `¥${h.amount}` : "待核价";
+    row.onclick = () => {
+      pickedBooking.hotelKey = pickedBooking.hotelKey === h.key ? null : h.key;
+      hlist.querySelectorAll(".brow").forEach((r) => r.classList.remove("sel"));
+      if (pickedBooking.hotelKey) row.classList.add("sel");
+    };
+    hlist.appendChild(row);
+  }
+  node.querySelector("#bmain").onclick = () => step(() =>
+    api("POST", `/travel/plan-session/${sessionId}/booking`, {
+      ...(pickedBooking.transportKey ? { transportKey: pickedBooking.transportKey } : {}),
+      ...(pickedBooking.hotelKey ? { hotelKey: pickedBooking.hotelKey } : {}),
+    }));
+  chat.appendChild(node);
+  scrollBottom();
+}
+
+function renderBudget(resp) {
+  const b = resp.budget;
+  if (!b) return;
+  const node = el(`<div class="rcard">
+    <div class="stage o"><i></i>预算确认</div>
+    <div class="bilist" style="margin-top:6px"></div>
+    <div class="btotal"><span class="t"></span><span class="v"></span><span class="s" style="font-size:11px;color:var(--t3);margin-left:6px"></span></div>
+    ${b.warnings?.length ? `<div class="bwarn">${b.warnings.join("<br>")}</div>` : ""}
+    <div class="cbtns"><button class="cbtn main" id="bappr">确认 · 生成最终方案</button></div>
+  </div>`);
+  node.querySelector(".t").textContent = `合计（${resp.state === "budget_ready" ? "已含已选预订" : ""}）`;
+  node.querySelector(".v").textContent = `¥${(b.total ?? 0).toLocaleString("zh-CN")}`;
+  node.querySelector(".s").textContent = b.original > (b.total ?? 0) ? `原 ¥${b.original.toLocaleString("zh-CN")} · 优惠 -¥${b.discount?.toLocaleString("zh-CN") ?? 0}` : (b.pricingMode ?? "");
+  const list = node.querySelector(".bilist");
+  for (const item of b.items ?? []) {
+    const row = el(`<div class="bi"><span class="lbl"></span><span class="note"></span><span class="amt"></span></div>`);
+    row.querySelector(".lbl").textContent = item.label;
+    row.querySelector(".note").textContent = item.note ?? "";
+    const amt = row.querySelector(".amt");
+    if (item.amount != null) amt.textContent = `¥${item.amount.toLocaleString("zh-CN")}`;
+    else { amt.textContent = "待核价 · 不计入合计"; amt.classList.add("pend"); }
+    list.appendChild(row);
+  }
+  node.querySelector("#bappr").onclick = () =>
+    step(() => api("POST", `/travel/plan-session/${sessionId}/approve`, {}));
+  chat.appendChild(node);
+  scrollBottom();
+}
+
+function renderDraft(resp) {
+  const d = resp.draft;
+  if (!d) return;
+  const node = el(`<div class="rcard">
+    <div class="stage g"><i></i>最终方案</div>
+    <div class="ctitle"></div>
+    <div class="ddays"></div>
+    ${resp.verification?.summary ? `<div class="gnote">核实：${resp.verification.summary}</div>` : ""}
+    <div class="cbtns"><button class="cbtn main" onclick="resetAll()">再规划一趟</button></div>
+  </div>`);
+  node.querySelector(".ctitle").textContent = `${d.title ?? "行程方案"}${d.destination ? " · " + d.destination : ""}`;
+  const wrap = node.querySelector(".ddays");
+  for (const day of d.days ?? []) {
+    const stops = Array.isArray(day.stops)
+      ? day.stops.map((s) => s?.name ?? String(s)).join(" → ")
+      : String(day.stops ?? "");
+    wrap.appendChild(el(`<div class="dline"><b>${day.label ?? day.date ?? ""}</b>　${stops}</div>`));
+  }
+  chat.appendChild(node);
+  scrollBottom();
+}
+
+function renderReadyActions() {
+  const node = el(`<div class="rcard">
+    <div class="stage o"><i></i>信息齐了</div>
+    <div class="ctitle">可以生成方案与预算了</div>
+    <div class="cbtns"><button class="cbtn main" id="rgen">生成方案（真实生成，最长 120s）</button></div>
+  </div>`);
+  node.querySelector("#rgen").onclick = () =>
+    step(() => api("POST", `/travel/plan-session/${sessionId}/generate`, {}));
+  chat.appendChild(node);
+  scrollBottom();
+}
+
+function resetAll() {
+  sessionId = null;
+  pickedChoice.clear();
+  chat.innerHTML = `<div class="empty" id="empty"><div class="compass">🧭</div>一句话说想去哪儿，我来逐项跟你确认<br>天数 · 出发地 · 想去的点 · 预算，确认后出完整方案</div>`;
+  setState("");
+}
+
+async function reconnect() {
+  try {
+    const r = await fetch("/healthz");
+    const j = await r.json();
+    $("backendBanner").style.display = j.backend === "ok" ? "none" : "block";
+    if (j.backend === "ok") addBot("后端已连上，可以开始了。");
+  } catch {
+    $("backendBanner").style.display = "block";
+  }
+}
+
+reconnect();
+</script>
+</body>
+</html>

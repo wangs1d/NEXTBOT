@@ -1,0 +1,136 @@
+/**
+ * commitments 写入方（2026-11-12 根修「提醒承诺在对话面失忆」）。
+ *
+ * 事故链（生产实证）：提醒只落在 schedule-task-service，滚动摘要显式丢弃
+ * 提醒轮，【待办与承诺】块的权威源 commitments 表却**全库无写入方**——
+ * 526 行全是测试种子，真实 actor 0 行，prompt 块恒空。本模块补上写路径：
+ * 日程/提醒任务创建 → 落一行 active 承诺；完成/取消/删除 → 状态收口。
+ *
+ * 设计：
+ *   - 表结构与存量 schema 逐列一致（CREATE TABLE IF NOT EXISTS，老库零迁移）；
+ *   - id 确定性派生（sched_<taskId>）：重复创建/重放天然幂等；
+ *   - 全部 best-effort：待办写入失败不阻塞提醒主链路，warn 留痕；
+ *   - 写后失效 commitment-prompt-provider 的 30s 读缓存（同进程立即可见）。
+ */
+
+import { openAgenticSqlite } from "../agentic-memory/sqlite-store.js";
+import { invalidateCommitmentCache } from "./commitment-prompt-provider.js";
+
+export type ScheduleCommitmentInput = {
+  actorId: string;
+  taskId: string;
+  /** 待办文案（给模型看的语义，如「提醒用户回家」） */
+  text: string;
+  /** ISO 截止/触发时刻 */
+  deadline?: string;
+  category?: string;
+};
+
+function commitmentIdForTask(taskId: string): string {
+  return `sched_${taskId}`;
+}
+
+/** 建表（与生产库 2026-10 存量 schema 逐列一致；老库命中 IF NOT EXISTS 零变化）。 */
+function ensureTable(db: ReturnType<typeof openAgenticSqlite>): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS commitments (
+      id TEXT PRIMARY KEY,
+      actor_id TEXT NOT NULL,
+      text TEXT NOT NULL,
+      committed_by TEXT NOT NULL,
+      status TEXT NOT NULL,
+      deadline TEXT,
+      dependencies TEXT NOT NULL DEFAULT '[]',
+      escalation_policy TEXT NOT NULL,
+      evidence_ledger_ids TEXT NOT NULL DEFAULT '[]',
+      source TEXT NOT NULL,
+      confidence REAL,
+      reminder_sent_at TEXT,
+      escalation_count INTEGER NOT NULL DEFAULT 0,
+      last_escalated_at TEXT,
+      dependency_blocked INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      fulfilled_at TEXT,
+      cancelled_at TEXT,
+      broken_at TEXT,
+      notes TEXT
+    , reminder_tiers_sent TEXT NOT NULL DEFAULT '[]', superseded_at TEXT, category TEXT, confirm_reminder_sent_at TEXT, contact TEXT)
+  `);
+}
+
+/** 任务创建/更新为 active → upsert 一行 active 承诺（幂等）。 */
+export function upsertScheduleCommitment(input: ScheduleCommitmentInput): void {
+  const text = input.text.trim();
+  if (!input.actorId || !input.taskId || !text) return;
+  try {
+    const db = openAgenticSqlite();
+    try {
+      ensureTable(db);
+      const now = new Date().toISOString();
+      db.prepare(
+        `INSERT INTO commitments (
+           id, actor_id, text, committed_by, status, deadline, dependencies,
+           escalation_policy, evidence_ledger_ids, source, created_at, updated_at, category
+         ) VALUES (?, ?, ?, 'agent', 'active', ?, '[]', '{}', '[]', 'schedule', ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           text = excluded.text,
+           deadline = excluded.deadline,
+           status = 'active',
+           updated_at = excluded.updated_at,
+           fulfilled_at = NULL,
+           cancelled_at = NULL`,
+      ).run(
+        commitmentIdForTask(input.taskId),
+        input.actorId,
+        text.slice(0, 200),
+        input.deadline ?? null,
+        now,
+        now,
+        input.category ?? null,
+      );
+      invalidateCommitmentCache(input.actorId);
+    } finally {
+      db.close();
+    }
+  } catch (err) {
+    console.warn(`[commitments] 提醒承诺写入失败（不影响提醒主链路）: ${err}`);
+  }
+}
+
+/**
+ * 任务终态收口：fulfilled（已触发完成）/ cancelled（用户取消或任务删除）。
+ * 只收口 active 行；行不存在（如老任务）静默跳过。
+ */
+export function settleScheduleCommitment(
+  actorId: string,
+  taskId: string,
+  outcome: "fulfilled" | "cancelled",
+): void {
+  if (!actorId || !taskId) return;
+  try {
+    const db = openAgenticSqlite();
+    try {
+      ensureTable(db);
+      const now = new Date().toISOString();
+      const info = db
+        .prepare(
+          `UPDATE commitments
+           SET status = ?, updated_at = ?, fulfilled_at = ?, cancelled_at = ?
+           WHERE id = ? AND status = 'active'`,
+        )
+        .run(
+          outcome,
+          now,
+          outcome === "fulfilled" ? now : null,
+          outcome === "cancelled" ? now : null,
+          commitmentIdForTask(taskId),
+        );
+      if (info.changes > 0) invalidateCommitmentCache(actorId);
+    } finally {
+      db.close();
+    }
+  } catch (err) {
+    console.warn(`[commitments] 提醒承诺状态收口失败（不影响提醒主链路）: ${err}`);
+  }
+}

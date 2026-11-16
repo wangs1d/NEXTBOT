@@ -14,8 +14,11 @@ String? extractUrlFromText(String text) {
   return m.group(0)!.replaceAll(RegExp(r'[),.;，。！？、]+$'), '');
 }
 
-/// 相对地址补全为完整代理地址（含设备凭证：音视频/图片标签发不出请求头）。
-String resolveMediaUrl(String url) => MediaUrl.resolve(url);
+/// 相对地址补全为完整代理地址。
+///
+/// 本模块产物只喂 [CachedMediaImage] / `Image.network`（都能发 Authorization
+/// 头），所以走 header 出口：凭证不进 URL，磁盘缓存键不会随 token 轮换漂移。
+String resolveMediaUrl(String url) => MediaUrl.resolveForHeaders(url);
 
 String? resolveItemPreviewUrl(AgentResultItem it) {
   final String? textUrl = extractUrlFromText(it.text);

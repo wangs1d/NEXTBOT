@@ -34,7 +34,9 @@ test("纯图轮命中 photo_delivery 策略，注入交图专用指令", () => {
   );
   assert.equal(directive.strategy, "photo_delivery");
   assert.equal(directive.instruction, PHOTO_DELIVERY_INSTRUCTION);
-  assert.match(directive.instruction, /不要按主题分节|严禁按主题分节/);
+  // 2026-11-14 主流口径：图注不重复，但正文形态按用户要求来，不再硬禁分节/清单。
+  assert.match(directive.instruction, /不必逐张重复图注/);
+  assert.match(directive.instruction, /按用户要的形式组织/);
 });
 
 test("图文混合轮（search_web 也成功）不走 photo_delivery，仍按常规分档", () => {

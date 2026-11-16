@@ -670,7 +670,7 @@ class _GuidePhoto extends StatelessWidget {
             )
           else
             CachedMediaImage(
-              url: LinkUtils.resolveMediaUrl(url),
+              url: LinkUtils.resolveMediaUrlForHeaders(url),
               fit: BoxFit.cover,
               errorBuilder: (BuildContext _, Object __, StackTrace? ___) =>
                   Center(

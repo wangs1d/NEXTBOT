@@ -8,6 +8,7 @@ import {
   WebpayNotConfiguredError,
   getWebpayService,
 } from "../../services/webpay/webpay-service.js";
+import { emitPaymentNotify } from "../../payments/notify-hook.js";
 
 /**
  * AI 网页应用收款 HTTP 面（自包含，无 deps）：
@@ -140,6 +141,9 @@ export function registerWebpayRoutes(app: FastifyInstance): void {
     scope.post("/api/webpay/notify", async (req, reply) => {
       const params = (req.body ?? {}) as Record<string, string>;
       const result = service.handleNotify(params);
+      // 验签通过后顺手通知统一支付模块去查单：把「用户已付款」的感知
+      // 从 15s 对账周期压到一次往返；通知本身仍不是入账依据。
+      if (result === "success") emitPaymentNotify("alipay_sandbox", params.out_trade_no);
       reply.header("Cache-Control", "no-store");
       return reply.type("text/plain; charset=utf-8").send(result);
     });

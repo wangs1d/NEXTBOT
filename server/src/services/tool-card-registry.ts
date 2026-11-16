@@ -95,6 +95,17 @@ export interface ToolCardPayload {
       /** 组规格 token（如 ["256g"]），卡片展示规格 chip 用 */
       specTokens?: string[];
       offerCount: number;
+      /**
+       * 商品直达链接（2026-11-13 P0-5 新增）：报价来源的审计凭据。
+       * 旧实现把 url 只藏在 extra.shopping.items 里且注释写「客户端回传，
+       * 不展示」——卡片层拿不到链接，就没法标注来源、也没法给购买按钮，
+       * 用户因此问不出「这价格是哪来的」。现在下沉到分组结构里。
+       */
+      sourceUrl?: string;
+      /** 抓取时刻（毫秒）：让用户知道这是实时价还是几分钟前的价 */
+      fetchedAt?: number;
+      /** 该平台能否真的下单（false = 只能跳原商品页，如什么值得买） */
+      orderable?: boolean;
     }>;
     bestIndex?: number | null;
   };
@@ -604,6 +615,19 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
     // 手机端候选轮播卡自己的条目数组（含商品链接）：卡内点「就这家」时客户端
     // 要把 url 原样回传给 card.action，服务端才能直接去结算页，不必再问模型。
     const shopItems: Array<Record<string, unknown>> = [];
+    // 未取到报价的平台（2026-11-13 P0-4）：写进卡里 = 用户看得见缺口，
+    // 模型也没有空间去编一个「淘宝的价格」。
+    const missingPlatforms: Array<Record<string, unknown>> = [];
+    for (const raw of Array.isArray(r.unavailablePlatforms) ? r.unavailablePlatforms : []) {
+      const rec = (raw ?? {}) as Record<string, unknown>;
+      const platform = str(rec.platform);
+      if (!platform) continue;
+      missingPlatforms.push({
+        platform,
+        platformLabel: str(rec.label) || labelOf(platform),
+        reason: str(rec.reason) || "no_data",
+      });
+    }
     let shown = 0;
     for (const g of groups) {
       if (shown >= 6) break;
@@ -638,24 +662,34 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
       priceGroups.push({
         priceCny: price,
         platform: platform || "未知平台",
-        ...(label !== platform ? { platformLabel: label } : {}),
+        // 平台中文来源名**无条件下发**（2026-11-13 P0-5）：旧实现只在
+        // label !== platform 时才带，导致有些平台在卡片上不显示来源名。
+        platformLabel: label,
         title: title.slice(0, 60),
         ...(shop ? { shop: shop.slice(0, 12) } : {}),
         ...(image ? { image } : {}),
         ...(similar ? { similar: true } : {}),
         ...(specTokens.length > 0 ? { specTokens } : {}),
         offerCount: offers.length,
+        // 报价来源凭据：直达链接 + 抓取时刻（卡片层要能回答「这价格哪来的」）
+        ...(str(best.url) ? { sourceUrl: str(best.url) } : {}),
+        ...(typeof best.fetchedAt === "number" ? { fetchedAt: best.fetchedAt } : {}),
+        // 这家能不能真的下单（false = 只能跳原商品页，如什么值得买）
+        orderable: platformSupportsCheckout(platform),
       });
       shopItems.push({
         title: title.slice(0, 60),
         ...(price != null ? { price } : {}),
         platform: platform || "",
-        ...(label !== platform ? { platformLabel: label } : {}),
+        // 平台中文名同样无条件下发（与 priceCompare.groups 保持一致）
+        platformLabel: label,
         ...(shop ? { shop: shop.slice(0, 12) } : {}),
         ...(image ? { image } : {}),
         ...(similar ? { badge: "疑似同款" } : {}),
         // 商品直达链接：卡内下单的唯一凭据（客户端回传，不展示）
         ...(str(best.url) ? { url: str(best.url) } : {}),
+        // 抓取时刻：卡片标注「价格来自哪、什么时候抓的」
+        ...(typeof best.fetchedAt === "number" ? { fetchedAt: best.fetchedAt } : {}),
         // 这家能不能真的下单（2026-11-06 改判据）：看 adapter 的 supportsCheckout
         // ——只有情报站（什么值得买）不可下单。苏宁这类「搜索免登录、结算要登录」
         // 的平台依然 true：登录在卡内扫码完成，不再一票否决（否则免登录源全被
@@ -701,9 +735,14 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
           bestIndex,
           ...(bestIndex == null ? {} : { bestLabel: "最合适" }),
           items: shopItems,
+          // 缺口显式化：没比到价的平台在卡内成行，模型不得替它们编价。
+          ...(missingPlatforms.length > 0 ? { missingPlatforms } : {}),
           footer,
         },
       },
+      // priceCompare：**只服务旧版本客户端**（2026-11-13 起新版客户端删掉了
+      // 竖直列表卡，比价统一走上面的 extra.shopping 横向轮播卡）。
+      // 保留它是为了让**没升级的 App** 仍能正常显示比价，不要当死代码删掉。
       ...(priceGroups.length > 0
         ? {
             priceCompare: {
@@ -927,6 +966,112 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
   "ride_hailing.quote": buildBookingSearchCard,
   "restaurant.search": buildBookingSearchCard,
   "home_service.search": buildBookingSearchCard,
+
+  // 统一支付模块（2026-11-13）：payment.pay 的下一步动作决定卡面——
+  // 待授权→授权页 + 「我已授权，继续」；待确认→一键确认扣款；待付款→收款码；
+  // 已支付→成功回执。卡内动作直接调用统一支付服务，不再经 LLM 转述。
+  "payment.pay": (r) => {
+    const intentId = str(r.intentId);
+    if (!intentId) return null;
+    const action = str(r.nextAction);
+    const amount = num(r.amount);
+    const subject = str(r.subject);
+    const channelLabel = str(r.channelLabel) || "支付";
+    const mode = str(r.mode);
+    const qrImage = str(r.qrCodeDataUrl);
+    const amountText = amount != null ? `¥${amount}` : "见收银台";
+    const baseItems: ToolCardItem[] = [
+      { type: "check", text: `事由：${subject || intentId}` },
+      { type: amount != null ? "num" : "check", text: `金额：${amountText} · ${channelLabel}` },
+    ];
+
+    if (action === "authorize") {
+      const url = str(r.authorizationUrl);
+      return {
+        title: "🔐 需要支付授权",
+        items: [
+          ...baseItems,
+          ...(url ? [{ type: "warn" as const, text: `授权页：${url}` }] : []),
+        ],
+        footer: "打开授权页设置额度并点「同意授权」，回来后点下面继续；未授权前不会扣款",
+        cardType: "",
+        actions: [
+          {
+            id: "payment_authorized",
+            label: "我已授权，继续",
+            variant: "primary",
+            cardAction: "payment.intent.resume",
+            payload: { intentId },
+          },
+          { id: "payment_later", label: "稍后再说", variant: "secondary" },
+        ],
+      };
+    }
+
+    if (action === "confirm") {
+      return {
+        title: "💳 确认支付",
+        items: [...baseItems, { type: "warn", text: "超过免确认额度：需要你点头才会扣款" }],
+        footer: "确认后立即发起扣款，确认 10 分钟内有效",
+        cardType: "",
+        actions: [
+          {
+            id: "payment_confirm",
+            label: `确认支付 ${amountText}`,
+            variant: "primary",
+            cardAction: "payment.intent.confirm",
+            payload: { intentId, confirmToken: str(r.confirmToken) },
+          },
+          { id: "payment_later", label: "先不付", variant: "secondary" },
+        ],
+      };
+    }
+
+    if (action === "pay") {
+      return {
+        title: "💳 支付确认",
+        items: baseItems,
+        footer:
+          mode === "mock"
+            ? "【模拟支付】不会产生真实扣款；付款后点下面确认"
+            : `请使用${channelLabel}完成付款，完成后点下面确认`,
+        cardType: "shopping_pay",
+        extra: {
+          shopping: {
+            stage: "pay",
+            title: `${channelLabel} · 待支付`,
+            amount: amount != null ? `${amount}` : "",
+            amountLabel: "应付金额",
+            orderNo: intentId,
+            platformLabel: channelLabel,
+            ...(qrImage ? { qrImage } : {}),
+            note: mode === "mock" ? "模拟支付单，不产生真实资金" : "扫码完成付款 · 支付结果以渠道查询为准",
+          },
+        },
+        actions: [
+          {
+            id: "payment_pay_done",
+            label: "我已完成支付，帮我确认",
+            variant: "primary",
+            cardAction: "payment.intent.check",
+            payload: { intentId },
+          },
+          { id: "payment_later", label: "稍后再说", variant: "secondary" },
+        ],
+      };
+    }
+
+    if (action === "paid") {
+      return {
+        title: "✅ 支付成功",
+        items: baseItems,
+        footer: `已确认到账 · ${channelLabel}`,
+        cardType: "",
+      };
+    }
+
+    return null;
+  },
 
   "payment.create_order": (r) => {
     const outTradeNo = str(r.outTradeNo);

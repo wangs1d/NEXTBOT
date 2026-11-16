@@ -367,7 +367,7 @@ export function renderAdminConsolePage(): string {
 
   <section class="tab" id="tab-payments">
     <h1>支付</h1>
-    <div class="sub">真实支付订单（微信 / 支付宝 live 通道）· 台账只记真实交易，模拟订单不落库</div>
+    <div class="sub">真实支付订单 · 按渠道（支付宝 / 微信）统计 · 台账只记真实交易，沙箱与模拟订单不落库</div>
     <div class="toolbar" id="payToolbar" style="display:none">
       <select id="payRange">
         <option value="0">全部时间</option>
@@ -1615,27 +1615,28 @@ function renderPaymentsTable() {
   if (hint) {
     var paidSum = 0;
     orders.forEach(function (o) { if (o.status === "paid") paidSum += Number(o.amount) || 0; });
-    hint.textContent = "筛选出 " + orders.length + " / " + payOrders.length + " 笔 · 其中已付 ¥" + paidSum;
+    hint.textContent = "筛选出 " + orders.length + " / " + payOrders.length + " 笔 · 其中已付 ¥" + paidSum.toFixed(2);
   }
   if (!payOrders.length) {
-    wrap.innerHTML = '<div class="card"><div class="empty">还没有真实支付订单。</div>' +
-      '<div class="meta" style="text-align:center;padding:0 0 18px">真实通道需在服务端配置微信/支付宝商户凭证（live 模式）；模拟测试订单不再展示、不再落库。</div></div>';
+    wrap.innerHTML = '<div class="card"><div class="empty">还没有真实支付订单。</div></div>';
     return;
   }
   var rows = orders.map(function (o) {
     return "<tr>" +
       '<td class="wrap">' + esc(o.outTradeNo) + "</td>" +
-      "<td>" + esc(o.provider) + " / " + esc(o.method) + "</td>" +
-      "<td>¥" + o.amount + "</td>" +
-      '<td class="wrap">' + esc(o.description || "-") + "</td>" +
+      "<td>" + esc(o.channel) + "</td>" +
+      '<td class="wrap">' + esc(o.product || "-") + "</td>" +
+      '<td class="wrap">' + esc(o.accountId || "-") + "</td>" +
+      "<td>¥" + (Number(o.amount) || 0).toFixed(2) + "</td>" +
       "<td>" + orderStatusChip(o.status) + "</td>" +
       "<td>" + fmtTime(o.createdAt) + "</td>" +
       "<td>" + fmtTime(o.paidAt) + "</td>" +
+      '<td class="wrap">' + esc(o.tradeNo || "-") + "</td>" +
       "</tr>";
   }).join("");
   wrap.innerHTML = orders.length
     ? '<div class="card"><table><tr>' +
-      "<th>商户单号</th><th>渠道 / 方式</th><th>金额</th><th>描述</th><th>状态</th><th>创建时间</th><th>支付时间</th>" +
+      "<th>商户单号</th><th>渠道</th><th>商品</th><th>充值账号</th><th>金额</th><th>状态</th><th>创建时间</th><th>支付时间</th><th>交易号</th>" +
       "</tr>" + rows + "</table></div>"
     : '<div class="card"><div class="empty">该时间范围内没有订单</div></div>';
 }
@@ -1649,10 +1650,10 @@ function csvCell(v) {
 function exportPaymentsCsv() {
   var orders = filteredPayOrders();
   if (!orders.length) { showErr("当前筛选范围内没有可导出的订单"); return; }
-  var lines = [["商户单号", "渠道", "方式", "金额", "描述", "状态", "创建时间", "支付时间"].join(",")].concat(
+  var lines = [["商户单号", "渠道", "商品", "支付方式", "充值账号", "金额", "状态", "创建时间", "支付时间", "交易号"].join(",")].concat(
     orders.map(function (o) {
-      return [o.outTradeNo, o.provider, o.method, o.amount, o.description || "", orderStatusLabel(o.status),
-        fmtTime(o.createdAt), fmtTime(o.paidAt)].map(csvCell).join(",");
+      return [o.outTradeNo, o.channel, o.product || "", o.method || "", o.accountId || "", o.amount,
+        orderStatusLabel(o.status), fmtTime(o.createdAt), fmtTime(o.paidAt), o.tradeNo || ""].map(csvCell).join(",");
     })
   );
   // BOM：让 Excel 正确识别 UTF-8 中文
@@ -1672,15 +1673,15 @@ function loadPayments() {
   api("/api/admin/orders").then(function (r) { return r.json().then(function (j) { return { code: r.status, j: j }; }); })
     .then(function (res) {
       if (res.code === 401) throw new Error("管理员会话已失效，请重新登录");
-      if (res.j.enabled !== true) {
-        body.innerHTML = '<div class="card"><div class="empty">支付服务未启用</div></div>';
+      if (res.j.enabled !== true || !res.j.stats) {
+        body.innerHTML = '<div class="card"><div class="empty">还没有真实支付订单。</div></div>';
         return;
       }
-      var s = res.j.stats || {};
+      var s = res.j.stats;
       var html = '<div class="stats">' +
         statCard(s.total, "真实订单") +
         statCard(s.paid, "已支付") +
-        statCard("¥" + s.paidAmount, "收入") +
+        statCard("¥" + Number(s.paidAmount || 0).toFixed(2), "收入") +
         "</div>";
       if (s.pending || s.refunded) {
         html += '<div class="stats">' +
@@ -2132,7 +2133,7 @@ $("userKw").addEventListener("input", renderUserTable);
 $("userStatusSel").addEventListener("change", renderUserTable);
 $("userSortSel").addEventListener("change", renderUserTable);
 $("userRefresh").addEventListener("click", loadUsers);
-$("payRange").addEventListener("change", renderPaymentsTable);
+$("payRange").addEventListener("change", function () { renderPaymentsTable(); });
 $("payExportBtn").addEventListener("click", exportPaymentsCsv);
 $("fbNewPill").addEventListener("click", loadFeedback);
 

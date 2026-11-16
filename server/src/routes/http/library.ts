@@ -288,21 +288,20 @@ export function buildGroups(input: {
   for (const p of input.travelPlans) {
     const ms = Number(p.createdAt ?? 0);
     const iso = Number.isFinite(ms) && ms > 0 ? new Date(ms).toISOString() : "";
-    pushOrDefer(
-      { kind: "travelPlans", sessionId: p.sessionId ?? "", updatedAt: iso, item: p },
-      (g) => {
-        g.items.travelPlans.push(p);
-        g.counts.travelPlans += 1;
-        touch(g, iso);
-        // 行程卡标题：规划会话不在旁聊注册表里，用行程自身标题/目的地兜底
-        // （规划 sessionId 每次规划独立 → 天然一次规划一张卡）。
-        // 历史组（sessionId 空）不设标题，客户端保持「历史记录」展示。
-        if (g.sessionId && !g.title) {
-          const planTitle = (p.title ?? "").trim() || (p.destination ?? "").trim();
-          if (planTitle) g.title = planTitle;
-        }
-      },
+    // 行程口径（2026-11-13 用户确认）：一个规划一张卡。不再按 sessionId 折叠——
+    // 规划 sessionId 缺失或等于主对话 actorId 时会掉进轮次/时间聚类，多次规划
+    // 被并进同一张卡。直接以 planId 独立成卡，卡标题取行程自身标题/目的地；
+    // 无归属（sessionId 空）仍进历史组，客户端保持「历史记录」展示。
+    const g = ensure(
+      p.sessionId ? `${p.sessionId}${KEY_SEP}plan${KEY_SEP}${p.planId}` : "",
     );
+    g.items.travelPlans.push(p);
+    g.counts.travelPlans += 1;
+    touch(g, iso);
+    if (g.sessionId && !g.title) {
+      const planTitle = (p.title ?? "").trim() || (p.destination ?? "").trim();
+      if (planTitle) g.title = planTitle;
+    }
   }
 
   // 主对话无轮次的产物：新→旧排序后按 30 分钟间隙切簇，每簇一张卡（标题空 → 客户端按时间兜底）。

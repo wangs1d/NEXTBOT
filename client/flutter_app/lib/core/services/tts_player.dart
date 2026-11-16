@@ -7,6 +7,7 @@ import "package:flutter/foundation.dart";
 import "package:path_provider/path_provider.dart";
 
 import "../config/media_url.dart";
+import "../../features/chat/media_disk_cache.dart";
 
 /// Windows 上 audioplayers_windows_plugin 的 BytesSource 会触发 native
 /// 层 0xc0000005 access violation，Dart try-catch 无法捕获。
@@ -221,7 +222,17 @@ class TtsPlayer {
     _attachProgressListeners(player);
 
     try {
-      await player.play(UrlSource(MediaUrl.resolve(fullUrl)));
+      // 播放器发不出 Authorization 头，URL 里带 ?token= 会让磁盘缓存键随 token
+      // 续期漂移、并把凭证写进访问日志。先经磁盘缓存层取字节（带头 + 401 续期），
+      // 再播本地文件；语音消息重播直接命中本地，没网也能回放。
+      final String resolved = MediaUrl.resolve(fullUrl);
+      final File? local =
+          await MediaDiskCache.instance.fileFor(resolved);
+      await player.play(
+        local != null
+            ? DeviceFileSource(local.path)
+            : UrlSource(resolved), // 兜底：磁盘层不可用时直连流播
+      );
       _fireStart();
       return true;
     } catch (e) {

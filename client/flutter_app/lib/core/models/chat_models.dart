@@ -1,3 +1,5 @@
+import "notify_action.dart";
+
 /// 消息附件类型。
 enum MessageAttachmentType {
   audio,
@@ -114,6 +116,7 @@ class ChatMessage {
     this.envelopeBlocks,
     this.pendingMediaCards,
     this.followUpPrompts,
+    this.notifyActions,
     this.eveningDigest,
     this.transferReminder,
     this.nameChoices,
@@ -237,6 +240,17 @@ class ChatMessage {
   /// done 实时下发，历史消息不带（对话推进后旧建议即失效）。
   final List<String>? followUpPrompts;
 
+  /// 「需要你拍板」的动作行（2026-11-13「通知即界面」）。
+  ///
+  /// 与通知栏上的按钮**共用同一个 actionId 与同一枚一次性 token**——两个渲染面，
+  /// 一套语义。点这里的按钮和点通知栏按钮走同一条服务端执行链路（验签 + 幂等），
+  /// 所以在对话里拍板和在通知栏拍板，效果完全一样。
+  ///
+  /// 内存态不持久化：token 有有效期，重启后带着一枚可能已过期的 token 渲染按钮，
+  /// 用户点下去只会得到「已过期」——那比不显示更糟。跨重启的兜底是通知栏那条
+  /// （它有独立的降级路径：点开进 App 处理）。
+  final List<NotifyAction>? notifyActions;
+
   /// 睡前备忘卡（contentType="evening_digest"，2026-10-22 定调）。
   ///
   /// 晚间 digest（evening.digest 事件）落对话流一张专属卡：结构化块
@@ -313,6 +327,7 @@ class ChatMessage {
     List<Map<String, dynamic>>? envelopeBlocks,
     List<Map<String, dynamic>>? pendingMediaCards,
     List<String>? followUpPrompts,
+    List<NotifyAction>? notifyActions,
     Map<String, dynamic>? eveningDigest,
     Map<String, dynamic>? transferReminder,
     List<String>? nameChoices,
@@ -344,6 +359,7 @@ class ChatMessage {
       envelopeBlocks: envelopeBlocks ?? this.envelopeBlocks,
       pendingMediaCards: pendingMediaCards ?? this.pendingMediaCards,
       followUpPrompts: followUpPrompts ?? this.followUpPrompts,
+      notifyActions: notifyActions ?? this.notifyActions,
       eveningDigest: eveningDigest ?? this.eveningDigest,
       transferReminder: transferReminder ?? this.transferReminder,
       nameChoices: nameChoices ?? this.nameChoices,

@@ -16,6 +16,7 @@ import { SilenceLog } from "./silence-log.js";
 import { CONFIRMATION_TTL_MS, type PendingConfirmation, PendingConfirmationStore } from "./pending-confirmation-store.js";
 import { topicKeyOfProposal, TopicDismissTracker } from "./topic-dismiss-tracker.js";
 import { primarySubjectOf, type DiscoveryLayer, type OpenedBody } from "./discovery-layer.js";
+import { registerIntentForProposal } from "./notification-actions.js";
 
 export type ProactivePipelineDeps = {
   /** 数据目录（默认 data/proactivity）：proposals.json / frequency.json / known-actors.json */
@@ -47,6 +48,11 @@ export type ProactivePipelineDeps = {
    * 改走手机系统推送（App 被杀也能收到）。未注入 = 通道禁用，离线一律挂起待重连。
    */
   mobilePush?: import("./mobile-push-service.js").MobilePushChannel;
+  /**
+   * 动作意图服务（2026-11-13「通知即界面」）：离线推送路径也要签发动作意图——
+   * 厂商通道渲染不出按钮，但点开通知能进 App 处理这个决策。
+   */
+  actionIntents?: import("./action-intent-service.js").ActionIntentService | null;
   /**
    * 沉默日志（方案 B）：verdict=silenced 的效用评估留痕，支持
    * 「你上周为什么没提醒我 XX」反问检索。未注入时管道内建一份
@@ -202,6 +208,9 @@ export class ProactivePipeline {
 
   /** 推进到期延迟提案（deferred/offline 挂起的在在场变化后重仲裁；at 可注入推进时钟） */
   flushDue(now = Date.now()): void {
+    // 运行期僵尸清理（2026-11-12）：启动清理只覆盖重启，长驻进程内 defer-forever
+    // 的挂起提案靠这里每轮兜底（48h 超龄 + 无 firedAt 才丢，补推提案豁免）。
+    this.store.pruneStale(now);
     for (const p of this.store.listPending()) {
       if ((p.deliverAfter ?? 0) <= now) this.decide(p, now);
     }
@@ -301,8 +310,37 @@ export class ProactivePipeline {
     if (push && (p.tier === "must" || p.importance === "critical") && push.hasChannel(p.actorId)) {
       this.store.reschedule(p.dedupKey, clock() + OFFLINE_PUSH_RETRY_MS);
       const deliveryId = `dp_${clock().toString(36)}_${(this.pushSeq++).toString(36)}`;
+      // 「通知即界面」：离线推送同样签发动作意图。厂商通道渲染不出按钮（系统模板），
+      // 但通知里带上 intentId → 点开进 App 能直接处理这个决策（降级路径同一套语义）。
+      let intentId = "";
+      let actionIntent = null;
+      const intentService = this.deps.actionIntents;
+      if (intentService) {
+        try {
+          const intent = registerIntentForProposal(intentService, p, {
+            title: p.title,
+            body: String(p.directText ?? p.summary),
+            deliveryId,
+          });
+          if (intent) {
+            intentId = intent.intentId;
+            actionIntent = intentService.renderForClient(intent);
+          }
+        } catch (err) {
+          console.log(`[ProactivePipeline] 离线推送动作意图签发失败（忽略）kind=${p.kind}: ${err}`);
+        }
+      }
       void push
-        .push({ actorId: p.actorId, title: p.title, body: p.directText ?? p.summary, importance: p.importance, kind: p.kind, deliveryId })
+        .push({
+          actorId: p.actorId,
+          title: p.title,
+          body: p.directText ?? p.summary,
+          importance: p.importance,
+          kind: p.kind,
+          deliveryId,
+          ...(intentId ? { intentId } : {}),
+          ...(actionIntent ? { actionIntent } : {}),
+        })
         .then((result) => {
           if (!result.ok) {
             console.log(`[ProactivePipeline] 离线推送失败（保留待发区重试）kind=${p.kind} provider=${result.provider} reason=${result.reason}`);
@@ -394,6 +432,69 @@ export class ProactivePipeline {
       dedupKey: `confirm_ack:${entry.confirmId}`,
     });
     return { executed: true };
+  }
+
+  /**
+   * 通知栏动作（2026-11-13「通知即界面」）：把一条**已投递**的提案重新入队，
+   * 推迟到 deliverAfter 再重投一次（用户点「稍后再说」）。
+   *
+   * 为什么不走 submitProposal：那条路有 24h 已投递指纹去重，会把这次明确的
+   * 「推迟」判成重复投递直接丢弃——用户点了「稍后再说」却再也没被提醒，
+   * 是最伤信任的一种失灵。这里直接入队，绕开指纹判定。
+   */
+  requeueProposal(proposal: ProactiveProposal, deliverAfter: number): boolean {
+    const now = this.deps.nowFn?.() ?? Date.now();
+    const next: ProactiveProposal = {
+      ...proposal,
+      createdAt: now,
+      deliverAfter,
+    };
+    const ok = this.store.enqueue(next);
+    this.store.flush();
+    return ok;
+  }
+
+  /**
+   * 通知栏动作（2026-11-13）：推进一条待确认（ask_first 提案的批准/拒绝）。
+   * 与用户在对话里回「可以」走的是同一条路（hub resolver → resolveProposalConfirmation），
+   * 所以两条路径的语义、审计、失败处理完全一致。
+   */
+  resolveConfirmationByKind(
+    actorId: string,
+    kind: string,
+    approved: boolean,
+  ): { ok: boolean; message: string } {
+    const store = this.deps.confirmations;
+    if (!store) return { ok: false, message: "确认存储未装配" };
+    const entry = store
+      .list(actorId)
+      .filter((e) => e.origin === "pipeline" && e.kind === kind)
+      .slice(-1)[0];
+    if (!entry) {
+      return { ok: false, message: "这条确认已经不在了（可能已经处理过）" };
+    }
+    store.take(entry.confirmId);
+    if (!approved) {
+      // 拒绝：静默关掉 + 一句回执（不回执的话用户不知道点没点上）
+      this.deps.speak?.({
+        proposalId: `confirm_decline_${entry.confirmId}`,
+        actorId,
+        kind: entry.kind,
+        tier: "must",
+        importance: "medium",
+        dedupKey: `confirm_decline:${entry.confirmId}`,
+        title: "好，先不做",
+        summary: "好的，这事先不做了。",
+        evidence: [],
+        createdAt: this.deps.nowFn?.() ?? Date.now(),
+        source: "confirm-flow",
+      });
+      return { ok: true, message: "好，这事先不做了" };
+    }
+    const res = this.resolveProposalConfirmation(entry, true);
+    return res.executed
+      ? { ok: true, message: "好，已按你的确认推进" }
+      : { ok: false, message: "这项暂时推进不了" };
   }
 
   /** 仲裁并执行（提案已在待发区内；delivered 出队投递，deferred 更新时刻，其余出队） */

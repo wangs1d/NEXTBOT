@@ -1,44 +1,31 @@
 import "../services/access_auth_api.dart";
 import "api_config.dart";
 
-/// 媒体/页面 URL 的统一出口：相对路径 → 绝对地址，并补上本机设备凭证。
+/// 媒体/页面 URL 的统一出口：相对路径 → 绝对地址。
 ///
-/// 云端一旦开启周界鉴权（ACCESS_AUTH_REQUIRED=1），`<img>` 之外的音频/视频标签
-/// 与 WebView 页面地址都发不出 `Authorization` 头，凭证只能进 query（服务端
-/// `?token=` 与 Bearer 两个通道同等认）。服务端只存 token 哈希、永不回吐明文，
-/// 所以这一步必须在客户端做，且收口在一处——漏掉的表现是素材 404 而不是报错。
+/// 2026-11-12 定稿：**凭证不再进 URL**。周界鉴权（ACCESS_AUTH_REQUIRED）下每条
+/// 链路按自己能力取凭证，URL 只承载业务参数：
+///
+/// | 消费方 | 凭证通道 |
+/// |---|---|
+/// | Dart 侧字节加载（CachedMediaImage / Image.network / NbHttp） | `Authorization` 头 |
+/// | 音视频播放器（发不出头） | 先经 MediaDiskCache 落盘，播本地文件 |
+/// | WebView 页面与其内 `<img>`/`fetch` | 页面地址带一次 `?token=` → 服务端落 HttpOnly Cookie |
+///
+/// 为什么非改不可：token 有 TTL、`needsRefresh` 提前 7 天续期，凭证一旦进 URL，
+/// 磁盘缓存键（sha256(url)）就跟着换 → 整库媒体缓存作废（"照片又全部重下一遍"），
+/// 同时 token 会写进服务端访问日志与图片 Referer。
 class MediaUrl {
   MediaUrl._();
 
-  /// [url] 可以是 `/picture/...`、`picture/...` 或绝对地址。
-  /// 只有指向本服务的 URL 才带凭证；外部 CDN/第三方地址原样返回，
-  /// 免得把设备 token 送给别人的域名。
+  /// [url] 可以是 `/picture/...`、`picture/...` 或绝对地址；**只补全、不带凭证**。
+  /// 外部 CDN/第三方地址原样返回。
   static String resolve(String url, {Map<String, String>? query}) {
-    final String raw = url.trim();
-    if (raw.isEmpty) return raw;
-    final Uri? parsed = Uri.tryParse(raw);
-    if (parsed == null) return raw;
-
-    final bool isHttp =
-        parsed.scheme == "http" || parsed.scheme == "https";
-    Uri target;
-    if (isHttp) {
-      if (!_isSameOrigin(parsed)) return raw;
-      target = parsed;
-    } else if (!parsed.hasScheme) {
-      final Uri base = Uri.parse(ApiConfig.httpBase);
-      final String rel = parsed.path.startsWith("/")
-          ? parsed.path.substring(1)
-          : parsed.path;
-      target = base.replace(path: "/$rel");
-    } else {
-      return raw; // data: / file: / 其它协议不掺凭证
-    }
-
+    final Uri? target = _absolute(url);
+    if (target == null) return url.trim();
     final Map<String, String> merged = <String, String>{
-      ...parsed.queryParameters,
+      ...target.queryParameters,
       ...?query,
-      ...queryCredentials,
     };
     // 空 map 也要走 replace 的话，Dart 会留下一个光秃秃的 "?"，
     // 白名单外的消费方（磁盘缓存键、日志）会把它当成另一个地址。
@@ -46,12 +33,81 @@ class MediaUrl {
     return target.replace(queryParameters: merged).toString();
   }
 
-  /// 无法发请求头的消费方（WebView 页面、音视频标签）要拼进 URL 的凭证。
+  /// 语义化别名：字节消费方（走请求头鉴权）用它，读代码时一眼能看出凭证通道。
+  /// 行为与 [resolve] 完全一致。
+  static String resolveForHeaders(String url, {Map<String, String>? query}) =>
+      resolve(url, query: query);
+
+  /// 渲染进程内部播放专用出口：补全 + 带凭证，**仅在「既发不出请求头、又共享
+  /// 不到同站 Cookie」的场景使用**（当前唯一：Windows 视频面板用
+  /// `loadStringContent` 载入的 HTML，document 是 null 原点，`SameSite=Strict`
+  /// 的 Cookie 不会随 `<video>` 请求发出；`SameSite=None` 又要求 Secure，
+  /// http://局域网地址 上不可靠）。
   ///
-  ///  - 有 token → `?token=`（服务端 extractToken 两个通道同等认）；
-  ///  - 未登录 → `?userId=inst_…`，服务端按 guest 放行。云端强制鉴权下若什么
-  ///    都不带，页面/音频会直接 401，表现是「白屏」而不是报错。
-  static Map<String, String> get queryCredentials {
+  /// 除上述场景外一律用 [resolve] / [resolveForHeaders]。
+  static String resolveForRenderer(String url, {Map<String, String>? query}) {
+    final Uri? target = _absolute(url);
+    if (target == null) return url.trim();
+    final Map<String, String> merged = <String, String>{
+      ...target.queryParameters,
+      ...?query,
+      ...pageBootstrapQuery,
+    };
+    if (merged.isEmpty) return target.toString();
+    return target.replace(queryParameters: merged).toString();
+  }
+
+  /// WebView **页面地址**专用出口：补全 + 带上页面级凭证。
+  ///
+  /// 这是全客户端唯一还会把 token 放进 URL 的地方，目的只有一个：服务端在
+  /// HTML 页面路径上会把它落成同站 `HttpOnly` Cookie（见 server `auth.ts`
+  /// 的 `HTML_PAGE_PATHS`），之后页面内的 `<img>`、`fetch`、音视频标签都靠
+  /// Cookie 认人，子资源 URL 不需要再拼任何凭证。
+  ///
+  /// 未登录时带 `?userId=inst_…`（服务端按 guest 放行）。
+  static String webViewPageUrl(String url, {Map<String, String>? query}) {
+    final Uri? target = _absolute(url);
+    if (target == null) return url.trim();
+    final Map<String, String> merged = <String, String>{
+      ...target.queryParameters,
+      ...?query,
+      ...pageBootstrapQuery,
+    };
+    if (merged.isEmpty) return target.toString();
+    return target.replace(queryParameters: merged).toString();
+  }
+
+  /// 相对地址补全为绝对地址；外部域名/data:/file: 等一律返回 null（调用方原样用）。
+  static Uri? _absolute(String url) {
+    final String raw = url.trim();
+    if (raw.isEmpty) return null;
+    final Uri? parsed = Uri.tryParse(raw);
+    if (parsed == null) return null;
+
+    final bool isHttp =
+        parsed.scheme == "http" || parsed.scheme == "https";
+    if (isHttp) {
+      return _isSameOrigin(parsed) ? parsed : null;
+    }
+    if (parsed.hasScheme) return null; // data: / file: / 其它协议不掺东西
+    final Uri base = Uri.parse(ApiConfig.httpBase);
+    final String rel =
+        parsed.path.startsWith("/") ? parsed.path.substring(1) : parsed.path;
+    // 相对地址自带的 query（如缩略图档位 `?w=400`、travel 代理的 `?u=`）
+    // 必须跟着走：只 replace(path) 会把它整条丢掉，拼出来的地址变成另一张图。
+    return base.replace(
+      path: "/$rel",
+      queryParameters:
+          parsed.queryParameters.isEmpty ? null : parsed.queryParameters,
+    );
+  }
+
+  /// 页面地址要拼的凭证（只给 [webViewPageUrl] 用）。
+  ///
+  ///  - 有 token → `?token=`（服务端换成同站 HttpOnly Cookie）；
+  ///  - 未登录 → `?userId=inst_…`，服务端按 guest 放行。强制鉴权下页面若什么都
+  ///    不带会直接 401，表现是「白屏」而不是报错。
+  static Map<String, String> get pageBootstrapQuery {
     final Map<String, String> tokenQuery =
         AccessCredentialStore.instance.accessTokenQuery;
     if (tokenQuery.isNotEmpty) return tokenQuery;

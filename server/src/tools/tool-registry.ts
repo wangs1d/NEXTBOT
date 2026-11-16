@@ -54,8 +54,14 @@ export type ToolContext = {
   /**
    * 按需向客户端请求实时位置（Agent 需要位置时才调用，返回 null 表示不可用/超时）。
    * 由位置类工具（weather.get_local 等）在缺少经纬度时使用。
+   *
+   * `opts` 用于「当前位置必须准」的场景（问我在哪、离我多远）：
+   * 缓存里的旧坐标或低精度 fix 不满足要求时会绕过缓存，现场向客户端拉一次 GPS。
    */
-  requestLocation?: (reason?: string) => Promise<ClientLocationWire | null>;
+  requestLocation?: (
+    reason?: string,
+    opts?: { maxAgeMs?: number; maxAccuracyMeters?: number },
+  ) => Promise<ClientLocationWire | null>;
   /**
    * 最近一次已知位置（内存缓存 + 本地位置历史落盘样本），带 `ageMs` 标注龄期。
    * 实时 GPS 拿不到时的兜底；调用方必须把 ageMs 如实透出，不得当实时位置用。
@@ -67,6 +73,19 @@ export type ToolContext = {
    * 主动任务等无流式上下文的调用方为空，工具自行降级。
    */
   pushMediaCards?: (cards: ToolMediaCard[]) => void;
+  /**
+   * Agent 浏览器工作预览帧（2026-11-12）：agent_browser 在无头浏览器里每执行
+   * 一步后把页面截图推给客户端（手机端悬浮窗「Agent 正在控制浏览器」的画面源）。
+   * 聊天主路径装配；程序化调用方缺省为空，服务自行降级不推帧。
+   * 返回 false 表示通道已失效（回合收口/连接关闭），连续流应立即自停。
+   */
+  pushBrowserPreview?: (frame: {
+    sessionId: string;
+    action: string;
+    url: string;
+    imageBase64: string;
+    mode: string;
+  }) => boolean | void;
   /** 默认沙箱；`full` 时开放高权限工具 */
   agentAccessMode?: AgentAccessMode;
   /** 电脑桥接在线时允许 desktop.visual.* */

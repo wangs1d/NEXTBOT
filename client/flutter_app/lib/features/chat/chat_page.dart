@@ -1,5 +1,6 @@
 ﻿import "package:flutter/foundation.dart"
     show defaultTargetPlatform, kIsWeb, TargetPlatform;
+import "../../core/ui/card_metrics.dart";
 import "package:flutter/material.dart";
 import "package:flutter/rendering.dart" show ScrollCacheExtent;
 import "package:flutter/services.dart";
@@ -427,7 +428,12 @@ class _ChatPageState extends State<ChatPage>
   // 预定义常量 - 减少重复创建对象
   /// 聊天内容列（消息流 + 输入区）的最大宽度：宽屏下共同居中收敛，
   /// 避免长文本横向铺满整个窗口。
-  static const double _contentMaxWidth = 860;
+  ///
+  /// 2026-11-13（P0-7）：改为与卡片**共用同一响应式令牌**
+  /// （[CardMetrics]）——手机端顶满可用宽度（卡片不再被 390 二次收窄），
+  /// 中屏留边距，桌面端维持 860 与卡片同宽。
+  static double _contentMaxWidth(BuildContext context) =>
+      CardMetrics.contentMaxWidth(context);
 
   /// 空态居中问候语（豆包式，无对话/工作分栏）：称呼 + 俏皮尾句；
   /// 称呼取不到（新用户/跳过向导/接口失败）时退化为不带称呼。
@@ -1686,7 +1692,7 @@ class _ChatPageState extends State<ChatPage>
                     child: Center(
                       child: ConstrainedBox(
                         constraints:
-                            const BoxConstraints(maxWidth: _contentMaxWidth),
+                            BoxConstraints(maxWidth: _contentMaxWidth(context)),
                         child: NotificationListener<ScrollNotification>(
                           onNotification: _handleScrollNotification,
                           child: ListView.custom(
@@ -1758,7 +1764,7 @@ class _ChatPageState extends State<ChatPage>
                   child: Center(
                     child: ConstrainedBox(
                       constraints:
-                          const BoxConstraints(maxWidth: _contentMaxWidth),
+                          BoxConstraints(maxWidth: _contentMaxWidth(context)),
                       child: Align(
                         alignment: Alignment.centerRight,
                         child: SizedBox(
@@ -1837,7 +1843,7 @@ class _ChatPageState extends State<ChatPage>
               child: Align(
                 alignment: Alignment.topCenter,
                 child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: _contentMaxWidth),
+                  constraints: BoxConstraints(maxWidth: _contentMaxWidth(context)),
                   child: Padding(
                     padding: _inputHorizontalPadding,
                     child: Column(

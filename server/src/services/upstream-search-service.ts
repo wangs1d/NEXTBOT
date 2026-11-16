@@ -8,6 +8,7 @@ import {
   SearchCache,
 } from "./search-enhancements.js";
 import { searchImagesViaSearchApi, type ImageApiItem } from "./search-api-provider.js";
+import { consumeAnySearchWebFailure } from "./search-providers/anysearch.js";
 import { filterByQueryFragments, primaryRelevanceRatio } from "./domestic-web-providers.js";
 import { rerankImagesByVlm } from "./image-relevance-vlm.js";
 import { filterUnseenMedia, rememberShownMedia } from "./media-shown-ledger.js";
@@ -229,6 +230,14 @@ export class UpstreamSearchService {
     const fresh = applySearchFreshness(raw, { query: keyword });
     const maxAgeDays = Number(process.env.SEARCH_MAX_ITEM_AGE_DAYS ?? 120);
     const providerUsed = inferSearchProvider(fresh.items);
+    // 退化可观测（2026-11-12）：空结果 + AnySearch 失败记录 → notes 写明是搜索
+    // 服务暂时超时/异常，不是「网上没有相关信息」。否则模型对空结果只会回
+    // 「没查到」，用户感知为「搜索功能坏了」却看不到根因。
+    const anySearchFailure = consumeAnySearchWebFailure();
+    const searchFailureNote =
+      fresh.items.length === 0 && anySearchFailure
+        ? `搜索服务暂时失败（${anySearchFailure}），本轮没有拿到检索结果——请如实告知用户搜索服务暂时不稳定，不要断言「网上没有相关信息」`
+        : null;
     const result = {
       provider: providerUsed,
       items: fresh.items,
@@ -247,6 +256,7 @@ export class UpstreamSearchService {
           datedCount: fresh.datedCount,
           total: fresh.items.length,
         }),
+        ...(searchFailureNote ? [searchFailureNote] : []),
       ],
     };
     this.webQueryCache.set(cacheKey, result);
@@ -270,9 +280,10 @@ export class UpstreamSearchService {
     if (!keyword) {
       return { provider: "bing-images", mediaType: "image", items: [], notes: ["query 不能为空"] };
     }
-    // 单次默认 4、上限 8：单 call 不应铺一整面图墙；
-    // LLM 需要更多张时应拆成多个细粒度 query 并行搜（如多个地点/多个主题各搜一次），
-    // 由前端 renderBlocks 把「每段文字→对应一组照片」自然交错。
+    // 单次默认 4、上限 8：单 call 不应铺一整面图墙。
+    // 2026-11-12 用户口径：一轮只搜索一次——工具层同轮单次闸已拦截重复调用，
+    // 服务层不再假设会有同轮扇出；多角度/多主题出图由 search_images_batch
+    // 一次调用内部拆维度完成。
     const boundedLimit = clamp(limit, 1, 8);
     // 候选池放大 5 倍：远程图防盗链 / 格式不支持时转存层会跳过并继续取下一张，
     // 池子太浅会出现「整批下载失败 → 0 张图」，用户拿不到任何照片。
@@ -415,6 +426,10 @@ export class UpstreamSearchService {
    * 并行抓取 Bing 图片结果页：同一个 query 同时打 cn 搜索页 / cn 异步接口 /
    * www 国际版三个端点。所有请求同时发起，整体耗时 ≈ 单端点超时，结果按端点
    * 标注供上层做文本相关性择优；单端点失败不影响其他端点。
+   *
+   * 跨 query 错峰（2026-11-12）：进入本方法即排队领取发射槽，与其他并发 query
+   * 的发射时刻错开 ≥ BING_IMAGE_STAGGER_MS，避免多 query 齐射触发 Bing 风控；
+   * 只错开启动时刻，不等待前一个 query 完成（重叠流水线）。
    */
   private async fetchBingImageBatches(
     keyword: string,
@@ -423,6 +438,8 @@ export class UpstreamSearchService {
     // query 质量由模型负责（工具描述已约束为短实体词）；本层只把同一个 query
     // 并行打到 cn 搜索页 / cn 异步接口 / www 国际版三个端点，整体耗时 ≈ 单端点超时，
     // 按文本相关度择优——单端点被风控/改版打掉时其余端点仍能出货。
+    // 发射前先过错峰闸：并发 query 在此排队错峰，先进先出。
+    await acquireBingImageLaunchSlot();
     const enc = encodeURIComponent(keyword);
     const targets: Array<{ label: string; url: string }> = [
       { label: "cn", url: `https://cn.bing.com/images/search?q=${enc}&form=HDRSC2` },
@@ -1284,13 +1301,11 @@ export class UpstreamSearchService {
     // 导致前端媒体卡片无法注入、照片展示不出来。这里返回"已达成的部分结果"即可。
     const deadline = Date.now() + IMAGE_MATERIALIZE_BUDGET_MS;
     let cursor = 0;
-    const attempted = new Set<number>();
 
     const workers = Array.from({ length: IMAGE_MATERIALIZE_CONCURRENCY }, async () => {
       while (out.length < limit) {
         if (Date.now() >= deadline) return;
         const idx = cursor++;
-        attempted.add(idx);
         const item = items[idx];
         if (!item) return;
         const remoteUrl = item.mediaUrl || item.thumbnailUrl;
@@ -1314,34 +1329,11 @@ export class UpstreamSearchService {
     });
 
     await Promise.all(workers);
-    // 预算内没轮到的（大图/慢网）转后台补写：聊天里即便仍显示远程 URL，
-    // 文件稍后也会落进 data/images/<actor>/，资料库照样能看到。
-    const shortfall = Math.max(0, limit - out.length);
-    const pending = shortfall > 0
-      ? items.filter((_, idx) => !attempted.has(idx)).slice(0, shortfall)
-      : [];
-    if (pending.length > 0) void this.materializeInBackground(pending, actorId, sessionId, turn);
+    // 渲染/入库对账（2026-11-12 用户口径「前端渲染几张，资料库就收几张」）：
+    // 不再做预算外后台补写。被补写的候选从未进入返回结果、从未渲染，落库只会
+    // 造成「前端 4 张、资料库 +8」式的数量错位；下载本身也是纯浪费。预算内
+    // 转存失败/没轮到的候选直接丢弃——本轮渲染几张，资料库就收几张。
     return out;
-  }
-
-  /** 预算外的转存补写：串行、单张限时，失败静默（只影响资料库收录，不影响本轮回复）。 */
-  private async materializeInBackground(
-    items: MediaSearchItem[],
-    actorId: string,
-    sessionId = "",
-    turn?: MediaTurnInfo,
-  ): Promise<void> {
-    const storage = this.imageStorageService;
-    if (!storage) return;
-    for (const item of items) {
-      const remoteUrl = item.mediaUrl || item.thumbnailUrl;
-      if (!remoteUrl) continue;
-      try {
-        await storage.downloadAndStorePng(remoteUrl, actorId, 20_000, sessionId, { turn });
-      } catch {
-        // 防盗链/格式不支持：跳过
-      }
-    }
   }
 }
 
@@ -1354,6 +1346,38 @@ const IMAGE_MATERIALIZE_BUDGET_MS = 5_000;
 // 图片结果页抓取超时：cn / async / www 三个端点并行抓取，取相关性最高的一批，
 // 因此这里约束的是「单端点」耗时而不是三个端点之和。
 const IMAGE_FETCH_TIMEOUT_MS = 3_500;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Bing 图片兜底错峰发射闸（2026-11-12）
+// 同一波并发的多个 query（模型并行 search_images / searchImagesBatch 多组两侧）
+// 若同一瞬间齐射 Bing，每个 query 内部还并行打 3 个端点，瞬时 6+ 并发会触发
+// 风控（整页随机填充 / 直接空结果）。此闸把「发射时刻」串行化：先到的 query
+// 立即发射，后到的等上一发之后 ≥ stagger 间隔才发射，但**不等待上一发完成**
+// ——请求在时间轴上重叠（流水线式），只是不再齐射。单 query 内部的 3 端点
+// 冗余并行保持不变；仅约束跨 query 的发射时刻。
+// ─────────────────────────────────────────────────────────────────────────────
+// 默认 1000ms：单 query 内部预算「抓取 3.5s + 转存 5s + VLM 2.2s ≈ 10.7s」，
+// 12s 工具档只剩 ~1.3s 余量，错峰等待吃余量但不越界（超出会被工具超时砍掉丢图）。
+const BING_IMAGE_STAGGER_MS = Number.parseInt(process.env.BING_IMAGE_STAGGER_MS ?? "1000", 10);
+let bingImageLaunchChain: Promise<void> = Promise.resolve();
+let bingImageLastLaunchAt = 0;
+
+async function acquireBingImageLaunchSlot(): Promise<void> {
+  if (!Number.isFinite(BING_IMAGE_STAGGER_MS) || BING_IMAGE_STAGGER_MS <= 0) return;
+  const prev = bingImageLaunchChain;
+  let release!: () => void;
+  bingImageLaunchChain = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  try {
+    await prev;
+    const wait = bingImageLastLaunchAt + BING_IMAGE_STAGGER_MS - Date.now();
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+    bingImageLastLaunchAt = Date.now();
+  } finally {
+    release();
+  }
+}
 
 function clamp(input: number, min: number, max: number): number {
   if (!Number.isFinite(input)) return min;

@@ -26,6 +26,8 @@ type WalRawEntry = {
   context?: string;
   /** 出口补写的本轮媒体卡（2026-11-09）；旧行/无媒体轮缺省。 */
   mediaCards?: unknown[];
+  /** 出口补写的真·分绿泡对账数组（2026-11-13）；旧行/非分泡轮缺省。 */
+  bubbles?: Array<{ id?: unknown; text?: unknown }>;
 };
 
 export type WalTranscriptTurn = {
@@ -36,6 +38,11 @@ export type WalTranscriptTurn = {
   clientMessageId?: string;
   /** 本轮媒体卡（照片/视频卡原样透传，供历史回填重建图片气泡）。 */
   mediaCards?: unknown[];
+  /**
+   * 本轮分泡对账数组（2026-11-13）：真实分泡轮逐泡透传，客户端回填按泡
+   * 重建多条消息；旧行/塌缩/单泡轮缺省 → 客户端降级单泡（现状行为）。
+   */
+  bubbles?: Array<{ id: string; text: string }>;
 };
 
 /** 文件名即日期（YYYY-MM-DD.jsonl），字典序=时间序，倒序读最近的先。 */
@@ -142,6 +149,22 @@ export async function readActorTranscriptFromWal(
       if (entry.messageId?.trim()) turn.clientMessageId = entry.messageId.trim();
       if (Array.isArray(entry.mediaCards) && entry.mediaCards.length > 0) {
         turn.mediaCards = entry.mediaCards;
+      }
+      // 分泡对账数组透传（2026-11-13）：只收 id+text 均非空串的泡，且整轮
+      // 至少一泡才挂字段——单泡塌缩轮（bubbles 长度 1）也透传，客户端按泡
+      // 重建后形态与当轮一致；空/脏结构静默忽略（旧行兼容）。
+      if (Array.isArray(entry.bubbles)) {
+        const cleanBubbles = entry.bubbles
+          .filter(
+            (b): b is { id: string; text: string } =>
+              !!b &&
+              typeof b === "object" &&
+              typeof b.id === "string" &&
+              typeof b.text === "string" &&
+              b.text.trim().length > 0,
+          )
+          .map((b) => ({ id: b.id, text: b.text }));
+        if (cleanBubbles.length > 0) turn.bubbles = cleanBubbles;
       }
       byKey.set(key, turn);
     }

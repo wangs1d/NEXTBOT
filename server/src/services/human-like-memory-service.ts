@@ -15,6 +15,11 @@ import {
 } from "./emotion-memory.js";
 import { fetchOpenAiCompatibleEmbedding } from "./openai-embedding-client.js";
 import { GraphSqlitePersistence, resolveHumanMemoryStoreMode } from "./graph-sqlite-store.js";
+import { assertMemoryWriter } from "../memory/memory-authority.js";
+import {
+  hmStageAfterRestore,
+  RETENTION_RESTORE_BOOST,
+} from "../memory/retention-policy.js";
 import {
   classifyMemorySourceRole,
   extractEchoQueryFromAssistantReply,
@@ -497,19 +502,12 @@ function clamp(value: number, min: number, max: number): number {
 const AUTO_CONFIRM_THRESHOLD = 3;
 
 /**
- * deletionStage 回退映射（供 reawakenNode 使用）。
- * 与 ForgettingController 中的 STAGE_ORDER 对应但反向：
- *   cold → downranked → active
- *   soft_deleted → cold
- *   active / hard_deleted 为终态，不再回退。
+ * deletionStage 回退映射：**已迁至 memory/retention-policy.ts**（2026-11-13）。
+ *
+ * 此前这里存一份 STAGE_REGRESS、遗忘控制器里又存一份 STAGE_ORDER，两份阶梯
+ * 各改各的。现统一由 retention policy 提供（hmStageAfterRestore），本文件
+ * 不再重复定义阶梯。
  */
-const STAGE_REGRESS: Record<MemoryDeletionStage, MemoryDeletionStage> = {
-  active: "active",
-  downranked: "active",
-  cold: "downranked",
-  soft_deleted: "cold",
-  hard_deleted: "hard_deleted",
-};
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -749,8 +747,18 @@ export class HumanLikeMemoryService {
     actorId: string,
     text: string,
     source: string,
-    opts?: { context?: MemoryContextKind; domain?: string; metadata?: Record<string, unknown> },
+    opts?: {
+      context?: MemoryContextKind;
+      domain?: string;
+      metadata?: Record<string, unknown>;
+      /** 写入契约的调用方身份（memory.cognition 的 producer）。 */
+      writer?: string;
+    },
   ): Promise<string | null> {
+    // 认知图（memory.cognition）的唯一写入口。契约此前完全没登记它——
+    // 认知图既是结构化事实的共同权威面，又是叙事记忆的落点，缺了断言就
+    // 抓不到第二个写者。
+    assertMemoryWriter("cognition_graph", opts?.writer ?? "HumanLikeMemoryService");
     const start = Date.now();
     const summary = text.trim().replace(/\s+/g, " ");
     if (!summary || summary.length < 6) return null;
@@ -1301,10 +1309,13 @@ export class HumanLikeMemoryService {
 
   /**
    * 节点再唤醒（供 ForgettingController.reawakenAndStrengthen 调用）。
-   * - frequencyScore += 0.3（远超普通 recall 的 +0.06，体现"再唤醒反弹"）
+   * - frequencyScore += RETENTION_RESTORE_BOOST（远超普通 recall 的 +0.06，体现"再唤醒反弹"）
    * - deletionStage 回退一级：cold → downranked → active
    * - lastAccessedAt 更新为当前时间
    * - 写入后立即持久化
+   *
+   * 2026-11-13：回退映射与加成改由 memory/retention-policy.ts 提供（此前这里
+   * 另存了一份 STAGE_REGRESS，与遗忘控制器的 STAGE_ORDER 各写一份阶梯）。
    */
   reawakenNode(actorId: string, nodeId: string): void {
     const node = this.store.nodes[nodeId];
@@ -1314,8 +1325,8 @@ export class HumanLikeMemoryService {
       );
       return;
     }
-    node.frequencyScore = clamp(node.frequencyScore + 0.3, 0, 5);
-    node.deletionStage = STAGE_REGRESS[node.deletionStage];
+    node.frequencyScore = clamp(node.frequencyScore + RETENTION_RESTORE_BOOST, 0, 5);
+    node.deletionStage = hmStageAfterRestore(node.deletionStage) as MemoryDeletionStage;
     node.lastAccessedAt = nowIso();
     this.schedulePersist();
   }

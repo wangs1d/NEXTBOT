@@ -94,18 +94,18 @@ class TravelWebPanelHost {
       controller.resetPageState();
 
       final Uri base = Uri.parse(ApiConfig.httpBase);
-      final Uri pageUri = base.replace(
-        path: "${base.path}/travel-map/desktop".replaceAll("//", "/"),
-        queryParameters: <String, String>{
+      // 页面地址走 webViewPageUrl：这一次带 ?token=（服务端落成同站 HttpOnly
+      // Cookie），页内 /travel-plans、/travel-route 等 fetch 与 <img> 之后靠
+      // Cookie 认人，子资源 URL 不再拼任何凭证。未登录时带设备标识（guest），
+      // 否则强制鉴权下页面直接白屏。
+      final String pageUrl = MediaUrl.webViewPageUrl(
+        "${base.path}/travel-map/desktop".replaceAll("//", "/"),
+        query: <String, String>{
           "host": "1",
-          // 页面打开这一次带 query 凭证：服务端把它落成同站 Cookie，页内
-          // /travel-plans、/travel-route 等 fetch 才发得出凭证（发不了头）。
-          // 未登录时这里是设备标识（guest），否则强制鉴权下页面直接白屏。
-          ...MediaUrl.queryCredentials,
           "_cb": DateTime.now().millisecondsSinceEpoch.toString(),
         },
       );
-      await webviewController.loadUrl(pageUri.toString());
+      await webviewController.loadUrl(pageUrl);
 
       // 等待页面脚本就绪（server 未启动/未就绪时导航不完成，executeScript
       // 会持续抛错）。约 12s 宽限，覆盖应用启动时 server 的拉起窗口。
@@ -122,7 +122,7 @@ class TravelWebPanelHost {
         } catch (_) {/* 页面尚未就绪，继续等 */}
       }
       if (!pageReady) {
-        _error = "行程页面加载失败：本机服务未就绪（$pageUri）\n请确认应用服务已启动后重开行程";
+        _error = "行程页面加载失败：本机服务未就绪（$pageUrl）\n请确认应用服务已启动后重开行程";
         return;
       }
 

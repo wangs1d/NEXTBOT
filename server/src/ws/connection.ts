@@ -122,7 +122,16 @@ type SocketWithHeartbeat = {
 
 const WS_READY_STATE_OPEN = 1;
 const WS_HEARTBEAT_INTERVAL_MS = 25_000;
-const WS_HEARTBEAT_GRACE_MS = 10_000;
+/**
+ * 心跳宽限：25s 一轮，宽限放到略大于一轮 —— 允许**连续两轮**没收到 pong
+ * 才判死（≈75s），而不是错一轮就断。
+ *
+ * 2026-11-14：手机端在弱网/系统短暂冻结时，单轮 pong 迟到很常见；旧值
+ * 10s 会在下一次 tick 立刻 close(1001)，服务端日志显示确实偶发误杀
+ * （heartbeat timeout 的 actor 全是移动端 IP）。放宽后仍能识别真死链
+ * （真死链 pong 永远不回），同时避免移动端抖动被直接掐断。
+ */
+const WS_HEARTBEAT_GRACE_MS = 26_000;
 
 function safeSocketSend(socket: SocketWithHeartbeat, data: string): boolean {
   const open = socket.readyState === undefined || socket.readyState === WS_READY_STATE_OPEN;
@@ -243,6 +252,11 @@ export type WsRouteDeps = {
    * 全程不产生用户消息、不跑模型——与 chat.user_action 的多轮路径刻意分离。
    */
   shoppingOrderService?: import("../services/shopping-order-service.js").ShoppingOrderService | null;
+  /**
+   * 购物比价服务（可选，2026-11-13 P1）：card.action 通道的「跳过这家 /
+   * 重新出码 / 继续比价」靠它续跑那一轮被登录闸门挂起的比价。
+   */
+  shoppingCompareService?: import("../services/shopping-compare-service.js").ShoppingCompareService | null;
   /** 账号服务（可选）：session.init 记录最近活跃（管理后台「最近活跃」指标） */
   agentAccountService?: { touchLastActive(actorId: string): void } | null;
   /**
@@ -297,6 +311,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     accessAuthService,
     phoneCallCoordinator,
     shoppingOrderService,
+    shoppingCompareService,
     paymentService,
     agentAccountService,
     actorModelBindings,
@@ -333,6 +348,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     { websocket: true },
     (socket, request) => {
       const ws = socket as SocketWithHeartbeat;
+      const openedAt = Date.now();
       let boundActorId: string | undefined;
       let initAsDesktopBridge = false;
       let initAsPhoneBridge = false;
@@ -381,7 +397,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           const overdue = Date.now() - heartbeatMissedAt;
           if (heartbeatMissedAt > 0 && overdue >= WS_HEARTBEAT_GRACE_MS) {
             app.log.warn(
-              { actorId: boundActorId, clientIp },
+              { actorId: boundActorId, clientIp, overdueMs: overdue },
               "WebSocket heartbeat timeout, closing stale connection",
             );
             try {
@@ -389,6 +405,14 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             } catch {
               // Ignore close failures on stale sockets.
             }
+            return;
+          }
+          // 宽限期内再补一次 ping（不重置 heartbeatMissedAt）：单轮丢包可能只是
+          // 移动端短暂冻结，再给一轮机会；连续两轮无 pong 才在上面的分支判死。
+          try {
+            ws.ping?.();
+          } catch {
+            /* 下一轮会走判死分支 */
           }
           return;
         }
@@ -415,8 +439,24 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
         app.log.warn({ err, actorId: boundActorId, clientIp }, "WebSocket transport error");
       });
 
-      ws.on("close", () => {
+      ws.on("close", (code?: number, reason?: Buffer) => {
         clearInterval(heartbeatTimer);
+        // 连接生命周期收口日志（2026-11-14 手机端「断连重连」诊断）：
+        // 此前 close 完全静默，只能从 nginx 看到「连了/断了」，看不到谁断的、
+        // 什么码、活了多久。移动端那次 8~10 秒短命连接风暴就是因此无法定因。
+        // 这里只记元信息，不含消息内容。
+        app.log.info(
+          {
+            actorId: boundActorId,
+            clientIp,
+            code,
+            reason: reason ? reason.toString() : "",
+            durationMs: Date.now() - openedAt,
+            desktopBridge: initAsDesktopBridge,
+            phoneBridge: initAsPhoneBridge,
+          },
+          "WebSocket closed",
+        );
         const detached = worldPartitionWsRegistry.detachSocket(socket);
         if (detached) {
           broadcastPartitionPresence(detached.partitionId);
@@ -1036,7 +1076,8 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             // 晚间 digest（Task 15 生活节律）：连接建立时订阅，到点推送今日回顾+明日预告
             eveningDigestScheduler?.subscribe(actorId);
             // 按需位置：绑定 socket，Agent 需要位置时向该客户端请求实时 GPS
-            locationCoordinator.bindSocket(actorId, socket);
+            // （带上设备类别：手机与电脑同时在线时优先问手机，PC 定位常是网络推断）
+            locationCoordinator.bindSocket(actorId, socket, deviceClass);
             // 持续模式（方案 A）：下发定时上报配置，客户端按 intervalSec 回传
             // client.location_report(source:"continuous")；ondemand 不发，客户端无定时器
             locationCoordinator.sendTrackingConfig(socket);
@@ -1657,7 +1698,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           await handleCardActionEvent(
             { socket, boundActorId, sendUnifiedError },
             event.payload,
-            { shoppingOrderService, paymentService },
+            { shoppingOrderService, shoppingCompareService, paymentService },
           );
           return;
         }

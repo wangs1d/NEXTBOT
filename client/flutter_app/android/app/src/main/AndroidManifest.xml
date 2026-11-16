@@ -163,6 +163,13 @@
             android:exported="false"
             android:foregroundServiceType="mediaProjection"/>
 
+        <!-- 通知栏动作（2026-11-13「通知即界面」）：插件的 ActionBroadcastReceiver
+             负责把通知栏按钮点击路由到后台 isolate 的 Dart 回调——没有它，
+             按钮点了没有任何反应（插件文档明确要求应用自行声明）。 -->
+        <receiver
+            android:name="com.dexterous.flutterlocalnotifications.ActionBroadcastReceiver"
+            android:exported="false"/>
+
         <!-- 开机自启：重启前台服务恢复桥接与消息捕捉 + 闹钟精确闹钟重挂 -->
         <receiver
             android:name=".BootReceiver"

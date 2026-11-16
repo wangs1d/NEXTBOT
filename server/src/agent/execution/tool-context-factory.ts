@@ -16,11 +16,22 @@ export type ToolExecutionAccess = {
   desktopBridgeOnline?: boolean;
   phoneBridgeOnline?: boolean;
   /** 按需位置：位置类工具（weather.get_local 等）在缺少经纬度时可向客户端请求实时 GPS */
-  requestLocation?: () => Promise<ClientLocationWire | null>;
+  requestLocation?: (
+    reason?: string,
+    opts?: { maxAgeMs?: number; maxAccuracyMeters?: number },
+  ) => Promise<ClientLocationWire | null>;
   /** 最近已知位置（内存缓存 → 本地位置历史），带 ageMs；实时 GPS 拿不到时的兜底 */
   getLastKnownLocation?: () => KnownLocation | null;
   /** 中途推送媒体卡（购物登录/支付二维码等）：聊天主路径由 WS 层装配 */
   pushMediaCards?: (cards: ToolMediaCard[]) => void;
+  /** Agent 浏览器工作预览帧（agent_browser 无头执行时推页面截图）：聊天主路径装配 */
+  pushBrowserPreview?: (frame: {
+    sessionId: string;
+    action: string;
+    url: string;
+    imageBase64: string;
+    mode: string;
+  }) => boolean | void;
 };
 
 export type ToolExecutionBase = {
@@ -146,6 +157,8 @@ export class ToolContextFactory {
       getLastKnownLocation: base.access?.getLastKnownLocation,
       // 中途推卡：购物等长工具执行中把二维码等即时呈现给用户（chat.media_ready）
       pushMediaCards: base.access?.pushMediaCards,
+      // 浏览器预览帧：agent_browser 无头执行时推页面截图（手机悬浮窗画面源）
+      pushBrowserPreview: base.access?.pushBrowserPreview,
       // 单次调用取消信号（工具循环超时即 abort）：子进程/HTTP 类 handler 可消费
       ...(signal ? { signal } : {}),
     };

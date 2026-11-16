@@ -136,7 +136,10 @@ class _AgentInlineVideoPlayerState extends State<AgentInlineVideoPlayer> {
 
   void _openPanelPlayer() {
     VideoPreviewLauncher.open(
-      url: _mediaUrl,
+      // 面板用 loadStringContent 载入 HTML（null 原点），SameSite=Strict 的
+      // 同站 Cookie 不会随 <video> 请求发出，这里只能把凭证带进 URL。
+      // 这是全客户端唯一保留的「渲染器内 URL 凭证」场景（见 MediaUrl 注释）。
+      url: MediaUrl.resolveForRenderer(_mediaUrl),
       pageUrl: _pageUrl,
     );
   }
@@ -147,8 +150,12 @@ class _AgentInlineVideoPlayerState extends State<AgentInlineVideoPlayer> {
       _openPanelPlayer();
       return;
     }
-    final VideoPlayerController controller =
-        VideoPlayerController.networkUrl(Uri.parse(_mediaUrl));
+    // 原生播放器自身发不出 Authorization 头，但 video_player 支持 httpHeaders：
+    // 凭证走头、URL 不带 token（同 iOS/Android 原生实现都认这个参数）。
+    final VideoPlayerController controller = VideoPlayerController.networkUrl(
+      Uri.parse(_mediaUrl),
+      httpHeaders: MediaUrl.headersFor(_mediaUrl),
+    );
     _controller = controller;
     setState(() {
       _initFuture = controller.initialize();
@@ -514,8 +521,10 @@ class _FullscreenVideoPageState extends State<_FullscreenVideoPage> {
 
   Future<void> _init() async {
     final String url = _resolveMediaUrl(widget.data.mediaUrl);
-    final VideoPlayerController controller =
-        VideoPlayerController.networkUrl(Uri.parse(url));
+    final VideoPlayerController controller = VideoPlayerController.networkUrl(
+      Uri.parse(url),
+      httpHeaders: MediaUrl.headersFor(url),
+    );
     _controller = controller;
     try {
       await controller.initialize();

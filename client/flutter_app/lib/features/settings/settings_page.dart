@@ -13,6 +13,7 @@ import "../../core/services/cloud_model_binding_store.dart";
 import "../../core/services/model_api_tester.dart";
 import "../../core/services/phone_bridge_service.dart";
 import "../../core/services/phone_capture_service.dart";
+import "../../core/services/sms_access_service.dart";
 import "../../core/services/ws_chat_service.dart";
 import "../../core/theme/app_theme.dart";
 import "../chat/voiceprint_registration_page.dart";
@@ -57,6 +58,10 @@ class _SettingsPageState extends State<SettingsPage>
   bool _captureLoading = true;
   bool _captureAll = false; // 未识别包全量捕捉兜底（默认关）
   List<CapturePackageRule> _captureRules = const []; // 自定义包名规则（回显用）
+
+  // —— 短信读取权限（READ_SMS；Agent「看我的短信」工具的前置条件） ——
+  bool _smsGranted = false;
+  bool _smsPermanentlyDenied = false;
 
   // —— 模型与声纹分区 ——
   // 模型接入 UI/收集/测试全部在 ModelProviderCard（与首启向导共用），这里只存
@@ -1010,6 +1015,21 @@ class _SettingsPageState extends State<SettingsPage>
             unawaited(PhoneBridgeService.instance.setLocationReportEnabled(v));
           },
         ),
+        // 短信读取权限（2026-11-13）：Manifest 声明了 READ_SMS，但运行时权限从不申请，
+        // 原生读取恒被系统拒绝 —— 这里给出明确的授权入口与状态回显。
+        SwitchListTile(
+          contentPadding: EdgeInsets.zero,
+          title: const Text("读取短信"),
+          subtitle: Text(
+            _smsGranted
+                ? "已授权：Agent 可按需读取本机短信（用于识别账单与快递通知）"
+                : _smsPermanentlyDenied
+                    ? "已拒绝且不再询问：请在系统设置里为本应用开启「短信」权限"
+                    : "未授权：Agent 将无法按需读取短信（通知捕捉不受影响）",
+          ),
+          value: _smsGranted,
+          onChanged: (_) => unawaited(_requestSmsPermission()),
+        ),
       ],
     );
   }
@@ -1019,6 +1039,8 @@ class _SettingsPageState extends State<SettingsPage>
       final bool enabled = await PhoneCaptureService.instance.isListenerEnabled();
       final int queueSize = await PhoneCaptureService.instance.queueSize();
       final config = enabled ? await PhoneCaptureService.instance.getCaptureConfig() : null;
+      final bool smsGranted = await SmsAccessService.instance.isGranted();
+      final bool smsForever = await SmsAccessService.instance.isPermanentlyDenied();
       if (!mounted) return;
       setState(() {
         _listenerEnabled = enabled;
@@ -1026,6 +1048,8 @@ class _SettingsPageState extends State<SettingsPage>
         _captureAll = config?.captureAll ?? false;
         _captureRules = config?.extraRules ?? const [];
         _captureLoading = false;
+        _smsGranted = smsGranted;
+        _smsPermanentlyDenied = smsForever;
       });
     } catch (_) {
       if (!mounted) return;
@@ -1033,6 +1057,21 @@ class _SettingsPageState extends State<SettingsPage>
         _captureLoading = false;
         _listenerEnabled = false;
       });
+    }
+  }
+
+  /// 申请短信读取权限（首次弹系统授权窗；永久拒绝则引导去系统设置）。
+  Future<void> _requestSmsPermission() async {
+    final bool ok = await SmsAccessService.instance.ensureGranted();
+    if (!mounted) return;
+    final bool forever = await SmsAccessService.instance.isPermanentlyDenied();
+    setState(() {
+      _smsGranted = ok;
+      _smsPermanentlyDenied = forever;
+    });
+    if (!ok && forever) {
+      // 再 request 也不会弹窗了，只能去系统设置
+      await SmsAccessService.instance.openSettings();
     }
   }
 

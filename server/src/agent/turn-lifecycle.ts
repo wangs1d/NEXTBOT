@@ -140,6 +140,7 @@ export class TurnLifecycle {
       await this.deps.narrativeMemory?.ingest(actorId, body, "chat:turn_archive", {
         highSignal: decision.decision === "remember" || decision.decision === "overwrite",
         context,
+        writer: "TurnLifecycle",
       });
     })().catch(() => {});
   }
@@ -183,6 +184,7 @@ export class TurnLifecycle {
       await this.deps.narrativeMemory?.ingest(actorId, body, "chat:fast_path", {
         highSignal: decision.decision === "remember" || decision.decision === "overwrite",
         context,
+        writer: "TurnLifecycle",
       });
     })().catch(() => {});
   }
@@ -301,6 +303,7 @@ export class TurnLifecycle {
                 input.actorId,
                 fact,
                 inferMemoryTopic(input.userText),
+                "TurnLifecycle",
               );
             }
           })().catch(() => {});

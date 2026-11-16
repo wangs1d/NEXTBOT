@@ -72,12 +72,15 @@ export type SearchProvider = {
 
 export type SearchProviderFactory = (cfg: SearchApiConfig) => SearchProvider;
 
-// 搜索 API 超时：必须小于 search_web 的工具执行预算（TOOL_TIMEOUT_SEARCH_MS，默认
-// 6500ms）。曾默认 8000ms > 6500ms——AnySearch 慢响应时整个 search_web 在 6.5s 被外层
-// 击杀（轨迹日志实证「工具执行超时(6500ms)」），API 结果与爬虫兜底全部丢失。
-// 默认 5000ms 给 API，剩余预算留给爬虫兜底；SEARCH_API_TIMEOUT_MS 可调。
+// 搜索 API 超时：必须小于外层工具执行预算。默认 14000ms（2026-11-12 重排）。
+// 旧默认 5000ms 是为「API 失败后还有爬虫兜底」设计的——兜底删除（只信 AnySearch）
+// 后 5000ms 只剩副作用：AnySearch web 垂直对新闻/人物类 query 实测 12~15s（curl
+// 直连取证，TTFB 占满，网络 <0.5s），5000ms 一刀切全部击杀 → 恒空结果 → 用户侧
+// 表现为「搜索功能坏了」。现对齐搜索工具外圈预算（16s）：内圈 14s，剩余留给相关
+// 性闸门与转存；上游健康（1~3s）时行为不变，只有上游慢时才多等。
+// SEARCH_API_TIMEOUT_MS 可调。
 const SEARCH_API_TIMEOUT_MS =
-  Number.parseInt(process.env.SEARCH_API_TIMEOUT_MS ?? "5000", 10) || 5000;
+  Number.parseInt(process.env.SEARCH_API_TIMEOUT_MS ?? "14000", 10) || 14000;
 const DEFAULT_BING_ENDPOINT = "https://api.cognitive.microsoft.com/bing/v7.0/search";
 
 // ─────────────────────────────────────────────────────────────────────────────

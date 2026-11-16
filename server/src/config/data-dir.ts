@@ -63,7 +63,18 @@ function resolveDataDir(): string {
   return join(xdgDataHome, "Nextbot", "data");
 }
 
-/** npm run test*（含 test:master-agent 等）都算测试进程；直接跑 tsx 的 eval 脚本不算。 */
+/**
+ * 测试进程判定（2026-11-12 加固）。
+ *
+ * 历史坑：只认 `npm_lifecycle_event ^test`，直接 `node --test` / `tsx --test`
+ * 跑的用例不算测试进程 → 落盘到 %APPDATA%\Nextbot\data，生产文件里攒出
+ * 354 个 `e2e-*` / `probe-*` 会话。现在三条判据取并集：
+ *   1. npm run test*；
+ *   2. Node 测试运行器上下文（NODE_TEST_CONTEXT）；
+ *   3. 命令行带 --test / --test-only（node --test / tsx --test）。
+ */
 function isTestProcess(): boolean {
-  return /^test/.test(process.env.npm_lifecycle_event ?? "");
+  if (/^test/.test(process.env.npm_lifecycle_event ?? "")) return true;
+  if (process.env.NODE_TEST_CONTEXT) return true;
+  return process.execArgv.some((arg) => arg === "--test" || arg.startsWith("--test="));
 }

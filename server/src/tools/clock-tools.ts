@@ -27,40 +27,36 @@ import type { ToolRegistry } from "./tool-registry.js";
 async function geoCtx(context: {
   clientIp?: string;
   clientLocation?: import("../types/client-location.js").ClientLocationWire;
-  requestLocation?: () => Promise<import("../types/client-location.js").ClientLocationWire | null>;
+  requestLocation?: (
+    reason?: string,
+    opts?: { maxAgeMs?: number; maxAccuracyMeters?: number },
+  ) => Promise<import("../types/client-location.js").ClientLocationWire | null>;
 }) {
-
   // 客户端已不随聊天消息携带 GPS（省电设计）：没有自带位置时改走按需实时定位
   // （LocationCoordinator 新鲜缓存优先，否则向客户端下发 agent.location_request），
   // 否则本工具对 clientLocation 的依赖在真实链路里永远落空。
   if (context.clientLocation) {
-
     return {
-
       clientIp: context.clientIp,
-
       clientLocation: context.clientLocation,
-
     };
-
   }
 
-  const live = await context.requestLocation?.();
+  // 「我在哪」必须回答此刻的位置：15 分钟复用窗口里的旧坐标、或 ±100m 以上的
+  // 粗 fix（后台常驻上报常见）都不能直接拿来答，不达标就现场拉一次 GPS。
+  const live = await context.requestLocation?.("clock.get_user_location:当前精确位置", {
+    maxAgeMs: 60_000,
+    maxAccuracyMeters: 50,
+  });
 
   if (live) {
-
     return {
-
       clientIp: context.clientIp,
-
       clientLocation: live,
-
     };
-
   }
 
   return { clientIp: context.clientIp };
-
 }
 
 
@@ -147,9 +143,24 @@ function buildLocationToolResult(info: UserGeoInfo): Record<string, unknown> {
 
     city: info.city,
 
+    district: info.district,
+
     region: info.region,
 
     country: info.country,
+
+    // 精确位置字段（2026-11-14）：只给 city/region 时模型只能答到行政区，
+    // 用户问「我现在在哪」永远停在城市级。address/township/poi 是高德逆地理
+    // 给出的门牌与最近地标，原样透出供模型作答（坐标仍禁止展示）。
+    ...(info.address ? { address: info.address } : {}),
+
+    ...(info.township ? { township: info.township } : {}),
+
+    ...(info.poi ? { poi: info.poi } : {}),
+
+    ...(info.poiDistanceMeters != null ? { poiDistanceMeters: info.poiDistanceMeters } : {}),
+
+    ...(info.accuracyMeters != null ? { accuracyMeters: info.accuracyMeters } : {}),
 
     timezone: info.timezone,
 
@@ -163,7 +174,17 @@ function buildLocationToolResult(info: UserGeoInfo): Record<string, unknown> {
 
     message: label
 
-      ? `根据${sourceHint}，用户当前位于：${label}${info.timezone ? `（时区 ${info.timezone}）` : ""}。经纬度仅供工具调用入参，禁止向用户展示坐标数字。`
+      ? `根据${sourceHint}，用户当前位于：${label}` +
+        (info.accuracyMeters != null && info.accuracyMeters > 0
+          ? `（定位精度约 ±${Math.round(info.accuracyMeters)} 米）`
+          : "") +
+        (info.poi && !label.includes(info.poi)
+          ? `，最近地标：${info.poi}${info.poiDistanceMeters != null ? `（约 ${Math.round(info.poiDistanceMeters)} 米）` : ""}`
+          : "") +
+        `${info.timezone ? `（时区 ${info.timezone}）` : ""}。` +
+        "用户问「我在哪」时应按 address/location 答到街道/门牌/地标这一级，不要只回答城市或区县；" +
+        "本结果只代表此刻位置，不代表家/公司；用户问家/公司在哪个城市时调用 place 工具按需查询，不要用本结果的城市顶替。" +
+        "精度不足时如实说明误差范围。经纬度仅供工具调用入参，禁止向用户展示坐标数字。"
 
       : `${sourceHint}成功，但城市名解析暂不可用。lat/lon 字段可直接作为天气等工具的入参；禁止向用户展示坐标数字、禁止因缺城市名反问用户所在城市。`,
 

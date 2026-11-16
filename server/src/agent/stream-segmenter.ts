@@ -100,6 +100,22 @@ const TABLE_ROW_LINE_RE = /^[ \t]*\|/;
 /** 泡尾/泡首需要剥掉的悬挂标点与空白（真人消息不以逗号开头/结尾）。 */
 const BUBBLE_EDGE_STRIP_RE = /^[\s，,、]+|[\s，,、]+$/gu;
 
+/**
+ * 泡内空白段折叠（2026-11-13 P0-B，真机取证：单泡中间隔一个空段）：
+ *
+ * 单条真人消息内部不该有空行——空行间隙只会出现在「多条消息」之间，
+ * 而多条消息的边界已由切泡逻辑处理。泡内空行的三个来源：
+ * 1. maxBubbles 封顶后，剩余多段全文经 flushFinal 以 "continue" 整块并入
+ *    末泡，原文段落间空行原样保留；
+ * 2. stripSentencesAlreadySaid 删掉残差中间已说过的句子，残留换行留下空行；
+ * 3. 出口收口残差 feed 进末泡时携带原文空行。
+ * 统一在 emit 前把「换行 + 空白 + 换行」折叠成单个换行：泡内多行内容
+ * （markdown 列表/表格行，单换行分隔）不受影响，纯空白行被剥掉。
+ */
+function collapseIntraBubbleBlankLines(text: string): string {
+  return text.replace(/\n[ \t]*\n+/gu, "\n");
+}
+
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 export class StreamSegmenter {
@@ -247,7 +263,11 @@ export class StreamSegmenter {
     // 作为唯一的"new"泡发出。
     if (this.bubbleMode) {
       if (!combined) return;
-      const deduped = stripSentencesAlreadySaid(this.emittedText, combined).trim();
+      // 泡内空行折叠（P0-B）：残差整块并入末泡/独立成泡前，先剥掉原文
+      // 段落间空行——真人单条消息里不该有空白段（见 collapseIntraBubbleBlankLines）。
+      const deduped = collapseIntraBubbleBlankLines(
+        stripSentencesAlreadySaid(this.emittedText, combined).trim(),
+      );
       if (!deduped) return;
       // 残差成新泡的条件：上次切泡跨了换行（模型用换行分条，尾句是新一条
       // 消息，哪怕只有"嗯"两个字），或残差本身含句末边界。碎片残差
@@ -298,7 +318,11 @@ export class StreamSegmenter {
     }
 
     if (combined) {
-      const deduped = stripSentencesAlreadySaid(this.emittedText, combined).trim();
+      // 同泡分段递进模式（P0-B）：尾段残差同样剥掉泡内空行——空白段只该
+      // 出现在消息之间，单泡内部只有单换行。
+      const deduped = collapseIntraBubbleBlankLines(
+        stripSentencesAlreadySaid(this.emittedText, combined).trim(),
+      );
       if (deduped) {
         this.trackEmitted(deduped);
         this.emit(deduped, "stream");

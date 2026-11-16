@@ -27,6 +27,12 @@ class _Harness {
   final List<String> receivedRaw = <String>[];
   int connections = 0;
 
+  /// 每次建连的时刻（「连上就掉」重连节奏回归用）。
+  final List<DateTime> connectionTimes = <DateTime>[];
+
+  /// >0 时服务端在握手成功后等待该时长再主动关闭（模拟短命连接）。
+  Duration closeAfter = Duration.zero;
+
   /// 是否对 `ws.keepalive` 回 ack（模拟健康链路 / 半开链路）。
   bool ackKeepalive = true;
 
@@ -53,7 +59,13 @@ Future<_Harness> _startServer() async {
   server.listen((HttpRequest request) async {
     final WebSocket ws = await WebSocketTransformer.upgrade(request);
     harness.connections += 1;
+    harness.connectionTimes.add(DateTime.now());
     harness._sockets.add(ws);
+    if (harness.closeAfter > Duration.zero) {
+      Timer(harness.closeAfter, () {
+        ws.close();
+      });
+    }
     ws.listen((dynamic data) {
       final String raw = data.toString();
       harness.receivedRaw.add(raw);
@@ -337,6 +349,39 @@ void main() {
       reason: "探活收到 ack 说明链路活着，不得因单条消息 ack 丢失就拆链",
     );
     expect(service.isConnected, isTrue);
+  });
+
+  test("连上就掉：短命连接走快重试，不按指数退避干等", () async {
+    // 真机「断连重连」体验根因之一：_markDisconnected 先把 _connectedAt 清零，
+    // 退避计算再读它 → wasBriefConnection 恒 false，短命连接也走 2s/4s/8s…
+    // 指数退避，用户看到长时间「正在重连」。这里断言第二次建连在快重试窗口内。
+    final _Harness server = await _startServer();
+    server.closeAfter = const Duration(milliseconds: 300);
+    final WsChatService service = WsChatService(
+      url: server.url,
+      heartbeatInterval: const Duration(seconds: 30),
+      heartbeatTimeout: const Duration(seconds: 60),
+      connectTimeout: const Duration(seconds: 3),
+    );
+    addTearDown(() async {
+      await service.close();
+      await server.close();
+    });
+
+    service.connect();
+    await _waitFor(() => server.connections >= 1);
+    await _waitFor(
+      () => server.connections >= 2,
+      timeout: const Duration(seconds: 4),
+    );
+    final int gapMs = server.connectionTimes[1]
+        .difference(server.connectionTimes[0])
+        .inMilliseconds;
+    expect(
+      gapMs,
+      lessThan(2000),
+      reason: "短命连接应在 ~1s 内重试（含 300ms 存活期），不能退避到 2s+（实际 ${gapMs}ms）",
+    );
   });
 
   test("入站静默时发卡片动作：同样探活且真写到 socket", () async {

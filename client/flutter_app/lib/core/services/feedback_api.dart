@@ -106,13 +106,20 @@ class FeedbackApi {
     Map<String, Object> diagnostics = const <String, Object>{},
   }) async {
     try {
+      final String actor = await InstallIdentity.instance.actorId();
       final http.Response res = await _client
           .post(
-            Uri.parse("$_baseUrl/api/feedback"),
+            // 身份必须进 **query**（2026-11-12 根修）：周界鉴权在 onRequest 裁决，
+            // 那时 body 还没解析——只把 userId 放 body 时，未登录设备会被判成
+            // 「无身份」，服务端把归属钉成匿名；随后「我的反馈」按 inst_… 过滤
+            // 就一条都查不到（提交成功却查不回，正是 e2e 用例暴露的问题）。
+            Uri.parse("$_baseUrl/api/feedback").replace(
+              queryParameters: <String, String>{"userId": actor},
+            ),
             headers: _headers,
             body: jsonEncode(<String, dynamic>{
-              // 控制面身份：稳定安装 ID（或部署配置的 USER_ID），避免全员撞同一 sessionId
-              "userId": await InstallIdentity.instance.actorId(),
+              // 身份同时保留在 body：服务端两个通道都认，body 侧会被钉成同一归属
+              "userId": actor,
               "type": type,
               "title": title,
               "description": description,

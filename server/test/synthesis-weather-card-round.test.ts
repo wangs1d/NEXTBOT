@@ -38,11 +38,12 @@ test("天气卡轮命中 weather_card 策略，注入卡片专用指令", () => 
   );
   assert.equal(directive.strategy, "weather_card");
   assert.equal(directive.instruction, WEATHER_CARD_INSTRUCTION);
-  // 2026-11-05 用户拍板：天气轮的回复引导保留——三条硬边界（数值上卡不重复、
-  // 坐标不给用户、口语建议收束）都是有用的结构化引导。
-  assert.match(directive.instruction, /正文里不要再出现/);
+  // 2026-11-14 主流口径（豆包式）：正文是完整回答，卡片只是视觉补充，
+  // 不再用「数值由卡片承载」限制模型；保留坐标与事实两条硬边界。
+  assert.match(directive.instruction, /回答完整/);
+  assert.match(directive.instruction, /视觉补充/);
   assert.match(directive.instruction, /经纬度坐标/);
-  assert.match(directive.instruction, /口语给结论和建议/);
+  assert.match(directive.instruction, /不要替用户虚构/);
 });
 
 test("天气+搜索混合轮不走 weather_card，仍按常规分档", () => {

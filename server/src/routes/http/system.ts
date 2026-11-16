@@ -7,6 +7,7 @@ import {
 } from "@nextbot/agent-world";
 import { PROTOCOL_UNIFIED_TOOL_NAMES } from "../../tools/protocol-unified-tools.js";
 import { isBootPending } from "../../bootstrap/boot-readiness.js";
+import { buildThinkingBudgetHealth } from "../../external-model/thinking-policy.js";
 import type { HttpRouteDeps } from "./types.js";
 import type { BrainCenter } from "../../brain/brain-center.js";
 
@@ -22,6 +23,15 @@ export function registerSystemRoutes(
     ok: true,
     ready: !isBootPending(),
     pid: process.pid,
+    /**
+     * 思考档位学习快照（2026-11-12）：各模型在各档位下的首字延迟 P50/P90，
+     * 以及「不下发档位反而更慢」的隐性陷阱诊断。
+     *
+     * 放在 /health 而不是单独端点，是因为它的用途就是「用户说慢的时候，
+     * 运维第一眼能看到现在是哪一档、实际多少毫秒」——多一跳就没用了。
+     * 纯内存计算，无 IO，重活（落盘）在采样侧 debounce 完成。
+     */
+    thinkingBudget: buildThinkingBudgetHealth(4),
   }));
 
   /** AWP v0.1：无鉴权元数据，供外部 Agent 发现入口与事件名。 */

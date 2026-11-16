@@ -6,10 +6,11 @@ import "package:nextbot/core/config/media_url.dart";
 /// 「发不出 Authorization 头」的消费方也必须能证明身份，否则表现是白屏或
 /// 空图而不是报错。
 ///
-/// 这里锁住未登录设备（guest）的两条通道：
-///  - 能发请求头的（Image.network / Dart http）→ `X-Nb-Actor` 头；
-///  - 只能拼 URL 的（音视频标签 / WebView）→ `?userId=inst_…`。
-/// 有 token 时两者都必须让位给 token，不能把邮箱写进 URL。
+/// 2026-11-12 定稿后的三条通道（凭证不再进子资源 URL）：
+///  - 能发请求头的（Image.network / Dart http）→ `X-Nb-Actor` 头 / Bearer；
+///  - WebView **页面地址** → `?userId=inst_…`（服务端落成同站 Cookie）；
+///  - 其余一律不带凭证：`resolve()` 只补全地址。
+/// 有 token 时页面地址也必须让位给 token，不能把邮箱写进 URL。
 void main() {
   setUp(() {
     ApiConfig.runtimeUserId = null;
@@ -28,13 +29,21 @@ void main() {
     expect(headers.containsKey("Authorization"), isFalse);
   });
 
-  test("未登录：URL 通道补 userId（图片/音频/WebView 发不出头）", () {
+  test("未登录：只有 WebView 页面地址带 userId，子资源 URL 一律不带", () {
     expect(
-      MediaUrl.queryCredentials,
+      MediaUrl.pageBootstrapQuery,
       <String, String>{"userId": "inst_9f8e7d6c5b4a3210"},
     );
-    final String url = MediaUrl.resolve("/picture/assets/a.png");
-    expect(url, contains("userId=inst_9f8e7d6c5b4a3210"));
+    // 页面地址：这一次带，服务端据此落同站 Cookie
+    expect(
+      MediaUrl.webViewPageUrl("/gallery-wall"),
+      contains("userId=inst_9f8e7d6c5b4a3210"),
+    );
+    // 图片/音频字节地址：不再带任何凭证（走请求头）
+    expect(
+      MediaUrl.resolve("/picture/assets/a.png"),
+      isNot(contains("userId=")),
+    );
   });
 
   test("外部域名一律不给身份", () {
@@ -57,10 +66,11 @@ void main() {
     expect(headers["X-Nb-Actor"], "inst_9f8e7d6c5b4a3210");
   });
 
-  test("登录态（无 token 但有邮箱）不把邮箱塞进 URL", () {
+  test("登录态（无 token 但有邮箱）不把邮箱塞进任何 URL", () {
     ApiConfig.runtimeUserId = "me@example.com";
     expect(MediaUrl.guestActorId, isNull);
-    expect(MediaUrl.queryCredentials, isEmpty);
+    expect(MediaUrl.pageBootstrapQuery, isEmpty);
+    expect(MediaUrl.webViewPageUrl("/gallery-wall"), isNot(contains("example.com")));
     expect(MediaUrl.headersFor("${ApiConfig.httpBase}/picture/a.png"), isEmpty);
   });
 }

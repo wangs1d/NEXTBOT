@@ -581,3 +581,51 @@ test("stripResidualRenderDeclarations：剥变体 [RENDER_AS]:structured（行�
     "规范形  与变体  都剥",
   );
 });
+
+// ── 2026-11-12 渲染/入库对账（用户口径：前端渲染几张，资料库就收几张）─────
+import {
+  splitMediaCardsByTopic,
+  trimMediaCardsByTopic,
+} from "../src/services/tool-result-processor.js";
+
+/** 构造图搜转存卡：本地 PNG 地址（downloadAndStorePng 返回形态）。 */
+function buildLocalPhotoCards(n: number, actor = "a1"): MediaCardItem[] {
+  return Array.from({ length: n }, (_, i) => ({
+    type: "image" as const,
+    title: `photo-${i}`,
+    mediaUrl: `/agent/images/${actor}/1731000000000-${String(i).padStart(8, "0")}.png`,
+    thumbnailUrl: `/agent/images/${actor}/1731000000000-${String(i).padStart(8, "0")}.png`,
+  }));
+}
+
+test("splitMediaCardsByTopic: 无分组 8 张 → kept 4 + removed 4（并行两次 search_images 聚合场景）", () => {
+  const cards = buildLocalPhotoCards(8);
+  const { kept, removed } = splitMediaCardsByTopic(cards, { maxPerGroup: 4, maxPerSide: 2 });
+  assert.equal(kept.length, 4);
+  assert.equal(removed.length, 4);
+  // 保序：kept 是原列表前缀，removed 是其余部分
+  assert.deepEqual(kept.map((c) => c.title), cards.slice(0, 4).map((c) => c.title));
+  assert.deepEqual(removed.map((c) => c.title), cards.slice(4).map((c) => c.title));
+  // trimMediaCardsByTopic 与 split.kept 完全一致（单一事实源）
+  assert.deepEqual(trimMediaCardsByTopic(cards, { maxPerGroup: 4, maxPerSide: 2 }), kept);
+});
+
+test("splitMediaCardsByTopic: 多主题各自保留前 4 张，互不挤占", () => {
+  const cards = [
+    ...buildLocalPhotoCards(5).map((c) => ({ ...c, groupTitle: "水屋" })),
+    ...buildLocalPhotoCards(5).map((c) => ({ ...c, groupTitle: "沙屋" })),
+  ];
+  const { kept, removed } = splitMediaCardsByTopic(cards, { maxPerGroup: 4, maxPerSide: 2 });
+  assert.equal(kept.length, 8);
+  assert.equal(removed.length, 2);
+});
+
+test("splitMediaCardsByTopic: 对比分组每侧各保留 maxPerSide，超出部分进 removed", () => {
+  const cards = [
+    ...buildLocalPhotoCards(4).map((c) => ({ ...c, groupTitle: "水屋", side: "A" as const })),
+    ...buildLocalPhotoCards(3).map((c) => ({ ...c, groupTitle: "水屋", side: "B" as const })),
+  ];
+  const { kept, removed } = splitMediaCardsByTopic(cards, { maxPerGroup: 4, maxPerSide: 2 });
+  assert.equal(kept.length, 4); // A 侧 2 + B 侧 2
+  assert.equal(removed.length, 3); // A 侧 2 + B 侧 1
+});

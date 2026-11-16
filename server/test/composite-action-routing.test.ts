@@ -52,8 +52,8 @@ const CASES: Case[] = [
   { tool: "web_search", action: "find_video", query: "在视频结果里定位第二个视频", args: { query: "在视频结果里定位第二个视频" }, fallback: "web" },
   { tool: "web_search", action: "parse_video", query: "帮我下载视频并保存下来", args: { url: "https://v.example.com/1" } },
   { tool: "web_search", action: "hot", query: "今天有什么热搜", args: { query: "今天有什么热搜" }, fallback: "web" },
-  { tool: "web_search", action: "weather", query: "北京今天天气怎么样", args: { location: "北京", query: "北京今天天气怎么样" } },
-  { tool: "web_search", action: "quote", query: "比特币现在什么价", args: { symbol: "BTC", query: "比特币现在什么价" } },
+  { tool: "web_search", action: "weather", query: "北京今天天气怎么样", args: { city: "北京", query: "北京今天天气怎么样" } },
+  { tool: "web_search", action: "quote", query: "美元汇率现在多少", args: { symbols: "美元汇率", query: "美元汇率现在多少" } },
   // web_fetch
   { tool: "web_fetch", action: "read", query: "读一下这个网页 https://example.com 的内容", args: { url: "https://example.com" } },
   { tool: "web_fetch", action: "inspect", query: "这个网页说了什么 https://example.com", args: { url: "https://example.com", question: "报名时间" } },
@@ -208,6 +208,71 @@ test("转发正确：44 个 action 全部落到对应执行器，且 action 字�
     );
     assert.equal(out.ok, true);
   }
+});
+
+test("天气丢参回归（2026-11-14 真机事故）：city/days 必须透传，旧字段名 location 归一成 city", async () => {
+  const executed: Array<{ tool: string; input: Record<string, unknown> }> = [];
+  const handlers = new Map<string, (input: Record<string, unknown>, ctx: unknown) => Promise<unknown>>();
+  const fakeRegistry = {
+    register(name: string, handler: (input: Record<string, unknown>, ctx: unknown) => Promise<unknown>) {
+      handlers.set(name, handler);
+    },
+    async execute(tool: string, input: Record<string, unknown>) {
+      executed.push({ tool, input });
+      return { result: { ok: true } };
+    },
+  };
+  registerCompositeTools(fakeRegistry as never);
+
+  // 标准字段名：city + days 原样透传（「北海一周天气」）
+  await handlers.get("web_search")!({ action: "weather", city: "北海", days: 7 }, {});
+  assert.equal(executed[0]!.tool, "weather.get_local");
+  assert.equal(executed[0]!.input.city, "北海", "city 不能在映射层丢失");
+  assert.equal(executed[0]!.input.days, 7, "days 不能在映射层丢失");
+
+  // 旧字段名习惯：location 归一成 city，不再静默丢弃
+  await handlers.get("web_search")!({ action: "weather", location: "北海" }, {});
+  assert.equal(executed[1]!.input.city, "北海", "location 应归一成 city");
+  assert.ok(!("location" in executed[1]!.input), "归一后不应残留 location");
+});
+
+test("接线审计回归（2026-11-14）：quote/images/raw/navigate 的参数必须落到执行器字段名", async () => {
+  const executed: Array<{ tool: string; input: Record<string, unknown> }> = [];
+  const handlers = new Map<string, (input: Record<string, unknown>, ctx: unknown) => Promise<unknown>>();
+  const fakeRegistry = {
+    register(name: string, handler: (input: Record<string, unknown>, ctx: unknown) => Promise<unknown>) {
+      handlers.set(name, handler);
+    },
+    async execute(tool: string, input: Record<string, unknown>) {
+      executed.push({ tool, input });
+      return { result: { ok: true } };
+    },
+  };
+  registerCompositeTools(fakeRegistry as never);
+
+  // quote：新字段名 symbols 直传；旧字段名 symbol 归一（执行器只读 input.symbols）
+  await handlers.get("web_search")!({ action: "quote", symbols: "BTC,ETH" }, {});
+  assert.equal(executed[0]!.input.symbols, "BTC,ETH");
+  await handlers.get("web_search")!({ action: "quote", symbol: "BTC" }, {});
+  assert.equal(executed[1]!.input.symbols, "BTC", "symbol 应归一成 symbols");
+  assert.ok(!("symbol" in executed[1]!.input), "归一后不应残留 symbol");
+
+  // images：旧字段名 count 归一成 limit（执行器只读 input.limit）
+  await handlers.get("web_search")!({ action: "images", query: "猫", count: 6 }, {});
+  assert.equal(executed[2]!.input.limit, 6, "count 应归一成 limit");
+  assert.ok(!("count" in executed[2]!.input), "归一后不应残留 count");
+
+  // raw：旧字段名 timeout_ms 归一成 timeoutMs（执行器只读 req.timeoutMs）
+  await handlers.get("web_fetch")!({ action: "raw", url: "https://api.example.com", timeout_ms: 9000 }, {});
+  assert.equal(executed[3]!.input.timeoutMs, 9000, "timeout_ms 应归一成 timeoutMs");
+  assert.ok(!("timeout_ms" in executed[3]!.input), "归一后不应残留 timeout_ms");
+
+  // navigate：url/goal → startUrl/goalKeywords（执行器只认这两个字段名）
+  await handlers.get("web_fetch")!({ action: "navigate", url: "https://example.com", goal: "报名 入口" }, {});
+  assert.equal(executed[4]!.tool, "info.navigate_site");
+  assert.equal(executed[4]!.input.startUrl, "https://example.com", "url 应落到 startUrl");
+  assert.deepEqual(executed[4]!.input.goalKeywords, ["报名", "入口"], "goal 应拆成 goalKeywords");
+  assert.ok(!("url" in executed[4]!.input) && !("goal" in executed[4]!.input), "归一后不应残留 url/goal");
 });
 
 test("非法 action：明确报错并列出可选值，不静默降级也不误触写操作", async () => {

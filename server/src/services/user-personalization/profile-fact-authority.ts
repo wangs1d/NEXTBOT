@@ -207,83 +207,82 @@ export function isProfileFieldCopyLine(
   return false;
 }
 
-export interface KvSlotCleanResult {
-  value: string;
-  removed: number;
-  changed: boolean;
+/**
+ * 解析**已渲染**的结构化事实块 → 字段 → 当前值。
+ *
+ * 只认「当前值」形态的行：`- 字段：值（登记时间…）`。
+ *   - 〔历史〕/〔计划〕/〔原计划〕形态的行**不算**当前值——那不是现状，
+ *     画像里的对应行不能因此被当成副本删掉（否则「以前住杭州」会被误伤）；
+ *   - 值取第一个全角括号之前的内容（「此前」注解、登记时间都在括号里）。
+ *
+ * 这份映射是「画像里的行是不是重复」的**唯一判据**：只有当另一块确实渲染
+ * 了这个字段，才允许把画像里的同一字段行剔除。判据缺失 → 一律保留。
+ */
+export function parseRenderedFactBlock(
+  renderedBlock: string | undefined | null,
+): Map<string, string> {
+  const map = new Map<string, string>();
+  if (!renderedBlock) return map;
+  for (const raw of renderedBlock.split("\n")) {
+    const parsed = parseFieldLine(raw);
+    if (!parsed) continue;
+    const field = profileFieldOfLabel(parsed.label);
+    if (!field || map.has(field)) continue;
+    const rest = parsed.value.trim();
+    if (!rest || rest.startsWith("〔")) continue; // 〔历史〕/〔计划〕不是现状
+    const value = rest.split("（")[0]!.trim();
+    if (!value) continue;
+    map.set(field, value);
+  }
+  return map;
 }
 
 /**
- * KV 槽位清理：剔除档案字段副本（权威库已有该字段值）并归并完全重复行。
- * 不做替换——权威块由 prompt 单独注入，槽位里保留第二份只会造成双写漂移。
+ * 剔除画像正文里的档案字段副本行（prompt 渲染层专用，纯函数）。
+ *
+ * USER_PROFILE.md 的「字段：值」行是 structured_facts 的**投影**。当档案
+ * 字段块（【用户档案·结构化事实】）已经渲染了同一个字段时，画像里的那一行
+ * 就是同一份数据的第二次渲染——「王哥」在三处重复就是这么来的。
+ *
+ * 剔除判据（2026-11-13 收紧，回应「称呼：王哥 剔掉了」的质疑）：
+ *   1. **必须确认另一块真的渲染了这个字段**（parseRenderedFactBlock 有它）。
+ *      没渲染 → 画像行保留。这条是防丢信息的底线：结构化块每轮按需注入，
+ *      字段数超限时会被截断，若只看「本轮白名单」就删画像行，那个字段会
+ *      在本轮**彻底消失**（称呼就是这么丢过一次）。
+ *   2. 确认渲染后：值逐字相同 → 纯副本，剔；值不同 → 画像是陈旧副本，
+ *      权威块带的是当前值，剔掉陈旧行（否则同一字段两个值进 prompt，
+ *      模型可能喊错称呼）。
+ *
+ * 兜底：没有任何字段被确认渲染时，一个字都不删（宁可重复，不可丢失）。
+ *
+ * @param renderedBlock 本轮实际注入的结构化事实块原文。
  */
-export function cleanProfileFieldCopiesFromSlot(
-  raw: string,
-  fields: ReadonlySet<string>,
-  knownValues?: ReadonlyMap<string, readonly string[]>,
-): KvSlotCleanResult {
-  const lines = raw.split("\n").map((l) => l.trim()).filter(Boolean);
-  if (lines.length === 0) return { value: raw, removed: 0, changed: false };
-  const seen = new Set<string>();
+export function stripProfileFactDuplicateLines(
+  profileText: string,
+  renderedBlock?: string | null,
+): { text: string; removed: number; staleRemoved: number } {
+  const empty = { text: profileText, removed: 0, staleRemoved: 0 };
+  if (!profileText) return empty;
+  const rendered = parseRenderedFactBlock(renderedBlock);
+  if (rendered.size === 0) return empty;
+
   const kept: string[] = [];
   let removed = 0;
-  for (const line of lines) {
-    if (fields.size > 0 && isProfileFieldCopyLine(line, fields, knownValues)) {
-      removed += 1;
-      continue;
+  let staleRemoved = 0;
+  for (const raw of profileText.split("\n")) {
+    const parsed = parseFieldLine(raw);
+    if (parsed) {
+      const field = profileFieldOfLabel(parsed.label);
+      const current = field ? rendered.get(field) : undefined;
+      if (current !== undefined) {
+        removed += 1;
+        if (current !== parsed.value) staleRemoved += 1;
+        continue;
+      }
     }
-    if (seen.has(line)) {
-      removed += 1;
-      continue;
-    }
-    seen.add(line);
-    kept.push(line);
+    kept.push(raw);
   }
-  const value = kept.join("\n");
-  return { value, removed, changed: value !== raw };
-}
-
-/** 行式事实库（JSON）条目外观 */
-export interface UserFactLike {
-  kind?: string;
-  subject?: string;
-  value: string;
-}
-
-/**
- * 行式事实库（data/user-facts/*.json）清理：剔除档案字段副本 + 同 subject 去重。
- * 该库是夜间巩固产物，同样是权威库的投影面，不能自留第二份称呼。
- */
-export function filterUserFactLikeEntries<T extends UserFactLike>(
-  facts: readonly T[],
-  fields: ReadonlySet<string>,
-  knownValues?: ReadonlyMap<string, readonly string[]>,
-): { kept: T[]; removed: number } {
-  const kept: T[] = [];
-  const seen = new Set<string>();
-  let removed = 0;
-  for (const f of facts) {
-    const subjectField = f.subject ? profileFieldOfLabel(f.subject) : "";
-    if (
-      fields.size > 0 &&
-      (isProfileFieldCopyLine(f.value, fields, knownValues) ||
-        (subjectField && fields.has(subjectField)))
-    ) {
-      removed += 1;
-      continue;
-    }
-    const key = `${f.kind ?? ""}|${f.subject ?? ""}|${f.value}`.replace(
-      /[\s，。；！？、,.;:!?'""''「」（）()\[\]【】~～]/g,
-      "",
-    );
-    if (seen.has(key)) {
-      removed += 1;
-      continue;
-    }
-    seen.add(key);
-    kept.push(f);
-  }
-  return { kept, removed };
+  return { text: kept.join("\n"), removed, staleRemoved };
 }
 
 /* ─────────────────────────── 编排（IO） ─────────────────────────── */
@@ -302,8 +301,6 @@ export interface ProfileAuthorityDeps {
     getSnapshot(actorId: string, keys?: string[]): { revision: number; entries: Record<string, unknown> };
     setEntry(actorId: string, key: string, value: unknown): void;
   } | null;
-  /** 需要清理的 KV 槽位；缺省 memory_facts / memory_preferences */
-  kvKeys?: readonly string[];
   /**
    * 画像全文的 KV 副本键（缺省 user_profile）。该键必须与 USER_PROFILE.md 同步——
    * 否则画像投影后 KV 里还留着旧全文，又是「一处一个样」。
@@ -316,16 +313,15 @@ export interface ProfileAuthorityReport {
   /** 权威库中的档案字段（投影依据） */
   fields: Record<string, string>;
   profileChanged: boolean;
-  /** 画像全文的 KV 副本是否被同步 */
+  /** @deprecated 2026-11-12 起画像不再写 KV 副本，恒为 false */
   profileKvSynced: boolean;
-  kvRemoved: number;
+  /** 是否清掉了存量的 KV user_profile 全文副本（一次性迁移，幂等） */
+  legacyProfileKvCleared: boolean;
 }
 
-const DEFAULT_KV_KEYS: readonly string[] = ["memory_facts", "memory_preferences"];
-
 /**
- * 一次收敛：把 USER_PROFILE.md 的档案字段行重渲染为权威投影，同步画像全文的 KV
- * 副本，并清掉 KV 槽位里的档案字段副本（含历史陈旧值）。幂等——无变化不写盘。
+ * 一次收敛：把 USER_PROFILE.md 的档案字段行重渲染为权威投影，并清掉 KV 里
+ * 存量的画像全文副本。幂等——无变化不写盘。
  *
  * 注意：调用方需保证与该 actor 画像的其它写操作串行（聚合器用 runSerialized）。
  */
@@ -335,19 +331,8 @@ export async function reconcileProfileFactsFromStores(
 ): Promise<ProfileAuthorityReport> {
   const facts = deps.factStore?.getActiveFacts(actorId) ?? [];
   const canon = canonicalFieldMap(facts);
-  const fields = [...canon.keys()];
-  const fieldSet = new Set(fields);
-
-  // 已知值（当前 + 历史）：用于识别「旧值副本」（改了称呼后别处还写着旧称呼）
-  const knownValues = new Map<string, readonly string[]>();
-  for (const f of fields) {
-    const hist = deps.factStore?.getAllValuesForField?.(actorId, f);
-    const current = canon.get(f);
-    knownValues.set(f, [...new Set([...(hist ?? []), ...(current ? [current] : [])])]);
-  }
 
   let profileChanged = false;
-  let projectedMd: string | null = null;
   if (canon.size > 0) {
     const mdRaw = await deps.profileStore.read(actorId);
     const md = mdRaw.trim();
@@ -358,32 +343,26 @@ export async function reconcileProfileFactsFromStores(
       await deps.profileStore.write(actorId, next);
       profileChanged = true;
     }
-    projectedMd = next;
   }
 
-  let profileKvSynced = false;
-  const profileKvKey = deps.profileKvKey === undefined ? "user_profile" : deps.profileKvKey;
-  if (deps.memorySync && profileKvKey && projectedMd !== null) {
-    const { entries } = deps.memorySync.getSnapshot(actorId, [profileKvKey]);
-    const current =
-      typeof entries[profileKvKey] === "string" ? (entries[profileKvKey] as string).trim() : "";
-    if (current !== projectedMd) {
-      deps.memorySync.setEntry(actorId, profileKvKey, projectedMd);
-      profileKvSynced = true;
-    }
-  }
+  const profileKvSynced = false;
+  // 2026-11-12 权威源收敛：画像全文只以 USER_PROFILE.md 为准，不再往 KV 写副本。
+  // 此前 `user_profile` 键与 md 逐字节相同（实测 392/393 字符），是纯粹的冗余副本：
+  // 写入要同步两处、读取可能拿到旧版、删除要删两处。现在读取侧直接从 md 实时投影
+  // （见 PromptContextBuilder），`profileKvKey` 保留参数只为兼容调用方签名。
 
-  let kvRemoved = 0;
-  if (deps.memorySync && canon.size > 0) {
-    for (const key of deps.kvKeys ?? DEFAULT_KV_KEYS) {
-      const { entries } = deps.memorySync.getSnapshot(actorId, [key]);
-      const raw = typeof entries[key] === "string" ? (entries[key] as string) : "";
-      if (!raw) continue;
-      const cleaned = cleanProfileFieldCopiesFromSlot(raw, fieldSet, knownValues);
-      if (cleaned.changed) {
-        deps.memorySync.setEntry(actorId, key, cleaned.value);
-        kvRemoved += cleaned.removed;
-      }
+  // 顺带清掉存量副本：老实例升级后 KV 里可能还留着上一次同步的全文，必须一并作废，
+  // 否则「读到旧副本」的风险窗口仍然存在（幂等：空了就不再写）。
+  // 2026-11-13：memory_facts / memory_preferences 的 KV 槽位已整体退役
+  // （键清空、写方全删），这里的槽位副本清理随之移除。
+  let legacyProfileKvCleared = false;
+  const legacyKey = deps.profileKvKey === null ? null : (deps.profileKvKey ?? "user_profile");
+  if (deps.memorySync && legacyKey) {
+    const { entries } = deps.memorySync.getSnapshot(actorId, [legacyKey]);
+    const current = typeof entries[legacyKey] === "string" ? (entries[legacyKey] as string) : "";
+    if (current.trim()) {
+      deps.memorySync.setEntry(actorId, legacyKey, "");
+      legacyProfileKvCleared = true;
     }
   }
 
@@ -392,6 +371,6 @@ export async function reconcileProfileFactsFromStores(
     fields: Object.fromEntries(canon),
     profileChanged,
     profileKvSynced,
-    kvRemoved,
+    legacyProfileKvCleared,
   };
 }

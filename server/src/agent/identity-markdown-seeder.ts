@@ -58,7 +58,8 @@ export async function seedIdentityMarkdown(
   ]);
 
   await Promise.all([
-    userText ? sync.seedIfAbsent(actorId, "user_profile", userText) : Promise.resolve(false),
+    // 2026-11-12：不再把 USER.md 播种到 KV user_profile（该键已退役）。
+    // 画像唯一权威是 user_profiles/<actor>/USER_PROFILE.md，读取时实时投影。
     memoryText ? sync.seedIfAbsent(actorId, "memory_document", memoryText) : Promise.resolve(false),
   ]);
 }

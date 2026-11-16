@@ -13,13 +13,13 @@ import { test } from "node:test";
 
 import {
   canonicalFieldMap,
-  cleanProfileFieldCopiesFromSlot,
-  filterUserFactLikeEntries,
   isProfileFieldCopyLine,
   parseFieldLine,
+  parseRenderedFactBlock,
   profileFieldOfLabel,
   projectProfileMarkdown,
   reconcileProfileFactsFromStores,
+  stripProfileFactDuplicateLines,
   type ProfileAuthorityDeps,
 } from "../src/services/user-personalization/profile-fact-authority.js";
 
@@ -98,40 +98,6 @@ test("F KV 副本识别：显式线索词 / 陈旧值自称 / 自由描述不误
   assert.equal(isProfileFieldCopyLine("[t] [topic:x] 我喜欢刘浩存，把她当老婆", fields, known), false);
 });
 
-test("G KV 槽位清理：剔除副本 + 归并重复行，其余原样保留", () => {
-  const raw = [
-    "[t] [topic:profile] 我喜欢被称呼「王哥」",
-    "[t] [topic:profile] 我喜欢被称呼为王哥",
-    "[t] [topic:profile] 我喜欢刘浩存，把她当老婆",
-  ].join("\n");
-  const r = cleanProfileFieldCopiesFromSlot(raw, new Set(["称呼"]), new Map([["称呼", ["王哥"]]]));
-  assert.equal(r.removed, 2);
-  assert.equal(r.value, "[t] [topic:profile] 我喜欢刘浩存，把她当老婆");
-  assert.equal(r.changed, true);
-  // 无副本时不产生变更
-  const clean = cleanProfileFieldCopiesFromSlot(r.value, new Set(["称呼"]), new Map([["称呼", ["王哥"]]]));
-  assert.equal(clean.changed, false);
-});
-
-test("H 行式事实库清理：剔除称呼副本与重复项", () => {
-  const facts = [
-    { kind: "preference", subject: "刘浩存", value: "我喜欢刘浩存，把她当老婆" },
-    { kind: "fact", subject: "身份", value: "我是王哥" },
-    { kind: "preference", subject: "被称呼为王哥", value: "我喜欢被称呼为王哥" },
-    { kind: "preference", subject: "被称呼为「王哥」", value: "我喜欢被称呼为「王哥」" },
-  ];
-  const { kept, removed } = filterUserFactLikeEntries(
-    facts,
-    new Set(["称呼"]),
-    new Map([["称呼", ["王哥"]]]),
-  );
-  assert.equal(removed, 3);
-  assert.deepEqual(
-    kept.map((f) => f.value),
-    ["我喜欢刘浩存，把她当老婆"],
-  );
-});
-
 /* ── 端到端收敛（内存假依赖）── */
 
 function memoryDeps(md: string, entries: Record<string, unknown>) {
@@ -162,38 +128,33 @@ function memoryDeps(md: string, entries: Record<string, unknown>) {
   return { state, deps };
 }
 
-test("I 端到端收敛：画像投影 + 画像 KV 副本同步 + 槽位清理", async () => {
+test("I 端到端收敛：画像投影 + 存量 KV 画像全文副本作废", async () => {
   const { state, deps } = memoryDeps(MD, {
     user_profile: "旧画像全文（未投影）",
-    memory_facts: "[t] [topic:profile] 我是王king",
-    memory_preferences: "[t] [topic:profile] 我喜欢被称呼为王哥\n[t] [topic:like] 我喜欢刘浩存，把她当老婆",
   });
 
   const report = await reconcileProfileFactsFromStores("u1", deps);
   assert.equal(report.profileChanged, true, "画像应被投影");
-  assert.equal(report.profileKvSynced, true, "画像 KV 副本应同步");
-  assert.equal(report.kvRemoved, 2, "应清掉 2 行档案字段副本");
+  // 2026-11-12：画像不再写 KV 副本（权威 = USER_PROFILE.md）
+  assert.equal(report.profileKvSynced, false, "不得再同步画像 KV 副本");
+  assert.equal(report.legacyProfileKvCleared, true, "存量 KV 副本应被作废");
   assert.deepEqual(report.fields, { 称呼: "王哥" });
 
   assert.ok(state.md.includes("- 称呼：王哥"));
   assert.ok(!state.md.includes("用户称呼"));
-  assert.equal(state.entries["user_profile"], state.md, "KV 画像副本必须与磁盘一致");
-  assert.equal(state.entries["memory_facts"], "", "陈旧自称行应被清除（槽位置空）");
-  assert.equal(state.entries["memory_preferences"], "[t] [topic:like] 我喜欢刘浩存，把她当老婆");
+  assert.equal(state.entries["user_profile"], "", "KV 画像副本必须被清空（读取走 md）");
 });
 
 test("J 端到端收敛幂等：第二次调用零副作用", async () => {
   const { state, deps } = memoryDeps(MD, {
     user_profile: "旧画像全文",
-    memory_facts: "[t] [topic:profile] 我是王king",
-    memory_preferences: "",
   });
   await reconcileProfileFactsFromStores("u1", deps);
   const snapshot = JSON.stringify(state);
   const second = await reconcileProfileFactsFromStores("u1", deps);
   assert.equal(second.profileChanged, false);
   assert.equal(second.profileKvSynced, false);
-  assert.equal(second.kvRemoved, 0);
+  assert.equal(second.legacyProfileKvCleared, false, "副本已清空，第二次不应再写");
   assert.equal(JSON.stringify(state), snapshot, "收敛必须是幂等变换");
 });
 
@@ -205,4 +166,93 @@ test("K canonicalFieldMap：忽略非档案字段与空值", () => {
     { field: "名字", value: "王铭川" },
   ]);
   assert.deepEqual([...map.entries()], [["称呼", "王哥"]]);
+});
+
+/* ─────────────────────────── 画像去重（prompt 渲染层） ─────────────────────────── */
+
+/**
+ * 2026-11-13：画像正文的档案字段行只允许在「结构化事实块**确实渲染了同一个
+ * 字段**」时剔除。
+ *
+ * 起因是「称呼：王哥 剔掉了」的质疑——称呼是每轮都要用的字段，一旦在结构化
+ * 块按需注入被截断的边界上被误删，这一轮 Agent 就完全不知道该怎么称呼用户。
+ * 因此判据从「本轮白名单里有这个字段」改成「另一块真的渲染了这个字段」。
+ */
+test("L 画像去重：结构化块渲染了同一字段才剔除（称呼不再被误删）", () => {
+  const profile = [
+    "## 基本信息",
+    "",
+    "- 称呼：王哥",
+    "- 职业：后端开发",
+    "- 居住地：兴义",
+  ].join("\n");
+  const rendered = [
+    "【用户档案·结构化事实】",
+    "- 称呼：王哥（11/13 记录）",
+  ].join("\n");
+
+  const out = stripProfileFactDuplicateLines(profile, rendered);
+  assert.equal(out.removed, 1, "只剔除已确认的重复行（称呼）");
+  assert.equal(out.staleRemoved, 0);
+  assert.ok(!out.text.includes("- 称呼：王哥"), "确认重复的称呼行应剔除");
+  assert.ok(out.text.includes("- 职业：后端开发"), "未渲染的字段必须保留");
+  assert.ok(out.text.includes("- 居住地：兴义"), "未渲染的字段必须保留");
+});
+
+test("M 画像去重：结构化块没渲染该字段时，一个字都不删（称呼不丢）", () => {
+  const profile = "## 基本信息\n\n- 称呼：王哥\n- 居住地：兴义";
+  // 结构化块里没有称呼（例：字段数超限被截断 / 渲染失败）
+  const rendered = "【用户档案·结构化事实】\n- 居住地：兴义（11/13 记录）";
+
+  const out = stripProfileFactDuplicateLines(profile, rendered);
+  assert.equal(out.removed, 1, "只剔除确认渲染的居住地");
+  assert.ok(out.text.includes("- 称呼：王哥"), "称呼未被结构化块渲染 → 必须保留");
+});
+
+test("N 画像去重：结构化块整体缺失时零删除", () => {
+  const profile = "## 基本信息\n\n- 称呼：王哥";
+  for (const rendered of [undefined, null, "", "【用户档案·结构化事实】\n（无事实）"]) {
+    const out = stripProfileFactDuplicateLines(profile, rendered);
+    assert.equal(out.removed, 0);
+    assert.equal(out.text, profile);
+  }
+});
+
+test("O 画像去重：画像是陈旧值时按权威值剔除（同一字段不留两个值）", () => {
+  const profile = "## 基本信息\n\n- 称呼：老王";
+  const rendered = "【用户档案·结构化事实】\n- 称呼：王哥（11/13 记录）";
+  const out = stripProfileFactDuplicateLines(profile, rendered);
+  assert.equal(out.removed, 1);
+  assert.equal(out.staleRemoved, 1, "陈旧副本要单独计数");
+  assert.ok(!out.text.includes("老王"), "陈旧称呼不得留在 prompt 里与权威值打架");
+});
+
+test("P 画像去重：〔历史〕/〔计划〕形态不算当前值，画像行保留", () => {
+  const rendered = [
+    "【用户档案·结构化事实】",
+    "- 居住地：〔历史〕杭州（2024-05；当前未知）",
+    "- 居住地：〔计划〕广州（12/01 起；尚未发生）",
+  ].join("\n");
+  const parsed = parseRenderedFactBlock(rendered);
+  assert.equal(parsed.has("居住地"), false, "历史/计划不是现状，不能当副本判据");
+
+  const profile = "## 基本信息\n\n- 居住地：杭州";
+  const out = stripProfileFactDuplicateLines(profile, rendered);
+  assert.equal(out.removed, 0, "没有当前值可比对 → 保留");
+  assert.ok(out.text.includes("- 居住地：杭州"));
+});
+
+test("Q parseRenderedFactBlock：只认当前值形态，取括号前的值", () => {
+  const parsed = parseRenderedFactBlock(
+    [
+      "【用户档案·结构化事实】",
+      "- 称呼：王哥（11/13 记录）（此前：老王，2024-01）",
+      "- 职业：后端开发（11/02 记录，事发 11/01）",
+      "- 居住地：〔历史〕杭州（2024-05；当前未知）",
+      "（以下为用户确定信息的精确记录……）",
+    ].join("\n"),
+  );
+  assert.equal(parsed.get("称呼"), "王哥");
+  assert.equal(parsed.get("职业"), "后端开发");
+  assert.equal(parsed.has("居住地"), false);
 });

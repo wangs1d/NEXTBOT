@@ -87,6 +87,8 @@ export function createTurnEventEmitter(opts: {
 export function buildIntentDetectedPayload(opts: {
   sessionId: string;
   traceId: string;
+  /** 本轮归属线程键（2026-11-12 P1 多会话并发），透传到 wire。 */
+  threadId?: string;
   decision: RouteDecision;
   plan?: ChatPlanStep[];
   subAgents?: ChatSubAgentPlan[];
@@ -94,6 +96,7 @@ export function buildIntentDetectedPayload(opts: {
   return {
     sessionId: opts.sessionId,
     traceId: opts.traceId,
+    ...(opts.threadId ? { threadId: opts.threadId } : {}),
     mode: planeToIntentMode(opts.decision.plane),
     reasons: opts.decision.reasons,
     plan: opts.plan,
@@ -105,6 +108,8 @@ export function buildIntentDetectedPayload(opts: {
 export function buildExecutionEventPayload(opts: {
   sessionId: string;
   traceId: string;
+  /** 本轮归属线程键（2026-11-12 P1 多会话并发），透传到 wire。 */
+  threadId?: string;
   eventId: string;
   kind: ChatExecutionKind;
   at?: number;
@@ -119,6 +124,7 @@ export function buildExecutionEventPayload(opts: {
   return {
     sessionId: opts.sessionId,
     traceId: opts.traceId,
+    ...(opts.threadId ? { threadId: opts.threadId } : {}),
     eventId: opts.eventId,
     kind: opts.kind,
     at: opts.at ?? Date.now(),

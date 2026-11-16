@@ -206,6 +206,99 @@ test("brief 出口：时段进正文摘要与穿衣建议", async () => {
   }
 });
 
+test("配置 AMAP_WEB_KEY 时实况/逐日取高德官方数据，逐小时降水仍取 Open-Meteo", async () => {
+  const previousKey = process.env.AMAP_WEB_KEY;
+  process.env.AMAP_WEB_KEY = "test-amap-key";
+  const original = globalThis.fetch;
+  const payload = buildPayload() as {
+    daily: { time: string[] };
+  } & Record<string, unknown>;
+  const today = payload.daily.time[0]!;
+  const tomorrow = payload.daily.time[1]!;
+  const urls: string[] = [];
+  globalThis.fetch = (async (url: unknown) => {
+    const u = String(url);
+    urls.push(u);
+    if (u.includes("restapi.amap.com/v3/geocode/regeo")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ status: "1", regeocode: { addressComponent: { adcode: "522300" } } }),
+      };
+    }
+    if (u.includes("weatherInfo") && u.includes("extensions=base")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          status: "1",
+          lives: [{ weather: "霾", temperature: "18", humidity: "66" }],
+        }),
+      };
+    }
+    if (u.includes("weatherInfo") && u.includes("extensions=all")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          status: "1",
+          forecasts: [
+            {
+              casts: [
+                { date: today, dayweather: "晴", nightweather: "雾", daytemp: "24", nighttemp: "15", daytemp_float: "24.0", nighttemp_float: "15.0" },
+                { date: tomorrow, dayweather: "多云", nightweather: "小雨", daytemp: "20", nighttemp: "14", daytemp_float: "20.0", nighttemp_float: "14.0" },
+              ],
+            },
+          ],
+        }),
+      };
+    }
+    return { ok: true, status: 200, json: async () => payload };
+  }) as unknown as typeof fetch;
+
+  try {
+    const brief = await new WeatherService().getBrief(25.0628, 104.891, "auto", "兴义市", 2);
+    assert.equal(brief.source, "amap");
+    assert.equal(brief.currentTempC, 18, "实况气温应取高德");
+    assert.equal(brief.weatherText, "霾");
+    assert.equal(brief.humidityPct, 66);
+    assert.equal(brief.todayMinC, 15);
+    assert.equal(brief.todayMaxC, 24);
+    assert.equal(brief.tomorrow?.weatherText, "多云转小雨");
+    assert.equal(brief.tomorrow?.maxC, 20);
+    assert.ok(brief.hourlyForecast.length > 0, "逐小时仍由 Open-Meteo 提供");
+    assert.equal(brief.peakRainPct, 5, "降水概率仍取 Open-Meteo 今天那一段");
+    assert.ok(urls.some((u) => u.includes("api.open-meteo.com")), "Open-Meteo 仍需请求逐小时数据");
+  } finally {
+    globalThis.fetch = original;
+    if (previousKey === undefined) delete process.env.AMAP_WEB_KEY;
+    else process.env.AMAP_WEB_KEY = previousKey;
+  }
+});
+
+test("高德失败时整条链路回落 Open-Meteo，不阻断出天气", async () => {
+  const previousKey = process.env.AMAP_WEB_KEY;
+  process.env.AMAP_WEB_KEY = "test-amap-key";
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (url: unknown) => {
+    if (String(url).includes("restapi.amap.com")) {
+      throw new Error("amap unavailable");
+    }
+    return { ok: true, status: 200, json: async () => buildPayload() };
+  }) as unknown as typeof fetch;
+
+  try {
+    const brief = await new WeatherService().getBrief(25.0628, 104.891, "auto", "兴义市", 2);
+    assert.equal(brief.source, "open-meteo");
+    assert.equal(brief.currentTempC, 18, "回落时用 Open-Meteo 实况");
+    assert.equal(brief.todayMaxC, 22);
+  } finally {
+    globalThis.fetch = original;
+    if (previousKey === undefined) delete process.env.AMAP_WEB_KEY;
+    else process.env.AMAP_WEB_KEY = previousKey;
+  }
+});
+
 after(() => {
   // 兜底还原：用例中途抛错也不能把进程时区留在 UTC
   delete process.env.TZ;

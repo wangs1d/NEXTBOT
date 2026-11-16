@@ -213,7 +213,7 @@ test("显式点名登录平台且已有 Cookie：只查点名平台，不并免�
   }
 });
 
-test("推码预算：一次只推一张码（首个撞墙平台推码后，其余登录平台延后不取数）", async () => {
+test("登录批量模式（2026-11-13 P0-2）：登录族平台不再「首个撞墙即停」，一次全部尝试", async () => {
   const calls: SearchCall[] = [];
   const stub = makeStubOrderService(
     ["taobao", "tmall", "jd", "pdd", "suning", "smzdm"],
@@ -227,12 +227,13 @@ test("推码预算：一次只推一张码（首个撞墙平台推码后，其�
   try {
     const res = (await service.comparePrices(makeCtx(), QUERY, {})) as Record<string, unknown>;
 
-    // 串行登录队列：taobao 排第一并撞墙 → 预算用尽 → jd/pdd 延后，不取数
+    // 2026-11-13 改版：登录族平台**全部**尝试（不再首个撞墙就停）。
+    // 用户投诉「说让我补京东的登录之后再补」——一次一张的预算让用户要扫三轮
+    // 才能比完；批量模式下三家登录平台都会被走到，一次把码推齐。
     const loginCalls = calls.filter((c) => ["taobao", "jd", "pdd", "tmall"].includes(c.platform));
-    assert.deepEqual(
-      loginCalls.map((c) => c.platform),
-      ["taobao"],
-      `首个撞墙平台后应停止登录队列：${loginCalls.map((c) => c.platform).join(",")}`,
+    assert.ok(
+      ["taobao", "jd", "pdd"].every((p) => loginCalls.some((c) => c.platform === p)),
+      `批量模式下所有登录平台都应被尝试：${loginCalls.map((c) => c.platform).join(",")}`,
     );
     assert.equal(
       calls.find((c) => c.platform === "taobao")?.innerOpts?.loginWaitMs,
@@ -243,17 +244,52 @@ test("推码预算：一次只推一张码（首个撞墙平台推码后，其�
     assert.ok(!calls.some((c) => c.platform === "tmall"), "tmall 不应单独探测");
     assert.ok(calls.some((c) => c.platform === "suning") && calls.some((c) => c.platform === "smzdm"));
 
-    // handoff 只含淘宝（一张码）；summary 说明延后节奏与建档
-    const handoff = res.handoff as { labels?: string[] } | undefined;
+    // 三家撞登录墙 → 合并成**一次** handoff，三家都在名单里
+    const handoff = res.handoff as { labels?: string[]; reason?: string } | undefined;
     assert.ok(handoff, "登录墙应合成一次统一 handoff");
-    assert.deepEqual(handoff?.labels, ["淘宝"], `handoff 只应有淘宝：${handoff?.labels?.join("、")}`);
-    const summary = String(res.summary ?? "");
-    assert.ok(summary.includes("一次只推一个"), `summary 应说明延后节奏：${summary}`);
-    assert.ok(/京东、拼多多这轮先不推码/.test(summary), `summary 应点名延后平台：${summary}`);
-    assert.ok(summary.includes("首次比价顺手建档"), `summary 应带建档文案：${summary}`);
-    assert.ok(summary.includes("淘宝的登录二维码"), `建档文案应点名淘宝：${summary}`);
+    assert.equal(handoff?.reason, "login");
+    assert.ok(
+      handoff?.labels?.includes("淘宝") &&
+        handoff?.labels?.includes("京东") &&
+        handoff?.labels?.includes("拼多多"),
+      `handoff 应一次含全部撞墙平台：${handoff?.labels?.join("、")}`,
+    );
+
+    // 免登录平台的报价仍要正常产出（批量模式不影响保底出价）
+    const groups = res.groups as Array<{ offers: Array<{ platform: string }> }>;
+    assert.ok(groups.some((g) => g.offers.some((o) => o.platform === "suning")));
   } finally {
     await cleanup();
+  }
+});
+
+test("旧的一次一张模式可回退：SHOPPING_COMPARE_LOGIN_BATCH=0 时首个撞墙即停", async () => {
+  const calls: SearchCall[] = [];
+  const stub = makeStubOrderService(
+    ["taobao", "tmall", "jd", "pdd", "suning", "smzdm"],
+    {
+      okPlatforms: { suning: [okProduct("suning")], smzdm: [okProduct("smzdm")] },
+      loginPlatforms: ["taobao", "jd", "pdd"],
+    },
+    calls,
+  );
+  // env 必须在**构造 service 之前**设好（loginBatchMode 是构造期读取的字段）
+  const prev = process.env.SHOPPING_COMPARE_LOGIN_BATCH;
+  process.env.SHOPPING_COMPARE_LOGIN_BATCH = "0";
+  const dir = await mkdtemp(join(tmpdir(), "shopping-compare-batch0-"));
+  try {
+    const svc = new ShoppingCompareService({ shoppingOrderService: stub, dataDir: dir });
+    await svc.comparePrices(makeCtx(), QUERY, {});
+    const loginCalls = calls.filter((c) => ["taobao", "jd", "pdd", "tmall"].includes(c.platform));
+    assert.deepEqual(
+      loginCalls.map((c) => c.platform),
+      ["taobao"],
+      `回退模式下首个撞墙平台后应停止登录队列：${loginCalls.map((c) => c.platform).join(",")}`,
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+    if (prev == null) delete process.env.SHOPPING_COMPARE_LOGIN_BATCH;
+    else process.env.SHOPPING_COMPARE_LOGIN_BATCH = prev;
   }
 });
 

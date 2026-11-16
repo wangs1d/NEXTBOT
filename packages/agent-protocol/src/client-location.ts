@@ -12,6 +12,16 @@ export const clientLocationWireSchema = z.object({
   timezone: z.string().max(80).optional(),
   /** 展示用，如「贵州省 · 遵义市」 */
   label: z.string().max(200).optional(),
+  /**
+   * 精确位置（2026-11-14）：完整门牌地址与最近地标。旧客户端不填也没关系——
+   * 服务端会用高德逆地理补齐；带上来则省一次外网反查。
+   */
+  address: z.string().max(300).optional(),
+  /** 街道/乡镇（如「下五屯街道」） */
+  township: z.string().max(120).optional(),
+  /** 最近地标/AOI 名称（如「九华苑」）；poiDistanceMeters 为到该地标的距离（米） */
+  poi: z.string().max(200).optional(),
+  poiDistanceMeters: z.number().finite().nonnegative().max(100_000).optional(),
   /** 上报来源标注：continuous=持续模式定时上报；缺省视为按需/面板主动上报 */
   source: z.enum(["continuous", "ondemand", "report"]).optional(),
   /**

@@ -88,6 +88,11 @@ test("校验：非法输入被拒绝（口径与工具层共用）", () => {
   assert.match(String(validateGeofenceInput(validInput({ radiusMeters: 5 }))), /radiusMeters/);
   assert.match(String(validateGeofenceInput(validInput({ event: "cross" }))), /event/);
   assert.match(String(validateGeofenceInput(validInput({ actionType: "sms" }))), /actionType/);
+  // observe：只观察进出、不执行动作，不需要任何 actionConfig
+  assert.equal(
+    validateGeofenceInput(validInput({ actionType: "observe", actionConfig: {} })),
+    null,
+  );
   // 各动作参数口径
   assert.match(
     String(validateGeofenceInput(validInput({ actionType: "reminder", actionConfig: {} }))),
@@ -298,5 +303,57 @@ test("geofence.* 工具：create/list/delete round trip", async () => {
       ctx,
     )) as { result: { ok: boolean } };
     assert.equal(removed.result.ok, true);
+  });
+});
+
+// ─── 2026-11-13 精度裁决 ────────────────────────────────────────────────
+// 室内 WiFi fix 常有 100~500m 精度半径，若照单全收会把人判到隔壁街区，
+// 进而误报「到家/到公司」。精度差到连围栏边界都定不了时（accuracy > 半径），
+// 本次判定不可信：推进基线但不产生事件，等下一个高精度 fix 纠正。
+test("精度裁决：accuracy > 半径时不产生围栏事件（低精度 fix 不误触发）", async () => {
+  await withGeofence(async ({ svc, events, setNow }) => {
+    svc.create("u1", validInput({ event: "both", radiusMeters: 200 }));
+    // 基线：栏外，精度良好
+    svc.processLocationReport("u1", FAR_HOME);
+    assert.equal(events.length, 0);
+
+    // 进入栏内，但 fix 精度 500m（> 半径 200m）：边界定不了 → 不应触发 enter
+    setNow("2026-09-04T10:06:00Z");
+    const imprecise = svc.processLocationReport("u1", {
+      ...NEAR_HOME,
+      accuracyMeters: 500,
+    });
+    assert.equal(imprecise.length, 0, "精度不足时不得误报 enter");
+    assert.equal(events.length, 0);
+
+    // 同一位置，高精度 fix（10m）→ 正常触发 enter
+    setNow("2026-09-04T10:12:00Z");
+    const precise = svc.processLocationReport("u1", {
+      ...NEAR_HOME,
+      accuracyMeters: 10,
+    });
+    assert.equal(precise.length, 1, "高精度 fix 应正常触发");
+    assert.equal(precise[0].kind, "enter");
+    assert.equal(events.length, 1);
+  });
+});
+
+test("精度裁决：accuracy 缺失（未提供）时按老行为判定，不阻塞主链路", async () => {
+  await withGeofence(async ({ svc, events }) => {
+    svc.create("u1", validInput({ event: "both" }));
+    svc.processLocationReport("u1", FAR_HOME);
+    const entered = svc.processLocationReport("u1", NEAR_HOME); // 无 accuracy 字段
+    assert.equal(entered.length, 1, "精度未知时不应阻塞判定");
+    assert.equal(events.length, 1);
+  });
+});
+
+test("精度裁决：accuracy <= 半径时正常触发（边界内的高精度 fix）", async () => {
+  await withGeofence(async ({ svc, events }) => {
+    svc.create("u1", validInput({ event: "both", radiusMeters: 200 }));
+    svc.processLocationReport("u1", FAR_HOME);
+    const entered = svc.processLocationReport("u1", { ...NEAR_HOME, accuracyMeters: 150 });
+    assert.equal(entered.length, 1);
+    assert.equal(events.length, 1);
   });
 });

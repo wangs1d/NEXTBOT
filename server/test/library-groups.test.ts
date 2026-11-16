@@ -165,11 +165,87 @@ describe("library buildGroups（每次对话一张卡）", () => {
     });
 
     assert.equal(groups.length, 2);
-    const planGroup = groups.find((g) => g.sessionId === "tplan-abc123");
+    const planGroup = groups.find((g) => g.sessionId.includes("tplan-abc123"));
     assert.ok(planGroup);
     assert.equal(planGroup.title, "东京 5 日游");
     const history = groups[groups.length - 1];
     assert.equal(history.sessionId, "");
     assert.equal(history.title, ""); // 历史组保持空标题 → 客户端显示「历史记录」
+  });
+
+  it("行程一个规划一张卡（2026-11-13 口径）：同会话多次规划不并卡", () => {
+    // 两个行程同属一个规划会话：旧逻辑按 sessionId 折叠会挤进同一张卡；
+    // 新逻辑按 planId 独立成卡，一个规划一张卡。
+    const plan = (planId: string, title: string, createdAt: number) => ({
+      planId,
+      title,
+      destination: "杭州",
+      startDate: "",
+      endDate: "",
+      dayCount: 2,
+      stopCount: 5,
+      createdAt,
+      coverImage: "",
+      totalCost: null,
+      sessionId: "tplan-same-session",
+    });
+    const groups = buildGroups({
+      actorId: ACTOR,
+      files: [],
+      images: [],
+      notes: [],
+      travelPlans: [
+        plan("plan-a", "西湖两日", 1764000000000),
+        plan("plan-b", "灵隐寺一日", 1764000300000),
+      ],
+      titles: new Map(),
+    });
+
+    assert.equal(groups.length, 2);
+    assert.deepEqual(
+      new Set(groups.map((g) => g.title)),
+      new Set(["西湖两日", "灵隐寺一日"]),
+    );
+    for (const g of groups) {
+      assert.equal(g.counts.travelPlans, 1);
+    }
+  });
+
+  it("主对话内连续规划的行程也不与其它产物混卡：各自独立成卡", () => {
+    // sessionId=actorId（主对话）且无轮次：旧行为掉进 30 分钟时间聚类，
+    // 会和同时段的图片并卡；新行为按 planId 独立。
+    const groups = buildGroups({
+      actorId: ACTOR,
+      files: [],
+      images: [
+        image("d.png", ACTOR, "2026-11-13T02:00:00.000Z", "turn-x", "画西湖海报"),
+      ],
+      notes: [],
+      travelPlans: [
+        {
+          planId: "plan-c",
+          title: "杭州三日",
+          destination: "杭州",
+          startDate: "",
+          endDate: "",
+          dayCount: 3,
+          stopCount: 8,
+          createdAt: Date.parse("2026-11-13T02:10:00.000Z"),
+          coverImage: "",
+          totalCost: null,
+          sessionId: ACTOR,
+        },
+      ],
+      titles: new Map(),
+    });
+
+    assert.equal(groups.length, 2);
+    const planGroup = groups.find((g) => g.counts.travelPlans === 1);
+    assert.ok(planGroup);
+    assert.equal(planGroup.counts.images, 0);
+    assert.equal(planGroup.title, "杭州三日");
+    const imageGroup = groups.find((g) => g.counts.images === 1);
+    assert.ok(imageGroup);
+    assert.equal(imageGroup.counts.travelPlans, 0);
   });
 });

@@ -155,6 +155,11 @@ class WsEventRouter {
     // ── 工具进度：根分发器管输入框徽标/浏览器面板，控制器管思考态文案 ──
     "tool.call": WsEventRoute.both,
     "tool.result": WsEventRoute.both,
+
+    // ── Agent 浏览器工作预览帧（2026-11-12）：手机端聊天控制器收进悬浮窗 ──
+    // 服务端在 agent_browser 无头执行每步后推页面截图，手机端右上角悬浮窗
+    // 据此展示「Agent 正在控制浏览器」的画面。桌面端不用（有自己的浏览器面板）。
+    "agent.browser.preview": WsEventRoute.chatOnly,
   };
 
   /// 状态型事件（连接态语义）。

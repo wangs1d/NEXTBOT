@@ -7,6 +7,15 @@ import { join } from "node:path";
 import { RetentionMap, retentionMaxEntries } from "./resource-pool.js";
 import { writeJsonAtomic } from "../storage/atomic-json.js";
 import { dedupeMemoryLines, limitLinesByChars, memoryDecayFactor, semanticFingerprint } from "./memory-record-utils.js";
+import {
+  KV_BUCKET_BY_TIER,
+  TIER_BY_KV_BUCKET,
+  refreshMemoryLineTimestamp,
+  restoreAction,
+  retentionThresholds,
+  tierForScore,
+  type KvRetentionBucket,
+} from "../memory/retention-policy.js";
 import { emotionalSalience, inferEmotionFromText } from "./emotion-memory.js";
 import { getShortTermMemoryGatewayService } from "./short-term-memory-gateway.js";
 import { fetchOpenAiCompatibleEmbedding, resolveEmbeddingModel } from "./openai-embedding-client.js";
@@ -388,23 +397,17 @@ export class MemoryManagerService {
       result.fadedCount = retention.faded.length;
 
       if (result.entriesMerged > 0 || result.entriesRemoved > 0) {
-        const newSummary = limitLinesByChars(
-          dedupeMemoryLines([...retention.remembered, ...retention.faded], {
-            preferLatest: true,
+        // 2026-11-12 单一写者：摘要整串重写不再是本模块 applyPatch 覆盖，
+        // 而是交给 AgentMemorySyncService（memory.summary 的 owner）执行
+        // 读-改-写重试——避免与 append 路径并发时 CAS 失败被静默丢弃。
+        result.summaryUpdated = await this.memorySync.replaceSummaryLines(
+          actorId,
+          () => ({
+            summary: [...retention.remembered, ...retention.faded],
+            forgotten: [...retention.forgottenArchive, ...retention.forgotten],
           }),
-          this.config.maxSummaryChars,
-          { preserveTail: true },
-        ).kept.join("\n");
-        const forgottenArchive = limitLinesByChars(
-          retention.forgottenArchive,
-          this.config.maxSummaryChars * 2,
-          { preserveTail: true },
-        ).kept.join("\n");
-        const patchResult = await this.memorySync.applyPatch(actorId, revision, [
-          { key: "memory_summary", op: "put", value: newSummary },
-          { key: "memory_summary_forgotten", op: "put", value: forgottenArchive },
-        ]);
-        result.summaryUpdated = patchResult.ok;
+          "MemoryManagerService",
+        );
       }
     } catch {
       /* fire-and-forget */
@@ -424,39 +427,42 @@ export class MemoryManagerService {
    * forgotten 自动恢复：把命中的 forgotten 行移回 memory_summary。
    *
    * 场景：recall 命中 memory_summary_forgotten 中的行且与当前 query 相关时调用。
-   * 实现：原子读取当前 memory_summary + memory_summary_forgotten，
-   * 把指定行从 forgotten 移到 summary（去重），通过 applyPatch 写回。
+   * 实现：由 memory.summary 的 owner（AgentMemorySyncService）原子读-改-写，
+   * 把指定行从 forgotten 移到 summary（去重）。
+   *
+   * 2026-11-13（统一恢复动作）：恢复策略来自 memory/retention-policy.ts ——
+   * forgotten 桶 = cold 档，恢复即「升一档」到 warm（落回 summary 桶）。
+   * 同时**刷新行首时间戳**：此前恢复只搬行不换时间戳，而行龄取自行首的
+   * `[ISO 时间戳]`，于是被恢复的行下一轮整理立刻又被遗忘——恢复等于没做。
    */
   async restoreForgottenLines(actorId: string, lines: string[]): Promise<void> {
     if (!this.memorySync || lines.length === 0) return;
     try {
-      const { revision, entries } = this.memorySync.getSnapshot(actorId, [
-        "memory_summary",
-        "memory_summary_forgotten",
-      ]);
-      const currentSummary = typeof entries.memory_summary === "string" ? entries.memory_summary : "";
-      const currentForgotten = typeof entries.memory_summary_forgotten === "string" ? entries.memory_summary_forgotten : "";
-
-      const summaryLines = currentSummary.split("\n").filter((l) => l.trim());
-      const forgottenLines = currentForgotten.split("\n").filter((l) => l.trim());
-
-      // 把命中的行从 forgotten 摘除，加到 summary（去重）
-      const matchedSet = new Set(lines.map((l) => l.trim()).filter(Boolean));
-      const remainingForgotten = forgottenLines.filter((l) => !matchedSet.has(l.trim()));
-      const restored = lines.filter((l) => {
-        const trimmed = l.trim();
-        return trimmed && !summaryLines.some((s) => s.trim() === trimmed);
-      });
-      if (restored.length === 0) return;
-
-      const newSummary = [...summaryLines, ...restored].join("\n");
-      const newForgotten = remainingForgotten.join("\n");
-
-      await this.memorySync.applyPatch(actorId, revision, [
-        { key: "memory_summary", op: "put", value: newSummary },
-        { key: "memory_summary_forgotten", op: "put", value: newForgotten },
-      ]);
-      console.log(`[MemoryManager] forgotten 自动恢复: ${restored.length} 行移回 memory_summary (${actorId})`);
+      // 单一写者：同样交给 owner 执行读-改-写，不再自行 applyPatch 覆盖。
+      const action = restoreAction(TIER_BY_KV_BUCKET.forgotten);
+      const nowIso = new Date().toISOString();
+      await this.memorySync.replaceSummaryLines(
+        actorId,
+        (current) => {
+          const inSummary = new Set(current.summary.map((l) => l.trim()));
+          const restoredNow = lines.filter((l) => {
+            const t = l.trim();
+            return t && !inSummary.has(t);
+          });
+          const matched = new Set(lines.map((l) => l.trim()).filter(Boolean));
+          return {
+            summary: [
+              ...current.summary,
+              ...restoredNow.map((l) =>
+                action?.refreshTimestamp ? refreshMemoryLineTimestamp(l, nowIso) : l,
+              ),
+            ],
+            forgotten: current.forgotten.filter((l) => !matched.has(l.trim())),
+          };
+        },
+        "MemoryManagerService",
+      );
+      console.log(`[MemoryManager] forgotten 自动恢复: ${lines.length} 行尝试移回 memory_summary (${actorId})`);
     } catch (err) {
       console.log(`[MemoryManager] restoreForgottenLines 失败: ${err}`);
     }
@@ -684,20 +690,27 @@ export class MemoryManagerService {
       ...this.scoreMemoryLine(line, now, semanticScores[index] ?? 0.5, topTopics),
     }));
 
+    // 档位判定统一走 retention policy（2026-11-13）：KV 三档与认知图五档
+    // 现在共用同一组阈值与同一套「档位 ↔ 存储字段」映射——此前两边各写
+    // 一份阈值，同一段记忆在 KV 还热着、在认知图已经降档。
+    const thresholds = retentionThresholds();
+    const bucketOf = (score: number): KvRetentionBucket =>
+      KV_BUCKET_BY_TIER[tierForScore(score, thresholds)];
+
     const remembered = scored
-      .filter((item) => item.score >= 1.15)
+      .filter((item) => bucketOf(item.score) === "remembered")
       .sort((a, b) => b.score - a.score || b.ts - a.ts)
       .slice(0, 32)
       .map((item) => item.line);
 
     const faded = scored
-      .filter((item) => item.score >= 0.45 && item.score < 1.15)
+      .filter((item) => bucketOf(item.score) === "faded")
       .sort((a, b) => b.score - a.score || b.ts - a.ts)
       .slice(0, 24)
       .map((item) => item.line);
 
     const forgotten = scored
-      .filter((item) => item.score < 0.45)
+      .filter((item) => bucketOf(item.score) === "forgotten")
       .map((item) => item.line)
       .slice(0, 32);
 
@@ -718,14 +731,16 @@ export class MemoryManagerService {
     const safeTs = Number.isFinite(ts) ? ts : now;
     const ageHours = Math.max(0, (now - safeTs) / 3_600_000);
 
-    // P2 统一遗忘曲线：与情景日志/长期节点共用 memoryDecayFactor（7 天半衰期），
-    // 并叠加情绪显著性——高光/至暗行衰减更慢。halfLifeDays=4·ln2 与原 96h
-    // 指数衰减等价，保证中性行的保留边界不变。
+    // P2 统一遗忘曲线：与情景日志/长期节点/读侧梯度共用 memoryDecayFactor，
+    // 并叠加情绪显著性——高光/至暗行衰减更慢。
+    // 2026-11-13：移除原先单独传入的 halfLifeDays=4·ln2（≈2.77 天，等价旧 96h
+    // 指数时间常数）。那一档让 KV 摘要的保鲜期只有认知图/读侧梯度的四成——同
+    // 一段记忆在 KV 还活着、在认知图已经淡出，正是「口径分裂」本身。现统一到
+    // 全局半衰期常量（memoryDecayFactor 内部不再接受覆盖参数）。
     const emotion = inferEmotionFromText(line);
     const decay = memoryDecayFactor({
       ageDays: ageHours / 24,
       emotionalSalience: emotionalSalience(emotion),
-      halfLifeDays: 4 * Math.LN2,
     });
     let score = decay;
     score += semanticScore * 0.8;

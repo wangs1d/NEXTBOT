@@ -79,7 +79,7 @@ test("pending view: no horizon gate — reminder 3 days out is still listed", as
   });
 });
 
-test("pending view: recently fired reminder stays as a completed line with its true local time", async () => {
+test("pending view: recently fired reminder is never injected (expired reminders stay out of context)", async () => {
   await withTempScheduleFile(async (service) => {
     // 直接落盘一条已完成任务，新实例 load 后验证
     const completedAt = new Date(Date.now() - 5 * 60_000).toISOString();
@@ -96,8 +96,7 @@ test("pending view: recently fired reminder stays as a completed line with its t
             category: "trivia",
             recurrence: "none",
             timezone: "Asia/Shanghai",
-            // UTC 17:20 = 北京 01:20：历史轮曾把 UTC 钟点误说成「五点二十」，
-            // 快照必须给出权威本地时间供后续轮对照
+            // UTC 17:20 = 北京 01:20
             runAt: "2026-11-06T17:20:00.000Z",
             nextRunAt: null,
             status: "completed",
@@ -114,18 +113,14 @@ test("pending view: recently fired reminder stays as a completed line with its t
     const reloaded = new ScheduleTaskService();
     await reloaded.load();
 
-    // 12h 内刚响过的提醒不再从快照消失：以「已完成 + 真实本地钟点」留在末尾，
-    // 让模型能顶掉历史里的错误说法（2026-11-07「五点二十」事故根治项）。
-    const snapshot = buildSchedulePromptSnapshot(reloaded, "session-1", false);
-    assert.match(snapshot, /SCH\|pending\|count=0/);
-    assert.match(snapshot, /已完成/);
-    assert.match(snapshot, /本地 01:20 已响过/);
-    assert.match(snapshot, /该睡觉啦/);
-    assert.match(snapshot, /以此块为准/);
+    // 2026-11-16 根修：已响过的提醒不再注入上下文（TTL 在注入点生效），
+    // 否则早上响过的提醒会在晚上被历史话术复活成「明早」。核对历史走
+    // calendar action=list_tasks（from 传过去时间）。
+    assert.equal(buildSchedulePromptSnapshot(reloaded, "session-1", false), "");
   });
 });
 
-test("pending view: reminder fired >12h ago drops out entirely", async () => {
+test("pending view: reminder fired long ago also drops out", async () => {
   await withTempScheduleFile(async (service) => {
     const completedAt = new Date(Date.now() - 13 * 60 * 60_000).toISOString();
     await writeFile(
@@ -206,8 +201,10 @@ test("pending view: other session's reminders are not listed", async () => {
 
 test("query view (extended): 7d range lists active tasks; count=0 when empty", async () => {
   await withTempScheduleFile(async (service) => {
-    // 空态：明确告诉模型「当前视野没有日程」
-    assert.equal(buildSchedulePromptSnapshot(service, "session-1", true), "SCH|range=7d|count=0");
+    // 空态：明确告诉模型「当前视野没有待触发日程」，并提示历史提醒走工具查询
+    const empty = buildSchedulePromptSnapshot(service, "session-1", true);
+    assert.match(empty, /SCH\|range=7d\|count=0/);
+    assert.match(empty, /list_tasks/);
 
     // 未来 active 任务进入 7 天视野，行带剩余时间
     await createReminder(service, { title: "开会", reminderMessage: "该开会啦", runAt: new Date(Date.now() + 2 * 60 * 60_000).toISOString() });

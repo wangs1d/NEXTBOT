@@ -31,6 +31,7 @@ import {
   preparePromptCachePlan,
 } from "./prefix-cache.js";
 import { fingerprintRequestHead, reportPrefixWatchOutcome } from "./prefix-watchdog.js";
+import { recordThinkingLatency, effortSentFrom } from "./thinking-policy.js";
 import { resolveChatToolPlanForStream } from "./resolve-chat-tools.js";
 // 从 agent-gateway 具体模块导入而非 gateway/index 大桶——基类模块经桶文件
 // 会回连 resolve-provider → providers/*，形成 module-init 循环
@@ -667,6 +668,20 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
           `total=${Date.now() - timingStart}ms chars=${streamedVisible.length}`,
       );
       streamUsage = result.usage;
+      // 思考档位学习（2026-11-12）：把本次首字延迟按「模型 + 实际下发档位」记样本，
+      // 供 thinking-policy 下次选档。用 firstDelta 优先（用户真正看见字的那一刻），
+      // 没有正文（纯工具轮）时退回首包时间。
+      {
+        const ttft = (timingFirstDelta ?? timingFirstRaw);
+        if (ttft !== null && Number.isFinite(ttft)) {
+          recordThinkingLatency({
+            providerId: this.id,
+            model,
+            effortSent: effortSentFrom(extraBody),
+            ttftMs: ttft - timingStart,
+          });
+        }
+      }
       toolIntentCalls = result.toolCalls;
       // 2026-10-11：整串路径补一道 stripMetaSentences（含「元决策自述句」判据，
       // 与流式 metaFilter 同一套词面），防止净化后文本仍把「根据规范必须调用…」

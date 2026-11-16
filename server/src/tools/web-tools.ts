@@ -20,6 +20,18 @@ function trimContent(text: string, maxChars: number): string {
   return t.slice(0, maxChars) + "\n…[正文过长已截断]";
 }
 
+/**
+ * search_images 同轮单次搜索闸的备忘表：键 = `actorId:chatUserMessageId`，
+ * 值 = 首次执行的 Promise。同轮第二次调用直接复用，不重复搜索/下载/落库。
+ * 空结果或失败时摘除（允许换词重试）；超容量整体清空（轮次生命周期短，够用）。
+ */
+const imageSearchTurnMemo = new Map<string, Promise<Record<string, unknown>>>();
+
+/** 测试隔离用：清空同轮单次搜索闸的备忘表（模块级状态，跨用例会残留）。 */
+export function resetImageSearchTurnMemoForTest(): void {
+  imageSearchTurnMemo.clear();
+}
+
 export function registerWebTools(
   toolRegistry: ToolRegistry,
   infoHubService: InfoHubService,
@@ -39,17 +51,47 @@ export function registerWebTools(
     // 搜索 API 后查询词应保持完整，不在工具层裁剪。
     const query = String(input.query ?? "").trim();
     // 默认 4、上限 8：贴合「少而精+图文混排」的产品诉求。
-    // 需要多张时应让 LLM 拆成多个细粒度 query 并行搜，
-    // 由前端 renderBlocks 把每段文字对应的照片自然交错展示。
+    // 一轮最多调用一次本工具（见下方同轮单次搜索闸）；需要多角度/多主题
+    // 出图时用 search_images_batch（一次调用内部自行拆维度）。
     const limit = toBoundedLimit(input.limit, 4);
     if (!query) return { provider: "none", mediaType: "image", items: [], notes: ["query 不能为空"] };
-    return upstreamSearchService.searchImages(
+
+    // 同轮单次搜索闸（2026-11-12 用户口径「一轮就搜索一次」）：同轮内第二次
+    // search_images 直接复用首次执行结果，不重复下载、不重复落库——此前模型
+    // 按「拆成多次并行调用」的旧引导对同一人名扇出多个 query，一次落库 8 张、
+    // 前端渲染层裁到 4 张，造成渲染/资料库数量错位。键 = actor + 本轮用户消息
+    // id（主对话路径必有）；无消息 id 的主动任务/后台路径不设闸（渲染侧
+    // splitMediaCardsByTopic 对账兜底仍然生效）。空结果/失败时摘除备忘，
+    // 允许模型按降级策略换词重试一次。
+    const actorId = resolveActorId(context);
+    const turnMessageId = context.chatUserMessageId?.trim() ?? "";
+    const memoKey = turnMessageId ? `${actorId}:${turnMessageId}` : "";
+    if (memoKey && imageSearchTurnMemo.has(memoKey)) {
+      console.log(`[search_images] 同轮单次闸命中，复用首次结果 actor=${actorId} turn=${turnMessageId}`);
+      return imageSearchTurnMemo.get(memoKey)!;
+    }
+    const exec = upstreamSearchService.searchImages(
       query,
       limit,
-      resolveActorId(context),
+      actorId,
       context.sessionId,
       mediaTurnFromContext(context),
     );
+    if (memoKey) {
+      if (imageSearchTurnMemo.size > 256) imageSearchTurnMemo.clear();
+      imageSearchTurnMemo.set(memoKey, exec);
+      void exec
+        .then((result) => {
+          const items = Array.isArray(result.items) ? result.items.length : 0;
+          if (items === 0 && imageSearchTurnMemo.get(memoKey) === exec) {
+            imageSearchTurnMemo.delete(memoKey);
+          }
+        })
+        .catch(() => {
+          if (imageSearchTurnMemo.get(memoKey) === exec) imageSearchTurnMemo.delete(memoKey);
+        });
+    }
+    return exec;
   });
 
   /**

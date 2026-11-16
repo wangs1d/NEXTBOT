@@ -27,11 +27,14 @@ class UserAvatarApi {
 
   static const Duration _timeout = Duration(seconds: 15);
 
-  /// 相对路径 → 本端绝对 URL（带设备凭证）；外部绝对地址原样返回。
+  /// 相对路径 → 本端绝对 URL；外部绝对地址原样返回。
+  ///
+  /// 走 header 出口（[MediaUrl.resolveForHeaders]）：头像最终由 [CachedMediaImage]
+  /// 渲染，凭证用请求头即可，URL 里不带 token 才能让磁盘缓存跨续期命中。
   static String? resolveUrl(String? avatarPath) {
     final String p = avatarPath?.trim() ?? "";
     if (p.isEmpty) return null;
-    return MediaUrl.resolve(p);
+    return MediaUrl.resolveForHeaders(p);
   }
 
   Map<String, String> get _authHeaders => AccessCredentialStore.instance.authHeaders;
@@ -67,8 +70,10 @@ class UserAvatarApi {
         ..files.add(
           http.MultipartFile.fromBytes("file", bytes, filename: fileName),
         );
+      // 必须走 _client.send：`request.send()` 会新建一个隐式 client，
+      // 注入的 NbClient（统一鉴权 + 401 静默续期）和测试 mock 都会被绕过。
       final http.StreamedResponse res =
-          await request.send().timeout(_timeout);
+          await _client.send(request).timeout(_timeout);
       final Map<String, dynamic> json =
           jsonDecode(utf8.decode(await res.stream.toBytes()))
               as Map<String, dynamic>;

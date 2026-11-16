@@ -24,6 +24,27 @@ const List<int> _png1x1 = <int>[
 
 Uint8List _img() => Uint8List.fromList(_png1x1);
 
+/// 圆点指示行（2026-11-12 指示器恢复为每图一个小圆点，不再是「1 / N」文字）。
+Finder _dots() => find.byKey(const ValueKey<String>("preview_page_dots"));
+
+/// 当前张位次：唯一一个纯白圆点的下标（其余是半透明白）。
+int _currentIndex(WidgetTester tester) {
+  final Row row = tester.widget<Row>(_dots());
+  final List<Widget> dots = row.children;
+  for (int i = 0; i < dots.length; i++) {
+    final AnimatedContainer dot = dots[i] as AnimatedContainer;
+    final BoxDecoration decoration = dot.decoration! as BoxDecoration;
+    if (decoration.color == Colors.white) return i;
+  }
+  return -1;
+}
+
+void _expectIndex(WidgetTester tester, int index) {
+  final Row row = tester.widget<Row>(_dots());
+  expect(row.children.length, 3);
+  expect(_currentIndex(tester), index);
+}
+
 Future<void> _openPreview(WidgetTester tester) async {
   await tester.pumpWidget(
     MaterialApp(
@@ -50,12 +71,12 @@ Future<void> _openPreview(WidgetTester tester) async {
 void main() {
   testWidgets("拖过一半 → 吸附到下一张（跟手分页）", (WidgetTester tester) async {
     await _openPreview(tester);
-    expect(find.text("1 / 3"), findsOneWidget);
+    _expectIndex(tester, 0);
 
     // 默认测试面 800 宽，-450 超过半屏（400）→ 换图
     await tester.dragFrom(const Offset(500, 300), const Offset(-450, 0));
     await tester.pumpAndSettle();
-    expect(find.text("2 / 3"), findsOneWidget);
+    _expectIndex(tester, 1);
   });
 
   testWidgets("未过一半 → 弹回当前图", (WidgetTester tester) async {
@@ -64,7 +85,7 @@ void main() {
     // -200 不足半屏且无速度 → 回弹
     await tester.dragFrom(const Offset(500, 300), const Offset(-200, 0));
     await tester.pumpAndSettle();
-    expect(find.text("1 / 3"), findsOneWidget);
+    _expectIndex(tester, 0);
   });
 
   testWidgets("第一张右拖 → 边界钳制不越界", (WidgetTester tester) async {
@@ -73,7 +94,7 @@ void main() {
     // 在第一张上向右拖（想看上一张）→ 钳制为零位移，回弹原地
     await tester.dragFrom(const Offset(300, 300), const Offset(450, 0));
     await tester.pumpAndSettle();
-    expect(find.text("1 / 3"), findsOneWidget);
+    _expectIndex(tester, 0);
   });
 
   testWidgets("上一张 → 拖过一半向右吸附", (WidgetTester tester) async {
@@ -82,12 +103,12 @@ void main() {
     // 先到第 2 张
     await tester.dragFrom(const Offset(500, 300), const Offset(-450, 0));
     await tester.pumpAndSettle();
-    expect(find.text("2 / 3"), findsOneWidget);
+    _expectIndex(tester, 1);
 
     // 向右拖过一半 → 回到第 1 张
     await tester.dragFrom(const Offset(300, 300), const Offset(450, 0));
     await tester.pumpAndSettle();
-    expect(find.text("1 / 3"), findsOneWidget);
+    _expectIndex(tester, 0);
   });
 
   testWidgets("最后一张左拖 → 边界钳制不越界", (WidgetTester tester) async {
@@ -98,11 +119,11 @@ void main() {
     await tester.pumpAndSettle();
     await tester.dragFrom(const Offset(500, 300), const Offset(-450, 0));
     await tester.pumpAndSettle();
-    expect(find.text("3 / 3"), findsOneWidget);
+    _expectIndex(tester, 2);
 
     // 再向左拖 → 无下一张，钳制回弹
     await tester.dragFrom(const Offset(500, 300), const Offset(-450, 0));
     await tester.pumpAndSettle();
-    expect(find.text("3 / 3"), findsOneWidget);
+    _expectIndex(tester, 2);
   });
 }

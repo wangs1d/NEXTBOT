@@ -11,6 +11,7 @@ import {
   stripInternalFrames,
 } from "../external-model/internal-frames.js";
 import { analyzeContentStructure, hasMarkdownTable } from "./render-hint-service.js";
+import { setMediaHidden } from "./library-meta.js";
 
 /** 摘要折叠字数阈值（与 content-summary-service / render-hint-service 保持一致：800。
  *  2026-10-28 定版：正文须超过 800 字才折叠——400 门槛把日常比价/问答回复也折进卡里，
@@ -1419,6 +1420,20 @@ export function trimMediaCardsByTopic(
   cards: MediaCardItem[],
   opts: TrimMediaCardsOptions,
 ): MediaCardItem[] {
+  return splitMediaCardsByTopic(cards, opts).kept;
+}
+
+/**
+ * 同 trimMediaCardsByTopic，但额外返回被裁掉的卡片。
+ *
+ * 用途（2026-11-12 用户口径「前端渲染几张，资料库就收几张」）：图搜转存是
+ * 落盘即进资料库，被裁掉的卡对应的本地 PNG 已写盘。调用方渲染定稿后对
+ * removed 里的本地图标记 libraryHidden，资料库与渲染数量保持一致。
+ */
+export function splitMediaCardsByTopic(
+  cards: MediaCardItem[],
+  opts: TrimMediaCardsOptions,
+): { kept: MediaCardItem[]; removed: MediaCardItem[] } {
   const { maxPerGroup, maxPerSide } = opts;
   // 按 groupTitle 分组（空标题=普通单组搜索归入同一组），保留首次出现顺序
   const groups = new Map<string, MediaCardItem[]>();
@@ -1433,21 +1448,46 @@ export function trimMediaCardsByTopic(
     }
     list.push(c);
   }
-  const out: MediaCardItem[] = [];
+  const kept: MediaCardItem[] = [];
+  const removed: MediaCardItem[] = [];
   for (const key of order) {
     const list = groups.get(key)!;
     const isCompare = list.some((c) => c.side === "A" || c.side === "B");
     if (isCompare) {
       // 对比分组：每侧各保留 maxPerSide 张，缺 A/B 任一侧时该侧为空、不强行补
-      const sideA = list.filter((c) => c.side === "A").slice(0, maxPerSide);
-      const sideB = list.filter((c) => c.side === "B").slice(0, maxPerSide);
-      out.push(...sideA, ...sideB);
+      const sideA = list.filter((c) => c.side === "A");
+      const sideB = list.filter((c) => c.side === "B");
+      kept.push(...sideA.slice(0, maxPerSide), ...sideB.slice(0, maxPerSide));
+      removed.push(...sideA.slice(maxPerSide), ...sideB.slice(maxPerSide));
     } else {
       // 普通分组：最多保留 maxPerGroup 张
-      out.push(...list.slice(0, maxPerGroup));
+      kept.push(...list.slice(0, maxPerGroup));
+      removed.push(...list.slice(maxPerGroup));
     }
   }
-  return out;
+  return { kept, removed };
+}
+
+/**
+ * 渲染/入库对账（2026-11-12 用户口径）：把从未渲染的本地图搜转存图标记
+ * libraryHidden，保证「前端渲染几张，资料库就收几张」。
+ *
+ * 只处理 `/agent/images/<actor>/<ts>-<uuid8>.png` 形式的本地地址（actor 取自
+ * URL 本身，不依赖调用方传值）；远程 URL 卡从未落盘，直接跳过。文件保留在
+ * 磁盘上，万一已被流式早推或历史消息引用，拉流不受影响——只是不再出现在
+ * 资料库列表里（listImages 的 isMediaHidden 过滤）。
+ */
+export function hideUnrenderedMediaCardsFromLibrary(removed: MediaCardItem[]): void {
+  for (const c of removed) {
+    const url = (c.thumbnailUrl || c.mediaUrl || "").trim();
+    const m = /^\/agent\/images\/([a-zA-Z0-9_-]+)\/(\d+-[a-f0-9]{8}\.png)$/.exec(url);
+    if (!m) continue;
+    try {
+      setMediaHidden(m[1], "images", m[2], true);
+    } catch {
+      // 标记失败不影响渲染：最坏情况资料库多一张（与旧行为一致）
+    }
+  }
 }
 
 /** 安全地把未知值转成对象数组（flatMap 用）。 */

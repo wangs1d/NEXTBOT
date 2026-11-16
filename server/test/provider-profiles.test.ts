@@ -17,6 +17,7 @@ const {
   FALLBACK_PROVIDER_PROFILE,
   resolveProviderProfile,
   resolveRouteCallParams,
+  zhipuThinkingExtras,
 } = await import("../src/external-model/provider-profiles.js");
 const { bypassChatRequestExtras } = await import("../src/external-model/resolve-provider.js");
 
@@ -201,4 +202,63 @@ test("bypassChatRequestExtras：kimi 主模型对齐 provider 层默认（thinki
     envWith({ EXTERNAL_MODEL_PROVIDER: "moonshot-kimi", MOONSHOT_API_KEY: "k" }),
   );
   assert.deepEqual(extras, { thinking: { type: "disabled" } });
+});
+
+/**
+ * 2026-11-12 首字延迟根修：思考开启时必须显式落档，禁止空对象。
+ *
+ * 空对象 = 「不下发档位」= 智谱走自动深度思考（实测 298-637 reasoning tokens /
+ * 6.1-13.7s 首字），而不是 high（0-78 tokens / 1.1-2.4s）。这条契约一旦回退，
+ * 主对话首字会从 2s 级退到 10s 级，且表面上看不出错——只在延迟上体现。
+ */
+test("zhipuThinkingExtras：思考开启时默认显式 high（不得返回空对象）", () => {
+  const prev = process.env.ZHIPU_REASONING_EFFORT;
+  delete process.env.ZHIPU_REASONING_EFFORT;
+  try {
+    const extras = zhipuThinkingExtras("glm-5.3-flash", false);
+    assert.deepEqual(extras, { reasoning_effort: "high" });
+    assert.ok(
+      Object.keys(extras).length > 0,
+      "思考开启时禁止返回空对象——空对象会被服务端当成 auto（最深档），首字退到 10s 级",
+    );
+  } finally {
+    if (prev === undefined) delete process.env.ZHIPU_REASONING_EFFORT;
+    else process.env.ZHIPU_REASONING_EFFORT = prev;
+  }
+});
+
+test("zhipuThinkingExtras：ZHIPU_REASONING_EFFORT 合法值覆盖默认", () => {
+  const prev = process.env.ZHIPU_REASONING_EFFORT;
+  try {
+    process.env.ZHIPU_REASONING_EFFORT = "max";
+    assert.deepEqual(zhipuThinkingExtras("glm-5.3-flash", false), {
+      reasoning_effort: "max",
+    });
+    process.env.ZHIPU_REASONING_EFFORT = "low";
+    assert.deepEqual(zhipuThinkingExtras("glm-5.3-flash", false), {
+      reasoning_effort: "low",
+    });
+  } finally {
+    if (prev === undefined) delete process.env.ZHIPU_REASONING_EFFORT;
+    else process.env.ZHIPU_REASONING_EFFORT = prev;
+  }
+});
+
+test("zhipuThinkingExtras：非法档位回落 high（不把脏值透给端点）", () => {
+  const prev = process.env.ZHIPU_REASONING_EFFORT;
+  try {
+    process.env.ZHIPU_REASONING_EFFORT = "turbo";
+    assert.deepEqual(zhipuThinkingExtras("glm-5.3-flash", false), {
+      reasoning_effort: "high",
+    });
+  } finally {
+    if (prev === undefined) delete process.env.ZHIPU_REASONING_EFFORT;
+    else process.env.ZHIPU_REASONING_EFFORT = prev;
+  }
+});
+
+test("zhipuThinkingExtras：等效关思考仍是 effort=low（GLM 不支持 thinking:disabled）", () => {
+  assert.deepEqual(zhipuThinkingExtras("glm-5.3-flash", true), {
+    reasoning_effort: "low",
+  });
 });

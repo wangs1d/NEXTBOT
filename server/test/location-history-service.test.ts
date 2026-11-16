@@ -90,6 +90,63 @@ test("record/query/latest/count：写入与时间范围过滤", async () => {
   });
 });
 
+test("enrich：逆地理结果回填行政区，坐标 label 被地名替换", async () => {
+  await withHistory(async ({ svc }) => {
+    // 客户端只上报坐标串：行政区全空，label 也是坐标。
+    const sample = svc.record(
+      "u1",
+      { latitude: 25.0631, longitude: 104.8918, label: "25.0631, 104.8918" },
+      "report",
+      new Date(BASE_AT),
+    );
+    const updated = svc.enrich(sample.id, {
+      label: "贵州省黔西南布依族苗族自治州兴义市下五屯街道九华苑",
+      city: "黔西南布依族苗族自治州",
+      district: "兴义市",
+      region: "贵州省",
+      country: "中国",
+      timezone: "Asia/Shanghai",
+    });
+    assert.equal(updated, true);
+    const latest = svc.latest("u1") as LocationSample;
+    assert.equal(latest.city, "黔西南布依族苗族自治州");
+    assert.equal(latest.district, "兴义市");
+    assert.equal(latest.region, "贵州省");
+    assert.equal(latest.timezone, "Asia/Shanghai");
+    assert.ok(latest.label?.includes("九华苑"), "坐标 label 应被真实地名替换");
+
+    // 客户端已解析出的地名 label 不被服务端长地址覆盖，但空行政区仍补齐。
+    const resolved = svc.record(
+      "u1",
+      { latitude: 25.0632, longitude: 104.8919, label: "兴义市 · 黔西南布依族苗族自治州 · 贵州省 · 中国" },
+      "report",
+      new Date(BASE_AT + 60_000),
+    );
+    svc.enrich(resolved.id, {
+      label: "另一条长地址",
+      city: "黔西南布依族苗族自治州",
+      district: "兴义市",
+      region: "贵州省",
+    });
+    const resolvedLatest = svc.latest("u1") as LocationSample;
+    assert.equal(resolvedLatest.label, "兴义市 · 黔西南布依族苗族自治州 · 贵州省 · 中国");
+    assert.equal(resolvedLatest.city, "黔西南布依族苗族自治州");
+
+    // 在途逆地理期间位置已移动：坐标不匹配，拒绝把 A 点地址写到 B 点。
+    const moved = svc.record(
+      "u1",
+      { latitude: 21.42, longitude: 109.15 },
+      "report",
+      new Date(BASE_AT + 120_000),
+    );
+    assert.equal(
+      svc.enrich(moved.id, { city: "北海市" }, { latitude: 25.0631, longitude: 104.8918 }),
+      false,
+    );
+    assert.equal((svc.latest("u1") as LocationSample).city, null);
+  });
+});
+
 test("clear：一键清除该用户全部历史，不影响他人", async () => {
   await withHistory(async ({ svc }) => {
     svc.record("u1", { latitude: 39.9, longitude: 116.4 }, "continuous");
@@ -172,7 +229,8 @@ test("LocationIngestPipeline：历史关闭时静默，开启时落库并回调"
   await withHistory(async ({ svc }) => {
     const reported: Array<{ actorId: string; source: string }> = [];
     const pipelineOn = new LocationIngestPipeline({
-      history: svc,
+      // 逆地理缺省会走外网；单测只验证落库/回调，回填单独测。
+      history: { record: svc.record.bind(svc), enrich: () => false },
       geofence: null,
       onLocationReported: (actorId, _loc, source) => reported.push({ actorId, source }),
     });
@@ -199,7 +257,7 @@ test("LocationIngestPipeline：同 actor 高频上报被频控丢弃，间隔可
     let nowMs = BASE_AT;
     const reported: string[] = [];
     const pipeline = new LocationIngestPipeline({
-      history: svc,
+      history: { record: svc.record.bind(svc), enrich: () => false },
       geofence: null,
       minIntervalMs: 10_000,
       now: () => nowMs,
@@ -233,4 +291,58 @@ test("clear 触发 onCleared 回调（供触发器缓存失效），无删除不
     assert.equal(svc.clear("u1"), 0);
     assert.deepEqual(cleared, ["u1"]);
   });
+});
+
+// ─── 2026-11-13 精度元数据落库 ──────────────────────────────────────────
+// 此前精度只在 WS 契约里存在，落库时被整段丢弃 —— 于是「这个 fix 有多准」
+// 在历史数据上永久不可知，服务端无法按精度裁决低精度 fix（室内漂移会把人
+// 判到隔壁街区）。现在精度必须随样本一起落库并可查回。
+test("精度元数据落库：accuracyMeters 随样本写入并可查回", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "loc-hist-acc-"));
+  // 注入时钟：样本时间固定在 BASE_AT，真实时钟下会被保留期清理掉
+  const svc = new LocationHistoryService({
+    dbPath: join(dir, "loc.db"),
+    retentionDays: 7,
+    now: () => new Date(BASE_AT),
+  });
+  try {
+    const s = svc.record(
+      "u1",
+      { latitude: 39.9, longitude: 116.4, label: "北京", accuracyMeters: 12.5 },
+      "continuous",
+      new Date(BASE_AT),
+    );
+    assert.equal(s.accuracyMeters, 12.5, "record 返回值应带精度");
+
+    const rows = svc.query("u1", new Date(BASE_AT - 1000), new Date(BASE_AT + 1000));
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].accuracyMeters, 12.5, "精度必须落库并可查回");
+  } finally {
+    svc.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("精度元数据落库：未提供/非法精度写 null（不污染统计）", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "loc-hist-acc2-"));
+  const svc = new LocationHistoryService({
+    dbPath: join(dir, "loc.db"),
+    retentionDays: 7,
+    now: () => new Date(BASE_AT),
+  });
+  try {
+    const noAcc = svc.record("u1", { latitude: 39.9, longitude: 116.4 }, "continuous", new Date(BASE_AT));
+    assert.equal(noAcc.accuracyMeters, null, "未提供精度应写 null");
+
+    const badAcc = svc.record(
+      "u1",
+      { latitude: 39.91, longitude: 116.41, accuracyMeters: -5 },
+      "continuous",
+      new Date(BASE_AT + 1000),
+    );
+    assert.equal(badAcc.accuracyMeters, null, "负精度应视为未提供");
+  } finally {
+    svc.close();
+    await rm(dir, { recursive: true, force: true });
+  }
 });

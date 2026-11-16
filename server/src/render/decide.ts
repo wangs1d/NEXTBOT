@@ -106,9 +106,18 @@ export function decideRender(input: RenderInput): RenderDecision {
   const cards = plan.cards;
   const workingText = plan.text ?? text;
 
-  const body: BodyDecision = plan.bodyForm
-    ? { form: plan.bodyForm, reason: `scene:${plan.primary}` }
-    : decideBody({ ...input, text: workingText }, workingText, cards);
+  // 用户需求优先（2026-11-14）：场景的 bodyForm 只是「没有更好理由时的默认版式」，
+  // 模型按用户点名的呈现方式（表格/清单/富文本/简短）显式声明了
+  // [RENDER_HINT:*]，就按声明走——对所有场景生效，不挑工具。
+  // 此前天气/工具卡场景硬写 plain，模型即便照用户要求排了表格，也会被压回
+  // plain（真机取证：用户说「用表格给未来五天天气」，回复只剩散文）。
+  // plainTextMode（语音/纯文本通道）例外：那里没有协议标记消费方。
+  const declared = input.plainTextMode ? null : hintToForm(input.modelHint);
+  const body: BodyDecision = declared
+    ? { form: declared, reason: `model-hint:${input.modelHint}` }
+    : plan.bodyForm
+      ? { form: plan.bodyForm, reason: `scene:${plan.primary}` }
+      : decideBody({ ...input, text: workingText }, workingText, cards);
 
   const primaryLabel = plan.matched[0]?.label ?? "";
   const reason = `${plan.reason} | ${body.reason}`;

@@ -78,17 +78,55 @@ export function recordMediaSession(
   const sid = sessionId?.trim();
   const name = fileName.trim();
   if (!sid && !hidden) return;
-  const meta = loadMeta(actorId);
-  const bucket = (meta[kind] ??= {});
   const turnId = turn?.turnId?.trim();
   const title = turn?.title?.trim();
-  bucket[name] = {
+  setEntry(actorId, kind, name, {
     sessionId: sid ?? "",
     at: new Date().toISOString(),
     ...(hidden ? { hidden: true } : {}),
     ...(turnId ? { turnId } : {}),
     ...(title ? { title } : {}),
-  };
+  });
+}
+
+/**
+ * 原地把已落盘产物标记为不进资料库（或解除标记）。
+ *
+ * 用途（2026-11-12 用户口径「前端渲染几张，资料库就收几张」）：图搜转存是
+ * 落盘即进资料库，而最终渲染层会按主题裁剪（trimMediaCardsByTopic）。被裁掉、
+ * 从未展示的图在渲染定稿后由调用方标记 hidden，资料库列表（listImages 的
+ * isMediaHidden 过滤）随即不再收录；文件保留在磁盘上，已被早推/历史消息引用
+ * 的拉流不受影响。
+ */
+export function setMediaHidden(
+  actorId: string,
+  kind: LibraryMediaKind,
+  fileName: string,
+  hidden = true,
+): void {
+  const name = fileName.trim();
+  if (!name) return;
+  const prev = loadMeta(actorId)[kind]?.[name];
+  if (prev?.hidden === hidden) return;
+  setEntry(actorId, kind, name, {
+    sessionId: prev?.sessionId ?? "",
+    at: prev?.at ?? new Date().toISOString(),
+    ...(prev?.turnId ? { turnId: prev.turnId } : {}),
+    ...(prev?.title ? { title: prev.title } : {}),
+    ...(hidden ? { hidden: true } : {}),
+  });
+}
+
+/** 写入单个条目并持久化（loadMeta 走 cache，改的就是同一份对象）。 */
+function setEntry(
+  actorId: string,
+  kind: LibraryMediaKind,
+  name: string,
+  entry: MediaSessionEntry,
+): void {
+  const meta = loadMeta(actorId);
+  const bucket = (meta[kind] ??= {});
+  bucket[name] = entry;
   try {
     const path = metaPath(actorId);
     mkdirSync(dirname(path), { recursive: true });

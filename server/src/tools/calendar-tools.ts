@@ -558,6 +558,9 @@ export function registerCalendarTools(
         recurrence: t.recurrence,
         nextRunAt: t.nextRunAt,
         runAt: t.runAt,
+        // 已完成的提醒（from 传过去时间才会出现在结果里）：lastRunAt 是其真实
+        // 响过时刻，属于过去事件，据此回答「过了吗/几点响的」，别再当成未来安排。
+        lastRunAt: t.lastRunAt ?? null,
         timezone: t.timezone,
       })),
     };

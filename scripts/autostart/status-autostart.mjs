@@ -13,6 +13,11 @@ const ROOT = path.resolve(SCRIPT_DIR, "..", "..");
 
 const TASK_NAME = "NextbotServer";
 const RUN_VALUE_NAME = "NextbotServer";
+// 桌面 App 自启（计划任务接管；Run 值「Nextbot」是 App 设置页的开关）
+const APP_TASK_NAME = "NextbotApp";
+const APP_RUN_VALUE_NAME = "Nextbot";
+const STARTUP_APPROVED_RUN_KEY =
+  "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
 // 旧版注册名（2026-10-23 前），仅用于残留检测提示
 const LEGACY_TASK_NAME = "PrivateAgentServer";
 const LEGACY_RUN_VALUE_NAME = "PrivateAgentServer";
@@ -76,6 +81,38 @@ if (taskInfo.STATE && taskInfo.STATE !== "NOT_FOUND") {
 }
 const runValue = regQuery();
 if (runValue) console.log(`注册方式：Run 键（${runValue}）`);
+
+// ─── 桌面 App 自启 ───
+function queryTaskInfo(taskName) {
+  const out = runPs(
+    `try { $t = Get-ScheduledTask -TaskName '${taskName}' -ErrorAction Stop; ` +
+      "$i = $t | Get-ScheduledTaskInfo; " +
+      "Write-Output ('STATE=' + $t.State); " +
+      "Write-Output ('LASTRUN=' + $i.LastRunTime); " +
+      "Write-Output ('LASTRESULT=' + $i.LastTaskResult); " +
+      "} catch { Write-Output 'STATE=NOT_FOUND' }",
+  );
+  return Object.fromEntries(out.split(/\r?\n/).map((l) => l.split("=", 2)));
+}
+const appTask = queryTaskInfo(APP_TASK_NAME);
+if (appTask.STATE && appTask.STATE !== "NOT_FOUND") {
+  console.log(`桌面 App：计划任务「${APP_TASK_NAME}」（状态 ${appTask.STATE}）`);
+  if (appTask.LASTRUN) {
+    console.log(`  上次触发：${appTask.LASTRUN}，结果码 ${appTask.LASTRESULT}`);
+  }
+} else {
+  console.log("桌面 App：计划任务未注册（仍由 App 自写的 Run 键直启，受 Run 队列影响）");
+}
+const approved = spawnSync("reg.exe", ["query", STARTUP_APPROVED_RUN_KEY, "/v", APP_RUN_VALUE_NAME], {
+  windowsHide: true,
+  encoding: "utf8",
+});
+if (approved.status === 0) {
+  const disabled = /REG_BINARY\s+03/i.test(approved.stdout ?? "");
+  console.log(`App Run 直启：${disabled ? "已禁用（计划任务接管）" : "启用"}`);
+} else {
+  console.log("App Run 直启：未设置 StartupApproved（按启用处理）");
+}
 if ((!taskInfo.STATE || taskInfo.STATE === "NOT_FOUND") && !runValue) {
   console.log("当前未注册开机自启，执行 npm run autostart:install 注册。");
   // 旧版注册名残留检测（重装新版本后可能遗留，会双重拉起服务端）

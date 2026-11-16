@@ -106,7 +106,11 @@ void main() {
   test("FORBIDDEN：转成能读懂的「身份同步中」，不留在处理中", () async {
     final MobileChatController controller = await newController();
     addTearDown(controller.dispose);
-    controller.isProcessing = true;
+    // isProcessing 已改为按线程只读（多会话并发重构）：用 turn_started 置位处理中。
+    controller.debugHandleWsEvent(<String, dynamic>{
+      "type": "chat.turn_started",
+      "payload": <String, dynamic>{"messageId": "msg-turn"},
+    });
 
     controller.debugHandleWsEvent(<String, dynamic>{
       "type": "error.event",
@@ -149,7 +153,11 @@ void main() {
   test("其它错误码：如实报错并退出处理中", () async {
     final MobileChatController controller = await newController();
     addTearDown(controller.dispose);
-    controller.isProcessing = true;
+    // isProcessing 已改为按线程只读（多会话并发重构）：用 turn_started 置位处理中。
+    controller.debugHandleWsEvent(<String, dynamic>{
+      "type": "chat.turn_started",
+      "payload": <String, dynamic>{"messageId": "msg-turn"},
+    });
 
     controller.debugHandleWsEvent(<String, dynamic>{
       "type": "error.event",
@@ -163,7 +171,11 @@ void main() {
   test("重投次数用尽：chat_delivery_failed 如实告知并退出处理中", () async {
     final MobileChatController controller = await newController();
     addTearDown(controller.dispose);
-    controller.isProcessing = true;
+    // isProcessing 已改为按线程只读（多会话并发重构）：用 turn_started 置位处理中。
+    controller.debugHandleWsEvent(<String, dynamic>{
+      "type": "chat.turn_started",
+      "payload": <String, dynamic>{"messageId": "msg-turn"},
+    });
 
     controller.debugHandleWsEvent(<String, dynamic>{
       "type": "chat_delivery_failed",

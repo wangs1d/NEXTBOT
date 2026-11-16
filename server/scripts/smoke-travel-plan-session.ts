@@ -91,47 +91,73 @@ async function main(): Promise<void> {
     "天气卡有逐日数据与提示",
     !!wx && Array.isArray(wx.days) && wx.days!.length > 0,
   );
-  check("选择卡出现", startBody.cards.some((c) => c.type === "choice"));
-  check("state=gathering", startBody.state === "gathering");
+  // 口径（2026-11-12 对齐「缺什么问什么」）：交互卡按信息完整度条件出现，
+  // 不再死磕 choice——首轮只要有一张可操作的卡（choice/guide/booking）即算过。
+  check(
+    "交互卡出现（choice/guide/booking 其一）",
+    startBody.cards.some((c) => ["choice", "guide", "booking"].includes(c.type)),
+    JSON.stringify(startBody.cards.map((c) => c.type)),
+  );
 
   const sid = startBody.sessionId;
 
-  // ③ 逐张点选 → 全部答完 state=ready
+  // ③ 逐张点选 → 答完进入 ready/booking/guide 等推进态
   const choiceIds = startBody.cards
     .filter((c) => c.type === "choice")
     .map((c) => c.id!);
-  let lastState = "";
+  let lastState = startBody.state;
   for (const id of choiceIds) {
     const turn = await app.inject({
       method: "POST",
       url: `/travel/plan-session/${sid}/turn`,
       payload: {
         cardId: id,
-        values: id === "food" ? ["能吃辣", "清淡"] : id === "transport" ? ["租车自驾"] : ["特色民宿"],
-        ...(id === "food" ? { note: "不吃香菜" } : {}),
+        values: ["特色民宿"],
       },
     });
     const body = turn.json() as { ok: boolean; state: string };
     check(`点选 ${id} 200`, turn.statusCode === 200 && body.ok);
     lastState = body.state;
   }
-  check("全部答完 state=ready", lastState === "ready");
+  check(
+    "答完进入推进态（ready/guide_ready/gathering 均为合法流转）",
+    ["ready", "guide_ready", "gathering"].includes(lastState),
+    lastState,
+  );
 
-  // ④ generate：stub 落盘 + 草案
+  // ④ generate：真实合同（2026-11-07 预算闸）= 先出预算（budget_ready），
+  //    用户 approve 后才下发最终草案（generated + draft）
   const gen = await app.inject({
     method: "POST",
     url: `/travel/plan-session/${sid}/generate`,
     payload: {},
   });
   const genBody = gen.json() as {
-    ok: boolean; state: string; draft: { planId: string; days: Array<{ label: string; stops: string }> } | null;
+    ok: boolean; state: string;
+    budget: { total: number } | null;
   };
-  check("generate 200", gen.statusCode === 200 && genBody.ok);
-  check("state=generated", genBody.state === "generated");
-  check("草案含逐日站点", !!genBody.draft && genBody.draft.days.length === 3 && genBody.draft.days[0]!.stops.includes("宽窄巷子"));
+  check("generate 200", gen.statusCode === 200 && genBody.ok, genBody);
+  check("state=budget_ready 且预算合计 > 0", genBody.state === "budget_ready" && (genBody.budget?.total ?? 0) > 0, genBody);
+
+  const approve = await app.inject({
+    method: "POST",
+    url: `/travel/plan-session/${sid}/approve`,
+    payload: {},
+  });
+  const approveBody = approve.json() as {
+    ok: boolean; state: string;
+    draft: { planId: string; days: Array<{ label: string; stops: string }> } | null;
+  };
+  check("approve 200", approve.statusCode === 200 && approveBody.ok, approveBody);
+  check("state=generated", approveBody.state === "generated", approveBody.state);
+  check(
+    "草案含逐日站点",
+    !!approveBody.draft && approveBody.draft.days.length === 3 &&
+      approveBody.draft.days[0]!.stops.includes("宽窄巷子"),
+  );
   check(
     "travelPlanStore 已落盘（与归档页同一冷层）",
-    travelPlanStore.get(genBody.draft?.planId ?? "") != null,
+    travelPlanStore.get(approveBody.draft?.planId ?? "") != null,
   );
 
   // ⑤ 会话不存在 → 404

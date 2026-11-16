@@ -38,7 +38,7 @@ class StructuredAssistantMessageBody extends StatelessWidget {
 
     if (!parts.structured) {
       return buildInlineMarkdownText(
-        normalized,
+        foldIntraBubbleBlankLines(normalized),
         bodyStyle,
         cs: cs,
       );
@@ -82,6 +82,20 @@ class StructuredAssistantMessageBody extends StatelessWidget {
     );
   }
 }
+
+/// 泡内空行折叠（2026-11-14 P0-B 根修：单泡中间隔一段空白的消息样式）。
+///
+/// 一个气泡 = 一条消息：空白段（空行）只该出现在「多条消息」之间，泡内多行
+/// 内容只允许单换行分隔。单泡轮（检索/信息类工具并泡、场景 singleBubble、
+/// markdown 整块收口）的正文来自 done.finalText，模型按段落排版留下的
+/// `\n\n` 会被纯文本渲染器原样画成一整行空白——用户看到的就是「一个绿泡里
+/// 中间隔了一段空白」。
+///
+/// 只作用于**纯叙述**正文（[build] 的 `!parts.structured` 分支），表格 /
+/// 列表 / 代码块 / 标题等 markdown 结构走结构化分支
+/// （[formatContentSummaryDetailLines] 不渲染空行，结构天然不受影响）。
+String foldIntraBubbleBlankLines(String text) =>
+    text.replaceAll(RegExp(r"\n[ \t]*\n+"), "\n");
 
 class _StructuredMessageParts {
   const _StructuredMessageParts({

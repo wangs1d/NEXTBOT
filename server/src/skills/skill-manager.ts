@@ -855,6 +855,8 @@ export class SkillManager {
       grantedPermissions: grantedPerms,
       // 透传中途推卡（如支付宝钱包绑定二维码）：sandbox 以 ...context 展开进执行上下文
       pushMediaCards: context.pushMediaCards,
+      // 透传浏览器预览帧（技能内 agent_browser 无头执行时推画面）
+      pushBrowserPreview: context.pushBrowserPreview,
     });
 
     // Curator 统计：执行成功记录一次使用（"越用越强"的量化依据）

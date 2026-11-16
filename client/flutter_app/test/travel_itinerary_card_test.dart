@@ -1,79 +1,20 @@
-import "dart:async" show StreamSubscription;
 import "dart:convert";
-import "dart:io" show HttpClient, HttpClientRequest, HttpClientResponse, HttpHeaders;
 
 import "package:flutter/material.dart";
 import "package:flutter_test/flutter_test.dart";
 
+import "package:http/http.dart" as http;
+import "package:path_provider_platform_interface/path_provider_platform_interface.dart";
 import "package:nextbot/core/utils/agent_result_parser.dart";
 import "package:nextbot/features/chat/agent_result_card.dart";
+import "package:nextbot/features/chat/media_disk_cache.dart";
 import "package:nextbot/features/chat/travel_plan_models.dart";
+
+import "helpers/temp_path_provider.dart";
 
 /// 1x1 透明 PNG（候选链回退测试的「真实可解码图」）
 const String _kPng1x1Base64 =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
-
-/// 极简假 HTTP 客户端：按 URL 决定状态码，200 时回 1x1 PNG 字节。
-/// 只实现 NetworkImage 走到的路径，其余成员 noSuchMethod 兜底。
-class _FakeHttpClient implements HttpClient {
-  _FakeHttpClient(this._statusFor);
-
-  final int Function(Uri url) _statusFor;
-
-  @override
-  Future<HttpClientRequest> getUrl(Uri url) async => _FakeRequest(_statusFor(url));
-
-  @override
-  dynamic noSuchMethod(Invocation invocation) => throw UnsupportedError("unexpected: ${invocation.memberName}");
-}
-
-class _FakeRequest implements HttpClientRequest {
-  _FakeRequest(this.statusCode);
-
-  final int statusCode;
-
-  @override
-  Future<HttpClientResponse> close() async => _FakeResponse(statusCode);
-
-  @override
-  dynamic noSuchMethod(Invocation invocation) => throw UnsupportedError("unexpected: ${invocation.memberName}");
-}
-
-class _FakeResponse extends Stream<List<int>> implements HttpClientResponse {
-  _FakeResponse(this._statusCode);
-
-  final int _statusCode;
-
-  late final Stream<List<int>> _delegate = Stream<List<int>>.value(
-    _statusCode < 400 ? base64Decode(_kPng1x1Base64) : <int>[],
-  );
-
-  @override
-  StreamSubscription<List<int>> listen(
-    void Function(List<int> element)? onData, {
-    Function? onError,
-    void Function()? onDone,
-    bool? cancelOnError,
-  }) =>
-      _delegate.listen(onData, onError: onError, onDone: onDone, cancelOnError: cancelOnError);
-
-  @override
-  int get statusCode => _statusCode;
-
-  @override
-  HttpHeaders get headers => _FakeHeaders();
-
-  @override
-  dynamic noSuchMethod(Invocation invocation) => throw UnsupportedError("unexpected: ${invocation.memberName}");
-}
-
-class _FakeHeaders implements HttpHeaders {
-  @override
-  String? value(String name) => name == HttpHeaders.contentTypeHeader ? "image/png" : null;
-
-  @override
-  dynamic noSuchMethod(Invocation invocation) => throw UnsupportedError("unexpected: ${invocation.memberName}");
-}
 
 AgentResultData _structuredPlanData() {
   return AgentResultData(
@@ -159,12 +100,41 @@ AgentResultData _degradedStructuredData() {
 }
 
 void main() {
-  setUp(() {
+  setUp(() async {
+    // 磁盘缓存真实落盘需要 path_provider：测试环境用临时目录实现，
+    // 否则 MediaDiskCache 直接降级"无缓存"，debugFetch 根本不会被调用。
+    PathProviderPlatform.instance = TempPathProviderPlatform();
+    // 磁盘缓存跨用例共享目录：先清掉，否则上一条用例成功落盘的图会让
+    // 「封面 404 → 回退」用例直接命中缓存、永远走不到失败分支。
+    await MediaDiskCache.instance.clearForTest();
     // 封面活取默认关断：卡片测试只验证卡内数据的确定性渲染；
     // 活取行为由专门的桩注入测试覆盖（见「活取封面到达后换上新图」）。
     TravelLiveCover.resetForTesting();
     TravelLiveCover.enabled = false;
+    // 契约：海报封面走 [CachedMediaImage]（磁盘缓存层），字节由 MediaDiskCache
+    // 统一取（NbHttp 带凭证头）。测试里注入确定性字节源，否则会真等一次网络
+    // 超时——`debugNetworkImageHttpClientProvider` 只影响 NetworkImage，管不到
+    // 这条链路。默认全部 200（1x1 PNG），需要失败时按 URL 覆写。
+    MediaDiskCache.debugFetch = (Uri uri, Map<String, String>? headers) async =>
+        http.Response.bytes(base64Decode(_kPng1x1Base64), 200);
   });
+
+  tearDown(() {
+    MediaDiskCache.debugFetch = null;
+  });
+
+  /// 卡片里所有走磁盘缓存的图片地址（海报/图集同源，按树序）。
+  List<String> mediaUrls(WidgetTester tester) => tester
+      .widgetList<CachedMediaImage>(find.byType(CachedMediaImage))
+      .map((CachedMediaImage w) => w.url)
+      .toList(growable: false);
+
+  /// 抽一帧让磁盘缓存落盘 + CachedMediaImage 重建（异步一跳）。
+  Future<void> settleMedia(WidgetTester tester) async {
+    for (int i = 0; i < 4; i++) {
+      await tester.pump(const Duration(milliseconds: 20));
+    }
+  }
 
   Future<void> pumpCard(WidgetTester tester, AgentResultData data) async {
     await tester.pumpWidget(
@@ -201,12 +171,12 @@ void main() {
   testWidgets("海报背景优先目的地代表性封面（目的地形象照），而非首个有图景点", (WidgetTester tester) async {
     await pumpCard(tester, _coverPlanData());
 
-    // 海报 Image 是卡内第一个 Image；其 URL 必须是封面，绝不是任何条目实拍
-    final Iterable<Image> images = tester.widgetList<Image>(find.byType(Image));
-    expect(images, isNotEmpty);
-    final NetworkImage poster = images.first.image as NetworkImage;
-    expect(poster.url, contains("destination-cover.jpg"));
-    expect(poster.url, isNot(contains("/poster.jpg")));
+    // 契约：海报首候选 = 封面；绝不是任何条目实拍
+    await settleMedia(tester);
+    final List<String> urls = mediaUrls(tester);
+    expect(urls, isNotEmpty);
+    expect(urls.first, contains("destination-cover.jpg"));
+    expect(urls.first, isNot(contains("/poster.jpg")));
   });
 
   testWidgets("活取封面到达后海报换上新图（历史卡片不改存量数据自动换新）", (WidgetTester tester) async {
@@ -215,13 +185,12 @@ void main() {
         destination == "马尔代夫" ? "/agent/images/live-cover.jpg" : null;
     await pumpCard(tester, _coverPlanData());
 
-    // 活取异步返回：走帧等 setState 落地，海报第一候选应为活取封面
+    // 活取是异步网络调用：走帧等 setState 落地，海报第一候选应为活取封面
     bool switchedToLive = false;
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < 20; i++) {
       await tester.pump(const Duration(milliseconds: 50));
-      final Iterable<Image> images = tester.widgetList<Image>(find.byType(Image));
-      if (images.isNotEmpty &&
-          (images.first.image as NetworkImage).url.contains("live-cover.jpg")) {
+      final List<String> urls = mediaUrls(tester);
+      if (urls.isNotEmpty && urls.first.contains("live-cover.jpg")) {
         switchedToLive = true;
         break;
       }
@@ -232,8 +201,10 @@ void main() {
   testWidgets("无封面时退回首个有图景点实拍（兼容旧数据）", (WidgetTester tester) async {
     await pumpCard(tester, _structuredPlanData());
 
-    final Image poster = tester.widget<Image>(find.byType(Image).first);
-    expect((poster.image as NetworkImage).url, contains("/poster.jpg"));
+    await settleMedia(tester);
+    final List<String> urls = mediaUrls(tester);
+    expect(urls, isNotEmpty);
+    expect(urls.first, contains("/poster.jpg"));
   });
 
   testWidgets("无结构化 travelPlan 的历史消息优雅降级：简介/叮嘱隐藏，按钮与海报骨架仍在", (WidgetTester tester) async {
@@ -259,36 +230,54 @@ void main() {
       ),
     );
 
-    final Iterable<Image> images = tester.widgetList<Image>(find.byType(Image));
-    expect(images, isNotEmpty);
-    final NetworkImage poster = images.first.image as NetworkImage;
+    await settleMedia(tester);
+    final List<String> urls = mediaUrls(tester);
+    expect(urls, isNotEmpty);
     // 测试环境默认 httpBase = http://127.0.0.1:3000
-    expect(poster.url, startsWith("http://127.0.0.1:3000/travel/media/remote?u="));
-    expect(poster.url, contains("upload.wikimedia.org"));
+    expect(urls.first, startsWith("http://127.0.0.1:3000/travel/media/remote?u="));
+    expect(urls.first, contains("upload.wikimedia.org"), reason: "远程图必须改走本机代理");
   });
 
-  testWidgets("封面加载失败自动回退到下一张条目实拍，不再永远渐变", (WidgetTester tester) async {
-    // 假 HTTP：封面 404、条目实拍 200（1x1 PNG）——验证候选链推进到下一张上屏
-    debugNetworkImageHttpClientProvider =
-        () => _FakeHttpClient((Uri url) => url.toString().contains("/poster.jpg") ? 200 : 404);
-    await pumpCard(tester, _coverPlanData());
+  // 契约测试：候选推进规则（不再是「假 HTTP + 数帧」的时序测试）。
+  // 原来那条 widget 级用例在 fake-async 下推不动磁盘缓存链路，实际测的是时序；
+  // 真正的规则是 nextPosterCandidate 的三个不变量，直接打它更稳也更准。
+  group("海报候选链推进规则", () {
+    test("首张未失败 → 用首张（封面优先）", () {
+      expect(
+        nextPosterCandidate(<String>["cover.jpg", "/poster.jpg"], <String>{}),
+        "cover.jpg",
+      );
+    });
 
-    // 候选链：封面失败 → 推进 → 条目实拍上屏（给足推进帧）
-    bool advancedToEntry = false;
-    for (int i = 0; i < 8; i++) {
-      await tester.pump(const Duration(milliseconds: 50));
-      final Iterable<Image> images = tester.widgetList<Image>(find.byType(Image));
-      if (images.isNotEmpty) {
-        final String url = (images.first.image as NetworkImage).url;
-        if (url.contains("/poster.jpg")) {
-          advancedToEntry = true;
-          break;
-        }
-      }
-    }
-    expect(advancedToEntry, isTrue, reason: "封面失败后应由条目实拍补位海报");
-    // painting 调试变量必须在测试体结束前复位（不变量检查先于 tearDown 跑）
-    debugNetworkImageHttpClientProvider = null;
+    test("封面失败 → 推进到下一张条目实拍", () {
+      expect(
+        nextPosterCandidate(
+          <String>["cover.jpg", "/poster.jpg"],
+          <String>{"cover.jpg"},
+        ),
+        "/poster.jpg",
+      );
+    });
+
+    test("同一张失败只记一次：重复回调不会跳过未尝试的候选", () {
+      final Set<String> failed = <String>{"cover.jpg"};
+      expect(nextPosterCandidate(<String>["cover.jpg", "/poster.jpg"], failed),
+          "/poster.jpg");
+      // 同一个 errorBuilder 再回调一次（重建时的重复上报）不应产生副作用
+      failed.add("cover.jpg");
+      expect(nextPosterCandidate(<String>["cover.jpg", "/poster.jpg"], failed),
+          "/poster.jpg");
+    });
+
+    test("全部失败 → null（渲染渐变骨架，不再无休止重试）", () {
+      expect(
+        nextPosterCandidate(
+          <String>["cover.jpg", "/poster.jpg"],
+          <String>{"cover.jpg", "/poster.jpg"},
+        ),
+        isNull,
+      );
+    });
   });
 
   testWidgets("结构化 days 全空回退文本解析：「全程」空骨架天不计入天数徽章", (WidgetTester tester) async {

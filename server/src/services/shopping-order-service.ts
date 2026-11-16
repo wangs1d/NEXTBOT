@@ -10,6 +10,7 @@ import type { BrowserSessionService } from "./browser-session-service.js";
 import { BROWSER_SESSION_SITES, type BrowserSessionSiteId } from "./browser-session-sites.js";
 import type { ImportedBrowserCookie } from "./browser-session-types.js";
 import { CAPTURE_CONSENT_ALL_SITES } from "./browser-session-types.js";
+import { startBrowserPreviewStream, type BrowserPreviewHandle } from "./browser-preview-stream.js";
 import {
   localDateKey,
   mapPlatformStatusText,
@@ -447,6 +448,14 @@ export class ShoppingOrderService {
       throw err;
     }
     const tAcquire = Date.now();
+    // 云端浏览器工作画面（2026-11-14）：无头通道没有可见面板，页面画面要推给
+    // 客户端悬浮窗——手机端靠它看 Agent 在翻哪个页面（比价/搜索/下单/查单全走
+    // 这里，一次接线覆盖购物全族）。shared 模式页面本就在用户眼前（桌面面板），
+    // 不重复推流。
+    const preview: BrowserPreviewHandle | null =
+      lease.mode === "headless"
+        ? startBrowserPreviewStream(ctx, lease.page, { mode: lease.mode, sessionId: `shop-${platform}-${tAcquire}` })
+        : null;
     // 登录门超时会把 lease 转入 pendingLogins（二维码继续存活），此时
     // finally 不能再 release——页面归 pendingLogins 会话管。
     let leaseTransferred = false;
@@ -482,6 +491,7 @@ export class ShoppingOrderService {
       );
       return result;
     } finally {
+      preview?.stop();
       if (!leaseTransferred) await lease.release();
     }
   }
@@ -572,6 +582,110 @@ export class ShoppingOrderService {
   }
 
   /**
+   * 批量登录二维码推送（2026-11-13 P0-2）：一次把**所有**待登录平台的
+   * 二维码推给用户（合并成一张多平台登录卡），而不是撞墙一家推一家。
+   *
+   * 用户投诉：「说让我补京东的登录之后再补」——一次一张的预算让用户要扫三轮
+   * 才能比完。对齐主流 agent：需要用户本人做的环节一次交齐。
+   *
+   * 每个平台独立开一个页面探登录墙并截二维码（不等待扫码），
+   * 返回真正推出去的 platform→{imageUrl, qrLink} 映射（深链供点码登录按钮）。
+   */
+  async pushBatchLoginQrs(
+    ctx: ToolContext,
+    platforms: string[],
+    query: string,
+  ): Promise<Map<string, { imageUrl: string; qrLink?: string; qrLinkFallback?: string }>> {
+    const items = await this.captureBatchLoginPngs(ctx, platforms, query);
+    if (items.length === 0) return new Map<string, { imageUrl: string; qrLink?: string; qrLinkFallback?: string }>();
+    const labels = items.map((i) => i.label);
+    return await this.qrAssist.pushBatchQrCards(
+      ctx,
+      items,
+      {
+        title:
+          items.length === 1
+            ? `请登录${labels[0]}`
+            : `请登录（${labels.join("、")}）`,
+        caption:
+          items.length === 1
+            ? `点各平台下的「点码登录」按钮拉起 App 确认（或扫码），登录完我会自动继续比价，最长等待 ${Math.round(getLoginWaitMs() / 1000)} 秒`
+            : `点各平台下的「点码登录」按钮拉起 App 确认（或扫码），登录完我会自动继续比价`,
+      },
+    );
+  }
+
+  /**
+   * 只抓码、**不推流**（2026-11-13 P1：二维码失效重推）。
+   *
+   * 登录二维码有有效期（平台侧一般 2–5 分钟），用户扫得慢、或者中途切走
+   * 都会导致码失效。这时要**重新出一张码并原地换掉旧卡**，而不是再推一张
+   * 新卡进聊天流（聊天里堆两张码，用户分不清哪张能用）。
+   *
+   * 返回每家的码地址（已落盘，可直接塞进 card.update 的 qrItems）。
+   */
+  async captureBatchLoginQrs(
+    ctx: ToolContext,
+    platforms: string[],
+    query: string,
+  ): Promise<Array<{ platform: string; label: string; imageUrl: string; width?: number; height?: number; qrLink?: string; qrLinkFallback?: string }>> {
+    const items = await this.captureBatchLoginPngs(ctx, platforms, query);
+    if (items.length === 0) return [];
+    return await this.qrAssist.saveBatchQrPngs(ctx, items);
+  }
+
+  /**
+   * 批量探登录墙 + 截二维码的公共实现（推流版与重推版共用）。
+   *
+   * 每家独立开页面：登录跳转常由 JS 延迟触发，落页稳定后再判一次；
+   * 不是登录页（匿名可读 / 已登录）→ 不出码，直接跳过这家。
+   */
+  private async captureBatchLoginPngs(
+    ctx: ToolContext,
+    platforms: string[],
+    query: string,
+  ): Promise<Array<{ platform: string; label: string; png: Buffer | null }>> {
+    const items: Array<{ platform: string; label: string; png: Buffer | null }> = [];
+    if (platforms.length === 0) return items;
+    for (const platform of platforms) {
+      const adapter = this.requireAdapter(platform);
+      if (!adapter) continue;
+      const label = this.platformLabel(platform);
+      let lease: BrowserPageLease | null = null;
+      try {
+        const cookieResult = await this.getCookieAndSiteId(resolveActorId(ctx), platform);
+        lease = await this.browserExecutor.acquirePage(
+          resolveActorId(ctx),
+          adapter.searchUrl(query, {}),
+          {
+            siteId: platform,
+            cookies: cookieResult.ok ? cookieResult.cookies : [],
+            interactiveLogin: ctx.pushMediaCards != null,
+            preferHeadless: true,
+            allowAnonymous: true,
+          },
+        );
+        // 登录跳转常由 JS 延迟触发，落页稳定后再判一次
+        await lease.page.waitForTimeout(2_000).catch(() => {});
+        const det = await detectLoginPage(platform, lease.page);
+        if (!det.isLogin) {
+          // 没撞登录墙（可能匿名可读或已登录）→ 不需要推码
+          await lease.release().catch(() => {});
+          lease = null;
+          continue;
+        }
+        const png = await this.qrAssist.captureQrPng(lease.page);
+        items.push({ platform, label, png });
+      } catch {
+        /* 探不到就算了，不阻断其余平台 */
+      } finally {
+        if (lease) await lease.release().catch(() => {});
+      }
+    }
+    return items;
+  }
+
+  /**
    * 登录态捕获（「一次登录一直使用」）：把当前页面上下文中该平台域的 Cookie
    * 加密落库。按 targetUrl 限定范围——shared 模式经 CDP 连的是用户真实浏览器
    * profile，不限定范围会抓到所有站点的 Cookie。授权语义见
@@ -612,6 +726,76 @@ export class ShoppingOrderService {
       await this.audit(ctx, "cookies_persisted", platform, { source, count: mapped.length });
     } catch {
       /* 捕获失败不影响主流程（下次成功执行会再捕获） */
+    }
+  }
+
+  /**
+   * 登录墙探针（2026-11-13 P0-1）：**只判断「这家能不能匿名读到价」，
+   * 不抓商品、不推码、不等待**。
+   *
+   * 用途：比价等需要「一次性收齐所有平台」的批量任务，必须在取价**之前**
+   * 就知道哪些平台要登录——否则必然半路撞墙、先交半成品答案（用户投诉：
+   * 「说让我补京东的登录之后再补」）。
+   *
+   * 判定顺序：
+   * 1. 已有授权 Cookie → 直接放行（登录态确定，无需探）。
+   * 2. 匿名站点（authMode=anonymous）→ 直接放行。
+   * 3. 导航到搜索页 → detectLoginPage 判登录墙（登录页 + 扫码登录特征）。
+   *
+   * 探测失败一律当「不拦」（放行给取价阶段用真实结果判定），宁可多跑一次
+   * 也不能因为探针抖动把平台误判成要登录。
+   */
+  async probeLoginWall(
+    ctx: ToolContext,
+    platform: string,
+    query: string,
+    opts: { preferVisible?: boolean } = {},
+  ): Promise<{ required: boolean; reason?: "login" | "captcha"; evidence?: string }> {
+    const adapter = this.requireAdapter(platform);
+    if (!adapter) return { required: false };
+    // 匿名可读的平台：不存在登录墙
+    if (adapter.authMode === "anonymous") return { required: false };
+
+    const actorId = resolveActorId(ctx);
+    // 已有授权 Cookie → 登录态确定
+    const withCookie = await this.listPlatformsWithCookies(actorId, [platform])
+      .then((list) => list.includes(platform))
+      .catch(() => false);
+    if (withCookie) return { required: false };
+
+    let lease: BrowserPageLease | null = null;
+    // 探针也是一次真实的云端浏览器导航：顺手推画面，客户端从比价一开始就有东西看。
+    let preview: BrowserPreviewHandle | null = null;
+    try {
+      const cookieResult = await this.getCookieAndSiteId(actorId, platform);
+      lease = await this.browserExecutor.acquirePage(
+        actorId,
+        adapter.searchUrl(query, {}),
+        {
+          siteId: platform,
+          cookies: cookieResult.ok ? cookieResult.cookies : [],
+          interactiveLogin: ctx.pushMediaCards != null,
+          preferHeadless: opts.preferVisible !== true,
+          allowAnonymous: true,
+        },
+      );
+      if (lease.mode === "headless") {
+        preview = startBrowserPreviewStream(ctx, lease.page, {
+          mode: lease.mode,
+          sessionId: `probe-${platform}-${Date.now()}`,
+        });
+      }
+      // 登录跳转常由 JS 延迟触发，落页稳定后再补检一次
+      await lease.page.waitForTimeout(1_500).catch(() => {});
+      const det = await detectLoginPage(platform, lease.page);
+      if (det.isLogin) return { required: true, reason: "login", evidence: det.reason };
+      return { required: false };
+    } catch {
+      // 探针失败不当登录墙
+      return { required: false };
+    } finally {
+      preview?.stop();
+      if (lease) await lease.release().catch(() => {});
     }
   }
 
@@ -776,6 +960,10 @@ export class ShoppingOrderService {
       preferHeadless: true,
       allowAnonymous: true,
     });
+    const preview: BrowserPreviewHandle | null =
+      lease.mode === "headless"
+        ? startBrowserPreviewStream(ctx, lease.page, { mode: lease.mode })
+        : null;
     try {
       await lease.page.waitForTimeout(2_000).catch(() => {});
       const specs = await extract(lease.page);
@@ -787,6 +975,7 @@ export class ShoppingOrderService {
         itemTitle: pageTitle.split(/[-_|（(]/)[0]?.trim() || undefined,
       };
     } finally {
+      preview?.stop();
       await lease.release();
     }
   }
@@ -810,7 +999,7 @@ export class ShoppingOrderService {
     opts: { force?: boolean } = {},
   ): Promise<
     | { ok: true; alreadyLoggedIn: true }
-    | { ok: true; alreadyLoggedIn: false; token: string; imageUrl: string | null }
+    | { ok: true; alreadyLoggedIn: false; token: string; imageUrl: string | null; qrLink?: string; qrLinkFallback?: string }
     | { ok: false; error: string }
   > {
     const actorId = resolveActorId(ctx);
@@ -829,6 +1018,11 @@ export class ShoppingOrderService {
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
+    // 扫码登录页同样是云端浏览器画面：推给悬浮窗，用户能看到 Agent 停在哪一页等登录。
+    const preview: BrowserPreviewHandle | null =
+      lease.mode === "headless"
+        ? startBrowserPreviewStream(ctx, lease.page, { mode: lease.mode })
+        : null;
     try {
       await lease.page.waitForTimeout(2_500).catch(() => {});
       let det = await detectLoginPage(platform, lease.page);
@@ -847,7 +1041,8 @@ export class ShoppingOrderService {
         await lease.release();
         return { ok: true, alreadyLoggedIn: true };
       }
-      const imageUrl = await this.qrAssist.savePageQrPng(ctx, lease.page);
+      const pageQr = await this.qrAssist.savePageQrPng(ctx, lease.page, platform);
+      const imageUrl = pageQr?.imageUrl ?? null;
       const token = randomUUID();
       this.pendingLogins.set(token, {
         token,
@@ -858,10 +1053,19 @@ export class ShoppingOrderService {
         expiresAt: Date.now() + getLoginWaitMs(),
         closed: false,
       });
-      return { ok: true, alreadyLoggedIn: false, token, imageUrl };
+      return {
+        ok: true,
+        alreadyLoggedIn: false,
+        token,
+        imageUrl,
+        ...(pageQr?.qrLink ? { qrLink: pageQr.qrLink } : {}),
+        ...(pageQr?.qrLinkFallback ? { qrLinkFallback: pageQr.qrLinkFallback } : {}),
+      };
     } catch (err) {
       await lease.release().catch(() => {});
       return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    } finally {
+      preview?.stop();
     }
   }
 
@@ -905,6 +1109,25 @@ export class ShoppingOrderService {
    * 查卡内扫码结果：已登录 → 落 Cookie、释放页面。
    * 还没扫到返回 stillWaiting，让用户再点一次「我扫好了」。
    */
+  /**
+   * 多平台登录态批量校验（2026-11-13 P0-2）：多平台登录卡上用户点「我扫好了」
+   * 时，逐家确认登录态——扫了哪几家就绪、哪几家还没扫，如实回报。
+   *
+   * 判定用**已授权 Cookie**（浏览器会话里落库的登录态），不依赖某个具体
+   * 页面 lease：多平台推码时各平台页面是独立打开的，用户可能只扫了其中一个。
+   */
+  async checkMultiPlatformLogin(
+    ctx: ToolContext,
+    platforms: string[],
+  ): Promise<{ ready: string[]; pending: string[] }> {
+    const actorId = resolveActorId(ctx);
+    const withCookie = await this.listPlatformsWithCookies(actorId, platforms)
+      .catch(() => [] as string[]);
+    const ready = platforms.filter((p) => withCookie.includes(p));
+    const pending = platforms.filter((p) => !withCookie.includes(p));
+    return { ready, pending };
+  }
+
   async checkLoginHandoff(
     ctx: ToolContext,
     token: string,
@@ -1087,6 +1310,11 @@ export class ShoppingOrderService {
 
     // 阶段一成功时租约转交 ActiveSession（阶段二/过期时释放）；其余路径 finally 释放
     let keepAlive = false;
+    // 结算页同样是云端浏览器画面（2026-11-14）：下单流程全程可围观。
+    const preview: BrowserPreviewHandle | null =
+      lease.mode === "headless"
+        ? startBrowserPreviewStream(ctx, lease.page, { mode: lease.mode })
+        : null;
     try {
       await lease.page.waitForTimeout(2_500).catch(() => {});
       const gate = await this.ensureLoggedIn(ctx, lease, platform, firstUrl);
@@ -1231,6 +1459,7 @@ export class ShoppingOrderService {
       const message = err instanceof Error ? err.message : String(err);
       return { ok: false, error: redactCredentials(`走到结算页失败：${message}`), retryable: /timeout|navigation/i.test(message) };
     } finally {
+      preview?.stop();
       if (!keepAlive) await lease.release().catch(() => {});
     }
   }
@@ -1296,6 +1525,11 @@ export class ShoppingOrderService {
         }
         throw err;
       }
+      // 提交订单这步也在云端浏览器里：把结算/提交画面推给悬浮窗。
+      const preview: BrowserPreviewHandle | null =
+        lease.mode === "headless"
+          ? startBrowserPreviewStream(ctx, lease.page, { mode: lease.mode })
+          : null;
 
       try {
         await lease.page.waitForTimeout(2_500).catch(() => {});
@@ -1333,6 +1567,7 @@ export class ShoppingOrderService {
           lease.mode === "shared" ? { agentAllowed: true } : {},
         );
       } finally {
+        preview?.stop();
         await lease.release().catch(() => {});
       }
 

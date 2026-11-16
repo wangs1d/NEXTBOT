@@ -58,19 +58,48 @@ Map<String, dynamic> buildWsSessionInit({bool announceModelUnbind = false}) {
   // （含空对象）= 撤绑。因此「停用自有模型」必须显式发一个空对象——只删
   // 本机文件再补发一帧普通 init，服务端会把云端绑定保留下来，重装后幽灵
   // 复活（2026-11-12 修复）。
-  if (!kIsWeb &&
-      !LocalRuntimeManager.isBundled &&
-      ApiConfig.wsUrl.startsWith("wss://")) {
-    final CloudModelBindingStore binding = CloudModelBindingStore.instance;
-    if (binding.isConfigured) {
-      init["modelProvider"] = <String, dynamic>{
-        "baseUrl": binding.baseUrl,
-        "apiKey": binding.apiKey,
-        "model": binding.model,
-      };
-    } else if (announceModelUnbind) {
-      init["modelProvider"] = <String, dynamic>{};
-    }
-  }
+  final CloudModelBindingStore binding = CloudModelBindingStore.instance;
+  final Map<String, dynamic>? modelProvider = buildModelProviderPayload(
+    overTls: !kIsWeb && ApiConfig.wsUrl.startsWith("wss://"),
+    bundledRuntime: LocalRuntimeManager.isBundled,
+    configured: binding.isConfigured,
+    baseUrl: binding.baseUrl,
+    apiKey: binding.apiKey,
+    model: binding.model,
+    announceUnbind: announceModelUnbind,
+  );
+  if (modelProvider != null) init["modelProvider"] = modelProvider;
   return init;
+}
+
+/// session.init 的 `modelProvider` 字段口径（纯函数，单测直接打这个）：
+///
+/// | 场景 | 返回 |
+/// |---|---|
+/// | 明文 ws / 捆绑 runtime | null（不下发：服务端拒绝非 TLS 上送，捆绑形态 key 不出本机） |
+/// | 已配置绑定 | 完整三元组 |
+/// | 停用绑定（announceUnbind） | 空对象 → 服务端撤绑 |
+/// | 未配置且未声明撤绑 | null（缺字段 = 保留服务端已有绑定） |
+///
+/// 拆成纯函数的理由：真实 `init` 只在 wss 下才带这个字段，测试环境跑明文 ws
+/// 永远看不到它，语义就只能靠读代码保证（原来那条单测正是因此长期红着）。
+@visibleForTesting
+Map<String, dynamic>? buildModelProviderPayload({
+  required bool overTls,
+  required bool bundledRuntime,
+  required bool configured,
+  String? baseUrl,
+  String? apiKey,
+  String? model,
+  required bool announceUnbind,
+}) {
+  if (!overTls || bundledRuntime) return null;
+  if (configured) {
+    return <String, dynamic>{
+      "baseUrl": baseUrl ?? "",
+      "apiKey": apiKey ?? "",
+      "model": model ?? "",
+    };
+  }
+  return announceUnbind ? <String, dynamic>{} : null;
 }

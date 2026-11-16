@@ -83,7 +83,7 @@ const COMPOSITE_SPECS: CompositeSpec[] = [
   {
     name: "web_search",
     description:
-      "联网检索的统一入口：网页搜索、深读检索、图片/视频、热搜榜、天气、行情。凡是「查一下/搜一下/网上看看」都走这里。",
+      "联网检索的统一入口：网页搜索、深读检索、图片/视频、热搜榜、天气、行情。凡是「查一下/搜一下/网上看看」都走这里。\n【强制调用规则】涉及时事、新闻、股价、排片、票价、公告等时效信息，或任何人物的近况、最新消息、行程、所在城市、公开活动时，必须先调用本工具再作答，禁止仅凭训练数据作答——本轮 prompt 里没有【实时检索结果】块时也不例外。时效话题的 query 请带上当前年月或「最新」。只有寒暄、情绪、观点，以及不随时间变化的常识，才可以直接回答。",
     defaultAction: "web",
     actions: {
       web: {
@@ -101,7 +101,7 @@ const COMPOSITE_SPECS: CompositeSpec[] = [
         tool: "search_images",
         desc: "找图片",
         keywords: ["图片", "照片", "壁纸", "表情包", "头像", "找图", "配图", "插画"],
-        params: ["count"],
+        params: ["limit"],
       },
       images_batch: {
         tool: "search_images_batch",
@@ -132,25 +132,39 @@ const COMPOSITE_SPECS: CompositeSpec[] = [
       },
       weather: {
         tool: "weather.get_local",
-        desc: "查天气，location 缺省按用户所在地",
+        desc: "查天气，city 缺省按用户所在地；问多日（未来一周/后天/周末）时传 days",
         keywords: ["天气", "气温", "下雨", "温度", "降温", "多少度", "空气质量"],
-        params: ["location"],
+        params: ["city", "days"],
       },
       quote: {
         tool: "market.quote",
-        desc: "查股票/基金/汇率行情",
-        keywords: ["股价", "汇率", "比特币", "行情", "涨跌", "基金", "指数", "币价"],
-        params: ["symbol"],
+        desc: "查股票/指数/汇率行情（暂不支持加密货币币价）",
+        keywords: ["股价", "汇率", "行情", "涨跌", "基金", "指数", "多少美元"],
+        params: ["symbols"],
       },
     },
     properties: {
       query: { type: "string", description: "检索词或问题" },
       queries: { type: "array", items: { type: "string" }, description: "images_batch 的多组检索词" },
       url: { type: "string", description: "parse_video 的视频页地址" },
-      location: { type: "string", description: "weather 的城市名，可省略" },
-      symbol: { type: "string", description: "quote 的标的代码或名称" },
-      limit: { type: "integer", description: "web 返回条数，默认 5" },
-      count: { type: "integer", description: "images 返回张数，默认 6" },
+      // 2026-11-14 接线修复：字段名必须与底层执行器一致（weather.get_local 只认
+      // city/days）。此前这里声明的是 location，透传后被执行器静默丢弃——
+      // 「北海一周天气」实际查成了用户 GPS 所在地（兴义）。days 同理此前未声明，
+      // 「未来一周」的天数传不进回执。
+      city: {
+        type: "string",
+        description:
+          "weather 分支的城市名：用户明确说了城市时才传（如「北海一周天气」→ city:'北海', days:7）；没说城市就不要传，缺省按用户真实所在地",
+      },
+      days: {
+        type: "integer",
+        description: "weather 分支的预报天数 1-16（未来一周 → 7，后天 → 3），缺省今天+明天",
+      },
+      symbols: { type: "string", description: "quote 的标的代码或名称，支持逗号分隔多个（如 BTC,ETH）" },
+      limit: {
+        type: "integer",
+        description: "web 返回条数（默认 5）；images 分支为返回张数（默认 4，上限 8）",
+      },
     },
   },
   {
@@ -180,7 +194,7 @@ const COMPOSITE_SPECS: CompositeSpec[] = [
         tool: "http.request",
         desc: "调用任意 HTTP 接口",
         keywords: ["接口", "api", "请求", "curl", "post", "header"],
-        params: ["method", "headers", "body", "timeout_ms"],
+        params: ["method", "headers", "body", "timeoutMs"],
       },
     },
     properties: {
@@ -190,7 +204,7 @@ const COMPOSITE_SPECS: CompositeSpec[] = [
       method: { type: "string", enum: ["GET", "POST", "PUT", "DELETE"], description: "raw 的请求方法" },
       headers: { type: "object", description: "raw 的请求头" },
       body: { type: "object", description: "raw 的请求体" },
-      timeout_ms: { type: "integer", description: "raw 的超时毫秒数" },
+      timeoutMs: { type: "integer", description: "raw 的超时毫秒数" },
     },
   },
   {
@@ -590,6 +604,47 @@ export function resolveCompositeAction(
   return best ?? spec.defaultAction;
 }
 
+/**
+ * 复合参数 → 执行器参数适配（2026-11-14 接线审计）。
+ *
+ * 复合层声明的字段名必须与底层执行器一致，透传才不丢参。本函数归一两类残留：
+ * 1) 模型按历史习惯传的旧字段名（location/symbol/count/timeout_ms）；
+ * 2) 复合层语义名与执行器实现名不同源的（navigate 的 url/goal → startUrl/goalKeywords）。
+ * 丢参后果分级：weather 查错城市、quote 直接报错、images/timeout 静默降级——
+ * 全部在此收口，不再各自为战。
+ */
+function adaptForwardInput(tool: string, input: Record<string, unknown>): Record<string, unknown> {
+  const pickRename = (from: string, to: string): Record<string, unknown> | null => {
+    if (hasValue(input[to]) || !hasValue(input[from])) return null;
+    const { [from]: legacy, ...rest } = input;
+    return { ...rest, [to]: legacy };
+  };
+  switch (tool) {
+    case "weather.get_local":
+      return pickRename("location", "city") ?? input;
+    case "market.quote":
+      return pickRename("symbol", "symbols") ?? input;
+    case "search_images":
+      return pickRename("count", "limit") ?? input;
+    case "http.request":
+      return pickRename("timeout_ms", "timeoutMs") ?? input;
+    case "info.navigate_site": {
+      const adapted = { ...input };
+      if (!hasValue(adapted.startUrl) && hasValue(adapted.url)) adapted.startUrl = adapted.url;
+      if (!hasValue(adapted.goalKeywords) && hasValue(adapted.goal)) {
+        adapted.goalKeywords = String(adapted.goal)
+          .split(/[,，、\s]+/)
+          .filter(Boolean);
+      }
+      delete adapted.url;
+      delete adapted.goal;
+      return adapted;
+    }
+    default:
+      return input;
+  }
+}
+
 /** 注册复合执行器到 ToolRegistry（在旧执行器注册完成后调用）。 */
 export function registerCompositeTools(registry: ToolRegistry): void {
   for (const spec of COMPOSITE_SPECS) {
@@ -603,7 +658,9 @@ export function registerCompositeTools(registry: ToolRegistry): void {
           error: `未知 action: ${String(input.action ?? "(空)")}，可用: ${Object.keys(spec.actions).join(" / ")}`,
         };
       }
-      const result = await registry.execute(spec.actions[action]!.tool, withoutAction(input), context);
+      const targetTool = spec.actions[action]!.tool;
+      const forwardInput = adaptForwardInput(targetTool, withoutAction(input));
+      const result = await registry.execute(targetTool, forwardInput, context);
       // 透传底层 ok：被收编执行器失败时，复合层不能伪装成功（否则不重试、不报错）。
       // 仅显式 ok:false 视为失败，兼容旧 handler 返回裸结果的形态。
       if (result.ok !== false) return result.result;

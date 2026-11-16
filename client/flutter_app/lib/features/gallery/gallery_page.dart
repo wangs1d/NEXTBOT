@@ -96,9 +96,27 @@ class _GalleryPageState extends State<GalleryPage> {
     );
   }
 
+  /// 网格缩略图解码宽度（物理像素）：格子 ≤112px，3 倍密度足够。
+  static const int _tileCacheWidth = 340;
+
   Map<String, dynamic> _decodeBody(http.Response response) {
     final dynamic decoded = jsonDecode(response.body);
     return decoded as Map<String, dynamic>;
+  }
+
+  /// 缩略图预热（2026-11-12）：图库此前是唯一不预热的照片页——一页 30 张
+  /// 全靠网格逐格 `CachedMediaImage` 现下，冷启动只能按下载通道挤牙膏似的
+  /// 一张张浮出来。列表一返回就把本页缩略图丢给磁盘缓存后台通道预热。
+  void _warmThumbs(List<_Photo> photos) {
+    final List<String> urls = <String>[
+      for (final _Photo p in photos)
+        if (p.thumbnailUrl.isNotEmpty)
+          p.thumbnailUrl.startsWith("http")
+              ? p.thumbnailUrl
+              : "${ApiConfig.httpBase}${p.thumbnailUrl}",
+    ];
+    if (urls.isEmpty) return;
+    MediaDiskCache.instance.warm(urls);
   }
 
   Future<void> _refresh() async {
@@ -126,6 +144,7 @@ class _GalleryPageState extends State<GalleryPage> {
         _hasMore = _photos.length < ((body["total"] as num?)?.toInt() ?? 0);
         _loading = false;
       });
+      _warmThumbs(_photos);
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -147,12 +166,16 @@ class _GalleryPageState extends State<GalleryPage> {
       final Map<String, dynamic> body = _decodeBody(response);
       final List<dynamic> photos = (body["photos"] as List<dynamic>?) ?? const <dynamic>[];
       if (!mounted) return;
+      final List<_Photo> added = photos
+          .map((dynamic item) => _Photo.fromJson(item as Map<String, dynamic>))
+          .toList(growable: false);
       setState(() {
-        _photos.addAll(photos.map((dynamic item) => _Photo.fromJson(item as Map<String, dynamic>)));
+        _photos.addAll(added);
         _page += 1;
         _hasMore = photos.isNotEmpty;
         _loadingMore = false;
       });
+      _warmThumbs(added);
     } catch (_) {
       if (!mounted) return;
       setState(() => _loadingMore = false);
@@ -710,6 +733,7 @@ class _PhotoTile extends StatelessWidget {
           CachedMediaImage(
             url: "$httpBase${photo.thumbnailUrl}",
             fit: BoxFit.cover,
+            cacheWidth: _GalleryPageState._tileCacheWidth,
             errorBuilder: (_, Object error, StackTrace? stack) => const ColoredBox(
               color: Color(0x22800000),
               child: Center(child: Icon(Icons.broken_image_outlined)),

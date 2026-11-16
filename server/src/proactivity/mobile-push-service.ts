@@ -12,6 +12,8 @@
 // 设备 token 注册表：data/proactivity/push-tokens.json（客户端启动时经
 // POST /api/proactivity/push/register 上报 actorId + provider + token）。
 import { readJson, writeJson } from "./persist-file.js";
+import { notificationIdFor } from "./notification-id.js";
+import type { ClientActionIntent } from "./action-intent-service.js";
 
 export type PushInput = {
   actorId: string;
@@ -20,7 +22,20 @@ export type PushInput = {
   importance: string;
   kind: string;
   deliveryId: string;
+  /**
+   * 动作意图 id（2026-11-13「通知即界面」）：厂商推送落地的是系统模板通知，
+   * **带不了按钮**——但带 intentId 后，点开通知能进 App 处理这个决策。
+   * 通知 id 的口径统一走 notificationIdFor(intentId ?? deliveryId)。
+   */
+  intentId?: string;
+  /** 动作视图（带按钮的决策）：厂商通道只能降级成「点开处理」，不能渲染按钮 */
+  actionIntent?: ClientActionIntent | null;
 };
+
+/** 通知 id 的唯一口径：有 intent 用 intent，没有就用 delivery（两端必须一致） */
+export function pushNotificationKey(input: PushInput): string {
+  return input.intentId?.trim() || input.deliveryId;
+}
 
 export type PushAttemptResult = { ok: boolean; provider: string; reason?: string };
 
@@ -119,10 +134,17 @@ export class BarkProvider implements PushProvider {
 
   async push(_target: PushTarget, input: PushInput): Promise<{ ok: boolean; reason?: string }> {
     try {
+      // Bark 是纯文本推送：带按钮时在正文末尾标一句「可回复/可处理」，
+      // 让用户知道点进去能拍板，而不是以为只是一条提醒。
+      const actions = input.actionIntent?.actions ?? [];
+      const body =
+        actions.length > 0
+          ? `${input.body}\n— 可在 App 里直接处理：${actions.map((a) => a.label).join(" / ")}`
+          : input.body;
       const result = await postJson(
         this.url,
         {},
-        { title: input.title, body: input.body, group: "nextbot", level: input.importance === "critical" ? "timeSensitive" : "active" },
+        { title: input.title, body, group: "nextbot", level: input.importance === "critical" ? "timeSensitive" : "active" },
       );
       return result.ok ? { ok: true } : { ok: false, reason: `bark HTTP ${result.status}: ${result.text}` };
     } catch (err) {
@@ -150,7 +172,18 @@ export class WebhookPushProvider implements PushProvider {
       const result = await postJson(
         this.url,
         this.bearer ? { Authorization: `Bearer ${this.bearer}` } : {},
-        { actorId: input.actorId, title: input.title, body: input.body, importance: input.importance, kind: input.kind, deliveryId: input.deliveryId },
+        {
+          actorId: input.actorId,
+          title: input.title,
+          body: input.body,
+          importance: input.importance,
+          kind: input.kind,
+          deliveryId: input.deliveryId,
+          // 「通知即界面」：动作视图随推送下发，网关侧若能渲染按钮就能直接决策
+          intentId: input.intentId ?? "",
+          notificationId: notificationIdFor(pushNotificationKey(input)),
+          actionIntent: input.actionIntent ?? null,
+        },
       );
       return result.ok ? { ok: true } : { ok: false, reason: `webhook HTTP ${result.status}: ${result.text}` };
     } catch (err) {
@@ -218,9 +251,16 @@ export class HuaweiPushProvider implements PushProvider {
               // HIGH 重要性渠道（LocalNotificationService："proactive"）
               channel_id: "proactive",
               click_action: { type: 3 },
-              notify_id: Math.abs(
-                [...`${input.title}${input.body}`].reduce((a, c) => (a * 31 + c.charCodeAt(0)) | 0, 0),
-              ) % 2_000_000_000,
+              // 通知 id 统一口径（2026-11-13）：与 App 自建通知、华为推送、Webhook
+              // 三处同源——此前这里用 title+body 哈希、App 侧用 deliveryId.hashCode，
+              // 后果是同一条决策跨层投递变成两条通知（其中一条的按钮是死的）。
+              notify_id: notificationIdFor(pushNotificationKey(input)),
+              // data 随点击回传：App 被杀时点开这条通知，能知道要处理哪个决策
+              data: {
+                deliveryId: input.deliveryId,
+                intentId: input.intentId ?? "",
+                hasActions: input.actionIntent ? "1" : "0",
+              },
             },
           },
           token: [target.token],

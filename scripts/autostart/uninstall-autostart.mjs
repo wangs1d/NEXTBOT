@@ -13,6 +13,11 @@ const ROOT = path.resolve(SCRIPT_DIR, "..", "..");
 
 const TASK_NAME = "NextbotServer";
 const RUN_VALUE_NAME = "NextbotServer";
+// 桌面 App 自启（计划任务接管；Run 值「Nextbot」是 App 设置页的开关，不在此删）
+const APP_TASK_NAME = "NextbotApp";
+const APP_RUN_VALUE_NAME = "Nextbot";
+const STARTUP_APPROVED_RUN_KEY =
+  "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
 // 旧版注册名（2026-10-23 前），残留一并清理
 const LEGACY_TASK_NAME = "PrivateAgentServer";
 const LEGACY_RUN_VALUE_NAME = "PrivateAgentServer";
@@ -74,11 +79,30 @@ const regDel = spawnSync("reg.exe", ["delete", RUN_KEY, "/v", RUN_VALUE_NAME, "/
 });
 if (regDel.status === 0) console.log("✓ 已删除 Run 键");
 
-if (del.status !== 0 && regDel.status !== 0) {
+// 4. 桌面 App：删除计划任务，并移除 StartupApproved 禁用标记
+//    （Run 值「Nextbot」是 App 设置页的开关，保留不动）
+const appDel = spawnSync("schtasks.exe", ["/delete", "/tn", APP_TASK_NAME, "/f"], {
+  windowsHide: true,
+  encoding: "utf8",
+});
+if (appDel.status === 0) {
+  spawnSync("schtasks.exe", ["/end", "/tn", APP_TASK_NAME], { windowsHide: true, stdio: "ignore" });
+  console.log(`✓ 已删除计划任务「${APP_TASK_NAME}」`);
+}
+const approvedDel = spawnSync(
+  "reg.exe",
+  ["delete", STARTUP_APPROVED_RUN_KEY, "/v", APP_RUN_VALUE_NAME, "/f"],
+  { windowsHide: true, encoding: "utf8" },
+);
+if (approvedDel.status === 0) {
+  console.log("✓ 已移除 App Run 键的禁用标记（恢复其自身直启行为）");
+}
+
+if (del.status !== 0 && regDel.status !== 0 && appDel.status !== 0) {
   console.log("未发现已注册的开机自启（计划任务与 Run 键均不存在）。");
 }
 
-// 4. 旧版注册名残留清理（静默）
+// 5. 旧版注册名残留清理（静默）
 spawnSync("schtasks.exe", ["/end", "/tn", LEGACY_TASK_NAME], { windowsHide: true, stdio: "ignore" });
 const legacyDel = spawnSync("schtasks.exe", ["/delete", "/tn", LEGACY_TASK_NAME, "/f"], { windowsHide: true, stdio: "ignore" });
 const legacyRegDel = spawnSync("reg.exe", ["delete", RUN_KEY, "/v", LEGACY_RUN_VALUE_NAME, "/f"], { windowsHide: true, stdio: "ignore" });

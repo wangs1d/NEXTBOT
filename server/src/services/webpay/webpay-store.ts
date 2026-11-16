@@ -364,6 +364,40 @@ export class WebpayStore {
     ).all(limit) as unknown as WebpayOrderRow[];
   }
 
+  /** 管理台订单列表（含沙箱，按创建时间倒序） */
+  listAdminOrders(limit = 300): WebpayOrderRow[] {
+    return this.open().prepare(
+      `SELECT ${ORDER_COLS} FROM webpay_orders ORDER BY created_at DESC LIMIT ?`,
+    ).all(limit) as unknown as WebpayOrderRow[];
+  }
+
+  /** 管理台统计：只计生产环境，沙箱订单不算收入 */
+  adminStats(): {
+    total: number;
+    paid: number;
+    pending: number;
+    closed: number;
+    refunded: number;
+    paidAmount: string;
+  } {
+    const rows = this.open().prepare(`
+      SELECT status, COUNT(*) AS n,
+        COALESCE(SUM(CAST(ROUND(CAST(total_amount AS REAL) * 100) AS INTEGER)), 0) AS cents
+      FROM webpay_orders WHERE env = 'production' GROUP BY status
+    `).all() as Array<{ status: string; n: number; cents: number }>;
+    const pick = (status: string) => rows.find((r) => r.status === status);
+    const paid = pick("paid");
+    const refunded = pick("refunded");
+    return {
+      total: rows.reduce((sum, r) => sum + r.n, 0),
+      paid: paid?.n ?? 0,
+      pending: pick("pending")?.n ?? 0,
+      closed: pick("closed")?.n ?? 0,
+      refunded: refunded?.n ?? 0,
+      paidAmount: (((paid?.cents ?? 0) + (refunded?.cents ?? 0)) / 100).toFixed(2),
+    };
+  }
+
   insertNotifyOnce(notifyId: string, tradeStatus: string, outTradeNo: string, tradeNo: string | null, paramsJson: string): boolean {
     const result = this.open().prepare(`
       INSERT OR IGNORE INTO webpay_notify_events (notify_id, trade_status, out_trade_no, trade_no, params_json, received_at)

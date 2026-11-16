@@ -97,6 +97,28 @@ async function resolveAnySearchImageTag(cfg: SearchApiConfig): Promise<string | 
   return tag;
 }
 
+/**
+ * 最近一次 web 垂直失败记录（2026-11-12 退化可观测）。
+ *
+ * 背景：只信 AnySearch 策略下，超时返回 [] 与「真没结果」在payload 层不可区分，
+ * 模型只能回「没查到」——用户感知为「搜索坏了」却看不到原因。这里记录最近一次
+ * 失败原因，由 upstream-search-service 在空结果时取走写进 notes，让模型如实
+ * 说「搜索服务暂时超时」。只存最后一次（消费即取走），并发下取最新即可。
+ */
+let lastWebFailure: { at: number; reason: string } | null = null;
+
+/** 取走最近一次 AnySearch web 失败原因（有则返回并清空；无失败返回 null）。 */
+export function consumeAnySearchWebFailure(): string | null {
+  const f = lastWebFailure;
+  lastWebFailure = null;
+  return f ? f.reason : null;
+}
+
+function recordWebFailure(keyword: string, reason: string): void {
+  lastWebFailure = { at: Date.now(), reason };
+  console.warn(`[SearchApi] AnySearch web 失败记录 -> query="${keyword.slice(0, 40)}" ${reason}`);
+}
+
 async function searchWeb(keyword: string, limit: number, cfg: SearchApiConfig): Promise<InfoSearchItem[]> {
   // 空 key 禁止匿名请求：官方匿名侧会返回与 query 无关的 URL（cqvip 文献页等），
   // 直接把这类 URL 交给上层等于交付垃圾搜索结果。
@@ -131,6 +153,7 @@ async function searchWeb(keyword: string, limit: number, cfg: SearchApiConfig): 
       console.warn(
         `[SearchApi] AnySearch HTTP ${response.status} ${response.statusText} -> query="${keyword.slice(0, 40)}"`,
       );
+      recordWebFailure(keyword, `HTTP ${response.status} ${response.statusText}`);
       return [];
     }
     const text = await response.text();
@@ -152,6 +175,7 @@ async function searchWeb(keyword: string, limit: number, cfg: SearchApiConfig): 
       console.warn(
         `[SearchApi] AnySearch 业务失败 code=${String(rec.code)} msg=${String(rec.message ?? "")} -> query="${keyword.slice(0, 40)}"`,
       );
+      recordWebFailure(keyword, `业务失败 code=${String(rec.code)} msg=${String(rec.message ?? "")}`);
       return [];
     }
     const data = rec.data;
@@ -177,9 +201,11 @@ async function searchWeb(keyword: string, limit: number, cfg: SearchApiConfig): 
   } catch (e) {
     // 静默吞异常曾让「API 实际不可达/超时」无任何日志，表现为 Agent 静默
     // 退到爬虫兜底、用户以为是没配 API（2026-09-12）。失败必须留痕。
+    const reason = `请求异常/超时(${cfg.timeoutMs}ms) err=${(e as Error)?.message ?? e}`;
     console.warn(
-      `[SearchApi] AnySearch 请求异常/超时(${cfg.timeoutMs}ms) -> query="${keyword.slice(0, 40)}"  err=${(e as Error)?.message ?? e}`,
+      `[SearchApi] AnySearch ${reason} -> query="${keyword.slice(0, 40)}"`,
     );
+    recordWebFailure(keyword, reason);
     return [];
   } finally {
     clearTimeout(timer);

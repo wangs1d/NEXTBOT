@@ -16,6 +16,7 @@ import {
 import { currentBlockingStep, getTaskPlanStore, taskPlanKey } from "../agent/task-plan-store.js";
 import { receiptProducesCard } from "../services/receipt-card-projection.js";
 import { isMediaOnlyRequest } from "../agent/realtime-search-query.js";
+import { recordThinkingLatency, effortSentFrom } from "./thinking-policy.js";
 import { filterMediaModalityTools, filterTextSearchTools } from "../agent/web-search-consent.js";
 import { classifyToolSensitivity } from "../security/sensitive-action.js";
 import type {
@@ -61,6 +62,9 @@ import {
   AGENT_UPDATE_IDENTITY_CHAT_TOOL,
 } from "../tools/agent-identity-tools.js";
 import { GEOFENCE_CHAT_TOOLS } from "../tools/geofence-tools.js";
+import { PLACE_CHAT_TOOLS } from "../tools/place-tools.js";
+import { GEO_CHAT_TOOLS } from "../tools/geo-tools.js";
+import { BILL_PARCEL_CHAT_TOOLS } from "../tools/bill-parcel-tools.js";
 import { WATCH_TRACK_CHAT_TOOLS } from "../tools/watch-board-tools.js";
 import { PROFILE_QUERY_CHAT_TOOLS } from "../tools/profile-query-tool.js";
 import { SMART_HOME_CHAT_TOOLS } from "../tools/smart-home-tools.js";
@@ -476,10 +480,17 @@ function resolveBaseToolExecutionTimeoutMs(registryToolName: string): number {
     // 8s 预算会在 GPS fix 前把工具击杀，agent 只能拿旧缓存/记忆城市答天气
     "weather": Number.parseInt(process.env.TOOL_TIMEOUT_WEATHER_MS ?? "15000", 10),
     "weather.get_local": Number.parseInt(process.env.TOOL_TIMEOUT_WEATHER_MS ?? "15000", 10),
-    "search_web": Number.parseInt(process.env.TOOL_TIMEOUT_SEARCH_MS ?? "6500", 10),
-    // 复合工具：web_search 一次可能落 images/images_batch/videos（12s 档）或 web（6.5s 档），
-    // 外层按最宽分支给 12s；web_fetch 对应 read/inspect（15s 档）。
-    "web_search": Number.parseInt(process.env.TOOL_TIMEOUT_SEARCH_IMAGES_MS ?? "12000", 10),
+    // 2026-11-12 重排为 16s：内圈搜索 API 预算提到 14s（AnySearch web 垂直对新闻/
+    // 人物类 query 实测 12~15s，5s 内圈击杀导致恒空结果），外圈须覆盖内圈 + 相关性
+    // 闸门/转存开销；上游健康时 1~3s 返回，该预算只在慢查询时才贴到。
+    // search_web（legacy 名，内部调用方 routeQuery/info-hub 仍在用）同步 16s，
+    // 保证内圈 14s 不被外圈 6.5s 击杀（重蹈 8000>6500 的覆辙）。
+    "search_web": Number.parseInt(process.env.TOOL_TIMEOUT_SEARCH_MS ?? "16000", 10),
+    // 复合工具：web_search 一次可能落 images/images_batch/videos（12s 档）或 web（6.5s 档）。
+    // 2026-11-12 重排为 16s：内圈搜索 API 预算提到 10s（AnySearch web 垂直对新闻/
+    // 人物类 query 实测 12~15s，5s 内圈击杀导致恒空结果），外圈须覆盖内圈 + 相关性
+    // 闸门/转存开销；上游健康时 1~3s 返回，该预算只在慢查询时才贴到。
+    "web_search": Number.parseInt(process.env.TOOL_TIMEOUT_SEARCH_IMAGES_MS ?? "16000", 10),
     "web_fetch": Number.parseInt(process.env.TOOL_TIMEOUT_FETCH_MS ?? "15000", 10),
     // 图片搜索独立 12s 档：内部链路是「结果页抓取 ≤5s + 图片转存硬预算 6.5s ≈ 11.5s」，
     // 按外圈 12s 设计。曾共享 search_web 的 6.5s 档，慢源查询（如「科莫多」这类图片
@@ -1177,6 +1188,9 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
       ...WATCH_TRACK_CHAT_TOOLS,
       ...PROFILE_QUERY_CHAT_TOOLS,
       ...GEOFENCE_CHAT_TOOLS,
+      ...PLACE_CHAT_TOOLS,
+      ...GEO_CHAT_TOOLS,
+      ...BILL_PARCEL_CHAT_TOOLS,
       ...AGENT_CAPABILITY_QUERY_CHAT_TOOLS,
       ...SMART_HOME_CHAT_TOOLS,
       ...DEVICE_CHAT_TOOLS,
@@ -1253,6 +1267,15 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
     category: 'wallet',
     keywords: ['钱包', 'wallet', '余额', 'balance', '支付', 'pay', '转账', 'transfer', '充值', 'recharge', '付钱', '买单', '代付', '缴费', '记账', '花了', '消费', 'purchase', '交易', 'transaction', '账单', 'bill', '钱', 'money', '金额', 'amount'],
     toolNames: [
+      'payment.pay',
+      'payment.pay_confirm',
+      'payment.pay_resume',
+      'payment.pay_status',
+      'payment.refund',
+      'payment.receipt',
+      'payment.authorization_status',
+      'payment.authorization_link',
+      'payment.revoke_authorization',
       'payment.create_order',
       'payment.query_order',
       'alipay.check-wallet',
@@ -1264,6 +1287,14 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
       'alipay.merchant-list',
       'alipay.merchant-order',
     ]
+  },
+  {
+    // 账单/快递汇总查询（2026-11-13）：邮件与短信自动识别出的账单与快递条目，
+    // 汇总成台账后由模型按需查询——「这个月话费扣了多少」「我最近有快递吗，
+    // 取件码是多少」。关键词取用户实际会说的话，不取工具内部术语。
+    category: 'bill_parcel',
+    keywords: ['账单', 'bill', '话费', '流量费', '扣款', '还款', '消费记录', '快递', '包裹', '物流', '运单', '取件码', '取件', '驿站', '签收', '快递单号', 'parcel', 'tracking', 'pickup'],
+    toolNames: ['bill_parcel.list', 'bill_parcel.summary']
   },
   {
     category: 'social',
@@ -2324,8 +2355,14 @@ export async function streamCompletionWithTools(
     const planAndExecuteRules = taskStage
       ? "1. 一次性规划：把本轮需要的所有工具调用放在同一次回复里并行发出（独立的信息需求拆成多个并行调用），不要拆成多轮串行。\n" +
         "2. 不要用完全相同的 query 重复搜索；但对比/多主题/盘点类需求，或首轮结果覆盖不全时，应换角度拆多个 query 补搜，或用 fetch_web / deep_search 深读，把信息收齐再回答，不要急着收尾。\n" +
+        "   例外（硬性）：search_images 一轮只调用一次，不适用「换角度拆多个 query 补搜」——多角度/对比/多主题出图用 search_images_batch 一次调用完成；同轮第二次 search_images 会被服务端拦截并复用首次结果。\n" +
         "3. code.run 的 stdout/stderr 如果已包含答案，不要重跑同样代码。输出被截断(truncated=true)时，改用 code.write_file 写产物再 code.read_file 分段读，不要重跑。\n"
-      : "";
+      // 2026-11-12 对话面补回并行要求（此前 2026-10-06 治啰嗦时整条删掉，只留任务面）：
+      // 不带 schema 的 chat 面同样会一工具一波次——实测「wave=0/1/2 各 4-7s」，
+      // 每波都要重付一次 prefill + 思考。但对话面不能照搬任务面那三条长守则，
+      // 只保留「无依赖就并行、有依赖才分轮」这一句，且只在真的要调多个工具时生效，
+      // 不会诱导闲聊轮去调工具（没有「应该调」的暗示，只有「要调就一起调」）。
+      : "· 多工具并行：需要多个工具时，互不依赖的调用放在同一次回复里一次发出（如同时查天气、搜餐厅），不要分轮排队；只有存在先后依赖（先搜到结果再下单）才分轮。例外：search_images 一轮只调用一次，不要为不同侧面/关键词并行发起多次，多角度出图用 search_images_batch。\n";
     // 轮内脚手架（2026-10-22）：域卡/守则只在**本轮**有意义，标记后轮末写回会跳过，
     // 否则一份 8,266 字符的域卡会常驻历史、每轮重发（实测 ≈3,200 real tokens/轮），
     // 且位置随历史漂移，跨轮前缀缓存从注入点起整段作废。
@@ -2339,7 +2376,7 @@ export async function streamCompletionWithTools(
             : "") +
           planAndExecuteRules +
           "4. 拿到工具结果后优先直接回答用户，不要为了「确认」再调一次工具。\n" +
-          "5. 图片/照片类需求用 search_images，不要用 search_web 编造图片来源（如 duitang.com 这类假域名）——前端拿不到真实图片。搜到的每张照片会由视觉模型自动生成真实画面描述并展示在照片下方，正文**不要**逐张介绍照片、不要用「第一张图/第二张图」这类指代（你看不见图片内容，写了必然对不上），也不要把图片链接复述进正文；正文只写整体性的结论、建议或补充信息。\n" +
+          "5. 图片/照片类需求用 search_images，不要用 search_web 编造图片来源（如 duitang.com 这类假域名）——前端拿不到真实图片。一轮最多调一次 search_images（多角度/对比出图用 search_images_batch）；搜到的每张照片会由视觉模型自动生成真实画面描述并展示在照片下方，正文**不要**逐张介绍照片、不要用「第一张图/第二张图」这类指代（你看不见图片内容，写了必然对不上），也不要把图片链接复述进正文；正文只写整体性的结论、建议或补充信息。\n" +
           "6. 如果此前（含更早轮次）就任务细节向用户追问过（目的地/时间/选项/偏好等），而用户本轮给出了答案、确认或补充（哪怕只有几个字如「先去A吧」「就这个」）：不要只回一句「好的/收到/不错」——立即调用对应工具把任务真正完成，拿到结果后再回复用户。只确认不兑现 = 任务失败。\n" +
           "7. 实数只认真值：价格/报价/库存/时刻/天气这类数字，只能来自本轮当场取到的数据。工具回执里出现「体验模式/脱敏/需登录/超时/0 条结果」时，不要把二手搜索结果当实时价，也不要自己估一个数——回执若写明了可取数的替代路径，照它当场再取一次；仍取不到就如实说这项没取到。" +
           (toolSearchPrepared.toolSearchActive
@@ -2872,6 +2909,19 @@ export async function streamCompletionWithTools(
             `firstDelta=${waveFirstDelta === null ? "-" : waveFirstDelta - waveTimingStart}ms ` +
             `total=${Date.now() - waveTimingStart}ms streamed=${waveStreamedText.length} raw=${fullText.length}`,
         );
+        // 思考档位学习（2026-11-12）：工具轮每一波都是一次完整的 prefill+思考，
+        // 首字延迟同样进样本池——否则只有 plain 分支在学，工具轮永远选不到档。
+        {
+          const ttft = waveFirstDelta ?? waveFirstRaw;
+          if (ttft !== null && Number.isFinite(ttft)) {
+            recordThinkingLatency({
+              providerId: "openai-compatible",
+              model,
+              effortSent: effortSentFrom(options?.extraBody),
+              ttftMs: ttft - waveTimingStart,
+            });
+          }
+        }
         fullText = result.content;
         fullReasoning = result.reasoning;
         finishReason = result.finishReason;

@@ -27,6 +27,7 @@ import type { ClientClockWire, ClientLocationWire } from "@nextbot/agent-protoco
 import { getDataDir } from "../config/data-dir.js";
 import { writeJsonAtomic } from "../storage/atomic-json.js";
 import type { ReverseGeocodeHit } from "./reverse-geocode-service.js";
+import { haversineMeters } from "./geo-utils.js";
 
 export type ActorActivity = "still" | "walking" | "vehicle" | "unknown";
 export type ActorPlaceKind = "home" | "work" | "other" | "unknown";
@@ -49,6 +50,13 @@ export type ActorLocationState = {
   district?: string;
   region?: string;
   country?: string;
+  /** 完整门牌地址（逆地理/客户端上报） */
+  address?: string;
+  /** 街道/乡镇 */
+  township?: string;
+  /** 最近地标/AOI 与距离（米） */
+  poi?: string;
+  poiDistanceMeters?: number;
   /** 定位当时上报的时区（逆地理产物），只作时钟的第三优先源，不覆盖设备时区 */
   timezone?: string;
   observedAt: number;
@@ -350,6 +358,15 @@ export class ActorContextService {
       district: loc.district?.trim() || undefined,
       region: loc.region?.trim() || undefined,
       country: loc.country?.trim() || undefined,
+      // 精确位置（2026-11-14）：客户端若已带上完整地址/地标就存下来；
+      // 没带则由 enrichLocationFromGeocode 用服务端逆地理补齐。
+      address: loc.address?.trim() || undefined,
+      township: loc.township?.trim() || undefined,
+      poi: loc.poi?.trim() || undefined,
+      poiDistanceMeters:
+        typeof loc.poiDistanceMeters === "number" && loc.poiDistanceMeters >= 0
+          ? loc.poiDistanceMeters
+          : undefined,
       timezone: loc.timezone?.trim() || undefined,
       observedAt,
       source,
@@ -387,10 +404,23 @@ export class ActorContextService {
    * 仍留在 clock 块不动——存储层如实记录上报，解析层（resolveClock）拿
    * 修正后的 geo 时区与设备钟做偏移冲突裁决，冲突时信定位。
    */
-  enrichLocationFromGeocode(actorId: string, hit: ReverseGeocodeHit): void {
+  enrichLocationFromGeocode(
+    actorId: string,
+    hit: ReverseGeocodeHit,
+    expected?: { latitude: number; longitude: number },
+  ): void {
     const ctx = this.contexts.get(actorId);
     const loc = ctx?.location;
     if (!ctx || !loc) return;
+    // 位置在逆地理在途期间又更新了：旧 fix 的地址不能写给新坐标（会把 A 点的
+    // 门牌挂到 B 点上）。超过 50m 视为已移动，直接丢弃这次修正。
+    if (expected) {
+      const moved = haversineMeters(
+        { latitude: loc.latitude, longitude: loc.longitude },
+        expected,
+      );
+      if (!Number.isFinite(moved) || moved > 50) return;
+    }
     const at = this.now();
     if (isValidIanaTimezone(hit.timezone) && hit.timezone !== loc.timezone) {
       loc.timezone = hit.timezone;
@@ -400,6 +430,14 @@ export class ActorContextService {
     if (!loc.district?.trim() && hit.district?.trim()) loc.district = hit.district.trim();
     if (!loc.region?.trim() && hit.region?.trim()) loc.region = hit.region.trim();
     if (!loc.country?.trim() && hit.country?.trim()) loc.country = hit.country.trim();
+    // 精确字段用最新逆地理结果覆盖（同一坐标的 fix，门牌/地标以服务端反查为准；
+    // 客户端旧缓存里的地址可能来自更早的 fix）。
+    if (hit.address?.trim()) loc.address = hit.address.trim();
+    if (hit.township?.trim()) loc.township = hit.township.trim();
+    if (hit.poi?.trim()) {
+      loc.poi = hit.poi.trim();
+      if (hit.poiDistanceMeters != null) loc.poiDistanceMeters = hit.poiDistanceMeters;
+    }
     ctx.updatedAt = at;
     this.afterUpdate();
   }

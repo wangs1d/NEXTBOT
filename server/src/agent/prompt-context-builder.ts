@@ -1,10 +1,8 @@
 import type { WorldService } from "@nextbot/agent-world";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
-import {
-  getProfileRouter,
-  recallTagsForTurn,
-} from "../brain/profile-router.js";
+import { SNAPSHOT_CONSTANT_FIELDS } from "../brain/profile-router.js";
+import { recallProfileFieldsSync } from "../brain/profile-semantic-recall.js";
 import { getMemoryComponents } from "../agentic-memory/index.js";
 import { peekMemorySuppressionStore } from "../agentic-memory/memory-suppression.js";
 import { buildEventRecallBlock } from "../agentic-memory/event-auto-recall.js";
@@ -34,6 +32,7 @@ import { getConversationTimelineService } from "../services/conversation-timelin
 import { getTaskPlanStore, taskPlanKey } from "./task-plan-store.js";
 import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
 import { getMemoryManagerService } from "../services/memory-manager-service.js";
+import { stripProfileFactDuplicateLines } from "../services/user-personalization/profile-fact-authority.js";
 import { getGlobalMemoryInventory } from "../brain/memory-inventory.js";
 import type { TurnUnderstanding } from "./task-router.js";
 import type {
@@ -557,6 +556,17 @@ export class PromptContextBuilder {
   }
 
   /**
+   * 待办的权威读取（2026-11-12）：来自 commitments 表，替代已停写的
+   * KV memory_open_loops / memory_commitments 两个槽。
+   * 未接线时保留 KV 槽的旧行为（灰度回退路径）。
+   */
+  private commitmentsProvider: ((actorId: string) => string | null) | null = null;
+
+  setCommitmentsProvider(fn: ((actorId: string) => string | null) | null): void {
+    this.commitmentsProvider = fn;
+  }
+
+  /**
    * 在办目标拉取器（GoalBoard 接线，agent-core 转发注入）。
    *
    * 每轮注入【在办目标】块（仅 active 前 3 条）：让对话面知道「我正在替用户办
@@ -626,6 +636,19 @@ export class PromptContextBuilder {
         memoryKeys,
       );
       fromKv = sliceMemoryEntriesToPromptContext(entries, userText || undefined);
+      // 待办读路径收敛（2026-11-12）：接了 commitments 权威源后，一律以它为准；
+      // KV 两个槽已停写，若还有存量也一律不读（避免旧事借回退路径复活）。
+      if (this.commitmentsProvider) {
+        try {
+          const block = this.commitmentsProvider(input.actorId) ?? undefined;
+          fromKv.memoryOpenLoops = block;
+          fromKv.memoryCommitments = undefined;
+        } catch (err) {
+          console.log(`[PromptContextBuilder] 待办读取失败（忽略）: ${err}`);
+          fromKv.memoryOpenLoops = undefined;
+          fromKv.memoryCommitments = undefined;
+        }
+      }
       const kvCurrentMission = compactPromptBlock(formatKvValueForPrompt(entries["memory_current_mission"]), 240);
       if (kvCurrentMission) {
         fromKv.taskContext = [`current-mission-from-memory: ${kvCurrentMission}`].join("\n");
@@ -675,6 +698,19 @@ export class PromptContextBuilder {
             turnUnderstanding?.scheduleQuery === true,
           ) || undefined
         : undefined;
+    // 静默为空告警（2026-11-12 根修「提醒在对话面失忆」）：任务库里有 active 任务、
+    // 快照却为空，几乎只有一种解释——sessionId 与 actorId 身份不匹配（创建侧与
+    // prompt 侧解析不一致）。此前静默空串零告警，提醒从对话面蒸发无人知晓。
+    if (
+      scheduleSnapshot === undefined &&
+      this.deps.scheduleTaskService != null &&
+      this.deps.scheduleTaskService.listAllTasks().some((t) => t.status === "active")
+    ) {
+      console.warn(
+        `[schedule-snapshot] 快照为空但任务库存在 active 任务（疑似 sessionId/actorId 不匹配）` +
+          `actorId=${input.actorId} sessionIds=[${[...new Set(this.deps.scheduleTaskService.listAllTasks().map((t) => t.sessionId))].slice(0, 5).join(",")}]`,
+      );
+    }
     // 行程状态热层：仅模型判定本轮在问行程/旅行时注入一行回执列表（目的地/日期/planId），
     // 完整明细不进上下文，由 travel.get-itinerary 按需回查（见 travel-prompt-snapshot.ts）
     const travelState =
@@ -978,6 +1014,46 @@ export class PromptContextBuilder {
       ...(this.buildSkillIndexPrompt(userText) ?? {}),
     };
 
+    // 档案字段去重（2026-11-13）：USER_PROFILE.md 的「字段：值」行是
+    // structured_facts 的投影。本轮已注入的档案字段（称呼恒带 + T2/T3 命中）
+    // 在【用户档案·结构化事实】块里已经渲染过一次，画像里的同值行就是同一份
+    // 数据的第二次渲染——实测「王哥」原本在三处出现。
+    //
+    // 判据（收紧过一次）：**只有当结构化块确实渲染了这个字段**才允许剔，
+    // 否则画像行一律保留。结构化块按需注入、字段数超限会被截断，若只看
+    // 「本轮白名单」就删画像行，那个字段会在这轮彻底消失——「称呼」丢过一次。
+    if (promptMemory.userProfileSummary && facts.stableBlock) {
+      try {
+        const stripped = stripProfileFactDuplicateLines(
+          promptMemory.userProfileSummary,
+          facts.stableBlock,
+        );
+        if (stripped.removed > 0) {
+          promptMemory.userProfileSummary = stripped.text.trim() || undefined;
+        }
+        if (stripped.staleRemoved > 0) {
+          // 画像里留着旧值（老王）而权威块是新值（王哥）：剔除陈旧行是对的，
+          // 但值得留痕——投影不同步通常意味着画像没跑过收敛。
+          console.log(
+            `[PromptContextBuilder] 画像档案字段陈旧副本已剔除 ${stripped.staleRemoved} 行` +
+              `（画像投影未同步，需跑一次画像收敛）`,
+          );
+        }
+      } catch (err) {
+        console.log(`[PromptContextBuilder] 画像档案字段去重失败（忽略）: ${err}`);
+      }
+    }
+
+    // 恒带字段保真（2026-11-13）：称呼这类「每轮都要用」的字段，必须在最终
+    // prompt 里至少出现一次。上面的去重已保证「只在另一块确实渲染时才删」，
+    // 这里再加一道断言式检查——万一将来渲染逻辑变了，这里立刻暴露，
+    // 而不是让 Agent 悄悄喊错人（或干脆不称呼）。
+    this.checkResidentProfileFields(
+      promptMemory,
+      facts.injectedValues,
+      facts.stableBlock,
+    );
+
     // 防召回循环：登记本轮实际注入的记忆条目。写入整合链路
     // （memory-consolidation-service）会据此过滤"模型复述注入记忆"产生的
     // 回声候选——注入回上下文的内容不再被提取为新记忆（OpenClaw 2.0 同款结构）。
@@ -1032,20 +1108,31 @@ export class PromptContextBuilder {
 
   /**
    * 结构化事实块：用户档案字段的确定性记录（称呼/职业/居住地/技术栈…）。
-   * 无条件注入（当前档案，非历史召回）。同 P0-1：字节稳定渲染，命中字段走
-   * turnAddressing 动态块沉底，"我是做什么工作的"直达当前值。
+   * 按需注入（2026-11-12 根修，替代恒带全量）：只渲染恒带称呼 + 本轮
+   * query 相关命中字段（T2 字面 / T3 语义，见 brain/profile-semantic-recall.ts）。
+   * 命中字段带 grounded 标记并进 turnAddressing 动态块，"我是做什么工作的"直达当前值。
    */
   private buildUserFactsBlock(
     actorId: string,
     userText: string,
-  ): { stableBlock: string | undefined; matchedFields: string[]; temporalBlock?: string } {
+  ): {
+    stableBlock: string | undefined;
+    matchedFields: string[];
+    temporalBlock?: string;
+    /**
+     * 本轮**已注入**的档案字段当前值（field → value）。
+     * 供画像块剔除同一份数据的副本行——档案字段的权威只有 structured_facts
+     * 一处，USER_PROFILE.md 里同值的行是投影副本，留着就是第二次渲染。
+     */
+    injectedValues: Map<string, string>;
+  } {
     try {
       const store = getMemoryComponents().factStore;
-      if (!store) return { stableBlock: undefined, matchedFields: [] };
-      const matchedFields = store
-        .matchFieldsInText(actorId, userText)
-        .map((f) => f.field.trim())
-        .filter(Boolean);
+      if (!store) return { stableBlock: undefined, matchedFields: [], injectedValues: new Map() };
+      // T2 字面命中（直提信号）：字段名或字段值出现在用户原话里（"咖啡还喝
+      // 拿铁吗"——字段「咖啡」没出现、值「拿铁」出现了也算直提）。
+      const t2Hits = store.matchFactsInText(actorId, userText);
+      const matchedFields = t2Hits.map((f) => f.field.trim()).filter(Boolean);
       // 软抑制（"别再提这个"）：只影响"主不主动提"，不移除内容
       let suppressedFields: Set<string> | undefined;
       try {
@@ -1060,31 +1147,78 @@ export class PromptContextBuilder {
       } catch {
         temporalBlock = undefined;
       }
-      // 画像 v2 动态路由（PROFILE_ROUTER_ENABLED，默认开）：恒带层（身份/沟通/
-      // 禁忌）+ 按本轮意图路由的类——替代全量注入；health 敏感类结构性排除。
-      // Router 未装配/灰度关闭 → categories 为 undefined，走全量渲染（旧行为）。
-      let categories: readonly string[] | undefined;
+      // 按需注入（2026-11-12 根修）：画像不再恒带全量——字段白名单 =
+      // 恒带称呼（每轮回复都要用）+ T2 字面命中 + T3 语义召回（query 相关性，
+      // 预取由 agent-core 在 build 前完成）。未命中零注入，「问 A 带出 B」在
+      // 结构上不可能发生。PROFILE_ROUTER_ENABLED=0 保留灰度回退（全量渲染）。
+      // T2/T3 命中字段同时作为 grounded 标记（「← 本轮提问相关，基于此回答」）
+      // 与 turnAddressing 寻址来源。
+      let fields: ReadonlySet<string> | undefined;
+      const groundedFields = new Set<string>(matchedFields);
       if (process.env.PROFILE_ROUTER_ENABLED !== "0") {
-        try {
-          const router = getProfileRouter();
-          if (router) {
-            // 三级召回时机合并：T0 恒带 + T1 意图路由 + T2 字段命中（直提信号）
-            categories = recallTagsForTurn(router, actorId, userText).categories;
-          }
-        } catch {
-          categories = undefined;
+        const whitelist = new Set<string>(SNAPSHOT_CONSTANT_FIELDS);
+        // T3 语义召回命中 = 本轮提问相关
+        for (const field of recallProfileFieldsSync(actorId, userText)) {
+          if (!field) continue;
+          whitelist.add(field);
+          groundedFields.add(field);
         }
+        for (const field of matchedFields) whitelist.add(field);
+        fields = whitelist;
+      }
+      const stableBlock =
+        store.renderForPrompt(actorId, groundedFields, "user", { suppressedFields, fields }) ??
+        undefined;
+      // 本轮真正进了 prompt 的字段当前值（白名单 ∩ 现存字段）。白名单为空时
+      // renderForPrompt 走全量渲染，此时全部现有字段都算已注入。
+      const injectedValues = new Map<string, string>();
+      for (const f of store.getActiveFacts(actorId, "user")) {
+        if (fields && !fields.has(f.field)) continue;
+        injectedValues.set(f.field, f.value);
       }
       return {
-        stableBlock:
-          store.renderForPrompt(actorId, undefined, "user", { suppressedFields, categories }) ??
-          undefined,
+        stableBlock,
         matchedFields,
+        injectedValues,
         ...(temporalBlock ? { temporalBlock } : {}),
       };
     } catch (err) {
       console.log(`[PromptContextBuilder] 结构化事实块构建失败（忽略）: ${err}`);
-      return { stableBlock: undefined, matchedFields: [] };
+      return { stableBlock: undefined, matchedFields: [], injectedValues: new Map() };
+    }
+  }
+
+  /**
+   * 恒带字段保真检查（2026-11-13）。
+   *
+   * 「称呼」是每轮回复都要用的字段（SNAPSHOT_CONSTANT_FIELDS）。它必须在本轮
+   * prompt 里**至少出现一次**：要么在【用户档案·结构化事实】块里（权威），
+   * 要么在【用户长期画像】正文里（投影）。两者都缺 = 这一轮 Agent 不知道
+   * 该怎么称呼用户——这正是「称呼：王哥 剔掉了」担心的后果。
+   *
+   * 这里只告警不改数据：真出现缺失，说明渲染链路上有别的 bug，应该被看见
+   * 而不是被静默补值掩盖。
+   */
+  private checkResidentProfileFields(
+    promptMemory: { userProfileSummary?: string },
+    injectedValues: ReadonlyMap<string, string>,
+    renderedBlock: string | undefined,
+  ): void {
+    if (injectedValues.size === 0) return;
+    const profileText = typeof promptMemory.userProfileSummary === "string"
+      ? promptMemory.userProfileSummary
+      : "";
+    for (const field of SNAPSHOT_CONSTANT_FIELDS) {
+      const value = injectedValues.get(field);
+      if (!value) continue;
+      const inFacts = !!renderedBlock?.includes(`${field}：${value}`);
+      const inProfile = profileText.includes(`${field}：${value}`);
+      if (!inFacts && !inProfile) {
+        console.warn(
+          `[PromptContextBuilder] 恒带字段「${field}」在本轮 prompt 中缺失` +
+            `（值=${value}；结构化块=${inFacts ? "有" : "无"}，画像=${inProfile ? "有" : "无"}）`,
+        );
+      }
     }
   }
 

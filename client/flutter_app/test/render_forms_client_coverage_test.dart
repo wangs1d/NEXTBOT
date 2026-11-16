@@ -1,3 +1,5 @@
+import "dart:convert";
+
 import "package:flutter/material.dart";
 import "package:flutter_test/flutter_test.dart";
 
@@ -262,7 +264,8 @@ void main() {
     expect(find.byIcon(Icons.open_in_new), findsNothing);
   });
 
-  testWidgets("专用卡 price_compare：分组报价只展示，行不跳平台、无决策页入口", (tester) async {
+  testWidgets("专用卡 price_compare：竖直列表卡已删，回退通用卡且不跳平台、无决策页入口",
+      (tester) async {
     await pumpBody(
       tester,
       "帮你比好了。\n"
@@ -276,7 +279,9 @@ void main() {
           '"footer":"信息为实时抓取，以下单结算页为准","actions":[],"speak":"high","cardId":"card_t9b"}\n'
           "[AGENT_RESULT_CARD_END]",
     );
-    expect(find.text("¥1869"), findsOneWidget);
+    // 竖直列表卡（PriceCompareCard）已于 2026-11-13 删除：无轮播载荷时
+    // price_compare 回退通用卡，价格以 items[] 的整串文本呈现。
+    expect(find.textContaining("¥1869"), findsOneWidget);
     expect(find.textContaining("打开比价决策页"), findsNothing);
     expect(find.byIcon(Icons.chevron_right_rounded), findsNothing);
     expect(find.byIcon(Icons.perm_media_outlined), findsNothing);
@@ -373,5 +378,60 @@ void main() {
     expect(find.byType(MetricEffectCard), findsNothing);
     expect(find.byType(ChipsEffectCard), findsNothing);
     expect(find.textContaining("周六见"), findsOneWidget);
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // card.update 回写标记的展示兜底
+  // ─────────────────────────────────────────────────────────────────
+
+  testWidgets("分泡轮信封无 text 块：card.update 回写的卡片标记不落进气泡正文",
+      (tester) async {
+    final Map<String, dynamic> card = <String, dynamic>{
+      "cardType": "reminder_confirm",
+      "title": "已取消提醒",
+      "items": <dynamic>[
+        <String, dynamic>{"type": "text", "text": "明天 08:00 · 该起床啦！"},
+      ],
+      "footer": "",
+      "actions": <dynamic>[],
+    };
+    // 历史遗留形态：旧版 _applyCardUpdate 曾把卡标记块追加进 text，而分泡轮
+    // 信封只剩卡块（text 块已摘掉），渲染层只能回退读 text——标记 + JSON 曾
+    // 整块漏进气泡。现在源头不再写标记，渲染回退也必须走既有解析器拆块。
+    final ChatMessage msg = ChatMessage(
+      messageId: "m-card-update",
+      sessionId: "s1",
+      role: "assistant",
+      text: "红树林赶海别起太晚，退潮不等人。\n"
+          "[AGENT_RESULT_CARD_START]\n${jsonEncode(card)}\n[AGENT_RESULT_CARD_END]",
+      timestamp: DateTime.now(),
+      envelopeBlocks: <Map<String, dynamic>>[
+        <String, dynamic>{"type": "card", "card": card},
+      ],
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (BuildContext context) => Scaffold(
+            body: SingleChildScrollView(
+              child: buildMessageBody(
+                context,
+                Theme.of(context).colorScheme,
+                msg,
+                isUser: false,
+                excludeCardTypes: const <String>["reminder_confirm"],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(
+      find.textContaining("AGENT_RESULT_CARD", findRichText: true),
+      findsNothing,
+    );
+    expect(find.textContaining("红树林赶海", findRichText: true), findsOneWidget);
+    expect(find.textContaining("cardType", findRichText: true), findsNothing);
   });
 }

@@ -16,7 +16,12 @@ export type ProactiveIntentKind =
   | "monthly_report"   // 月度报告（消费月报等，确定性数据拼接 + 单次 LLM 总结）
   // ── 位置场景（方案 D：位置与主动性联动）──
   | "location_arrival" // 到达常去地点的主动问候（DBSCAN 常去地点 + 冷却控制）
-  | "geofence_event";  // 地理围栏事件触发的主动告知（围栏动作的 speak 面）
+  | "geofence_event"   // 地理围栏事件触发的主动告知（围栏动作的 speak 面）
+  // ── 地点语义转换（方案 E：POI + 停留时间识别家/公司）──
+  | "place_home_arrival"   // 语义上「回家」：问候/顺带轻提待办
+  | "place_home_departure" // 语义上「离家」：问一句安排/天气/路况
+  | "place_work_arrival"   // 语义上「到公司」
+  | "place_new_city";      // 到外地：可给真实数据支撑的游玩建议
 
 /** 主动行为模式：主动性不只表现为"发消息" */
 export type ProactiveBehaviorMode =

@@ -37,7 +37,16 @@ class LinkUtils {
   /// 相对路径 → 服务端绝对 URL（带本机设备凭证）；外部绝对地址原样返回。
   /// （原 agent_result_card 顶层 `_resolveMediaUrl` 语义：不带斜杠的相对
   /// 路径补一根斜杠，否则拼出来的地址无法加载。）
+  ///
+  /// ⚠️ 凭证进 query 只适合**发不出请求头**的消费方（WebView / HTML 标签 /
+  /// 音频播放器）。图片字节（[CachedMediaImage]、`Image.network`）请用
+  /// [resolveMediaUrlForHeaders]。
   static String resolveMediaUrl(String url) => MediaUrl.resolve(url);
+
+  /// 图片字节消费方出口（2026-11-12）：补全地址但不掺 `?token=`，
+  /// 鉴权交给请求头。避免 token 续期后磁盘缓存键整体漂移导致图片重下。
+  static String resolveMediaUrlForHeaders(String url) =>
+      MediaUrl.resolveForHeaders(url);
 
   /// URL → 简短可读标签：取域名并去掉 www，不展示路径与协议。
   static String shortLabel(String url) {

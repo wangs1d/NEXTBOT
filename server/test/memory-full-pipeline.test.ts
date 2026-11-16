@@ -346,7 +346,7 @@ describe("记忆模块全流程", () => {
 
       // 不强制要求全部成功（LLM 调用可能失败），但结构应对
       assert.ok(typeof result.consolidated === "boolean", "应返回 consolidated 布尔值");
-      assert.ok(typeof result.synced === "boolean", "应返回 synced 布尔值");
+      assert.ok(typeof result.archived === "boolean", "应返回 archived 布尔值");
     });
   });
 

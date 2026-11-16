@@ -303,6 +303,14 @@ export const ServerEventType = {
   SharedBrowserInvoke: "shared.browser.invoke",
   /** 共用浏览器桥在线状态同步（随 session.init 绑定后下发） */
   SharedBrowserSync: "shared.browser.sync",
+  /**
+   * Agent 浏览器工作预览帧（2026-11-12）：agent_browser 在服务端无头浏览器里
+   * 每执行一步（open/click/type/scroll/wait_for/screenshot）后，把当前页面
+   * 截图（JPEG base64）推给发起聊天的连接。手机端悬浮窗据此实时展示
+   * 「Agent 正在控制浏览器工作」的画面。
+   * payload: { sessionId, action, url, imageBase64, mode }
+   */
+  AgentBrowserPreview: "agent.browser.preview",
   /** 发往手机端：消息捕捉批量上报已落库（payload.batchId + accepted/duplicate 计数），手机端凭此出队 */
   PhoneMsgReportAck: "phone.msg.report_ack",
   /** 球形 Agent 权威视觉状态（mood/energy/caption/委派 phase） */
@@ -605,6 +613,12 @@ export type RhythmProfileUpdatedPayload = {
 export type ChatTurnStartedPayload = {
   sessionId: string;
   traceId: string;
+  /**
+   * 本轮归属线程键（2026-11-12 P1 多会话并发）：主会话 = actorId，
+   * 旁聊等结构化线程 = `side:<actor>:<id>` 等。客户端按它把事件落回
+   * 正确的线程桶；缺省时客户端退回当前激活线程（旧服务端兼容）。
+   */
+  threadId?: string;
   t0: number;
 };
 
@@ -648,6 +662,8 @@ export type ChatSubAgentPlan = {
 export type ChatIntentDetectedPayload = {
   sessionId: string;
   traceId: string;
+  /** 本轮归属线程键（同 ChatTurnStartedPayload.threadId，2026-11-12 P1）。 */
+  threadId?: string;
   mode: ChatIntentMode;
   reasons: string[];
   plan?: ChatPlanStep[];
@@ -669,6 +685,8 @@ export type ChatExecutionKind =
 export type ChatExecutionEventPayload = {
   sessionId: string;
   traceId: string;
+  /** 本轮归属线程键（同 ChatTurnStartedPayload.threadId，2026-11-12 P1）。 */
+  threadId?: string;
   /** 事件唯一 id（同 traceId 内单调递增，便于客户端去重 / 排序） */
   eventId: string;
   kind: ChatExecutionKind;

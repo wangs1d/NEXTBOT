@@ -50,6 +50,16 @@ class MediaThumbnail extends StatelessWidget {
       child: Icon(errorIcon, color: cs.onSurfaceVariant),
     );
 
+    // 解码宽度按「显示宽 × 屏幕密度」封顶（2026-11-12）：不设时 Flutter 按
+    // 原图尺寸解码，一张 2048px 的生成图塞进 120px 缩略图要吃掉十几 MB 内存，
+    // 一屏几张就会明显卡顿/掉帧。
+    // width 可能是 double.infinity（铺满父级）——此时算不出目标像素，交给
+    // 布局后的尺寸，绝不能拿 Infinity 去 round（会直接抛异常）。
+    final double dpr = MediaQuery.devicePixelRatioOf(context);
+    final double? w = width;
+    final int? cacheWidth =
+        (w == null || !w.isFinite) ? null : (w * dpr).round().clamp(64, 4096);
+
     return ClipRRect(
       borderRadius: BorderRadius.circular(borderRadius),
       child: SizedBox(
@@ -62,6 +72,7 @@ class MediaThumbnail extends StatelessWidget {
           fit: fit,
           width: width,
           height: height,
+          cacheWidth: cacheWidth,
           loadingBuilder: (BuildContext context) => loadingBox,
           errorBuilder:
               (BuildContext context, Object error, StackTrace? stackTrace) {

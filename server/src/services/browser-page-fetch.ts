@@ -1,3 +1,5 @@
+import type { Page } from "playwright";
+
 import type { ImportedBrowserCookie } from "./browser-session-types.js";
 
 export type BrowserPageFetchResult = {
@@ -10,6 +12,15 @@ export type BrowserPageFetchResult = {
   error?: string;
 };
 
+export type BrowserPageFetchOptions = {
+  waitMs?: number;
+  /**
+   * 页面已导航完成时的钩子（2026-11-14）：调用方可在这里挂预览推流等旁路能力。
+   * 返回的清理函数在页面关闭前调用。
+   */
+  onPage?: (page: Page) => void | (() => void);
+};
+
 const PRICE_PATTERNS = [
   /¥\s*[\d,]+(?:\.\d{1,2})?/g,
   /[\d,]{2,}(?:\.\d{1,2})?\s*元/g,
@@ -20,11 +31,11 @@ const PRICE_PATTERNS = [
 export async function fetchPageWithCookies(
   url: string,
   cookies: ImportedBrowserCookie[],
-  opts?: { waitMs?: number },
+  opts?: BrowserPageFetchOptions,
 ): Promise<BrowserPageFetchResult> {
   const playwright = await tryLoadPlaywright();
   if (playwright) {
-    return playwrightFetch(url, cookies, opts?.waitMs ?? 12_000);
+    return playwrightFetch(url, cookies, opts?.waitMs ?? 12_000, opts?.onPage);
   }
   return fetchWithCookieHeader(url, cookies);
 }
@@ -41,6 +52,7 @@ async function playwrightFetch(
   url: string,
   cookies: ImportedBrowserCookie[],
   waitMs: number,
+  onPage?: (page: Page) => void | (() => void),
 ): Promise<BrowserPageFetchResult> {
   const { chromium } = await import("playwright");
   const browser = await chromium.launch({
@@ -56,19 +68,25 @@ async function playwrightFetch(
     await context.addCookies(playwrightCookies(url, cookies));
     const page = await context.newPage();
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: waitMs });
-    await page.waitForTimeout(Math.min(4_000, waitMs / 3));
-    const title = (await page.title()) || "";
-    const text = await page.evaluate(() => document.body?.innerText ?? "");
-    const textPreview = text.replace(/\s+/g, " ").trim().slice(0, 8_000);
-    await context.close();
-    return {
-      ok: true,
-      url,
-      title,
-      textPreview,
-      priceHints: extractPriceHints(textPreview),
-      engine: "playwright",
-    };
+    // 页面已落定：挂上旁路（推流等），清理函数在关页前调用。
+    const cleanup = onPage?.(page);
+    try {
+      await page.waitForTimeout(Math.min(4_000, waitMs / 3));
+      const title = (await page.title()) || "";
+      const text = await page.evaluate(() => document.body?.innerText ?? "");
+      const textPreview = text.replace(/\s+/g, " ").trim().slice(0, 8_000);
+      return {
+        ok: true,
+        url,
+        title,
+        textPreview,
+        priceHints: extractPriceHints(textPreview),
+        engine: "playwright",
+      };
+    } finally {
+      cleanup?.();
+      await context.close();
+    }
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     return {

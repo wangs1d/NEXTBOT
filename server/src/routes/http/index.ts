@@ -61,6 +61,7 @@ import { registerProfileManageRoutes } from "./profile-manage.js";
 import { registerHealthRhythmRoutes } from "./health-rhythm.js";
 import { registerUserAvatarRoutes } from "./user-avatar.js";
 import { registerPaymentGuardrailRoutes } from "./payment-guardrails.js";
+import { registerUnifiedPaymentRoutes } from "./payment-unified.js";
 import { registerWebpayRoutes } from "./webpay.js";
 import { registerRechargeRoutes } from "./recharge.js";
 import { registerV1GatewayRoutes } from "./v1-gateway.js";
@@ -83,8 +84,10 @@ import { registerLibraryRoutes } from "./library.js";
 import { registerDeviceRoutes } from "./device.js";
 import { registerAuthRoutes } from "./auth.js";
 import { registerApprovalRoutes } from "./approvals.js";
+import { registerActionIntentRoutes } from "./action-intents.js";
 import { registerInboxRoutes } from "./inbox.js";
 import { registerAttentionRoutes } from "./attention.js";
+import { registerDynamicsRoutes } from "./dynamics.js";
 import { registerVoiceMessageRoutes } from "./voice-messages.js";
 import { registerImageFileRoutes } from "./image-files.js";
 import { registerPictureRoutes } from "./picture.js";
@@ -315,6 +318,10 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerAutonomyRoutes(app, {
     autonomySettings: deps.autonomySettings ?? null,
   });
+  // 动作意图路由（2026-11-13「通知即界面」）：通知栏按钮的执行入口
+  if (deps.actionIntentService) {
+    registerActionIntentRoutes(app, { actionIntentService: deps.actionIntentService });
+  }
   // 能力就绪状态（渐进式解锁卡片）+ 记忆管理 + 支付护栏/回执（自包含，无 deps）
   registerCapabilityReadinessRoutes(app);
   // 云端无头浏览器自检（手机端比价/下单/预订的唯一执行通道，部署终验用）
@@ -330,6 +337,8 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   // 声纹注册/验证（首启向导 + 语音对话说话人闸；引擎本地 ONNX，缺失时优雅降级）
   registerVoiceprintRoutes(app);
   registerPaymentGuardrailRoutes(app);
+  // 统一支付模块（授权页 / 收银台页 / 意图与授权 API；服务未装配时端点自报 503）
+  registerUnifiedPaymentRoutes(app);
   // AI 网页应用收款（自包含页面 + /api/webpay/*；未配置时端点 503，不影响其他路由）
   registerWebpayRoutes(app);
   // 官网 API 充值（邮箱 OTP 会话 + 金额计入登录账号；支付仍走上面同一套 webpay）
@@ -433,6 +442,13 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
       activityStore: deps.agentActivityStore ?? null,
     });
   }
+  // 「动态」tab 聚合路由（手机端统一入口页；各数据源可选，缺哪个区块为空）
+  registerDynamicsRoutes(app, {
+    billParcelLedger: deps.billParcelLedger ?? null,
+    attentionStore: deps.attentionStore ?? null,
+    activityStore: deps.agentActivityStore,
+    sourceStore: deps.sourceStore ?? null,
+  });
   // Brain Center 路由（brainCenter 为 null 时端点返回 503 not enabled）
   registerBrainRoutes(app, deps);
   // Body Center 路由（bodyCenter 为 null 时端点返回 503 not enabled）

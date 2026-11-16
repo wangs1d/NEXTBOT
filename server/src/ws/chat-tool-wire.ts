@@ -41,6 +41,12 @@ import { renderToolStatusLine } from "./tool-status-template.js";
 export type ChatToolWireContext = {
   sessionId: string;
   traceId: string;
+  /**
+   * 本轮归属线程键（2026-11-12 P1 多会话并发）：主会话 = actorId，
+   * 旁聊 = `side:<actor>:<id>`。透传进 tool.call / tool.result /
+   * agent_status / execution_event 载荷，客户端按它落回正确线程。
+   */
+  threadId?: string;
   assistantMessageId: string;
   send: (json: string) => void;
   /**
@@ -86,6 +92,7 @@ function sendExecutionEvent(
       payload: buildExecutionEventPayload({
         sessionId: ctx.sessionId,
         traceId: ctx.traceId,
+        ...(ctx.threadId ? { threadId: ctx.threadId } : {}),
         eventId: nextExecutionEventId(),
         kind,
         ...body,
@@ -136,6 +143,7 @@ function sendAgentStatus(ctx: ChatToolWireContext, status: DelegateStatusPayload
         sessionId: ctx.sessionId,
         messageId: ctx.assistantMessageId,
         traceId: ctx.traceId,
+        ...(ctx.threadId ? { threadId: ctx.threadId } : {}),
         phase: status.phase,
         line: displayLine,
         toolName: status.toolName,
@@ -168,6 +176,7 @@ export function wireToolExecuteStart(ctx: ChatToolWireContext, info: ToolExecute
         toolName: info.toolName,
         input: info.input,
         traceId: ctx.traceId,
+        ...(ctx.threadId ? { threadId: ctx.threadId } : {}),
         assistantPreamble: info.assistantPreamble,
         ...(userStatusLine ? { userStatusLine } : {}),
       },
@@ -243,6 +252,7 @@ export function wireToolExecuted(ctx: ChatToolWireContext, info: ToolExecutedInf
         ok: info.ok,
         result: info.result,
         traceId: ctx.traceId,
+        ...(ctx.threadId ? { threadId: ctx.threadId } : {}),
       },
     }),
   );

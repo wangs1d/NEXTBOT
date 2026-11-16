@@ -169,6 +169,11 @@ export type HttpRouteDeps = {
   /** 移动端推送通道（离线必达升级）；可选，未注入时推送注册路由禁用 */
   proactivePushService?: import("../../proactivity/mobile-push-service.js").MobilePushService | null;
   /**
+   * 动作意图服务（2026-11-13「通知即界面」）：通知栏按钮的唯一真相源与执行入口。
+   * 可选，未注入时通知栏动作路由不挂载。
+   */
+  actionIntentService?: import("../../proactivity/action-intent-service.js").ActionIntentService | null;
+  /**
    * 五层主动性架构观测（传感健康/仲裁预览/目标板/链路自检）；可选，
    * 未注入时 /sensors 与 /selftest 端点不可用。
    */
@@ -177,6 +182,10 @@ export type HttpRouteDeps = {
   autonomySettings?: import("../../services/autonomy-settings-store.js").AutonomySettingsStore | null;
   /** 助手动态台账（右侧面板「助手动态」卡数据源） */
   agentActivityStore: import("../../proactivity/activity-store.js").AgentActivityStore;
+  /** 账单/快递汇总台账（「动态」tab bills/parcels 区块数据源；未注入时区块为空） */
+  billParcelLedger?: import("../../services/bill-parcel-ledger.js").BillParcelLedger | null;
+  /** 跨源统一采集库（「动态」tab mail 要事区块数据源；未注入时区块为空） */
+  sourceStore?: import("../../proactivity/source-store.js").SourceStore | null;
   /** 行为审计时间线（GET /agent/audit-timeline；可选，未注入时该端点 503） */
   auditTrailService?: import("../../proactivity/audit-timeline.js").AuditTrailService | null;
   /** 目标板（主页「盯着」小节数据源：track 类目标；未注入时该小节为空） */

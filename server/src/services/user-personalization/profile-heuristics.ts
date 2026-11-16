@@ -59,7 +59,7 @@ export function extractProfilePatches(userText: string): ProfilePatch[] {
   if (CONCISE_REPLY_PREF_RE.test(t)) {
     patches.push({
       replyPreference:
-        "默认短句、口语化、少解释，像熟人回话；不要客服腔、标题党、表格感和长篇总结。",
+        "默认短句、口语化、少解释，像熟人回话；不要客服腔、标题党、表格感和长篇总结。用户明确要表格/清单/长文时按用户要求来。",
     });
   }
 

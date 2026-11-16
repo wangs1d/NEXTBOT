@@ -8,8 +8,10 @@ import test from "node:test";
 
 import {
   ScheduleIntentService,
+  hasStatedTimeAnchor,
   parseScheduleTimeFromPrompt,
 } from "../src/services/schedule-intent-service.js";
+import type { ExternalChatProvider } from "../src/external-model/types.js";
 
 /** 固定时钟：北京时间 2026-10-13 18:00（周二，UTC 10:00）。 */
 const AT_18 = new Date("2026-10-13T10:00:00.000Z");
@@ -128,4 +130,41 @@ test("日常习惯类（吃药）仍走重复确认，不擅自定终身", async
   if (!parsed.matched && "needsRecurrenceConfirm" in parsed) {
     assert.equal(parsed.needsRecurrenceConfirm, true);
   }
+});
+
+test("只说「设置一个闹钟」不落库：无时间锚时不调解析模型，更不采用它编的时刻", async () => {
+  let parseModelCalls = 0;
+  const fake = {
+    isEnabled: () => true,
+    streamCompletion: async () => {
+      parseModelCalls += 1;
+      // 复刻 2026-11-15 事故：解析模型把「设置一个闹钟」补成明早 08:00 起床。
+      return JSON.stringify({
+        ok: true,
+        task: {
+          description: "设置一个闹钟",
+          kind: "reminder",
+          runAt: "2026-10-14T00:00:00.000Z",
+          recurrence: "none",
+          shortTitle: "起床",
+          reminderMessage: "该起床啦！",
+        },
+      });
+    },
+  } as unknown as ExternalChatProvider;
+  const service = new ScheduleIntentService(fake);
+  const parsed = await service.parseForCreate("test-session", "设置一个闹钟", {
+    userTimezone: "Asia/Shanghai",
+    now: AT_18,
+  });
+  assert.equal(parsed.matched, false, "用户没说时间 → 不得创建");
+  assert.equal(parseModelCalls, 0, "没有时间锚就不该给解析模型编时间的机会");
+  assert.match(
+    "hint" in parsed ? parsed.hint : "",
+    /问清几点/,
+    "回执应要求先问清具体时间",
+  );
+  assert.equal(hasStatedTimeAnchor("设置一个闹钟"), false);
+  assert.equal(hasStatedTimeAnchor("提醒我交周报"), false);
+  assert.equal(hasStatedTimeAnchor("十分钟后提醒我交周报"), true);
 });

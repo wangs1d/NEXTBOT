@@ -61,6 +61,7 @@ Widget _wrap(
   List<Map<String, dynamic>> tasks, {
   VoidCallback? onGoToChat,
   GlobalKey<MobileSchedulePageState>? key,
+  DateTime Function()? now,
 }) {
   return MaterialApp(
     home: MobileSchedulePage(
@@ -71,6 +72,7 @@ Widget _wrap(
       ),
       sessionId: "test-actor",
       onGoToChat: onGoToChat,
+      now: now,
     ),
   );
 }
@@ -176,19 +178,22 @@ void main() {
   });
 
   testWidgets("「下一件」徽标:只标今天最近一条未完成,带倒计时", (WidgetTester tester) async {
-    final DateTime now = DateTime.now();
-    final DateTime t1 = now.add(const Duration(hours: 2));
-    final DateTime t2 = now.add(const Duration(hours: 4));
-    await tester.pumpWidget(_wrap(<Map<String, dynamic>>[
-      _task("t1", "项目评审会", t1),
-      _task("t2", "健身", t2),
-    ]));
+    // 固定时钟：本页「今天/下一件/倒计时」都相对 now 算，用真实时钟 +
+    // now+4h 在 20 点后会跨到次日（今天只剩 1 条），断言随运行时刻红绿不定。
+    final DateTime now = DateTime(2026, 5, 20, 10, 0);
+    await tester.pumpWidget(_wrap(
+      <Map<String, dynamic>>[
+        _task("t1", "项目评审会", DateTime(2026, 5, 20, 12, 0)),
+        _task("t2", "健身", DateTime(2026, 5, 20, 14, 0)),
+      ],
+      now: () => now,
+    ));
     await tester.pumpAndSettle();
 
     expect(find.text("下一件"), findsOneWidget);
     expect(find.textContaining("小时"), findsWidgets);
     expect(find.text("2 件安排"), findsOneWidget);
-  }, skip: DateTime.now().hour >= 22);
+  });
 
   testWidgets("已完成条目灰化带对勾,取消的整条滤掉", (WidgetTester tester) async {
     final DateTime now = DateTime.now();

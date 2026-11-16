@@ -1,10 +1,14 @@
 /**
- * 使用 Open-Meteo 免费接口（无需 API Key）：预报 + 地理编码。
+ * 天气取数（2026-11-14 起分层）：
+ *   - 国内坐标：高德天气（中国气象局数据，实况 + 4 日预报）为主，逐小时降水概率/时区
+ *     由 Open-Meteo 补；高德未配置/超时/海外坐标时整条链路回落 Open-Meteo。
+ *   - 高德实况与手机自带天气同源，避免「手机报晴、这边报雾」「最高温差 2–3°C」。
  * @see https://open-meteo.com/
+ * @see https://lbs.amap.com/api/webservice/guide/api/weatherinfo
  */
 
 export type WeatherBrief = {
-  source: "open-meteo";
+  source: "open-meteo" | "amap";
   latitude: number;
   longitude: number;
   /** 实际生效的时区：请求传 auto 时为接口按坐标推导出的 IANA 时区 */
@@ -102,6 +106,99 @@ const WMO_TEXT: Record<number, string> = {
 
 function wmoText(code: number): string {
   return WMO_TEXT[code] ?? `天气码 ${code}`;
+}
+
+/** 高德天气（国内官方源）的实况字段 */
+type AmapLiveWeather = {
+  weather?: string;
+  temperature?: string;
+  humidity?: string;
+  windpower?: string;
+  reporttime?: string;
+};
+
+/** 高德逐日预报字段（day/night 拆分，气温是字符串） */
+type AmapCastWeather = {
+  date?: string;
+  dayweather?: string;
+  nightweather?: string;
+  daytemp?: string;
+  nighttemp?: string;
+  daytemp_float?: string;
+  nighttemp_float?: string;
+};
+
+type AmapWeatherPayload = {
+  status?: string;
+  lives?: AmapLiveWeather[];
+  forecasts?: Array<{ casts?: AmapCastWeather[] }>;
+};
+
+/**
+ * 高德天气文本 → WMO 天气码（只用于穿衣/预警等既有逻辑，不让下游认中文）。
+ * 顺序即优先级：雷 > 暴雨 > 中雨 > 冻雨/雨夹雪 > 大雪 > 中雪 > 小雪/阵雪 >
+ * 阵雨 > 雨 > 雪 > 雾霾沙尘 > 阴 > 多云 > 晴。
+ */
+const AMAP_TEXT_CODE_RULES: ReadonlyArray<{ re: RegExp; code: number }> = [
+  { re: /雷/, code: 95 },
+  { re: /暴雨|大雨/, code: 65 },
+  { re: /中雨/, code: 63 },
+  { re: /冻雨|雨夹雪/, code: 66 },
+  { re: /暴雪|大雪/, code: 75 },
+  { re: /中雪/, code: 73 },
+  { re: /阵雪|小雪/, code: 71 },
+  { re: /阵雨/, code: 81 },
+  { re: /雨/, code: 61 },
+  { re: /雪/, code: 71 },
+  { re: /雾|霾|浮尘|扬沙|沙尘/, code: 45 },
+  { re: /阴/, code: 3 },
+  { re: /多云/, code: 2 },
+  { re: /晴/, code: 0 },
+];
+
+function amapTextToWeatherCode(...texts: Array<string | undefined>): number | null {
+  const joined = texts
+    .map((t) => (t ?? "").trim())
+    .filter(Boolean)
+    .join(" ");
+  if (!joined) return null;
+  for (const rule of AMAP_TEXT_CODE_RULES) {
+    if (rule.re.test(joined)) return rule.code;
+  }
+  return null;
+}
+
+/** 「多云」+「小雨」→「多云转小雨」；相同或缺失时退化成单个现象 */
+function combineAmapWeatherText(day?: string, night?: string): string {
+  const d = (day ?? "").trim();
+  const n = (night ?? "").trim();
+  if (!d) return n;
+  if (!n || n === d) return d;
+  return `${d}转${n}`;
+}
+
+/** 高德返回值里空字段常是 [] 或对象，统一取字符串 */
+function pickAmapString(value: unknown): string {
+  let v = value;
+  if (Array.isArray(v)) v = v[0];
+  if (v == null || typeof v === "object") return "";
+  return String(v).trim();
+}
+
+function amapNumber(...values: Array<string | undefined>): number | null {
+  for (const value of values) {
+    const text = (value ?? "").trim();
+    // 空串不能当 0：高德缺字段时返回 "" / []，Number("") === 0 会把「没数据」写成 0°C
+    if (!text) continue;
+    const n = Number(text);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
+
+/** 高德天气只覆盖国内；海外坐标直接走 Open-Meteo */
+function isInsideChinaBounds(latitude: number, longitude: number): boolean {
+  return longitude >= 72.004 && longitude <= 137.8347 && latitude >= 0.8293 && latitude <= 55.8271;
 }
 
 /** 降水集中时段：雨最集中的钟点段，只有整天概率时用户无法决定几点出门 */
@@ -282,8 +379,59 @@ type GeocodeHit = {
 };
 
 export async function geocodeCity(name: string): Promise<GeocodeHit | null> {
+  const trimmed = name.trim();
+  if (!trimmed) return null;
+
+  // 1) 高德 Web 服务优先（2026-11-13）：Open-Meteo 地理编码的中文检索不可靠——
+  //    裸词「北海」首命中马来西亚槟城同名镇、「兴义市」直接查空；且 geocoding-api
+  //    域名国内网络不稳（实测 fetch failed）。高德对中文城市名一次命中，且 key 已配
+  //    （AMAP_WEB_KEY，与 geo-tools 同源）。坐标为 GCJ-02，城市级天气对几百米偏差
+  //    不敏感，不再做 WGS-84 换算。
+  const amapKey = (process.env.AMAP_WEB_KEY ?? "").trim();
+  if (amapKey) {
+    try {
+      const url = `https://restapi.amap.com/v3/geocode/geo?key=${encodeURIComponent(
+        amapKey,
+      )}&address=${encodeURIComponent(trimmed)}`;
+      const res = await fetch(url, {
+        headers: { Accept: "application/json" },
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as {
+          status?: string;
+          geocodes?: Array<{
+            formatted_address?: string;
+            country?: string;
+            province?: string | string[];
+            city?: string | string[];
+            location?: string;
+          }>;
+        };
+        const hit = data.status === "1" ? data.geocodes?.[0] : undefined;
+        const [lng, lat] = (hit?.location ?? "").split(",").map(Number);
+        if (Number.isFinite(lat) && Number.isFinite(lng)) {
+          const pick = (v: string | string[] | undefined): string =>
+            Array.isArray(v) ? (v[0] ?? "") : (v ?? "");
+          const province = pick(hit?.province);
+          const city = pick(hit?.city) || province;
+          return {
+            name: city || hit?.formatted_address || trimmed,
+            latitude: lat,
+            longitude: lng,
+            country: hit?.country,
+            admin1: province,
+          };
+        }
+      }
+    } catch {
+      // 高德失败（网络/超时/额度）→ 继续走 Open-Meteo 兜底，不直接判死。
+    }
+  }
+
+  // 2) Open-Meteo 兜底（未配置 AMAP_WEB_KEY 或高德失败时仍可用）
   const url = `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(
-    name.trim(),
+    trimmed,
   )}&count=1&language=zh&format=json`;
   const res = await fetch(url, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(15_000) });
   if (!res.ok) return null;
@@ -305,6 +453,79 @@ export class WeatherService {
     const n = Number.parseInt(process.env.WEATHER_CACHE_TTL_MS ?? "", 10);
     return Number.isFinite(n) && n >= 0 ? n : 300_000;
   })();
+
+  /** 坐标 → 高德行政区编码（adcode）缓存：同一位置 30 分钟内不必反复逆地理 */
+  private readonly amapAdcodeCache = new Map<string, { at: number; adcode: string }>();
+
+  private async resolveAmapAdcode(latitude: number, longitude: number): Promise<string | null> {
+    const key = (process.env.AMAP_WEB_KEY ?? "").trim();
+    if (!key) return null;
+    const cacheKey = `${latitude.toFixed(3)},${longitude.toFixed(3)}`;
+    const cached = this.amapAdcodeCache.get(cacheKey);
+    if (cached && Date.now() - cached.at <= 30 * 60_000) return cached.adcode;
+
+    const url = `https://restapi.amap.com/v3/geocode/regeo?key=${encodeURIComponent(
+      key,
+    )}&location=${longitude},${latitude}&extensions=base`;
+    const res = await fetch(url, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(8_000),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      status?: string;
+      regeocode?: { addressComponent?: { adcode?: string | string[] } };
+    };
+    const adcode = pickAmapString(data.regeocode?.addressComponent?.adcode);
+    if (data.status !== "1" || !adcode) return null;
+
+    if (this.amapAdcodeCache.size >= 256) {
+      const oldest = this.amapAdcodeCache.keys().next().value as string | undefined;
+      if (oldest !== undefined) this.amapAdcodeCache.delete(oldest);
+    }
+    this.amapAdcodeCache.set(cacheKey, { at: Date.now(), adcode });
+    return adcode;
+  }
+
+  /**
+   * 高德天气：实况（extensions=base）+ 4 日预报（extensions=all）并行取。
+   * 任何一步失败都返回 null，由调用方回落 Open-Meteo（不用残缺数据拼天气）。
+   */
+  private async fetchAmapWeather(
+    latitude: number,
+    longitude: number,
+    options: { withLive?: boolean } = {},
+  ): Promise<{ live?: AmapLiveWeather; casts: AmapCastWeather[] } | null> {
+    const key = (process.env.AMAP_WEB_KEY ?? "").trim();
+    if (!key || !isInsideChinaBounds(latitude, longitude)) return null;
+
+    const adcode = await this.resolveAmapAdcode(latitude, longitude);
+    if (!adcode) return null;
+
+    const base = `https://restapi.amap.com/v3/weather/weatherInfo?key=${encodeURIComponent(
+      key,
+    )}&city=${encodeURIComponent(adcode)}`;
+    const requestInit: RequestInit = {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(8_000),
+    };
+    // 只需要逐日预报的场景（行程规划）不额外拉实况，省一次上游请求
+    const livePromise =
+      options.withLive === false
+        ? Promise.resolve(null)
+        : fetch(`${base}&extensions=base`, requestInit);
+    const [liveRes, allRes] = await Promise.all([
+      livePromise,
+      fetch(`${base}&extensions=all`, requestInit),
+    ]);
+    const liveData = liveRes?.ok ? ((await liveRes.json()) as AmapWeatherPayload) : null;
+    const allData = allRes.ok ? ((await allRes.json()) as AmapWeatherPayload) : null;
+
+    const live = liveData?.status === "1" ? liveData.lives?.[0] : undefined;
+    const casts = allData?.status === "1" ? (allData.forecasts?.[0]?.casts ?? []) : [];
+    if (!live && casts.length === 0) return null;
+    return { ...(live ? { live } : {}), casts };
+  }
 
   async getBrief(
     latitude: number,
@@ -340,6 +561,8 @@ export class WeatherService {
       forecast_days: String(forecastDays),
     });
     const url = `https://api.open-meteo.com/v1/forecast?${params.toString()}`;
+    // 高德与 Open-Meteo 并行：高德只做增强，失败/超时不拖慢也不阻断主链路。
+    const amapPromise = this.fetchAmapWeather(latitude, longitude).catch(() => null);
     const res = await fetch(url, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(15_000) });
     if (!res.ok) {
       throw new Error(`天气接口错误: ${res.status}`);
@@ -372,8 +595,8 @@ time?: (string | null)[];
 
     const cur = raw.current ?? {};
     const code = Number(cur.weather_code ?? 0);
-    const tMax = Number(raw.daily?.temperature_2m_max?.[0] ?? cur.temperature_2m ?? 0);
-    const tMin = Number(raw.daily?.temperature_2m_min?.[0] ?? cur.temperature_2m ?? 0);
+    let tMax = Number(raw.daily?.temperature_2m_max?.[0] ?? cur.temperature_2m ?? 0);
+    let tMin = Number(raw.daily?.temperature_2m_min?.[0] ?? cur.temperature_2m ?? 0);
     // 降水概率与时段都只取「今天」那一天：跨天取 max 会把后天的雨报成今天有雨。
     const todayKey = raw.daily?.time?.[0];
     const tomorrowKey = raw.daily?.time?.[1];
@@ -409,39 +632,29 @@ time?: (string | null)[];
       probsByHour: todayProbsByHour,
       nowHourOfDay: todayKey === localNowDateKey ? localNow.getUTCHours() : null,
     });
-    const currentTempC = Number(cur.temperature_2m ?? 0);
     const hourlyForecast = buildHourlyForecast(raw.hourly, utcOffsetSeconds);
-    const brief: WeatherBrief = {
-      source: "open-meteo",
-      latitude,
-      longitude,
-      timezone: resolvedTimezone,
-      // 逆地理失败时不放坐标兜底（2026-10-08 用户要求）：坐标对用户无意义还暴露隐私，
-      // 没有城市名就让 summary/卡片标题直接以天气开头，不带位置前缀。
-      locationLabel: locationLabel ?? "",
-      currentTempC,
-      apparentTempC: Number(cur.apparent_temperature ?? currentTempC),
-      humidityPct: Number(cur.relative_humidity_2m ?? 0),
-      windKmh: Number(cur.wind_speed_10m ?? 0),
-      precipitationMm: Number(cur.precipitation ?? 0),
-      weatherCode: code,
-      weatherText: wmoText(code),
-      todayMinC: tMin,
-      todayMaxC: tMax,
-      peakRainPct,
-      ...(rainWindow ? { rainWindow } : {}),
-      clothingAdvice: buildClothingAdvice({
-        currentTempC,
-        todayMinC: tMin,
-        todayMaxC: tMax,
-        peakRainPct,
-        weatherCode: code,
-        windKmh: Number(cur.wind_speed_10m ?? 0),
-        ...(rainWindow ? { rainWindow } : {}),
-      }),
-      hourlyForecast,
-      summaryLine: "",
-    };
+
+    // ── 高德（国内官方源）覆盖：实况现象/实况气温/今日气温/逐日预报 ──
+    // 逐小时降水概率、体感、风速仍用 Open-Meteo（高德不提供这些颗粒度）；
+    // 高德为空/失败时逐项保持 Open-Meteo，不拼残缺数据。
+    const amap = await amapPromise;
+    const amapLive = amap?.live;
+    const amapCasts = amap?.casts ?? [];
+    const amapLiveText = (amapLive?.weather ?? "").trim();
+    const amapLiveTemp = amapNumber(amapLive?.temperature);
+    const amapLiveHumidity = amapNumber(amapLive?.humidity);
+    const amapTodayCast =
+      amapCasts.find((c) => (c.date ?? "").trim() === (todayKey ?? "")) ?? amapCasts[0];
+    const amapTodayMax = amapNumber(amapTodayCast?.daytemp_float, amapTodayCast?.daytemp);
+    const amapTodayMin = amapNumber(amapTodayCast?.nighttemp_float, amapTodayCast?.nighttemp);
+    const usingAmap = Boolean(amapLiveText || amapCasts.length > 0);
+    if (amapTodayMax != null) tMax = amapTodayMax;
+    if (amapTodayMin != null) tMin = amapTodayMin;
+
+    const currentTempC = amapLiveTemp ?? Number(cur.temperature_2m ?? 0);
+    const humidityPct = amapLiveHumidity ?? Number(cur.relative_humidity_2m ?? 0);
+    const weatherCode = amapLiveText ? (amapTextToWeatherCode(amapLiveText) ?? code) : code;
+    const weatherText = amapLiveText || wmoText(code);
 
     // 多日逐日预报（index 0 = 今天；days>1 时 daily[1] 即明天）
     const dailyDates = raw.daily?.time ?? [];
@@ -461,6 +674,75 @@ time?: (string | null)[];
         rainPct: Number(raw.daily?.precipitation_probability_max?.[d] ?? 0),
       });
     }
+    // 高德 4 日逐日预报覆盖同一天：现象/最高最低温以官方为准，降水概率仍取 Open-Meteo
+    if (amapCasts.length > 0) {
+      const byDate = new Map(dailyItems.map((item) => [item.date, item]));
+      for (const cast of amapCasts) {
+        const date = (cast.date ?? "").trim();
+        if (!date) continue;
+        const min = amapNumber(cast.nighttemp_float, cast.nighttemp);
+        const max = amapNumber(cast.daytemp_float, cast.daytemp);
+        if (min == null || max == null) continue;
+        const text = combineAmapWeatherText(cast.dayweather, cast.nightweather);
+        const castCode = amapTextToWeatherCode(cast.dayweather, cast.nightweather);
+        const existing = byDate.get(date);
+        if (existing) {
+          existing.minC = min;
+          existing.maxC = max;
+          if (text) existing.weatherText = text;
+          if (castCode != null) existing.weatherCode = castCode;
+        } else {
+          const item: WeatherDailyForecastItem = {
+            date,
+            weatherCode: castCode ?? 0,
+            weatherText: text || wmoText(castCode ?? 0),
+            minC: min,
+            maxC: max,
+            rainPct: 0,
+          };
+          dailyItems.push(item);
+          byDate.set(date, item);
+        }
+      }
+      dailyItems.sort((a, b) => a.date.localeCompare(b.date));
+      const mergedToday = todayKey ? byDate.get(todayKey) : undefined;
+      if (mergedToday) {
+        tMin = mergedToday.minC;
+        tMax = mergedToday.maxC;
+      }
+    }
+
+    const brief: WeatherBrief = {
+      source: usingAmap ? "amap" : "open-meteo",
+      latitude,
+      longitude,
+      timezone: resolvedTimezone,
+      // 逆地理失败时不放坐标兜底（2026-10-08 用户要求）：坐标对用户无意义还暴露隐私，
+      // 没有城市名就让 summary/卡片标题直接以天气开头，不带位置前缀。
+      locationLabel: locationLabel ?? "",
+      currentTempC,
+      apparentTempC: Number(cur.apparent_temperature ?? currentTempC),
+      humidityPct,
+      windKmh: Number(cur.wind_speed_10m ?? 0),
+      precipitationMm: Number(cur.precipitation ?? 0),
+      weatherCode,
+      weatherText,
+      todayMinC: tMin,
+      todayMaxC: tMax,
+      peakRainPct,
+      ...(rainWindow ? { rainWindow } : {}),
+      clothingAdvice: buildClothingAdvice({
+        currentTempC,
+        todayMinC: tMin,
+        todayMaxC: tMax,
+        peakRainPct,
+        weatherCode,
+        windKmh: Number(cur.wind_speed_10m ?? 0),
+        ...(rainWindow ? { rainWindow } : {}),
+      }),
+      hourlyForecast,
+      summaryLine: "",
+    };
     if (dailyItems.length > 0) {
       brief.daily = dailyItems;
     }
@@ -529,6 +811,8 @@ time?: (string | null)[];
       params.set("forecast_days", String(n));
     }
     const url = `https://api.open-meteo.com/v1/forecast?${params.toString()}`;
+    // 行程逐日同样以高德官方预报为准（只拉逐日，不拉实况）；失败回落 Open-Meteo。
+    const amapPromise = this.fetchAmapWeather(latitude, longitude, { withLive: false }).catch(() => null);
     const res = await fetch(url, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(15_000) });
     if (!res.ok) {
       throw new Error(`天气接口错误: ${res.status}`);
@@ -591,6 +875,25 @@ time?: (string | null)[];
         rainPct: Number(raw.daily?.precipitation_probability_max?.[d] ?? 0),
         hourly: byDate.get(date) ?? [],
       });
+    }
+    // 高德 4 日预报覆盖同一天的现象/气温（降水概率与逐小时仍由 Open-Meteo 提供）
+    const amapCasts = (await amapPromise)?.casts ?? [];
+    if (amapCasts.length > 0) {
+      const byDayDate = new Map(out.map((day) => [day.date, day]));
+      for (const cast of amapCasts) {
+        const date = (cast.date ?? "").trim();
+        if (!date) continue;
+        const day = byDayDate.get(date);
+        if (!day) continue;
+        const min = amapNumber(cast.nighttemp_float, cast.nighttemp);
+        const max = amapNumber(cast.daytemp_float, cast.daytemp);
+        if (min != null) day.minC = min;
+        if (max != null) day.maxC = max;
+        const text = combineAmapWeatherText(cast.dayweather, cast.nightweather);
+        if (text) day.weatherText = text;
+        const castCode = amapTextToWeatherCode(cast.dayweather, cast.nightweather);
+        if (castCode != null) day.weatherCode = castCode;
+      }
     }
     return { days: out };
   }

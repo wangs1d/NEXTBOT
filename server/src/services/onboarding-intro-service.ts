@@ -82,13 +82,16 @@ export class OnboardingIntroService {
     const userName = this.userNameOf(actorId);
     if (userName) {
       try {
-        getMemoryComponents().factStore?.applyFact({
-          actorId,
-          entity: "user",
-          field: "称呼",
-          value: userName,
-          confidence: 1.0,
-        });
+        getMemoryComponents().factStore?.applyFact(
+          {
+            actorId,
+            entity: "user",
+            field: "称呼",
+            value: userName,
+            confidence: 1.0,
+          },
+          "OnboardingIntroService",
+        );
       } catch {
         /* 事实库未装配不阻塞开场白 */
       }
@@ -125,13 +128,16 @@ export class OnboardingIntroService {
       if (!alias) return;
       const factStore = getMemoryComponents().factStore;
       if (!factStore) return; // 事实库未装配：保持阶段，下一轮再试
-      factStore.applyFact({
-        actorId,
-        entity: "user",
-        field: "称呼",
-        value: alias,
-        confidence: 1.0,
-      });
+      factStore.applyFact(
+        {
+          actorId,
+          entity: "user",
+          field: "称呼",
+          value: alias,
+          confidence: 1.0,
+        },
+        "OnboardingIntroService",
+      );
       // 用户一句话把称呼和名字都给了：两步并一步，别再追问。
       const both = explicitAgentName(text);
       if (both && (await this.rename(actorId, both))) {
@@ -149,13 +155,16 @@ export class OnboardingIntroService {
       const alias = explicitUserAlias(text);
       if (!alias) return;
       try {
-        getMemoryComponents().factStore?.applyFact({
-          actorId,
-          entity: "user",
-          field: "称呼",
-          value: alias,
-          confidence: 1.0,
-        });
+        getMemoryComponents().factStore?.applyFact(
+          {
+            actorId,
+            entity: "user",
+            field: "称呼",
+            value: alias,
+            confidence: 1.0,
+          },
+          "OnboardingIntroService",
+        );
       } catch {
         /* 事实库未装配不阻塞 */
       }

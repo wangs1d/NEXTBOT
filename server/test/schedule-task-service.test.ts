@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -186,5 +186,54 @@ test("keeps clean friendly copy and non-manual source copy untouched", async () 
       source: "commitment",
     });
     assert.equal(commitment.reminderMessage, commitmentMessage);
+  });
+});
+
+/**
+ * 2026-11-16 根修配套：过期提醒不进上下文，但必须可查。
+ * listTasksBySession 的 from 传过去时间时，已完成的单次提醒要能被查出来
+ * （calendar action=list_tasks 的历史视图依赖它）。
+ */
+test("history query: completed reminders are returned when from is in the past", async () => {
+  await withTempScheduleFile(async (service, filePath) => {
+    const firedAt = new Date(Date.now() - 2 * 60 * 60_000).toISOString();
+    await writeFile(
+      filePath,
+      JSON.stringify({
+        tasks: [
+          {
+            taskId: "task-history-1",
+            sessionId: "session-1",
+            title: "逛早市",
+            description: "明早八点逛早市",
+            kind: "reminder",
+            category: "itinerary",
+            recurrence: "none",
+            timezone: "Asia/Shanghai",
+            runAt: firedAt,
+            nextRunAt: null,
+            status: "completed",
+            reminderMessage: "该逛早市啦",
+            createdAt: firedAt,
+            updatedAt: firedAt,
+            lastRunAt: firedAt,
+          },
+        ],
+        runs: [],
+      }),
+      "utf-8",
+    );
+    const reloaded = new ScheduleTaskService();
+    await reloaded.load();
+
+    // 默认 from=now：已过期项不出现（上下文注入侧同样拿不到它）
+    assert.equal(reloaded.listTasksBySession("session-1").length, 0);
+    // from 回拨到过去：历史视图能查到，且 lastRunAt 标明已执行
+    const history = reloaded.listTasksBySession("session-1", {
+      from: new Date(Date.now() - 24 * 60 * 60_000).toISOString(),
+    });
+    assert.equal(history.length, 1);
+    assert.equal(history[0].status, "completed");
+    assert.equal(history[0].lastRunAt, firedAt);
   });
 });

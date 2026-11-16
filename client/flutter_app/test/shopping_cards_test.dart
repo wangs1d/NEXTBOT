@@ -8,6 +8,7 @@ import "package:nextbot/core/utils/agent_result_parser.dart";
 import "package:nextbot/features/chat/agent_result_card.dart";
 import "package:nextbot/features/chat/message_body_renderer.dart";
 import "package:nextbot/features/chat/shopping/shopping_candidates_card.dart";
+import "package:nextbot/features/chat/shopping/shopping_shared.dart";
 import "package:nextbot/features/chat/shopping/shopping_checkout_cards.dart";
 import "package:nextbot/features/chat/shopping/shopping_shipment_card.dart";
 
@@ -279,6 +280,192 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.byType(ShoppingCandidatesCard), findsOneWidget);
+  });
+
+  testWidgets("路由（2026-11-13 定稿）：price_compare 优先横向轮播卡",
+      (WidgetTester tester) async {
+    // 用户定稿：**横向轮播卡**（一屏 2.5 张、逐卡吸附），每张卡标清平台来源。
+    // 竖直列表卡降级为「extra.shopping 载荷缺失」时的兜底。
+    final AgentResultData data = AgentResultData.fromJson(<String, dynamic>{
+      "cardType": "price_compare",
+      "title": "比价结果：空气净化器",
+      "items": <Map<String, dynamic>>[
+        <String, dynamic>{"type": "num", "text": "¥1099 米家 5"},
+      ],
+      "priceCompare": <String, dynamic>{
+        "query": "空气净化器",
+        "groups": <Map<String, dynamic>>[
+          <String, dynamic>{
+            "priceCny": 1099,
+            "platform": "jd",
+            "platformLabel": "京东",
+            "title": "米家空气净化器 5",
+            "sourceUrl": "https://jd.com/x",
+            "orderable": true,
+          },
+        ],
+        "bestIndex": 0,
+      },
+      "extra": <String, dynamic>{"shopping": _candidatesPayload()},
+    });
+
+    await tester.pumpWidget(_host(AgentResultCard(data: data)));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(ShoppingCandidatesCard), findsOneWidget);
+  });
+
+  testWidgets("购买入口（2026-11-13）：未选中也能直接去当前平台下单",
+      (WidgetTester tester) async {
+    // 用户投诉「没有按钮能够直接帮助用户把这个物品购买了」。
+    // 旧交互要先点卡选中、再找按钮（两步）；且按钮不说是哪家。
+    // 现在主按钮常驻，指向**当前这一页**，文案带平台名。
+    final Map<String, dynamic> payload = <String, dynamic>{
+      "stage": "candidates",
+      "title": "比价结果：空气净化器",
+      "items": <Map<String, dynamic>>[
+        <String, dynamic>{
+          "title": "米家空气净化器 5",
+          "price": 1099,
+          "platform": "jd",
+          "platformLabel": "京东",
+          "url": "https://item.jd.com/5.html",
+          "orderable": true,
+        },
+        <String, dynamic>{
+          "title": "米家空气净化器 5 Pro",
+          "price": 1299,
+          "platform": "taobao",
+          "platformLabel": "淘宝",
+          "url": "https://item.taobao.com/5.html",
+          "orderable": true,
+        },
+      ],
+      "bestIndex": 0,
+    };
+    final List<AgentResultAction> captured = <AgentResultAction>[];
+    final AgentResultData cardData = AgentResultData.fromJson(<String, dynamic>{
+      "cardType": "price_compare",
+      "extra": <String, dynamic>{"shopping": payload},
+    });
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData.light(),
+        home: Scaffold(
+          body: SizedBox(
+            width: 390,
+            child: ShoppingCandidatesCard(
+              cs: ThemeData.light().colorScheme,
+              payload: payload,
+              cardData: cardData,
+              onUserAction: (AgentResultAction a,
+                  {required AgentResultData cardData}) {
+                captured.add(a);
+              },
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    // 未选中时主按钮就在，且写明去哪家
+    expect(find.text("去京东下单"), findsOneWidget);
+    expect(find.text("换一家看看"), findsOneWidget);
+
+    // 点它 = 选中当前卡 + 直接下单，平台与链接随动作回传
+    await tester.tap(find.text("去京东下单"));
+    await tester.pumpAndSettle();
+
+    expect(captured.length, 1, reason: "应回传一个下单动作");
+    final Map<String, dynamic> sent = captured.first.payload;
+    expect(sent["cardAction"], "shopping.spec.load");
+    expect(sent["platform"], "jd");
+    expect(sent["item"], "https://item.jd.com/5.html");
+  });
+
+  testWidgets("来源标注（2026-11-13）：轮播卡每张 tile 显式标平台名",
+      (WidgetTester tester) async {
+    // 用户投诉「比价卡片没有标注对应的来源，是哪个平台的」。
+    // 根因：底行写的是 `shop.isEmpty ? platform : shop`——有店铺名就把平台名顶掉。
+    // 修法：图上浮平台来源标 + 底行「平台 · 店铺」平台名恒在。
+    final Map<String, dynamic> payload = <String, dynamic>{
+      "stage": "candidates",
+      "title": "比价结果：空气净化器",
+      "items": <Map<String, dynamic>>[
+        <String, dynamic>{
+          "title": "米家空气净化器 5",
+          "price": 1099,
+          "platform": "jd",
+          "platformLabel": "京东",
+          "shop": "京东自营旗舰店",
+          "orderable": true,
+        },
+        <String, dynamic>{
+          "title": "米家空气净化器 5 Pro",
+          "price": 1299,
+          "platform": "taobao",
+          "platformLabel": "淘宝",
+          "shop": "小米官方旗舰店",
+          "orderable": true,
+        },
+      ],
+      "bestIndex": 0,
+    };
+    final AgentResultData data = AgentResultData.fromJson(<String, dynamic>{
+      "cardType": "price_compare",
+      "extra": <String, dynamic>{"shopping": payload},
+    });
+
+    await tester.pumpWidget(_host(AgentResultCard(data: data)));
+    await tester.pumpAndSettle();
+
+    // 平台名必须出现在卡上（图上浮标 + 底行来源行）
+    expect(find.text("京东"), findsWidgets);
+    expect(find.text("淘宝"), findsWidgets);
+    // 店铺名也不能丢
+    expect(find.textContaining("京东自营旗舰店"), findsWidgets);
+    // 来源标组件在渲染
+    expect(find.byType(ShopPlatformTag), findsWidgets);
+    expect(find.byType(ShopSourceLine), findsWidgets);
+  });
+
+  testWidgets("缺口显式化（2026-11-13 P0-4）：未取到价的平台在卡内成行",
+      (WidgetTester tester) async {
+    // 用户投诉「淘宝没搜索到报价，那价格哪来的」——缺口必须在卡里看得见，
+    // 模型才没有空间去编一个淘宝价。
+    final Map<String, dynamic> payload = <String, dynamic>{
+      "stage": "candidates",
+      "title": "比价结果：空气净化器",
+      "items": <Map<String, dynamic>>[
+        <String, dynamic>{
+          "title": "米家空气净化器 5",
+          "price": 1099,
+          "platform": "jd",
+          "platformLabel": "京东",
+          "orderable": true,
+        },
+      ],
+      "missingPlatforms": <Map<String, dynamic>>[
+        <String, dynamic>{
+          "platform": "taobao",
+          "platformLabel": "淘宝",
+          "reason": "login",
+        },
+      ],
+      "bestIndex": 0,
+    };
+    final AgentResultData data = AgentResultData.fromJson(<String, dynamic>{
+      "cardType": "price_compare",
+      "extra": <String, dynamic>{"shopping": payload},
+    });
+
+    await tester.pumpWidget(_host(AgentResultCard(data: data)));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining("未取到报价"), findsOneWidget);
+    expect(find.textContaining("淘宝"), findsWidgets);
   });
 
   testWidgets("路由：载荷缺失时 price_compare 回退旧卡，不抛异常",

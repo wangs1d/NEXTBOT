@@ -157,6 +157,7 @@ export function registerChatDataRoutes(
           ts: number | null;
           clientMessageId?: string;
           mediaCards?: unknown[];
+          bubbles?: Array<{ id: string; text: string }>;
         }> = [];
         for (const turn of turns) {
           if (turn.userText) {
@@ -175,6 +176,7 @@ export function registerChatDataRoutes(
               text: string;
               ts: number | null;
               mediaCards?: unknown[];
+              bubbles?: Array<{ id: string; text: string }>;
             } = {
               role: "assistant",
               text: capAssistantTextForHistory(turn.assistantText),
@@ -187,6 +189,12 @@ export function registerChatDataRoutes(
             // 才能重建照片气泡；URL 指向服务端转存资产，跨设备仍可加载。
             if (turn.mediaCards && turn.mediaCards.length > 0) {
               assistantItem.mediaCards = turn.mediaCards;
+            }
+            // 真·分绿泡对账数组随行下发（2026-11-13）：真实分泡轮逐泡透传，
+            // 客户端重装/换设备后回填按泡重建多条消息（与当轮实时形态一致）；
+            // 旧行/塌缩/单泡轮缺省 → 客户端降级单泡，与升级前行为一致。
+            if (turn.bubbles && turn.bubbles.length > 0) {
+              assistantItem.bubbles = turn.bubbles;
             }
             messages.push(assistantItem);
           }

@@ -58,6 +58,7 @@ const RULES: ClassRule[] = [
   { prefix: "ride_hailing.", domain: "travel" },
   { exact: "meituan.create_order", domain: "dining", action: "book", risk: "spend" },
   { prefix: "geofence", domain: "travel", action: "manage", trigger: "event", risk: "write" },
+  { prefix: "place", domain: "travel", action: "manage", risk: "write" },
   { prefix: "weather.", domain: "travel" },
   { prefix: "travel.", domain: "travel" },
   // ── dining 餐饮 ──
@@ -78,6 +79,15 @@ const RULES: ClassRule[] = [
   // 查支付方式/查订单是只读，exact 前置；家族前缀默认 spend
   { exact: "payment.list_methods", domain: "finance", action: "query", risk: "read" },
   { exact: "payment.query_order", domain: "finance", action: "query", risk: "read" },
+  // 统一支付模块（2026-11-13）：动钱的三条是 spend，查/授权是只读，撤授权是写
+  { exact: "payment.pay", domain: "finance", action: "book", risk: "spend" },
+  { exact: "payment.pay_confirm", domain: "finance", action: "book", risk: "spend" },
+  { exact: "payment.pay_resume", domain: "finance", action: "book", risk: "spend" },
+  { exact: "payment.pay_status", domain: "finance", action: "query", risk: "read" },
+  { exact: "payment.receipt", domain: "finance", action: "query", risk: "read" },
+  { exact: "payment.authorization_status", domain: "finance", action: "query", risk: "read" },
+  { exact: "payment.authorization_link", domain: "finance", action: "query", risk: "read" },
+  { exact: "payment.revoke_authorization", domain: "finance", action: "manage", risk: "write" },
   { prefix: "payment.", domain: "finance", action: "book", risk: "spend" },
   { exact: "shopping.order.place", domain: "finance", action: "book", risk: "spend" },
   { exact: "shopping.pay.submit", domain: "finance", action: "book", risk: "spend" },

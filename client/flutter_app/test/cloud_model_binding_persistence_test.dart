@@ -185,26 +185,41 @@ void main() {
   });
 
   test("session.init 撤绑语义：缺字段=保留，空对象=撤绑，三元组=绑定", () async {
+    // 真实 init 只在 wss 下才带 modelProvider（明文 ws 会被服务端拒收），
+    // 测试环境跑的是明文 ws，所以字段语义打在纯函数上，装配处只断言「不带」。
+    Map<String, dynamic>? payload({
+      bool overTls = true,
+      bool bundled = false,
+      bool configured = false,
+      bool unbind = false,
+    }) =>
+        buildModelProviderPayload(
+          overTls: overTls,
+          bundledRuntime: bundled,
+          configured: configured,
+          baseUrl: "https://api.deepseek.com",
+          apiKey: "sk-init",
+          model: "deepseek-chat",
+          announceUnbind: unbind,
+        );
+
+    // 缺字段 = 保留服务端已有绑定（普通握手绝不能误撤云端绑定）
+    expect(payload(), isNull);
+    // 停用自有模型 → 必须显式空对象，服务端才撤绑（否则绑定残留、重装幽灵复活）
+    expect(payload(unbind: true), <String, dynamic>{});
+    // 已配置 → 完整三元组
+    expect(payload(configured: true), <String, dynamic>{
+      "baseUrl": "https://api.deepseek.com",
+      "apiKey": "sk-init",
+      "model": "deepseek-chat",
+    });
+    // 明文 ws / 捆绑 runtime：一律不下发（非 TLS 不上送，key 不出本机）
+    expect(payload(overTls: false, configured: true), isNull);
+    expect(payload(bundled: true, configured: true), isNull);
+
+    // 装配层口径：测试环境是明文 ws，init 里不该出现 modelProvider
     await InstallIdentity.instance.applyBootChannel();
-    // 未配置绑定 + 普通补发 → 不带 modelProvider（服务端语义=保留已有绑定，
-    // 与旧客户端/桥接通道兼容）。
-    Map<String, dynamic> init = buildWsSessionInit();
-    expect(init.containsKey("modelProvider"), isFalse,
-        reason: "普通握手绝不能误撤云端绑定");
-    // 停用自有模型（clearModelBinding: true）→ 必须显式空对象，服务端才撤绑；
-    // 不然云端绑定残留，重装后幽灵复活。
-    init = buildWsSessionInit(announceModelUnbind: true);
-    expect(init["modelProvider"], <String, dynamic>{});
-    // 已配置绑定 → 带完整三元组。
-    await CloudModelBindingStore.instance.save(
-      baseUrl: "https://api.deepseek.com",
-      apiKey: "sk-init",
-      model: "deepseek-chat",
-    );
-    init = buildWsSessionInit();
-    final Map<dynamic, dynamic> mp = init["modelProvider"] as Map<dynamic, dynamic>;
-    expect(mp["apiKey"], "sk-init");
-    expect(mp["baseUrl"], "https://api.deepseek.com");
-    expect(mp["model"], "deepseek-chat");
+    final Map<String, dynamic> init = buildWsSessionInit(announceModelUnbind: true);
+    expect(init.containsKey("modelProvider"), isFalse);
   }, timeout: const Timeout(Duration(seconds: 60)));
 }

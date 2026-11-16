@@ -207,15 +207,7 @@ test("VIP 白名单命中 → critical（精确地址大小写不敏感 + @domai
   assert.equal(received.get(303)!.importance, "normal", "非 VIP 无规则命中即为 normal");
 });
 
-test("确定性关键词 → high：主题命中验证码、正文命中取件码、英文航班", () => {
-  const subjectHit = classifyMailImportance({
-    from: "noreply@service.com",
-    subject: "【某平台】您的验证码是 823105，5 分钟内有效",
-    textSnippet: "",
-  });
-  assert.equal(subjectHit.importance, "high");
-  assert.match(subjectHit.reasons[0]!, /验证码/);
-
+test("确定性关键词 → high：正文命中取件码、英文航班", () => {
   const textHit = classifyMailImportance({
     from: "notice@cainiao.com",
     subject: "您有新的包裹通知",
@@ -229,6 +221,72 @@ test("确定性关键词 → high：主题命中验证码、正文命中取件�
     textSnippet: "",
   });
   assert.equal(englishHit.importance, "high");
+});
+
+// 2026-11-14 用户定稿（加码自 11-13）：验证码整封丢弃——不允许验证码进入动态页
+// 等任何消费面，从来源就避免（不回调、不进消息中心、不进传感链路、不落库）。
+test("验证码 → otp（整封丢弃：不占 high、不落库、不触发汇报）", () => {
+  const otp = classifyMailImportance({
+    from: "noreply@service.com",
+    subject: "【某平台】您的验证码是 823105，5 分钟内有效",
+    textSnippet: "",
+  });
+  assert.equal(otp.importance, "otp", "验证码必须判 otp 整封丢弃");
+  assert.match(otp.reasons[0]!, /otp:验证码/);
+});
+
+test("账单/话费/快递/物流/取件码/快递单号 → high（用户明确要求进入汇报）", () => {
+  const bill = classifyMailImportance({
+    from: "bill@bank.com",
+    subject: "您的账单已出，本期应还 1280.00 元",
+    textSnippet: "",
+  });
+  assert.equal(bill.importance, "high", "账单必须进入汇报");
+  assert.match(bill.reasons[0]!, /账单/);
+
+  const phone = classifyMailImportance({
+    from: "noreply@telecom.com",
+    subject: "您的本月话费已出账",
+    textSnippet: "话费 59.00 元，套餐费 30 元。",
+  });
+  assert.equal(phone.importance, "high", "话费必须进入汇报");
+
+  const parcel = classifyMailImportance({
+    from: "notice@sf-express.com",
+    subject: "您的快递已发货",
+    textSnippet: "",
+  });
+  assert.equal(parcel.importance, "high", "快递必须进入汇报");
+
+  const logistics = classifyMailImportance({
+    from: "noreply@sto.cn",
+    subject: "物流更新",
+    textSnippet: "您的包裹正在运输途中。",
+  });
+  assert.equal(logistics.importance, "high", "物流必须进入汇报");
+
+  const trackingNo = classifyMailImportance({
+    from: "service@yto.com",
+    subject: "快递单号已生成",
+    textSnippet: "快递单号：SF1234567890",
+  });
+  assert.equal(trackingNo.importance, "high", "快递单号必须进入汇报");
+
+  const pickup = classifyMailImportance({
+    from: "notice@cainiao.com",
+    subject: "取件通知",
+    textSnippet: "取件码 8-2-3010，请到驿站领取。",
+  });
+  assert.equal(pickup.importance, "high", "取件码必须进入汇报");
+});
+
+test("复合邮件（账单+验证码）仍按账单走 high：high 判定优先于 otp 丢弃", () => {
+  const mixed = classifyMailImportance({
+    from: "noreply@bank.com",
+    subject: "账单查询验证码",
+    textSnippet: "您的账单验证码为 1234，本期应还 1280.00 元。",
+  });
+  assert.equal(mixed.importance, "high", "账单优先于验证码降级");
 });
 
 test("无关邮件 → normal（无规则命中、reasons 为空）", () => {
@@ -510,6 +568,45 @@ test("服务级过滤：noise 邮件不回调 onNewMessage、不进 message-hub�
   const again = await service.pollOnce();
   assert.ok(again.ok && again.handled === 0);
   assert.equal(service.status().noiseFiltered, 2);
+});
+
+// 2026-11-14 用户定稿：验证码整封丢弃——与营销/系统通知同一短路，
+// 不回调 onNewMessage、不进消息中心、不进传感缓冲（不允许验证码进入动态页）。
+test("服务级过滤：验证码邮件不回调 onNewMessage、不进 message-hub，UID 照常记录", async () => {
+  const persistPath = await tmpStatePath();
+  const mailbox = new FakeMailbox();
+  const received: Received[] = [];
+  const ingested: string[] = [];
+  const service = new MailWatchService({
+    clientFactory: () => mailbox.client,
+    onNewMessage: async (mail, c) => { received.push({ mail, classification: c }); },
+    messageHub: {
+      ingestInbound: async (input) => { ingested.push(input.externalMessageId ?? ""); },
+    },
+    env: {
+      MAIL_WATCH_ENABLED: "1",
+      MAIL_WATCH_HOST: "imap.example.com",
+      MAIL_WATCH_USER: "me@example.com",
+      MAIL_WATCH_PASS: "secret",
+    },
+    persistPath,
+  });
+  await service.pollOnce(); // 基线
+
+  mailbox.add(851, "noreply@service.com", "【某平台】您的验证码是 823105，5 分钟内有效");
+  mailbox.add(852, "friend@example.com", "周末聚餐呀", "周六晚上老地方见？");
+  const result = await service.pollOnce();
+  assert.ok(result.ok && result.handled === 2, "验证码也计入 handled（UID 消费掉不重判）");
+
+  assert.equal(received.length, 1, "验证码不触发 onNewMessage");
+  assert.equal(received[0]!.mail.uid, 852);
+  assert.equal(ingested.length, 1, "验证码不进消息中心");
+  assert.equal(service.status().otpFiltered, 1);
+
+  // 下一轮不再重判（UID 已记入已处理集合）
+  const again = await service.pollOnce();
+  assert.ok(again.ok && again.handled === 0);
+  assert.equal(service.status().otpFiltered, 1);
 });
 
 test("MAIL_WATCH_FILTER_NOISE=0 关闭过滤：系统通知回退为 normal，恢复落库与回调", async () => {

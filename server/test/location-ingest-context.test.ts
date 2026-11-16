@@ -17,6 +17,7 @@ import test from "node:test";
 
 import { ActorContextService, resolveUserClock } from "../src/services/actor-context-service.js";
 import { GeofenceService, inferPlaceKind } from "../src/services/geofence-service.js";
+import { LocationHistoryService } from "../src/services/location-history-service.js";
 import {
   LocationIngestPipeline,
   type LocationIngestDeps,
@@ -178,6 +179,49 @@ test("重叠围栏取半径最小的（更具体的地点优先）", async () =>
     assert.equal(ctx?.location?.placeLabel, "家");
   } finally {
     await stack.dispose();
+  }
+});
+
+test("上报后逆地理回填历史样本的行政区（不再只写内存快照）", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ingest-history-"));
+  const history = new LocationHistoryService({
+    dbPath: join(dir, "location.db"),
+    now: () => new Date(NOW),
+  });
+  try {
+    const pipeline = new LocationIngestPipeline({
+      history,
+      geofence: null,
+      context: null,
+      minIntervalMs: 0,
+      now: () => NOW,
+      reverseGeocode: async () => ({
+        city: "黔西南布依族苗族自治州",
+        district: "兴义市",
+        region: "贵州省",
+        country: "中国",
+        timezone: "Asia/Shanghai",
+        label: "兴义市 · 黔西南布依族苗族自治州 · 贵州省 · 中国",
+        address: "贵州省黔西南布依族苗族自治州兴义市下五屯街道九华苑",
+        source: "test",
+      }),
+    });
+
+    pipeline.ingest(
+      "u10",
+      { latitude: 25.0631, longitude: 104.8918, label: "25.0631, 104.8918" },
+      "report",
+    );
+    await pipeline.waitForEnrichmentForTest();
+
+    const sample = history.latest("u10");
+    assert.equal(sample?.city, "黔西南布依族苗族自治州");
+    assert.equal(sample?.district, "兴义市");
+    assert.equal(sample?.region, "贵州省");
+    assert.ok(sample?.label?.includes("九华苑"), "历史样本 label 应回填成真实地址");
+  } finally {
+    history.close();
+    await rm(dir, { recursive: true, force: true });
   }
 });
 

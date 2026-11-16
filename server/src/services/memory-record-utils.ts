@@ -1,3 +1,5 @@
+import { MEMORY_DECAY_HALF_LIFE_DAYS } from "../memory/retention-policy.js";
+
 const TIMESTAMP_PREFIX_RE = /^\[[^\]]+\]\s*/;
 const TOPIC_TAG_RE = /^\[[A-Z_:-]+\]\s*/i;
 
@@ -250,8 +252,16 @@ export interface MemoryRankSignals {
   sourceWeight?: number;
 }
 
-/** 时效半衰期：7 天。人脑式"最近的更清楚"，但旧事不会瞬间归零。 */
-const RECENCY_HALF_LIFE_DAYS = 7;
+/**
+ * 全局遗忘半衰期（唯一事实源）：实现已迁到 memory/retention-policy.ts，
+ * 本文件保留转发导出（见文件末尾的 re-export）。
+ *
+ * 此前 KV memory_summary 路径硬编码 `4 * Math.LN2`（≈2.77 天，等价于旧的
+ * 96 小时指数衰减时间常数），而认知图节点、读侧遗忘梯度、排序分三处都用 7 天
+ * ——同一套曲线两套校准，正好是本文件下方注释警告的"同一段记忆在 A 存储还新鲜、
+ * 在 B 存储已过期"。现已统一：任何存储层的衰减都走这个常量，不再各自传参。
+ */
+// 半衰期常量与衰减函数的实现已迁至 memory/retention-policy.ts（见文件末尾 re-export）。
 
 /**
  * 统一记忆排序分（P4 检索排序统一）：
@@ -275,43 +285,25 @@ export function unifiedMemoryScore(signals: MemoryRankSignals, now = Date.now())
   const ts =
     typeof rawTs === "number" ? rawTs : Date.parse(typeof rawTs === "string" ? rawTs : "");
   const ageDays = Number.isFinite(ts) ? Math.max(0, (now - ts) / 86_400_000) : 30;
-  const recency = Math.pow(0.5, ageDays / RECENCY_HALF_LIFE_DAYS);
+  const recency = Math.pow(0.5, ageDays / MEMORY_DECAY_HALF_LIFE_DAYS);
   const weight = signals.sourceWeight == null ? 1 : Math.max(0, signals.sourceWeight);
   return (relevance * 0.50 + recency * 0.27 + confidence * 0.13 + emotional * 0.10) * weight;
 }
 
 // ============================================================
 // 统一遗忘衰减（P2）：情景日志 / 长期节点 / KV 摘要共用同一曲线
+// ——实现已迁至 memory/retention-policy.ts，这里只保留转发导出。
 // ============================================================
 
-export interface MemoryDecayInput {
-  /** 距上次发生/访问的天数（>=0） */
-  ageDays: number;
-  /** 累计命中次数（间隔重复：越常用衰减越慢） */
-  accessCount?: number;
-  /** 情绪显著性 0-1（高光/至暗记忆衰减更慢） */
-  emotionalSalience?: number;
-  /** 半衰期天数，缺省 7 天 */
-  halfLifeDays?: number;
-}
-
 /**
- * 人脑式遗忘曲线：
- *   base = 0.5^(ageDays / halfLifeDays)
- *   + 访问频率加成（最多 +0.35，accessCount=9 时封顶）
- *   + 情绪加成（最多 +0.25）
- * 结果 clamp 到 0..1。
+ * 统一遗忘衰减：**实现已迁到 memory/retention-policy.ts**（2026-11-13）。
  *
- * 三个存储层（情景日志、humanLike 节点、KV memory_summary）用同一个函数，
- * 避免"同一段记忆在 A 存储还新鲜、在 B 存储已过期"的口径分裂。
+ * 这里是转发出口，不是实现——衰减曲线、档位阶梯、恢复动作现在同属一份策略
+ * （见 memory/retention-policy.ts），各存储只做档位 ↔ 自己字段的映射。
+ * 保留本文件的导出是为了不打断既有调用方。
  */
-export function memoryDecayFactor(input: MemoryDecayInput): number {
-  const ageDays = Number.isFinite(input.ageDays) ? Math.max(0, input.ageDays) : 30;
-  const halfLife = Number.isFinite(input.halfLifeDays) && (input.halfLifeDays as number) > 0
-    ? (input.halfLifeDays as number)
-    : RECENCY_HALF_LIFE_DAYS;
-  const base = Math.pow(0.5, ageDays / halfLife);
-  const accessBoost = Math.min(0.35, Math.max(0, input.accessCount ?? 0) * 0.04);
-  const emotionBoost = Math.min(0.25, Math.max(0, Math.min(1, input.emotionalSalience ?? 0)) * 0.25);
-  return Math.max(0, Math.min(1, base + accessBoost + emotionBoost));
-}
+export {
+  memoryDecayFactor,
+  MEMORY_DECAY_HALF_LIFE_DAYS,
+  type MemoryDecayInput,
+} from "../memory/retention-policy.js";

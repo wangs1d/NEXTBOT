@@ -35,6 +35,7 @@ import "core/models/wallet_models.dart";
 import "core/models/turn_state.dart";
 import "core/utils/agent_result_parser.dart";
 import "core/utils/assistant_text_sanitizer.dart";
+import "core/utils/server_history_parser.dart";
 import "core/utils/content_summary_parser.dart";
 import "core/services/app_auto_start.dart";
 import "core/services/agent_name_store.dart";
@@ -96,6 +97,7 @@ import "features/chat/chat_page.dart";
 // v2 统一渲染信封（P4，2026-11-10 桌面端接入）：done 载荷抽信封块序列，
 // 与手机端 mobile_chat_controller 同一入口、同一挂载规则。
 import "features/chat/render_envelope_dispatcher.dart" show extractEnvelopeBlocks;
+import "features/chat/history_media_warmer.dart";
 import "features/chat/composer_skill.dart";
 import "features/chat/chat_layout.dart";
 import "features/chat/content_summary_detail_modal.dart";
@@ -1003,7 +1005,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     // ws.client_boot 上报（见 _onWsConnected）。差值小 = 崩溃/被杀重启，
     // 差值大 = 冻结解冻或正常冷启动。
     try {
-      final dynamic lastAlive = _store.getPreference(_kLastAlivePrefKey);
+      // getPreference 是异步的（Isar 平台通道）：旧实现不 await，拿到的永远是
+      // Future，`is num` 恒 false → lastAliveAgeMs 每次都上报 -1，诊断信标
+      // 等于没数据，无法区分「进程被杀」与「冻结后解冻」。
+      final dynamic lastAlive = await _store.getPreference(_kLastAlivePrefKey);
       if (lastAlive is num && lastAlive > 0) {
         _bootLastAliveAgeMs =
             DateTime.now().millisecondsSinceEpoch - lastAlive.toInt();
@@ -1236,6 +1241,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       _agentName = "";
       _isInitialized = true;
     });
+
+    // 冷启动媒体预热（2026-11-12）：桌面端此前完全没接预热，历史照片全靠
+    // 滚到才现下——第一屏的图会一张张浮出来。与手机端共用同一份采集口径，
+    // 后台通道预热，不抢占屏上正在渲染的图片下载通道。
+    warmChatHistoryMedia(displayMessages);
 
     // 异步清理本地 store 里已剔除的重复消息（不阻塞首帧渲染）
     if (duplicateMessageIds.isNotEmpty) {
@@ -3943,9 +3953,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         "[AGENT_RESULT_CARD_START]\n${jsonEncode(cardMap)}\n[AGENT_RESULT_CARD_END]";
     final RegExp marker =
         RegExp(r"\[AGENT_RESULT_CARD_START\][\s\S]*?\[AGENT_RESULT_CARD_END\]");
-    final String nextText = marker.hasMatch(msg.text)
-        ? msg.text.replaceFirst(marker, block)
-        : "${msg.text}\n$block";
+    // 与手机端同口径：卡只活在结构化块里，text 是气泡正文。无标记块时不得
+    // 把卡 JSON 追加进 text（分泡轮信封只剩卡块、正文回退直读 text，追加即泄漏）。
+    final String nextText =
+        marker.hasMatch(msg.text) ? msg.text.replaceFirst(marker, block) : msg.text;
     final ChatMessage replaced = msg.copyWith(
       text: nextText,
       renderBlocks: msg.renderBlocks == null
@@ -3954,6 +3965,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       replyBlocks: msg.replyBlocks == null
           ? null
           : _swapCardBlock(msg.replyBlocks!, cardMap),
+      // v2 信封块优先于旧字段渲染：不一起换新，卡会停在旧态（与手机端
+      // _applyCardUpdate 同口径）。
+      envelopeBlocks: msg.envelopeBlocks == null
+          ? null
+          : _swapCardBlock(msg.envelopeBlocks!, cardMap),
     );
     _messages[idx] = replaced;
     _store.saveMessage(replaced).catchError((Object e) {
@@ -4125,6 +4141,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     // list 一次带回未读数 + 未读标题摘要（展开卡「未读消息」节），
     // 替代 unreadCount（内部同样走 list，只是丢了标题）。
     final inboxResult = await _inboxApi.list(limit: 50);
+    if (inboxResult.ok) {
+      // 网络恢复的旁路信号：HTTP 能通说明链路已恢复，此时 WS 若还断着就
+      // 立即补连（否则要等指数退避/心跳判死，用户会长时间看到「正在重连」）。
+      // ensureConnected 内部幂等：连接中空转；已连但入站陈旧时才会重建。
+      _ws.ensureConnected();
+    }
     if (inboxResult.ok && mounted) {
       final InboxSnapshot? snapshot = inboxResult.value;
       final int unread = snapshot?.unreadCount ?? 0;
@@ -4147,7 +4169,28 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     _messagePollTimer = Timer.periodic(const Duration(seconds: 15), (_) {
       _pollUnreadMessages();
       _touchAliveBeacon();
+      _ensureKeepAliveHealthy();
     });
+  }
+
+  /// 保活自愈（约 60s 一次）：前台服务被厂商 ROM 回收后，进程很快会再次被
+  /// 冻结——Dart 心跳停摆、服务端按心跳超时踢链，用户看到的就是「用着用着
+  /// 就断了/重连」。回前台 resumed 只会补一次，这里在应用存活期间也周期兜底；
+  /// start 幂等（服务在跑就是空转），判断依据来自原生真实运行态。
+  int _keepAliveTick = 0;
+
+  void _ensureKeepAliveHealthy() {
+    if (kIsWeb || !(Platform.isAndroid || Platform.isIOS)) return;
+    _keepAliveTick++;
+    if (_keepAliveTick % 4 != 0) return;
+    unawaited(() async {
+      try {
+        if (await KeepAliveService.isRunning()) return;
+        await KeepAliveService.start();
+      } catch (_) {
+        // 保活修补失败不影响业务；回前台还会再试一次。
+      }
+    }());
   }
 
   /// 存活心跳落盘（60s 节流）：进程被冻结/杀死后，这个时间戳就停在最后一刻，
@@ -4660,43 +4703,16 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       final List<dynamic> raw = body["messages"] as List<dynamic>? ?? const [];
       if (raw.isEmpty) return;
 
-      final List<ChatMessage> incoming = <ChatMessage>[];
-      int fallbackSeq = 0;
-      for (final dynamic item in raw) {
-        if (item is! Map<String, dynamic>) continue;
-        final String role = item["role"]?.toString() ?? "";
-        final String text =
-            stripAssistantProtocolFrames(item["text"]?.toString() ?? "").trim();
-        if ((role != "user" && role != "assistant") || text.isEmpty) continue;
-        final int? tsMs = item["ts"] is int ? item["ts"] as int : null;
-        final DateTime ts = tsMs != null
-            ? DateTime.fromMillisecondsSinceEpoch(tsMs)
-            : DateTime.now();
-        final String? clientMessageId = item["clientMessageId"]?.toString();
-        final String messageId =
-            role == "user" && (clientMessageId?.isNotEmpty ?? false)
-                ? clientMessageId!
-                : "hist-$role-${ts.millisecondsSinceEpoch}-${fallbackSeq++}";
-        // 媒体卡回填（2026-11-09）：服务端 WAL 透传本轮 mediaCards，重装/
-        // 换设备后历史里的照片气泡才能重建（与手机端 mobile_chat_controller
-        // 同一套解析口径）。
-        final List<Map<String, dynamic>>? histMediaCards =
-            (item["mediaCards"] as List<dynamic>?)
-                ?.whereType<Map<dynamic, dynamic>>()
-                .map((Map<dynamic, dynamic> c) => Map<String, dynamic>.from(c))
-                .toList();
-        incoming.add(ChatMessage(
-          messageId: messageId,
-          sessionId: actorId,
-          role: role,
-          text: text,
-          timestamp: ts,
-          mediaCards:
-              (histMediaCards != null && histMediaCards.isNotEmpty)
-                  ? histMediaCards
-                  : null,
-        ));
-      }
+      // 载荷解析走共享纯函数（2026-11-13）：与手机端 mobile_chat_controller
+      // 同一份实现，真·分绿泡轮逐泡建消息（重装后历史形态与当轮实时一致），
+      // 旧行/塌缩/单泡轮缺省 → 单泡路径（升级前行为）。fromBubbles 与
+      // incoming 等长平行，供锚定 id 重写后收集分泡消息最终 id 集合。
+      final ParsedServerHistory parsed = parseServerHistoryMessages(
+        raw: raw,
+        sessionKey: actorId,
+      );
+      final List<ChatMessage> incoming = parsed.messages;
+      final List<bool> incomingFromBubbles = parsed.fromBubbles;
 
       // 按 user 锚切轮（开头没有锚的孤儿助手消息自成一轮）
       final List<List<ChatMessage>> turns = <List<ChatMessage>>[];
@@ -4720,6 +4736,22 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         }
       }
 
+      // 分泡回填消息的最终 id 集合（2026-11-13）：锚定 id 重写完成后收集，
+      // 传给 assistantKnown 调整去重口径（同文分泡是刻意形态，不互相吞并）。
+      // incoming → turns 是顺序保持的平铺/分组，按同一顺序走一遍即可对上。
+      final Set<String> bubbleBackfillIds = <String>{};
+      int flattenCursor = 0;
+      for (final List<ChatMessage> turn in turns) {
+        for (final ChatMessage m in turn) {
+          if (flattenCursor < incomingFromBubbles.length &&
+              incomingFromBubbles[flattenCursor] &&
+              m.role == "assistant") {
+            bubbleBackfillIds.add(m.messageId);
+          }
+          flattenCursor++;
+        }
+      }
+
       final List<ChatMessage> merged = List<ChatMessage>.from(_messages);
       final Set<String> localUserIds = <String>{};
       final Set<String> localUserTexts = <String>{};
@@ -4733,6 +4765,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         }
       }
       final Set<String> backfilledAssistantTexts = <String>{};
+      // 回填批次开始前已存在的本地助手消息条数：分泡回填消息的包含去重只
+      // 对这个前缀范围做（批次内新插入的分泡不算——同文/互为片段是刻意形态）。
+      final int preexistingAssistantCount = localAssistants.length;
 
       bool turnExistsLocally(List<ChatMessage> turn) {
         final ChatMessage anchor = turn.first;
@@ -4749,8 +4784,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
 
       bool assistantKnown(ChatMessage m) {
         final String text = m.text.trim();
-        if (backfilledAssistantTexts.contains(text)) return true;
-        for (final ChatMessage local in localAssistants) {
+        final bool fromBubbles = bubbleBackfillIds.contains(m.messageId);
+        // 分泡回填消息跳过批量内精确文本去重：同文分泡是刻意形态，逐泡都要落。
+        if (!fromBubbles && backfilledAssistantTexts.contains(text)) return true;
+        final Iterable<ChatMessage> dedupeScope = fromBubbles
+            ? localAssistants.take(preexistingAssistantCount)
+            : localAssistants;
+        for (final ChatMessage local in dedupeScope) {
           final String lt = local.text.trim();
           // 包含关系去重：服务端合并正文 ↔ 本地分泡互为片段时视为同一条回复
           if (lt.length >= 8 && text.contains(lt)) return true;

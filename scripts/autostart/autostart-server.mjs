@@ -140,6 +140,21 @@ function childCommand() {
   };
 }
 
+/**
+ * 子进程 PATH 前置当前 Node 所在目录。
+ *
+ * dev-all 用 shell spawn `npm`、dev-server-watch 再 spawn `npx`，二者都按 PATH
+ * 解析 Node——若系统 PATH 里另有一个更高版本（本机 D:\nodejs v24 与
+ * better-sqlite3 的 Node 22 预编译产物不匹配），会出现「启动器是 22、真正跑
+ * server 的却是 24」的 ABI 崩溃。前置后整条链严格跟随启动器使用的 Node。
+ */
+function childEnv() {
+  const nodeDir = path.dirname(process.execPath);
+  const parts = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
+  if (parts[0] !== nodeDir) parts.unshift(nodeDir);
+  return { ...process.env, PATH: parts.join(path.delimiter) };
+}
+
 let shuttingDown = false;
 let currentChild = null;
 
@@ -150,6 +165,7 @@ function spawnChild() {
     cwd: ROOT,
     stdio: ["ignore", logFd, logFd],
     windowsHide: true,
+    env: childEnv(),
   });
   writePids({
     launcherPid: process.pid,

@@ -51,11 +51,7 @@ function envPositiveInt(name: string, fallback: number): number {
   return Number.isFinite(v) && v > 0 ? v : fallback;
 }
 
-/**
- * 旧「新会话开场判定阈值」已废弃（2026-10-06 治啰嗦 P1）：new_session 触发分支
- * 已删除，AGENT_MEMORY_RECALL_NEW_SESSION_MAX_MSGS 不再读取。保留占位注释防止
- * 误恢复——跨会话衔接的正确入口是恒驻速览（结构化事实）与 brain.recall 按需检索。
- */
+/** 指代升级阈值：会话长于该窗口时，"那个"才可能指向窗口外。 */
 const ANAPHORA_ESCALATION_THREAD_MIN = envPositiveInt("AGENT_MEMORY_RECALL_ANAPHORA_MIN_MSGS", 24);
 
 export function shouldRecallLongTerm(input: RecallGateInput): RecallGateResult {

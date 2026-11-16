@@ -794,12 +794,10 @@ export class ShortTermMemoryGatewayService {
     }
     memory.currentMission = this.inferMissionFromTurn(userText, assistantText, effectiveActive, memory.currentMission);
 
-    if (USER_PREFERENCE_RE.test(userText)) {
-      pushUnique(memory.preferences, userSentence);
-    }
-    if (USER_FACT_RE.test(userText)) {
-      pushUnique(memory.facts, userSentence);
-    }
+    // 2026-11-12 权威源收敛：会话层不再保存 preferences / facts 副本。
+    // 这两类内容的权威位置分别是 USER_PROFILE.md（画像）与 structured_facts（档案字段），
+    // 会话层再存一份原始句子只会：① 每轮无条件注入造成"旧事常驻"；② 与权威源漂移。
+    // 会话层只保留真正的短期状态：activeTopic / currentMission / carryForward / openLoops。
     if (assistantSentence) {
       pushUnique(memory.carryForward, `assistant: ${assistantSentence}`, 4);
     }

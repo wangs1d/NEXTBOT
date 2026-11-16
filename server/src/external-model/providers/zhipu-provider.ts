@@ -32,7 +32,9 @@ const SYSTEM_PROMPT =
  *
  * 环境变量：`ZHIPU_API_KEY`（必填以启用）、`ZHIPU_MODEL`（默认 glm-5.3-flash）、
  * `ZHIPU_BASE_URL`（默认 https://open.bigmodel.cn/api/paas/v4）、
- * `ZHIPU_REASONING_EFFORT`（思考开启时的努力档，low|high|max）。
+ * `ZHIPU_REASONING_EFFORT`（思考开启时的努力档，low|high|max；不设默认 high
+ * ——2026-11-12 实测：不下发档位会被服务端按 auto 深度思考处理，首字 11-18s，
+ * 而显式 high 只要 0.8-2.6s 且正文质量无差异）。
  */
 export class ZhipuProvider extends AbstractChatProvider {
   readonly id = "zhipu";
@@ -70,7 +72,9 @@ export class ZhipuProvider extends AbstractChatProvider {
   /**
    * 与 Kimi/MiniMax/DeepSeek 同契约：默认等效关思考（GLM 关不掉，降级为
    * effort=low，实测 reasoning_tokens=0）；显式 `disableThinking: false`（PRO 档）
-   * 放开思考——思考型模型在复杂任务上回复质量更好。
+   * 放开思考——此时固定落到**显式 high 档**（不是「不下发」：不下发会被服务端
+   * 当成 auto 深度思考，实测思考 token 511-634、首字 11-18s；显式 high 只要
+   * 0-78 token、首字 0.8-2.6s，正文质量逐条比对无差异）。
    */
   protected resolveEffectiveStreamOpts(
     streamOpts: AgentStreamOptions | undefined,

@@ -172,6 +172,82 @@ export function classifyTravelCardMissing(input: {
 }
 
 /* ────────────────────────────────────────────────────────────
+ * 行程轮 lead text 确定性收口（2026-11-12 用户定稿「简短介绍就行」）
+ *
+ * 背景：行程卡前的散文简介此前只有 prompt 软约束（summarizeItinerary
+ * displayNote「一两句话」），模型超发时用户在行程卡前收到一整段长文
+ * （真机实测取证）。这里在卡片版式归一化之后做确定性截断：带卡回复的
+ * 散文只保留前两句（总量 ≤120 字），其余散文段丢弃。
+ *
+ * 只收口**带卡轮**：正文里没有任何卡片块时原样返回——纯文本行程轮
+ * （漏卡态）的内容不被截丢，那是 classifyTravelCardMissing 的管辖范围。
+ * 卡片块（[AGENT_RESULT_CARD_START]…[END]）逐字保留、相对顺序不变，
+ * 只动散文段。
+ * ──────────────────────────────────────────────────────────── */
+
+const TRAVEL_LEAD_MAX_CHARS = 120;
+const TRAVEL_LEAD_MAX_SENTENCES = 2;
+const TRAVEL_CARD_BLOCK_RE =
+  /\[AGENT_RESULT_CARD_START\][\s\S]*?\[AGENT_RESULT_CARD_END\]/g;
+
+/**
+ * 收口带卡回复的散文简介：保留第一段散文的前 2 句（≤120 字），其余散文段
+ * 丢弃；卡片块原样保留、相对顺序不变。无卡文本原样返回。
+ */
+export function clampTravelLeadText(text: string): string {
+  if (!text || !text.includes("[AGENT_RESULT_CARD_START]")) return text;
+  const parts: Array<{ type: "text" | "card"; value: string }> = [];
+  let last = 0;
+  for (const match of text.matchAll(TRAVEL_CARD_BLOCK_RE)) {
+    const start = match.index ?? 0;
+    if (start > last) parts.push({ type: "text", value: text.slice(last, start) });
+    parts.push({ type: "card", value: match[0] });
+    last = start + match[0].length;
+  }
+  if (last < text.length) parts.push({ type: "text", value: text.slice(last) });
+
+  const prose = parts
+    .filter((p) => p.type === "text")
+    .map((p) => p.value)
+    .join(" ")
+    .trim();
+  if (!prose || prose.length <= TRAVEL_LEAD_MAX_CHARS) return text;
+
+  // 取前 2 句（。！？!? 结尾切分）；首句自身超长时硬截加省略号
+  const sentences = prose
+    .split(/(?<=[。！？!?])/)
+    .filter((s) => s.trim().length > 0);
+  let kept = "";
+  let keptCount = 0;
+  for (const sentence of sentences) {
+    if (keptCount >= TRAVEL_LEAD_MAX_SENTENCES) break;
+    if (keptCount > 0 && kept.length + sentence.length > TRAVEL_LEAD_MAX_CHARS) {
+      break;
+    }
+    kept += sentence;
+    keptCount += 1;
+  }
+  if (!kept) kept = `${prose.slice(0, TRAVEL_LEAD_MAX_CHARS)}…`;
+  kept = kept.trim();
+  if (!kept.endsWith("…") && !/[。！？!?…]$/.test(kept)) kept += "…";
+
+  // 重建：卡片块原位保留；第一段散文替换为收口版，其余散文段丢弃
+  const out: string[] = [];
+  let replaced = false;
+  for (const part of parts) {
+    if (part.type === "card") {
+      if (out.length > 0) out.push("\n\n");
+      out.push(part.value);
+      continue;
+    }
+    if (replaced) continue;
+    replaced = true;
+    out.push(kept);
+  }
+  return out.join("").trim();
+}
+
+/* ────────────────────────────────────────────────────────────
  * 简报卡（travel 主线 F1：规划直出后把假设摊开 + 一次偏好问询）
  *
  * 为什么确定性附卡而不是让模型转述：用户要的是「点一下就能把这版改掉」，

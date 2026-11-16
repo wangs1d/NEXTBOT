@@ -134,7 +134,26 @@ class ImageResultMessage extends StatelessWidget {
     return isIntrolike ? first : null;
   }
 
-  static String _resolveMediaUrl(String url) => MediaUrl.resolve(url);
+  /// 图片字节：只补全地址，凭证走请求头（避免 token 轮换后缓存键漂移）。
+  static String _resolveMediaUrl(String url) => MediaUrl.resolveForHeaders(url);
+
+  /// 本会话已发起过预热的地址（去重：流式期间本组件会随正文增长反复 build）。
+  static final Set<String> _warmedUrls = <String>{};
+
+  /// 照片地址一出现就交后台通道落盘（2 路，永不挤占前台渲染）。
+  ///
+  /// 根因：识图/搜索结果此前没有任何预热——流式正文里的图片地址要等
+  /// 结构化块完整、卡片真正挂载时才开始下载，「搜索返回照片要等一下才
+  /// 能看见」。这里在 build 期就抽 URL 交 [MediaDiskCache.warm]，卡片
+  /// 挂载时多半已命中磁盘或进行中（_inFlight 去重，同一地址不会下两遍）。
+  void _warmPhotoUrls(Iterable<String> urls) {
+    final List<String> pending = <String>[
+      for (final String raw in urls)
+        if (raw.trim().isNotEmpty && _warmedUrls.add(raw.trim())) raw.trim(),
+    ];
+    if (pending.isEmpty) return;
+    MediaDiskCache.instance.warm(pending);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -147,6 +166,15 @@ class ImageResultMessage extends StatelessWidget {
     final List<String> rawUrls = _extractImageUrls(textWithoutPayload);
     final List<String> urls = rawUrls.map(_resolveMediaUrl).toList();
     final String textOnly = _stripImageTokens(textWithoutPayload);
+
+    // 尽早预热：结构化块内 + 正文里抽到的全部图片地址（流式期间 URL 一
+    // 出现就开始后台落盘，等块完整、卡片挂载时直接秒解展示）。
+    _warmPhotoUrls(<String>[
+      if (photoItems != null)
+        for (final ({String url, String caption}) p in photoItems)
+          _resolveMediaUrl(p.url),
+      ...urls,
+    ]);
 
     // 真实设计：结构化照片卡在场 → 只渲染「照片 + 各自描述」，不再输出结论/要点
     final bool photoCardMode = photoItems != null && photoItems.isNotEmpty;

@@ -484,7 +484,7 @@ export class UserProfileAggregator {
           // 低于 0.8 也让置信度闸能挡住它去覆盖用户刚刚确认过的值。
           confidence: 0.7,
           temporal: "current",
-        });
+        }, "UserProfileAggregator");
       }
     } catch {
       /* 记忆系统未装配 → 忽略（画像照常写） */

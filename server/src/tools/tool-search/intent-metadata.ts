@@ -365,6 +365,26 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
     },
   },
   {
+    exact: "place",
+    metadata: {
+      aliases: [
+        "我家在哪",
+        "公司在哪",
+        "我住哪",
+        "常去的地方",
+        "识别地点",
+        "记住我家",
+        "那是我家",
+        "那是我公司",
+        "忘掉我的家",
+        "别记我的位置",
+      ],
+      examples: ["你知道我家在哪吗", "那是我妈家不是我家", "把我公司的地点忘掉"],
+      negativeAliases: ["导航到", "路线", "附近有什么"],
+      negativeExamples: ["从家到公司怎么走", "我家附近有什么好吃的"],
+    },
+  },
+  {
     exact: "interest.manage",
     metadata: {
       aliases: ["关注话题", "追踪动态", "盯着", "追更", "话题更新", "有新消息告诉我", "有更新提醒我"],

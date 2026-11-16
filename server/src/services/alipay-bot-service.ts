@@ -140,6 +140,22 @@ export class AlipayBotService {
   }
 
   /**
+   * CLI 是否就绪（`runtime/dist/cli.js` 存在）。
+   *
+   * 统一支付模块据此决定支付宝 AI 支付渠道是否可选用：不可用时必须
+   * 明确告诉用户「代付通道未安装」，而不是让 Agent 在运行期撞一个模糊异常。
+   */
+  isAvailable(): boolean {
+    if (!this.cliRoot) return false;
+    return existsSync(join(this.cliRoot, "runtime", "dist", "cli.js"));
+  }
+
+  /** CLI 根目录（诊断用；null = 未探测到）。 */
+  cliRootPath(): string | null {
+    return this.cliRoot;
+  }
+
+  /**
    * 获取指定用户的独立钱包实例（钱包按用户隔离）。
    *
    * 返回的实例使用独立状态目录 `<stateHome>/users/<sanitizedUserId>/`，

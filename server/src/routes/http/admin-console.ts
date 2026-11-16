@@ -16,6 +16,7 @@ import { renderInboxTemplate } from "../../services/inbox-templates.js";
 import { resolvePrimaryExternalModelBinding } from "../../external-model/resolve-provider.js";
 import { readClientManifest } from "./client-manifest.js";
 import { BetaWhitelistService } from "../../services/beta-whitelist-service.js";
+import { getWebpayStore } from "../../services/webpay/webpay-store.js";
 import type { HttpRouteDeps } from "./types.js";
 
 const DAY_MS = 86_400_000;
@@ -23,6 +24,99 @@ const DAY_MS = 86_400_000;
 function localDay(ms: number): string {
   const d = new Date(ms);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+
+type AdminPaymentOrder = {
+  outTradeNo: string;
+  channel: string;
+  method: string;
+  product: string;
+  accountId: string | null;
+  amount: number;
+  description: string;
+  status: string;
+  tradeNo: string | null;
+  createdAt: string;
+  paidAt: string | null;
+};
+
+type AdminPaymentStats = {
+  total: number;
+  pending: number;
+  paid: number;
+  closed: number;
+  refunded: number;
+  paidAmount: number;
+};
+
+function channelLabel(provider: string): string {
+  const p = (provider || "").toLowerCase();
+  if (p.includes("alipay")) return "支付宝";
+  if (p.includes("wechat") || p.includes("weixin") || p.includes("wxpay")) return "微信";
+  return provider || "-";
+}
+
+/** 统一支付口径：渠道只分支付宝/微信，网页充值作为支付宝下的支付方式，沙箱订单不计入。 */
+function adminPaymentSnapshot(deps: HttpRouteDeps): {
+  enabled: boolean;
+  stats: AdminPaymentStats | null;
+  orders: AdminPaymentOrder[];
+} {
+  const orders: AdminPaymentOrder[] = [];
+  let stats: AdminPaymentStats | null = null;
+
+  if (deps.paymentService) {
+    stats = { ...deps.paymentService.orderStats() };
+    for (const o of deps.paymentService.listOrders(300)) {
+      orders.push({
+        outTradeNo: o.outTradeNo,
+        channel: channelLabel(o.provider),
+        method: o.method,
+        product: o.description || "-",
+        accountId: o.actorId || null,
+        amount: o.amount,
+        description: o.description,
+        status: o.status,
+        tradeNo: null,
+        createdAt: o.createdAt,
+        paidAt: o.paidAt,
+      });
+    }
+  }
+
+  try {
+    const store = getWebpayStore();
+    const webpay = store.adminStats();
+    stats = {
+      total: (stats?.total ?? 0) + webpay.total,
+      pending: (stats?.pending ?? 0) + webpay.pending,
+      paid: (stats?.paid ?? 0) + webpay.paid,
+      closed: (stats?.closed ?? 0) + webpay.closed,
+      refunded: (stats?.refunded ?? 0) + webpay.refunded,
+      paidAmount: Math.round(((stats?.paidAmount ?? 0) + Number(webpay.paidAmount)) * 100) / 100,
+    };
+    for (const o of store.listAdminOrders(300)) {
+      if (o.env !== "production") continue;
+      orders.push({
+        outTradeNo: o.outTradeNo,
+        channel: "支付宝",
+        method: "电脑网站支付",
+        product: "网页充值",
+        accountId: o.accountId,
+        amount: Number(o.totalAmount),
+        description: "NEXTBOT API 充值",
+        status: o.status,
+        tradeNo: o.tradeNo,
+        createdAt: o.createdAt,
+        paidAt: o.paidAt,
+      });
+    }
+  } catch {
+    // webpay 未初始化：沿用旧通道口径
+  }
+
+  orders.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+  return { enabled: stats !== null, stats, orders };
 }
 
 /**
@@ -507,20 +601,21 @@ export function registerAdminConsoleRoutes(app: FastifyInstance, deps: HttpRoute
     };
 
     // —— 支付：真实订单台账统计（模拟订单不落库），已支付金额=收入 + 近14日收入趋势 ——
-    const orders = deps.paymentService ? deps.paymentService.orderStats() : null;
-    if (deps.paymentService) {
+    const payment = adminPaymentSnapshot(deps);
+    let orders: (AdminPaymentStats & { series: Array<{ day: string; count: number }> }) | null = null;
+    if (payment.enabled && payment.stats) {
       const paidByDay = new Map<string, number>();
       for (let i = 13; i >= 0; i--) paidByDay.set(localDay(now - i * DAY_MS), 0);
-      for (const o of deps.paymentService.listOrders(300)) {
+      for (const o of payment.orders) {
         if (o.status !== "paid") continue;
         const t = Date.parse(o.paidAt ?? o.createdAt);
         const key = Number.isFinite(t) ? localDay(t) : "";
         if (paidByDay.has(key)) paidByDay.set(key, (paidByDay.get(key) ?? 0) + o.amount);
       }
-      (orders as Record<string, unknown>).series = [...paidByDay.entries()].map(([day, amount]) => ({
-        day,
-        count: amount,
-      }));
+      orders = {
+        ...payment.stats,
+        series: [...paidByDay.entries()].map(([day, amount]) => ({ day, count: amount })),
+      };
     }
 
     // —— 站内信：总量、收/发、今日、近14日趋势 ——
@@ -641,21 +736,7 @@ export function registerAdminConsoleRoutes(app: FastifyInstance, deps: HttpRoute
   );
 
   app.get("/api/admin/orders", { preHandler: requireAdmin }, async () => {
-    if (!deps.paymentService) {
-      return { ok: true, enabled: false, stats: null, orders: [] };
-    }
-    const stats = deps.paymentService.orderStats();
-    const orders = deps.paymentService.listOrders(300).map((o) => ({
-      outTradeNo: o.outTradeNo,
-      provider: o.provider,
-      method: o.method,
-      amount: o.amount,
-      description: o.description,
-      status: o.status,
-      createdAt: o.createdAt,
-      paidAt: o.paidAt,
-    }));
-    return { ok: true, enabled: true, stats, orders };
+    return { ok: true, ...adminPaymentSnapshot(deps) };
   });
 
   app.get("/api/admin/messages", { preHandler: requireAdmin }, async () => {

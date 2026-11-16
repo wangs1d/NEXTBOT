@@ -196,7 +196,7 @@ export async function applyAgentIdentityRename(
   const narrative = reason
     ? `${origin === "user" ? "用户为我取名" : "我为自己取名"}${nameRef}——${reason}`
     : `${origin === "user" ? "用户为我取名" : "我为自己取名"}${nameRef}`;
-  deps.memorySync.appendMemorySummaryLine(actorId, narrative, "identity");
+  deps.memorySync.appendMemorySummaryLine(actorId, narrative, "identity", "AgentIdentityTools");
 
   pushToActor(deps, actorId, "identity_renamed", {
     displayName: name,

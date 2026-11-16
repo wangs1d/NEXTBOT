@@ -12,6 +12,28 @@ export type ReverseGeocodeHit = {
   timezone: string;
   label: string;
   source: string;
+  // ─── 精确位置（2026-11-14）────────────────────────────────────────
+  // 只返回到 city/district 的逆地理等于「只知道在哪个市」——用户问「我在哪」
+  // 时只能答到行政区，街区/小区尺度的信息全部丢失。高德 regeo（extensions=all）
+  // 能给出完整门牌地址与最近 AOI/POI，这里原样保留，供 prompt/工具作答。
+  /** 完整地址（高德 formatted_address，含省市区+街道+门牌） */
+  address?: string;
+  /** 街道/乡镇，如「下五屯街道」 */
+  township?: string;
+  /** 门牌所在道路（高德 streetNumber.street） */
+  street?: string;
+  /** 门牌号（高德 streetNumber.number） */
+  streetNumber?: string;
+  /** 最近地标/AOI 名称（如「九华苑」），无 AOI 时取最近 POI */
+  poi?: string;
+  /** 最近地标的类型（高德 type，分号分隔，如「商务住宅;住宅区;住宅小区」） */
+  poiType?: string;
+  /** 最近 AOI 名称（小区/园区/学校，比 POI 稳定；无 AOI 时缺省） */
+  aoi?: string;
+  /** 最近 AOI 类型（高德 type） */
+  aoiType?: string;
+  /** 最近地标距离（米） */
+  poiDistanceMeters?: number;
 };
 
 const FETCH_TIMEOUT_MS = 8_000;
@@ -19,10 +41,13 @@ const FETCH_TIMEOUT_MS = 8_000;
 /**
  * 逆地理结果进程内缓存（2026-10-12 延迟优化）。
  *
- * 坐标取整到 3 位小数（≈110m）作键；地址/时区在分钟级不会变，同一位置在多轮
+ * 坐标取整到 4 位小数（≈11m）作键；地址/时区在分钟级不会变，同一位置在多轮
  * 对话里被反复反查纯属浪费——此前前端 `/geo/reverse`（每条消息一次）与每轮
  * prompt 装配各打一次外网，且两条路径都无缓存。TTL 30min、LRU 512 条封顶；
  * 只缓存成功结果（失败多为瞬态，不固化），并发同键用 in-flight 去重。
+ *
+ * 2026-11-14 由 3 位（≈110m）收紧到 4 位：结果里现在带门牌/小区级地址，
+ * 110m 的取整会把隔壁小区的地址当成用户的——精度要求上来了，缓存键必须跟上。
  */
 const GEO_CACHE_TTL_MS = 30 * 60 * 1000;
 const GEO_CACHE_MAX = 512;
@@ -30,7 +55,19 @@ const geoCache = new Map<string, { at: number; hit: ReverseGeocodeHit }>();
 const geoInflight = new Map<string, Promise<ReverseGeocodeHit | null>>();
 
 function geoCacheKey(latitude: number, longitude: number): string {
-  return `${latitude.toFixed(3)},${longitude.toFixed(3)}`;
+  return `${latitude.toFixed(4)},${longitude.toFixed(4)}`;
+}
+
+/** 只读缓存（不触发网络）：prompt/工具补精确地址时用，拿不到就走原降级链。 */
+export function peekReverseGeocodeCache(
+  latitude: number,
+  longitude: number,
+): ReverseGeocodeHit | null {
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+  const cached = geoCache.get(geoCacheKey(latitude, longitude));
+  if (!cached) return null;
+  if (Date.now() - cached.at > GEO_CACHE_TTL_MS) return null;
+  return cached.hit;
 }
 
 /** 测试钩子：清空缓存与 in-flight 表。 */
@@ -151,18 +188,24 @@ async function reverseFromAmap(latitude: number, longitude: number): Promise<Rev
   if (!key) return null;
 
   const gcj = wgs84ToGcj02(latitude, longitude);
-  const url = `https://restapi.amap.com/v3/geocode/regeo?key=${encodeURIComponent(key)}&location=${gcj.longitude},${gcj.latitude}&extensions=base&output=JSON`;
+  // extensions=all：只有 all 才返回 pois/aois（最近地标）与完整 formatted_address；
+  // base 只有省市区，用户问「我在哪」只能答到行政区。
+  const url = `https://restapi.amap.com/v3/geocode/regeo?key=${encodeURIComponent(key)}&location=${gcj.longitude},${gcj.latitude}&extensions=all&output=JSON`;
   const data = (await fetchJson(url)) as {
     status?: string;
     regeocode?: {
-      addressComponent?: Record<string, string | string[] | undefined>;
+      formatted_address?: string | string[];
+      addressComponent?: Record<string, unknown>;
+      pois?: Array<{ name?: string; distance?: string | number; type?: string }>;
+      aois?: Array<{ name?: string; distance?: string | number; type?: string }>;
     };
   } | null;
   if (!data || data.status !== "1" || !data.regeocode) return null;
 
-  const comp = data.regeocode.addressComponent ?? {};
-  const pick = (v: string | string[] | undefined): string => {
+  const comp = (data.regeocode.addressComponent ?? {}) as Record<string, unknown>;
+  const pick = (v: unknown): string => {
     if (Array.isArray(v)) return String(v[0] ?? "").trim();
+    if (v && typeof v === "object") return "";
     return String(v ?? "").trim();
   };
 
@@ -171,6 +214,33 @@ async function reverseFromAmap(latitude: number, longitude: number): Promise<Rev
   const region = pick(comp.province);
   const country = pick(comp.country) || "中国";
   if (!city && !district && !region) return null;
+
+  const township = pick(comp.township);
+  const streetNumberRaw = comp.streetNumber;
+  const streetNumberObj =
+    streetNumberRaw && typeof streetNumberRaw === "object"
+      ? (streetNumberRaw as Record<string, unknown>)
+      : {};
+  const street = pick(streetNumberObj.street);
+  const streetNumber = pick(streetNumberObj.number);
+
+  // 最近地标：AOI（小区/园区/学校，位置稳定）优先，其次最近 POI（店铺/门牌点）。
+  // 高德的 pois/aois 已按距离升序，取第一条即可；distance 是米。
+  const nearest = (list?: Array<{ name?: string; distance?: string | number; type?: string }>) => {
+    const first = list?.[0];
+    const name = pick(first?.name);
+    if (!name) return null;
+    const distance = Number(first?.distance);
+    const type = pick(first?.type);
+    return {
+      name,
+      distanceMeters: Number.isFinite(distance) ? distance : undefined,
+      type: type || undefined,
+    };
+  };
+  const nearestAoi = nearest(data.regeocode.aois);
+  const nearestPoi = nearest(data.regeocode.pois);
+  const landmark = nearestAoi ?? nearestPoi;
 
   const timezone = await fetchTimezone(latitude, longitude);
   return {
@@ -181,6 +251,15 @@ async function reverseFromAmap(latitude: number, longitude: number): Promise<Rev
     timezone,
     label: buildLabel({ district, city, region, country }),
     source: "amap",
+    address: pick(data.regeocode.formatted_address) || undefined,
+    township: township || undefined,
+    street: street || undefined,
+    streetNumber: streetNumber || undefined,
+    poi: landmark?.name,
+    poiType: landmark?.type,
+    aoi: nearestAoi?.name,
+    aoiType: nearestAoi?.type,
+    poiDistanceMeters: landmark?.distanceMeters,
   };
 }
 

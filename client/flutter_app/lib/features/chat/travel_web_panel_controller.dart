@@ -59,9 +59,12 @@ class TravelWebPanelController {
   /// 那时 JS 的 `ready` 事件已经到达并把 `_ready` 置真；若在 `attach` 里重置，
   /// 页面不会再发第二次 `ready`，`loadPlan` 就永久滞留在队列里 → 界面卡在
   /// 「行程装载中…」（2026-10-12 实盘根因）。
+  ///
+  /// 执行器**不清**：它是 WebView 视图的能力（`executeScript` 闭包），跨导航依然
+  /// 有效；清掉会让"新页面 ready 到达时无人放行"，只能再等一次 attach。真正的
+  /// 闸门是 [_ready]（这里已置 false），不是执行器是否存在。
   void resetPageState() {
     _ready = false;
-    _executeScript = null;
     _pendingScripts.clear();
     _detached = false;
   }
@@ -216,6 +219,10 @@ class TravelWebPanelController {
   /// 每条各自异步完成）——不要在循环里 await：那会把后续脚本推到 microtask，
   /// 使「flush 完再通知挂载点」的先后关系不再成立。
   void _flushPending() {
+    // 执行器还没注入 → 队列必须原样留着。清空再逐条 _runNow 等于把意图丢掉
+    // （exec 为 null 时 _runNow 直接 return），随后 attach 拿到空队列，
+    // `loadPlan` 就永久消失——与 2026-10-12 那次「行程装载中…」同一后果。
+    if (_executeScript == null) return;
     final List<String> scripts = List<String>.of(_pendingScripts);
     _pendingScripts.clear();
     for (final String script in scripts) {
@@ -281,7 +288,13 @@ abstract final class TravelWebPanelPayload {
                   if (e.bookingNote.isNotEmpty) "bookingNote": e.bookingNote,
                   if (e.openingHours.isNotEmpty) "openingHours": e.openingHours,
                   if (e.rating != null) "rating": e.rating,
-                  "images": e.images,
+                  // 载荷里所有媒体地址都归一：相对路径拼服务端，被墙的远程图
+                  // （Wikimedia 等）改走本机代理——WebView 里直连这些域名取不到图，
+                  // 页面就只剩占位色块。
+                  "images": <String>[
+                    for (final String u in e.images)
+                      if (u.trim().isNotEmpty) resolveTravelMediaUrl(u),
+                  ],
                   "splatUrl": resolveTravelMediaUrl(e.splatUrl),
                   if (e.latitude != null && e.longitude != null)
                     "latitude": e.latitude,

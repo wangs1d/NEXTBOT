@@ -28,6 +28,7 @@
 import type { Database as SqliteDatabase } from "better-sqlite3";
 
 import { taxonomyTagFor } from "./field-taxonomy.js";
+import { assertMemoryWriter } from "../memory/memory-authority.js";
 import { isEphemeralActorId } from "../agent/actor-id.js";
 import { isStructuredFactsEnabled } from "./env.js";
 import { openAgenticSqlite } from "./sqlite-store.js";
@@ -468,7 +469,11 @@ export class StructuredFactStore {
    *   - 其余情况旧值入历史 + 新值生效（同一事务）。
    * 字段/值规范化后为空或超长返回 null（不入库，调用方走普通记忆路径）。
    */
-  applyFact(input: ApplyFactInput): ApplyFactResult | null {
+  applyFact(input: ApplyFactInput, writer = "StructuredFactStore"): ApplyFactResult | null {
+    // 档案字段（profile.field）的唯一写入口。writer 是**调用方**模块名——
+    // 契约断言的是"谁决定写什么"，不是"谁落的盘"。第二个写者若绕过这个
+    // 入口（比如另开一条直写 structured_facts 的路径），静态扫描测试会抓到。
+    assertMemoryWriter("structured_facts", writer);
     const actorId = input.actorId?.trim();
     const entity = normalizeFactField(input.entity ?? "user") || "user";
     const field = canonicalFactField(input.field ?? "");
@@ -1238,13 +1243,22 @@ export class StructuredFactStore {
     actorId: string,
     groundedFields?: Set<string>,
     entity = "user",
-    opts?: { suppressedFields?: ReadonlySet<string>; categories?: readonly string[] },
+    opts?: {
+      suppressedFields?: ReadonlySet<string>;
+      categories?: readonly string[];
+      /** 字段白名单（2026-11-12 按需注入）：传入时只渲染这些字段——query 相关性
+       * 召回（T2 字面命中 + T3 语义命中）+ 恒带称呼的产出集合。优先于 categories。 */
+      fields?: ReadonlySet<string>;
+    },
   ): string | null {
-    // 画像 v2：categories 传入时按类过滤（动态路由注入——恒带层+意图路由层）；
-    // 不传 = 全量渲染（旧行为，灰度回退路径）。
-    const catFilter = opts?.categories && opts.categories.length > 0 ? new Set(opts.categories) : null;
+    // 字段白名单优先（按需注入主路径）；categories 是旧灰度路径（回退用）。
+    const fieldFilter = opts?.fields && opts.fields.size > 0 ? opts.fields : null;
+    // 画像 v2：categories 传入时按类过滤（旧动态路由注入——恒带层+意图路由层）；
+    // 不传 = 全量渲染（灰度回退路径）。
+    const catFilter = !fieldFilter && opts?.categories && opts.categories.length > 0 ? new Set(opts.categories) : null;
     const inCategory = (f: StructuredFact): boolean =>
-      !catFilter || catFilter.has(f.category || taxonomyTagFor(f.field));
+      (!fieldFilter || fieldFilter.has(f.field)) &&
+      (!catFilter || catFilter.has(f.category || taxonomyTagFor(f.field)));
     const facts = this.getActiveFacts(actorId, entity).filter(inCategory);
     const activeFields = new Set(facts.map((f) => f.field));
     // 只有历史陈述、没有现状的字段（用户只说过"我以前住浙江"）：
@@ -1331,6 +1345,11 @@ export class StructuredFactStore {
       "已过且没有任何证据表明做了的事——两者都不得当成现状或已发生，只有用户",
       "明确说做到了才可以转为事实。仅当用户最新消息明确更正时以最新消息为准——",
       "此时系统会自动登记字段变更）",
+      "（问一答一（2026-11-12 实测事故）：本档案是你对用户「知道什么」的底账，",
+      "不是回复要朗读的清单。用户问某一项（如「我现在多少岁」）时，由你判断",
+      "问的是哪个字段、只答那一项——其余字段哪怕就排在旁边也不要连带输出",
+      "（问年龄只答年龄，不要顺带说「你叫XX」）。仅当用户同轮问了多项、或",
+      "该字段是回答的直接前提时才可带出。）",
       "（称呼礼仪：称呼用户时优先用用户明确指定的称呼（如「叫我王哥」的",
       "「王哥」）；没有指定时用「姓氏+先生/女士」（如「王先生」）或自然省略",
       "称呼。称呼/姓名字段的大名（如「王铭川」）只是事实记录，供问答引用，",

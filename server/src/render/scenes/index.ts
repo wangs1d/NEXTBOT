@@ -100,6 +100,17 @@ export function planPreRenderScene(input: PrePlanInput): ScenePrePlanResult {
 }
 
 /**
+ * 本轮边界的最高优先原则（2026-11-14 用户定稿「所有需求按用户给的执行」）。
+ *
+ * 每条场景边界都是「默认版式」，不是否决用户要求的理由——用户本轮点名了
+ * 呈现方式或详略（表格/清单/逐条/精简/完整展开…），模型理解后照做即可。
+ * 统一在这里前缀一次，避免每个场景各写一份、迟早漂移。
+ */
+const USER_REQUIREMENT_PRIORITY_CLAUSE =
+  "【用户要求优先】用户本轮明确指定的呈现方式或详略（用表格、列清单、逐条列出、精简、完整展开等）" +
+  "高于下面所有默认边界；两者冲突时按用户说的做，不得用「已经在卡片里」「默认版式如此」拒绝或改写。";
+
+/**
  * 把 pre-plan 的边界编进 prompt。与 synthesis-strategy 已硬编码注入的指令
  * 精确去重（天气边界两处同源，重复注入只会变成套路，见铁律 0）。
  * 返回空串表示本轮无需新增边界 → 输出与升级前逐字节一致。
@@ -111,9 +122,11 @@ export function buildSceneBoundaryBlock(
   const boundaries = pre.boundaries.filter(
     (b) => b.trim() && !existingInstruction.includes(b),
   );
-  return boundaries.length > 0
-    ? `\n\n【本轮渲染边界】${boundaries.join("\n")}`
-    : "";
+  if (boundaries.length === 0) return "";
+  const clause = existingInstruction.includes(USER_REQUIREMENT_PRIORITY_CLAUSE)
+    ? ""
+    : `${USER_REQUIREMENT_PRIORITY_CLAUSE}\n`;
+  return `\n\n【本轮渲染边界】${clause}${boundaries.join("\n")}`;
 }
 
 export { sceneRegistry, SceneRegistry } from "./registry.js";

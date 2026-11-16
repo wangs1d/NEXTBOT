@@ -48,6 +48,8 @@ import {
   getMemoryRerankerMode,
 } from "../agentic-memory/env.js";
 import { memoryDecayFactor, semanticFingerprint } from "../services/memory-record-utils.js";
+import { sanitizeMemoryLinesForPrompt } from "../agent/memory-line-hygiene.js";
+import { recallMemorySummaryByTopic } from "../agent/prompt-builder.js";
 import {
   classifyMemorySourceRole,
   isAssistantVoiceQuery,
@@ -171,6 +173,8 @@ interface HumanLikeMemoryLike {
       context?: "main" | "notes";
       domain?: string;
       metadata?: Record<string, unknown>;
+      /** 写入契约的调用方身份（memory.cognition 的 producer） */
+      writer?: string;
     },
   ): Promise<unknown>;
   buildRecall(
@@ -296,7 +300,6 @@ interface NightlySchedulerLike {
   forceRunNightTasks(): Promise<{
     consolidated: boolean;
     archived: boolean;
-    synced: boolean;
     error?: string;
   }>;
 }
@@ -366,6 +369,16 @@ function inferDomain(kind: MemoryItemKind): MemoryDomainKind {
 
 /** 单条 MemoryRecallItem.text 的最大字符数，超出则截断并追加省略标记 */
 const MAX_RECALL_ITEM_TEXT_LENGTH = 800;
+
+/**
+ * kvSummary 召回通道的上限（2026-11-13）。
+ *
+ * 与 prompt 侧【持久记忆】块同口径（600 字符 / 4 行）：这条通道与 prompt
+ * 侧读的是同一个 KV 键，若这里放开上限，同一份记忆会在同一轮上下文里出现
+ * 两次且内容不一致（prompt 侧净化+过滤，工具侧原本是全量）。
+ */
+const KV_SUMMARY_MAX_CHARS = 600;
+const KV_SUMMARY_MAX_LINES = 4;
 
 /** 数值 clamp 到 [0, 1]，用于反馈回灌与反馈调整后的分数归一。 */
 function clamp01(n: number): number {
@@ -882,6 +895,7 @@ export class MemoryCortex {
           try {
             void this.humanLike.ingest(actorId, assoc.conclusion, "write_association", {
               domain: "semantic",
+              writer: "MemoryCortex",
               metadata: {
                 associated: true,
                 associationConfidence: assoc.confidence,
@@ -931,6 +945,7 @@ export class MemoryCortex {
             // 以「联想推测」身份回灌 humanLike 记忆图，后续轮次可被召回
             void this.humanLike.ingest(actorId, assoc.conclusion, "association", {
               domain: "semantic",
+              writer: "MemoryCortex",
               metadata: {
                 associated: true,
                 associationConfidence: assoc.confidence,
@@ -1601,7 +1616,7 @@ export class MemoryCortex {
         this.narrative && !this.bridge
           ? this.safeRecall(() => this.narrative!.buildNarrativeRecall(actorId, query))
           : Promise.resolve<string | null>(null),
-        this.kvSummary ? this.safeKvSnapshot(actorId) : Promise.resolve<string | null>(null),
+        this.kvSummary ? this.safeKvSnapshot(actorId, query) : Promise.resolve<string | null>(null),
         this.buildAssociationRecallItems(actorId, query),
         // relationship：与 query 无关的环境性关系摘要（单条通道 → 归一化保留原始分，
         // 不会被 min-max 抬升），统一纳入仲裁参与去重/配额/阈值。
@@ -2023,8 +2038,15 @@ export class MemoryCortex {
       }
       for (const nodeId of predicted.activatedNodes.slice(0, 3)) {
         if (!nodeId) continue;
+        // 2026-11-13：此前这里直接把**内部节点 ID**拼进召回内容
+        // （"关联节点: sft_xxx"）。工具消息会进上下文，模型看到的是一串
+        // 无语义价值的内部标识——既占 token 又污染理解。改成取节点摘要；
+        // 摘要取不到就跳过这条（没有内容的关联本来就不该进候选）。
+        const summary = this.humanLike
+          ?.getNodeSummariesByIds?.(actorId, [nodeId], 1)?.[0]?.summary?.trim();
+        if (!summary) continue;
         items.push({
-          content: `关联节点: ${nodeId}`,
+          content: `关联记忆: ${summary}`,
           domain: "semantic",
           source: "association",
           score: clamp01(predicted.confidence || 0.35),
@@ -2071,23 +2093,11 @@ export class MemoryCortex {
     return kept;
   }
 
-  /** 问某类个人属性时，只保留该类事实；否则「问名字」会把「把助手称作大哥」一起端上来。 */
-  private narrowByQuestionIntent(items: MemoryRecallItem[], query: string): MemoryRecallItem[] {
-    const rules: Array<{ ask: RegExp; keep: RegExp }> = [
-      { ask: /名字|叫什么|姓名|怎么称呼|我是谁/, keep: /名字|名叫|叫做|叫什|我叫|姓名|昵称/ },
-      { ask: /多大|年龄|几岁/, keep: /岁|年龄/ },
-      { ask: /住哪|住在|地址|家在|哪个城市/, keep: /住|地址|家在|城市/ },
-      { ask: /生日|出生/, keep: /生日|出生/ },
-    ];
-    const matched = rules.filter((rule) => rule.ask.test(query));
-    if (matched.length === 0) return items;
-    const keep = new RegExp(matched.map((rule) => rule.keep.source).join("|"));
-    const assistantAboutUser = /把助手称作|称助手为|称呼助手|对助手说|助手当时说的/;
-    return items.filter((item) => {
-      const content = String(item.content ?? "");
-      return keep.test(content) && !assistantAboutUser.test(content);
-    });
-  }
+  /** 问某类个人属性时只保留该类事实的词表窄化已退役（2026-11-12）：
+   *  ask/keep 正则是意图词表路由同款模式，永远追不上语言的自然变化
+   *  （「多少岁」漏出 /多大|年龄|几岁/ 即现行案例）。个人属性问答的精度
+   *  由 query 相关性检索承担（画像侧 brain/profile-semantic-recall.ts；
+   *  通用召回侧向量相关性天然只带出近邻条目），不再靠词表守门。 */
 
   /**
    * 召回收口处过滤「助手自己的历史发言」。
@@ -2125,8 +2135,7 @@ export class MemoryCortex {
     // 候选不经过 humanLike 的 role 过滤——这里在统一收口处兜底，防止当时一句
     // 调侃（「二十岁，喊你大哥那位」）被当作用户事实复述。
     const voiceFiltered = this.dropAssistantVoiceItems(items, query);
-    const intentNarrowed = this.narrowByQuestionIntent(voiceFiltered, query);
-    const filtered = this.filterBySensitivity(intentNarrowed, opts?.includeRestricted);
+    const filtered = this.filterBySensitivity(voiceFiltered, opts?.includeRestricted);
     // 仲裁路径（skipStrengthBoost=true）已在统一排序中应用强度因子，此处跳过，
     // 避免仲裁后二次重排；分域/短路等未走仲裁的路径仍保留强度重排。
     const boosted = opts?.skipStrengthBoost
@@ -2348,7 +2357,9 @@ export class MemoryCortex {
           actorIds,
           dailyCleanupCount: result.consolidated ? 1 : 0,
           weeklyMergedCount: result.archived ? 1 : 0,
-          monthlyAbstractedCount: result.synced ? 1 : 0,
+          // 月度抽象阶段已随「长期归档同步」一并移除（2026-11-13）——
+          // 该步骤本身是 no-op，报 1 等于为不存在的成功背书。
+          monthlyAbstractedCount: 0,
           consistencyFlagCount: 0,
           knowledgePromotedCount: 0,
           compressionRate: 0,
@@ -2718,14 +2729,34 @@ export class MemoryCortex {
     }
   }
 
-  /** 安全读取 KV summary 快照，捕获异常并返回 null（用于仲裁通道并行召回） */
-  private safeKvSnapshot(actorId: string): string | null {
+  /**
+   * 安全读取 KV summary 快照，捕获异常并返回 null（用于仲裁通道并行召回）。
+   *
+   * 2026-11-13：这里原先返回**整段未过滤**的 memory_summary，作为单条 item
+   * 进仲裁，再原样进 tool 消息——与 prompt 侧【持久记忆】块是同一份数据、
+   * 同一来源，却是**超集**：没有话题过滤、没有行级净化、没有条数上限。
+   * 实测后果有两条：
+   *   ① 逐字对话行与 `[RENDER_HINT:structured]` 残留直接进工具消息（污染）；
+   *   ② 同一轮里模型先读到净化后的 4 行、调用 brain.recall 又读到未净化的
+   *      全量（1355+ 字符），两份内容重复且质量不一致。
+   * 现在与 prompt 侧同口径：净化 → 话题过滤 → 限行限字。
+   */
+  private safeKvSnapshot(actorId: string, query?: string): string | null {
     if (!this.kvSummary) return null;
     try {
       const snapshot = this.kvSummary.getSnapshot(actorId, ["memory_summary"]);
       const summary = snapshot.entries.memory_summary;
-      if (typeof summary === "string" && summary.trim()) return summary;
-      return null;
+      if (typeof summary !== "string" || !summary.trim()) return null;
+      const clean = sanitizeMemoryLinesForPrompt(summary).text;
+      if (!clean.trim()) return null;
+      const picked = recallMemorySummaryByTopic(
+        clean,
+        KV_SUMMARY_MAX_CHARS,
+        KV_SUMMARY_MAX_LINES,
+        query,
+        { minRelevance: 0.2 },
+      );
+      return picked.trim() ? picked : null;
     } catch (err) {
       console.log(`[MemoryCortex] kvSummary.getSnapshot 失败: ${err}`);
       return null;

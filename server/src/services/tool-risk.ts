@@ -38,7 +38,7 @@ const MONEY_PATTERNS: RegExp[] = [
 
 /** 明确只读的家族/模式（命中 → read_only；未命中且无副作用模式 → write） */
 const READ_ONLY_PATTERNS: RegExp[] = [
-  /(^|\.)(list|get|query|search|find|overview|status|state|stats|health|track|read|view|check|recall|where|preview|snapshot|screenshot|log|logs|notifications|sms_list|call_log|battery|observe|look|verify|analyze|suggest|capabilities|probe)(\.|_|$)/i,
+  /(^|\.)(list|get|query|search|find|overview|status|state|stats|health|track|read|view|check|recall|where|preview|snapshot|screenshot|log|logs|notifications|sms_list|call_log|battery|observe|look|verify|analyze|suggest|capabilities|probe|summary)(\.|_|$)/i,
   /^(brain\.recall|brain\.look|brain\.listen|perception\.|messages\.(overview|list|read)|phone\.(battery|call_log|notifications|sms_list|locate|screen_record)|device\.list|calendar\.(list|query|find)|reminder\.(query|schedule)$)/,
   /(_list$|_query$|_status$|_overview$)/,
 ];
@@ -63,6 +63,11 @@ const COMPOSITE_ACTION_RISK: Record<string, Record<string, ToolRiskClass>> = {
     list: "read_only",
     create: "write",
     delete: "irreversible",
+  },
+  place: {
+    list: "read_only",
+    confirm: "write",
+    forget: "irreversible",
   },
   smart_home: {
     list_devices: "read_only",

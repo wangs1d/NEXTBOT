@@ -13,6 +13,8 @@ import type { RuntimeKernelPromptMode, RuntimeKernelState } from "../agent/runti
 import type { ToolRegistry } from "./tool-registry.js";
 import type { BrainCenter } from "../brain/brain-center.js";
 import { empathyGuidanceLine } from "../services/emotion-memory.js";
+import { sanitizeMemoryLinesForPrompt } from "../agent/memory-line-hygiene.js";
+import { redactSensitiveText } from "../utils/redact.js";
 import type {
   AudioBufferRef,
   CapabilityDescriptor,
@@ -570,21 +572,29 @@ export function registerBrainTools(
         domain: domain as MemoryDomainKind | undefined,
         limit,
       });
+      // 2026-11-13：工具路径此前直接返回 result.items 原始内容——既没做
+      // 行级净化（逐字对话行 / [RENDER_HINT:...] 残留会进上下文），也没做
+      // PII 脱敏。prompt 侧两条都有，工具侧没有 = 同一条记忆换个入口进来
+      // 就换了质量标准。现在补齐，与 prompt 路径同口径。
+      const sanitizedItems = result.items.map((item) => ({
+        ...item,
+        content: redactSensitiveText(sanitizeMemoryLinesForPrompt(item.content).text),
+      }));
       // 情绪共情提示（P0）：召回结果里存在高光/至暗记忆时，给 LLM 一条明确的行为规则，
       // 避免它对用户的痛苦记忆只做冷冰冰的事实复述。
-      const strongestEmotion = result.items
+      const strongestEmotion = sanitizedItems
         .map((item) => item.emotion)
         .filter((emotion) => !!emotion)
         .sort((a, b) => Math.abs(b!.valence) - Math.abs(a!.valence))[0];
       const empathy = empathyGuidanceLine(strongestEmotion ?? null, { scope: "memory" });
-      const fadedHint = result.items.some((item) => item.faded)
+      const fadedHint = sanitizedItems.some((item) => item.faded)
         ? "其中带 faded 标记的是已衰减的『模糊印象』，只能作为背景线索，不要当作精确事实（如具体日期、金额）复述。"
         : "";
       return {
         ok: true,
         actorId: result.actorId,
         query: result.query,
-        items: result.items,
+        items: sanitizedItems,
         domain: result.domain,
         mode: result.mode,
         // 记忆免责声明（与【记忆图联想检索】注入块同款）：tool 消息进上下文时

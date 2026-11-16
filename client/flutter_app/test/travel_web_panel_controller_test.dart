@@ -99,11 +99,19 @@ void main() {
       expect(scripts.first, contains("杭州"));
     });
 
-    testWidgets("attach 之前到达的出站调用入队，attach 后补发", (WidgetTester tester) async {
+    // 契约：出站脚本要「执行器已注入」且「页面已 ready」两件都齐才送达。
+    // 只有执行器、页面还没上报 ready 时执行脚本等于丢给一个还没装好桥的文档，
+    // 所以 attach 不透支 ready——排队等页面自己发 ready 再放行。
+    testWidgets("attach 早于 ready：先入队，ready 到达后才补发", (WidgetTester tester) async {
       controller.loadPlan(<String, dynamic>{"destination": "兴义"});
       expect(scripts, isEmpty); // 尚无执行器：必须入队而非丢弃
 
       await controller.attach(execute);
+      expect(scripts, isEmpty, reason: "页面未 ready 前不得下发");
+      expect(controller.isReady, isFalse);
+
+      controller.handleWebMessage(jsonEncode(<String, dynamic>{"event": "ready"}));
+      expect(controller.isReady, isTrue);
       expect(scripts.length, 1);
       expect(scripts.first, contains("兴义"));
     });
@@ -179,10 +187,14 @@ void main() {
           ((days.first as Map<String, dynamic>)["entries"] as List<dynamic>)
               .first as Map<String, dynamic>;
       expect(entry["name"], "Embudu Village");
-      expect(entry["images"].first, startsWith("http")); // 相对路径已拼服务端地址
+      // 载荷里的媒体地址一律归一为绝对地址：相对路径拼服务端，被墙的远程图
+      // （Wikimedia 等）改走本机代理——WebView 直连这些域名取不到图。
+      expect(entry["images"].first, startsWith("http"));
       expect(entry["splatUrl"], startsWith("http"));
-      expect((entry["reviews"] as List).length, 1);
-      expect((entry["videos"] as List).length, 1);
+      // 视频/评论能力已于 2026-10-12 下线（服务端 travel-data-refresh 同口径），
+      // 载荷不再下发这两个字段；历史行程数据里的残留字段不应被透传。
+      expect(entry.containsKey("reviews"), isFalse);
+      expect(entry.containsKey("videos"), isFalse);
       expect(entry["latitude"], closeTo(4.17, 1e-6));
     });
 

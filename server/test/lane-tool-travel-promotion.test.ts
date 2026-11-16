@@ -143,8 +143,10 @@ test("行程规划超时可经 env 覆盖，且不破坏快工具的 30s 钳制�
   } finally {
     delete process.env.TOOL_TIMEOUT_TRAVEL_PLAN_MS;
   }
-  // 对照：快工具仍走各自分级档（classTimeouts 的 Math.min(classMs, defaultMs) 未被绕过）
-  assert.equal(resolveToolExecutionTimeoutMs("search_web"), 6_500);
+  // 对照：快工具仍走各自分级档（classTimeouts 的 Math.min(classMs, defaultMs) 未被绕过）。
+  // search_web 档 2026-11-12 从 6500 提到 16000：AnySearch web 上游 TTFB 实测 12~15s，
+  // 6500 一刀切击杀导致搜索恒空（当晚排障结论），契约随实现更新。
+  assert.equal(resolveToolExecutionTimeoutMs("search_web"), 16_000);
   assert.equal(resolveToolExecutionTimeoutMs("some_unknown_tool"), 30_000);
 });
 

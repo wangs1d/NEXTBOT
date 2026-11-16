@@ -67,18 +67,17 @@ class GalleryWallHost {
       // _cb 时间戳穿透长缓存：panel.html 服务端声明 max-age=3600，
       // 页面逻辑修订后不带穿透参数会被 WebView2 磁盘缓存压住。
       final Uri base = Uri.parse(ApiConfig.httpBase);
-      final Uri pageUri = base.replace(
-        path: "${base.path}/gallery-wall".replaceAll("//", "/"),
-        queryParameters: <String, String>{
+      // 页面地址走 webViewPageUrl：这一次带 ?token= 让服务端落同站 HttpOnly
+      // Cookie；页内 /gallery-wall/layout 与 `<img>` 之后只靠 Cookie 认人。
+      // 未登录时带设备标识（guest）。
+      final String pageUrl = MediaUrl.webViewPageUrl(
+        "${base.path}/gallery-wall".replaceAll("//", "/"),
+        query: <String, String>{
           "host": "1",
-          // 页面与页内 /gallery-wall/layout、`<img>` 都要身份：
-          // 有 token 时带 token（服务端会钉成同站 Cookie 并把 userId 钉成归属），
-          // 未登录时带设备标识；邮箱不再进 URL，避免写进访问日志。
-          ...MediaUrl.queryCredentials,
           "_cb": DateTime.now().millisecondsSinceEpoch.toString(),
         },
       );
-      await webviewController.loadUrl(pageUri.toString());
+      await webviewController.loadUrl(pageUrl);
 
       // 等页面脚本就绪（覆盖 server 拉起窗口），约 12s 宽限
       var pageReady = false;

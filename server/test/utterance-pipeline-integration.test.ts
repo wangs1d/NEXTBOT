@@ -36,7 +36,7 @@ function buildTurn(trace: string) {
     },
     { pauseMs: 0, bubbleGapMinMs: 0, bubbleGapMaxMs: 0, interimReplyGapMs: 0 },
   );
-  // 分泡门禁（对话面 + 非语音 + AGENT_BUBBLE_SPLIT 默认开）
+  // 分泡门禁（对话面 + 非语音 + 恒开）
   bubbleTracker.active = true;
   segmenter.enableBubbleMode();
 

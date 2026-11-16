@@ -51,12 +51,114 @@ class GeofencePlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
         private const val PREFS = "geofence_prefs"
         private const val KEY_PENDING = "pending_events"
         private const val KEY_IDS = "registered_ids"
+        /**
+         * 围栏完整定义（2026-11-13）：开机重建用。
+         *
+         * Android 的 `addProximityAlert` 注册是**易失**的——设备重启后系统会清空
+         * 本应用注册的全部邻近警报。此前 KEY_IDS 只存了 id 列表，连坐标都拿不回来，
+         * 于是「设好到公司/到家的围栏后手机重启一次，围栏就静默失效」，
+         * 而端上没有任何迹象（服务端只会看到"从此不再有事件"）。
+         * 现在把 id/name/坐标/半径/方向整体落盘，开机按这份定义重建。
+         */
+        private const val KEY_FENCES = "fence_definitions"
 
         @Volatile
         private var sink: EventChannel.EventSink? = null
 
         @Volatile
         private var appContext: Context? = null
+
+        /**
+         * 开机/应用更新后重建系统围栏（2026-11-13）。
+         *
+         * 由 [BootReceiver] 调用。引擎未启动、插件未实例化也能工作——因此这里是
+         * 静态方法，走自己的 Context 与 LocationManager，不依赖插件实例状态。
+         *
+         * 幂等：先撤销上次注册的，再按落盘定义重建。
+         */
+        fun restoreOnBoot(context: Context): Int {
+            val lm = context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+                ?: return 0
+            val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val raw = prefs.getString(KEY_FENCES, "[]") ?: "[]"
+            val arr = try {
+                JSONArray(raw)
+            } catch (e: Exception) {
+                JSONArray()
+            }
+            if (arr.length() == 0) return 0
+
+            // 先清掉残留（重启后系统本应已清，但应用更新/部分 ROM 会保留）
+            val oldIds = try {
+                JSONArray(prefs.getString(KEY_IDS, "[]") ?: "[]")
+            } catch (e: Exception) {
+                JSONArray()
+            }
+            for (i in 0 until oldIds.length()) {
+                val id = oldIds.optString(i, "")
+                if (id.isEmpty()) continue
+                try {
+                    lm.removeProximityAlert(buildPendingIntent(context, id, ""))
+                } catch (e: Exception) {
+                    Log.w(TAG, "开机清理围栏 $id 失败", e)
+                }
+            }
+
+            val ids = JSONArray()
+            var registered = 0
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val id = obj.optString("id", "")
+                if (id.isEmpty()) continue
+                val lat = obj.optDouble("latitude", Double.NaN)
+                val lon = obj.optDouble("longitude", Double.NaN)
+                if (lat.isNaN() || lon.isNaN()) continue
+                val radius = obj.optDouble("radiusMeters", 200.0).toFloat()
+                val kind = obj.optString("event", "enter")
+                val name = obj.optString("name", "")
+                try {
+                    lm.addProximityAlert(lat, lon, radius, -1L, buildPendingIntent(context, id, name, kind))
+                    ids.put(id)
+                    registered++
+                } catch (e: Exception) {
+                    Log.w(TAG, "开机重建围栏 $id 失败", e)
+                }
+            }
+            prefs.edit().putString(KEY_IDS, ids.toString()).apply()
+            Log.i(TAG, "开机重建系统围栏 $registered/${arr.length()} 个")
+            return registered
+        }
+
+        /**
+         * PendingIntent 工厂（静态版）：显式接收 Context，开机重建路径
+         * （BootReceiver → Flutter 引擎未启动、插件实例不存在）也能用。
+         *
+         * PendingIntent 必须逐围栏唯一：requestCode 用 id 的稳定 hash（跨进程可复现）。
+         *
+         * 2026-11-13：`kind` 不再硬编码为 "enter"，而是带上该围栏**配置的方向**
+         * （enter/leave/both），仅作参考与排障信息。事件实际是进入还是离开，由
+         * 系统在广播里给的 `KEY_PROXIMITY_ENTERING` 判定（见 GeofenceReceiver）。
+         * 注意 PendingIntent 的相等性不看 extras（只看 action/data/type/categories），
+         * 所以这里改 extras 不影响 clearAll 里的 removeProximityAlert 匹配。
+         */
+        fun buildPendingIntent(
+            ctx: Context,
+            fenceId: String,
+            name: String,
+            kind: String = "enter",
+        ): PendingIntent {
+            val intent = Intent(ctx, GeofenceReceiver::class.java).apply {
+                action = ACTION_TRIGGER
+                putExtra(EXTRA_FENCE_ID, fenceId)
+                putExtra(EXTRA_NAME, name)
+                putExtra(EXTRA_KIND, kind)
+            }
+            var flags = PendingIntent.FLAG_UPDATE_CURRENT
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                flags = flags or PendingIntent.FLAG_IMMUTABLE
+            }
+            return PendingIntent.getBroadcast(ctx, fenceId.hashCode(), intent, flags)
+        }
 
         /**
          * 由 [GeofenceReceiver] 调用：优先实时推给 Dart，否则落盘队列。
@@ -180,6 +282,8 @@ class GeofencePlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
         clearAll()
 
         val ids = JSONArray()
+        // 围栏完整定义落盘：开机重建用（系统注册是易失的，重启即丢）
+        val definitions = JSONArray()
         var registered = 0
         for (fence in fences) {
             val id = fence["id"] as? String ?: continue
@@ -187,14 +291,23 @@ class GeofencePlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
             val lat = (fence["latitude"] as? Number)?.toDouble() ?: continue
             val lon = (fence["longitude"] as? Number)?.toDouble() ?: continue
             val radius = (fence["radiusMeters"] as? Number)?.toFloat() ?: 200f
-            // 平台只支持「进入」；event=leave 的围栏不注册（服务端软围栏兜底）
+            // 2026-11-13：leave 围栏现在也注册。
+            // 原注释「平台只支持进入」是错的——Android `addProximityAlert` 对 enter/leave
+            // 都会触发，靠广播里的 KEY_PROXIMITY_ENTERING 区分。此前把 leave 围栏
+            // 直接跳过注册，等于「出门上班」这类离开事件在端上永远不会发生。
             val kind = fence["event"] as? String ?: "enter"
-            if (kind == "leave") {
-                Log.i(TAG, "围栏 $id 只关心离开，系统围栏不注册（服务端判定）")
-                continue
-            }
+            definitions.put(
+                JSONObject().apply {
+                    put("id", id)
+                    put("name", name)
+                    put("latitude", lat)
+                    put("longitude", lon)
+                    put("radiusMeters", radius.toDouble())
+                    put("event", kind)
+                },
+            )
             try {
-                lm.addProximityAlert(lat, lon, radius, -1L, buildPendingIntent(id, name))
+                lm.addProximityAlert(lat, lon, radius, -1L, buildPendingIntent(id, name, kind))
                 ids.put(id)
                 registered++
             } catch (e: Exception) {
@@ -202,7 +315,8 @@ class GeofencePlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
             }
         }
         context?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            ?.edit()?.putString(KEY_IDS, ids.toString())?.apply()
+            ?.edit()?.putString(KEY_IDS, ids.toString())
+            ?.putString(KEY_FENCES, definitions.toString())?.apply()
         Log.i(TAG, "已注册 $registered/${fences.size} 个系统围栏")
         return true
     }
@@ -225,23 +339,23 @@ class GeofencePlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
                 Log.w(TAG, "移除围栏 $id 失败", e)
             }
         }
-        prefs.edit().putString(KEY_IDS, "[]").apply()
+        // 围栏定义一并清掉：定义没了，开机重建也无从谈起
+        prefs.edit().putString(KEY_IDS, "[]").putString(KEY_FENCES, "[]").apply()
     }
 
-    /** PendingIntent 必须逐围栏唯一：requestCode 用 id 的稳定 hash（跨进程可复现）。 */
-    private fun buildPendingIntent(fenceId: String, name: String): PendingIntent {
+    /**
+     * PendingIntent 必须逐围栏唯一：requestCode 用 id 的稳定 hash（跨进程可复现）。
+     *
+     * 2026-11-13：改为委托给 companion 的静态版本——开机重建路径里 Flutter 引擎
+     * 尚未启动，插件实例还不存在，不能用实例字段拿 Context。
+     */
+    private fun buildPendingIntent(
+        fenceId: String,
+        name: String,
+        kind: String = "enter",
+    ): PendingIntent {
         val ctx = context ?: throw IllegalStateException("Context 未初始化")
-        val intent = Intent(ctx, GeofenceReceiver::class.java).apply {
-            action = ACTION_TRIGGER
-            putExtra(EXTRA_FENCE_ID, fenceId)
-            putExtra(EXTRA_NAME, name)
-            putExtra(EXTRA_KIND, "enter")
-        }
-        var flags = PendingIntent.FLAG_UPDATE_CURRENT
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            flags = flags or PendingIntent.FLAG_IMMUTABLE
-        }
-        return PendingIntent.getBroadcast(ctx, fenceId.hashCode(), intent, flags)
+        return buildPendingIntent(ctx, fenceId, name, kind)
     }
 
     private fun drainPending(): List<Map<String, Any?>> {
@@ -259,6 +373,17 @@ class GeofencePlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
                 map["name"] = obj.optString("name")
                 map["kind"] = obj.optString("kind", "enter")
                 map["at"] = obj.optString("at")
+                // 2026-11-13：补报时必须带上触发点坐标与精度。
+                // 此前只取上面 4 个字段，把系统给的经纬度/精度整段丢了 ——
+                // 于是「App 被杀后补报」永远只能退化成"事后重新拉一次 GPS"，
+                // 位置对不上触发点，服务端判围栏必错。
+                obj.optDouble("latitude").takeIf { !it.isNaN() }?.let { map["latitude"] = it }
+                obj.optDouble("longitude").takeIf { !it.isNaN() }?.let { map["longitude"] = it }
+                obj.optDouble("accuracyMeters").takeIf { !it.isNaN() }?.let { map["accuracyMeters"] = it }
+                obj.optDouble("altitudeMeters").takeIf { !it.isNaN() }?.let { map["altitudeMeters"] = it }
+                obj.optDouble("speedMps").takeIf { !it.isNaN() }?.let { map["speedMps"] = it }
+                obj.optDouble("headingDegrees").takeIf { !it.isNaN() }?.let { map["headingDegrees"] = it }
+                obj.optString("capturedAt").takeIf { it.isNotEmpty() }?.let { map["capturedAt"] = it }
                 out.add(map)
             }
         } catch (e: Exception) {

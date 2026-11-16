@@ -5,6 +5,7 @@ import "package:flutter/material.dart";
 
 import "../core/config/api_config.dart";
 import "../core/models/chat_models.dart";
+import "../core/models/notify_action.dart";
 import "../core/services/agent_name_store.dart";
 import "../core/services/side_chat_api.dart";
 import "../core/theme/app_typography.dart";
@@ -15,6 +16,8 @@ import "../features/chat/agent_result_card.dart";
 import "../features/chat/evening_digest_card.dart";
 import "../features/chat/image_preview_panel.dart";
 import "../features/chat/message_body_renderer.dart";
+import "../features/chat/travel_plan_archive.dart";
+import "../features/chat/travel_plan_launcher.dart";
 import "mobile_agent_status_orb.dart";
 import "mobile_chat_controller.dart";
 import "mobile_theme.dart";
@@ -59,9 +62,11 @@ class MobileChatPage extends StatefulWidget {
 class _MobileChatPageState extends State<MobileChatPage> {
   late final MobileChatController _controller;
   final TextEditingController _input = TextEditingController();
+  final FocusNode _composerFocus = FocusNode();
   final ScrollController _scroll = ScrollController();
   bool _canSend = false;
   int _lastMessageCount = 0;
+  int _lastPlanFlowRevision = 0;
 
   /// 待发送的相册图帧（「+」选入，随下一条消息一起发出）。
   final List<VisionWireFrame> _pendingFrames = <VisionWireFrame>[];
@@ -104,6 +109,7 @@ class _MobileChatPageState extends State<MobileChatPage> {
   @override
   void dispose() {
     _input.dispose();
+    _composerFocus.dispose();
     _scroll.dispose();
     // 仅当控制器是自建时才负责释放;外部注入的由根组件管理。
     if (widget.controller == null) {
@@ -205,9 +211,12 @@ class _MobileChatPageState extends State<MobileChatPage> {
   /// 与惰性布局赛跑的竞态逻辑（正向列表下该估计值追不上回填,落点半山腰）。
   void _maybeScrollToBottom() {
     final int count = _controller.messages.length;
+    final int revision = _controller.planFlowRevision;
     final bool needScroll = count != _lastMessageCount ||
+        revision != _lastPlanFlowRevision ||
         (_lastMessageCount > 0 && _controller.isProcessing);
     _lastMessageCount = count;
+    _lastPlanFlowRevision = revision;
     if (!needScroll) return;
     // 开场介绍阶段列表是按顶部对齐的正向列表（见 _buildMessageList），
     // offset 0 是顶部而非底部，不能套用「滚到底」语义。
@@ -247,6 +256,8 @@ class _MobileChatPageState extends State<MobileChatPage> {
         ? null
         : List<VisionWireFrame>.of(_pendingFrames);
     if (text.trim().isEmpty && frames == null) return;
+    // 规划会话请求进行中：先等这轮回执，避免用户连发把节奏打乱。
+    if (_controller.planFlow?.busy == true) return;
     final String? messageId =
         await _controller.send(text, visionFrames: frames);
     _input.clear();
@@ -383,14 +394,12 @@ class _MobileChatPageState extends State<MobileChatPage> {
   }
 
   /// 旁聊顶栏返回：只留返回箭头，不再带「主会话」文案。
+  /// 生成中也可返回（2026-11-12 P1 多会话并发）：流式事件按 threadId
+  /// 落回旁聊线程，切走不丢内容，回主会话继续聊互不干扰。
   Widget _buildBackToMain(MobilePalette p) {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
       onTap: () {
-        if (!_controller.canSwitchSession) {
-          _toast("正在回复，稍后再返回主会话");
-          return;
-        }
         unawaited(_controller.returnToMain());
       },
       child: Padding(
@@ -602,16 +611,20 @@ class _MobileChatPageState extends State<MobileChatPage> {
       _controller.messages.any((ChatMessage m) => m.role == "user");
 
   Widget _buildMessageList(BuildContext context, MobilePalette p) {
-    if (_controller.messages.isEmpty) {
+    final TravelPlanFlowController? planFlow = _controller.planFlow;
+    final bool showPlanFlow = planFlow != null;
+    if (_controller.messages.isEmpty && !showPlanFlow) {
       return _buildEmpty(p);
     }
     // 开场介绍（首启引导的两泡问候）还没有用户回复时，列表按顶部对齐：
     // 底锚会让两泡问候孤零零贴在输入框上方、落在屏幕下半屏（2026-11-08
     // 反馈要求放到界面上方）。用户开口后恢复常规底部锚定。
-    final bool openingOnly = !_hasUserMessage;
+    final bool openingOnly = !_hasUserMessage && !showPlanFlow;
     // 开场白两泡依次到达（2026-11-09）：后一泡还在排队时，末尾挂一个
     // 「正在输入」气泡，让停顿看起来是对方在打字，而不是界面上凭空多一条。
     final bool typing = openingOnly && _controller.isIntroTyping;
+    final int flowOffset = showPlanFlow ? 1 : 0;
+    final int messageCount = _controller.messages.length;
     // 长按/拖拽选中消息文字复制（与桌面端 SelectionArea 行为对齐）
     // reverse:true 底部锚定（2026-10-13）：index 0 = 最新消息（列表底部）,
     // 旧消息向视觉顶部延伸;offset 0 恒锚最新,重进不再需要滚位计算。
@@ -620,30 +633,51 @@ class _MobileChatPageState extends State<MobileChatPage> {
         controller: _scroll,
         reverse: !openingOnly,
         padding: EdgeInsets.fromLTRB(14, openingOnly ? 24 : 6, 14, 8),
-        itemCount: _controller.messages.length + (typing ? 1 : 0),
+        itemCount: messageCount + flowOffset + (typing ? 1 : 0),
         // 按消息 id 复用 Element（2026-11-11 闪卡根治）：reverse 列表下每追加
         // 一条消息（用户气泡 / turn_started 空占位），所有已有消息的 index 都
         // 后移一格；无 key 时 Sliver 按位置匹配，相邻消息 widget 结构不同就整
         // 棵子树重建——AgentResultCard 的入场动画重播，表现为「提问时卡片闪
         // 一下」。key + findChildIndexCallback 让漂移后仍按 id 找回旧 Element。
         findChildIndexCallback: (Key key) {
+          if (key is ValueKey<String> && key.value == "plan-flow") {
+            return showPlanFlow ? 0 : null;
+          }
           if (key is! ValueKey<String>) return null;
           final int msgIndex = _controller.messages
               .indexWhere((ChatMessage m) => m.messageId == key.value);
           if (msgIndex < 0) return null;
           final int viewIndex = openingOnly
               ? msgIndex
-              : _controller.messages.length - 1 - msgIndex;
-          if (typing && viewIndex >= _controller.messages.length) return null;
-          return viewIndex;
+              : messageCount - 1 - msgIndex;
+          final int typedIndex = viewIndex + flowOffset;
+          if (typing && typedIndex >= messageCount + flowOffset) return null;
+          return typedIndex;
         },
         itemBuilder: (context, index) {
-          if (typing && index == _controller.messages.length) {
+          // 内联规划流固定钉在 reverse 列表 index 0（视觉最底部）。
+          if (showPlanFlow && index == 0) {
+            return KeyedSubtree(
+              key: const ValueKey<String>("plan-flow"),
+              child: TravelPlanInlineFlowView(
+                controller: planFlow,
+                agentName:
+                    (AgentNameStore.instance.name.value ?? widget.agentName ?? "")
+                        .trim(),
+                onOpenPlan: TravelPlanLauncher.openPlanById,
+                onClose: _controller.closePlanFlow,
+                onFocusComposer: () =>
+                    FocusScope.of(context).requestFocus(_composerFocus),
+              ),
+            );
+          }
+          final int viewIndex = index - flowOffset;
+          if (typing && viewIndex == messageCount) {
             return _buildTypingBubble(p);
           }
           // 正向列表（开场介绍）index 即消息顺序；reverse 列表 index 0 是最新。
           final ChatMessage m = _controller.messages[
-              openingOnly ? index : _controller.messages.length - 1 - index];
+              openingOnly ? viewIndex : messageCount - 1 - viewIndex];
           return KeyedSubtree(
             key: ValueKey<String>(m.messageId),
             child: _buildMessageItem(context, m, p),
@@ -1239,6 +1273,10 @@ class _MobileChatPageState extends State<MobileChatPage> {
                 // 「接下来你可以」接续建议：点击即作为新消息发送（与桌面端同链路）。
                 onFollowupTap: (String prompt) =>
                     unawaited(_controller.send(prompt)),
+                // 「需要你拍板」动作（2026-11-13「通知即界面」）：与通知栏按钮
+                // 共用同一个 actionId + 同一枚 token——两个渲染面，一套语义。
+                onNotifyAction: (NotifyAction action) =>
+                    unawaited(_controller.runNotifyAction(action)),
                 excludeCardTypes: excludeCardTypes,
               ),
       ),
@@ -1321,6 +1359,7 @@ class _MobileChatPageState extends State<MobileChatPage> {
                 Expanded(
                   child: TextField(
                     controller: _input,
+                    focusNode: _composerFocus,
                     textInputAction: TextInputAction.send,
                     minLines: 1,
                     maxLines: 4,
@@ -1333,8 +1372,11 @@ class _MobileChatPageState extends State<MobileChatPage> {
                     decoration: InputDecoration(
                       border: InputBorder.none,
                       isCollapsed: true,
-                      hintText:
-                          _controller.isSideChatActive ? "在这个旁聊里继续说…" : "发消息…",
+                      hintText: _controller.isPlanFlowActive
+                          ? "继续说，可补充或调整规划…"
+                          : _controller.isSideChatActive
+                              ? "在这个旁聊里继续说…"
+                              : "发消息…",
                       hintStyle: TextStyle(
                         color: Theme.of(context).brightness == Brightness.dark
                             ? const Color(0xFF8C8C8C)
@@ -1490,7 +1532,15 @@ List<AgentResultData> _standaloneCardsOf(ChatMessage m) {
       add(AgentResultData.fromJson(Map<String, dynamic>.from(cardJson)));
     }
   }
-  add(AgentResultParser.parse(m.text).data);
+  // 正文标记解析（多卡全量，2026-11-12 丢卡根修）：塌缩轮/历史回填消息的
+  // 卡写在 finalText 里，parseBlocks 按原位全部展开。此前用 parse() 单卡
+  // 通道——一条消息含多个卡块时只保一张（优先 travel_itinerary，其余静默
+  // 剥离），重装/换设备/重连回填的旅游轮「只见行程卡」即此根因（桌面端
+  // 同数据走 parseBlocks 全保留）。与 envelope/replyBlocks 通道的重叠
+  // 由上方 seen 键去重吸收。
+  for (final block in AgentResultParser.parseBlocks(m.text)) {
+    if (block.isCard) add(block.data);
+  }
   return out;
 }
 
@@ -1682,6 +1732,7 @@ class _AssistantBody extends StatelessWidget {
     required this.cs,
     this.onUserAction,
     this.onFollowupTap,
+    this.onNotifyAction,
     this.excludeCardTypes = const <String>[],
   });
 
@@ -1700,6 +1751,9 @@ class _AssistantBody extends StatelessWidget {
   /// 「接下来你可以」接续建议点击回调（null 不渲染建议行）。
   final void Function(String prompt)? onFollowupTap;
 
+  /// 「需要你拍板」动作点击回调（2026-11-13「通知即界面」，null 不渲染动作行）。
+  final void Function(NotifyAction action)? onNotifyAction;
+
   @override
   Widget build(BuildContext context) {
     final ChatMessage m = message;
@@ -1716,6 +1770,7 @@ class _AssistantBody extends StatelessWidget {
           onUserAction: onUserAction,
           // 「接下来你可以」接续建议胶囊：与桌面端同渲染、同点击发送链路。
           onFollowupTap: onFollowupTap,
+          onNotifyAction: onNotifyAction,
           // 行程卡等外移卡由消息行在气泡外全宽渲染，body 内不再重复。
           excludeTravelCard: true,
           // 外移卡型动态注入：reminder_confirm + 本轮所有外移卡（全量外移机制）。

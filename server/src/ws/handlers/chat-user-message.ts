@@ -62,7 +62,7 @@ import {
   createTurnEventEmitter,
   type TurnEventEmitter,
 } from "../../agent/turn-events.js";
-import { getToolResultProcessor, attachMediaSearchMarker, extractMediaCards, dedupMediaCards, trimMediaCardsByTopic, buildInterleavedRenderBlocks, buildCaptionedRenderBlocks, allImageCardsHaveCaption, isFlatImageGallery, stripMediaCardMarker, isMediaSearchTool, type MediaCardItem } from "../../services/tool-result-processor.js";
+import { getToolResultProcessor, attachMediaSearchMarker, extractMediaCards, dedupMediaCards, splitMediaCardsByTopic, hideUnrenderedMediaCardsFromLibrary, buildInterleavedRenderBlocks, buildCaptionedRenderBlocks, allImageCardsHaveCaption, isFlatImageGallery, stripMediaCardMarker, isMediaSearchTool, type MediaCardItem } from "../../services/tool-result-processor.js";
 import { receiptProducesCard } from "../../services/receipt-card-projection.js";
 import type { TurnEffect } from "../../render/types.js";
 import { collectCardPayloads, effectStatusOf } from "../../render/index.js";
@@ -74,6 +74,7 @@ import {
 import {
   applyDeterministicCards,
   classifyTravelCardMissing,
+  clampTravelLeadText,
   looksLikeHandwrittenItinerary,
   resolveTravelReceipt,
   sniffItineraryDays,
@@ -588,7 +589,10 @@ export async function handleChatUserMessageEvent(
     }
   }
 
-  messageBatchProcessor.submit(msgActor, {
+  // 批处理通道键 = 线程键（2026-11-12 P1 多会话并发）：主通道 turnSessionId
+  // 被钉死为绑定身份（== msgActor，行为不变）；旁聊等结构化线程用自己的键
+  // 开独立 lane——旁聊 turn 与主会话 turn 互不排队、互不 abort，真正同时跑。
+  messageBatchProcessor.submit(turnSessionId, {
     text: effectiveText,
     visionFrames,
     agentAccessMode,
@@ -651,14 +655,25 @@ async function processBatchedMessage(
   turn: BatchTurnContext,
 ): Promise<void> {
   const msgActor = ctx.boundActorId;
-  const isStale = (): boolean => messageBatchProcessor.isStaleTurn(msgActor, turn.generation);
+  // 本轮的线程通道键（与 messageBatchProcessor.submit 的键一致，2026-11-12
+  // P1 多会话并发）：主通道 = actorId；旁聊等结构化线程 = 线程键。同 actor
+  // 的多线程 turn 互不 abort、互不代际失效，可同时各跑各的。
+  const laneKey =
+    typeof batched.sessionId === "string" && batched.sessionId
+      ? batched.sessionId
+      : msgActor;
+  // turn 级事件载荷统一携带 threadId：客户端（手机端 2026-11-12 P1）按它把
+  // chunk/done/status 等事件落回正确线程；老客户端忽略未知字段，零回归。
+  const threadId = laneKey;
+  const isStale = (): boolean => messageBatchProcessor.isStaleTurn(laneKey, turn.generation);
 
   if (isStale()) return;
 
-  // 中断该 actor 上一轮进行中的 LLM 请求(用户发新消息 → abort 旧的 HTTP 流式)
-  abortActiveTurn(msgActor);
+  // 中断该通道上一轮进行中的 LLM 请求(用户发新消息 → abort 旧的 HTTP 流式)。
+  // 只 abort 同一线程的上一轮：旁聊生成中新来的主会话消息不再杀掉旁聊轮。
+  abortActiveTurn(laneKey);
   const turnAbortController = new AbortController();
-  activeTurnAborters.set(msgActor, turnAbortController);
+  activeTurnAborters.set(laneKey, turnAbortController);
 
   let chunkSeq = 0;
   const assistantMessageId = `assistant-${batched.originalMessageId}`;
@@ -702,6 +717,7 @@ async function processBatchedMessage(
           payload: {
             sessionId: msgActor,
             traceId: batched.originalMessageId,
+            threadId,
           },
         }),
       );
@@ -756,6 +772,7 @@ async function processBatchedMessage(
           sessionId: msgActor,
           messageId: assistantMessageId,
           traceId: batched.originalMessageId,
+          threadId,
           chunk,
           sequence: speechSeq,
           phase,
@@ -812,6 +829,7 @@ async function processBatchedMessage(
               ? { bubbleIndex: assigned.bubbleIndex }
               : {}),
             traceId: batched.originalMessageId,
+            threadId,
             chunk: cleanedChunk,
             phase,
           },
@@ -858,6 +876,7 @@ async function processBatchedMessage(
           buildExecutionEventPayload({
             sessionId: msgActor,
             traceId: batched.originalMessageId,
+            threadId,
             eventId: `plan-${id}-${Date.now()}`,
             kind: "plan_step",
             planStep: {
@@ -892,6 +911,7 @@ async function processBatchedMessage(
       buildExecutionEventPayload({
         sessionId: msgActor,
         traceId: batched.originalMessageId,
+        threadId,
         eventId: `plan-continuation-${batched.planContinuation.stepId}-${Date.now()}`,
         kind: "plan_step",
         planStep: {
@@ -976,12 +996,14 @@ async function processBatchedMessage(
         turnEmitter.emitTurnStarted({
           sessionId: msgActor,
           traceId: batched.originalMessageId,
+          threadId,
           t0,
         });
         turnEmitter.emitIntentDetected(
           buildIntentDetectedPayload({
             sessionId: msgActor,
             traceId: batched.originalMessageId,
+            threadId,
             decision,
           }),
         );
@@ -1000,14 +1022,11 @@ async function processBatchedMessage(
       // 证据轮由 agent-core 置 "always"，reply.answerStreamHeld 如实带回；
       // 本层只在 done 裁决消费该信号（见下方裁决处）。意图标签/回执时机
       // 的前置/反应式扣流闸均已退役（缝补删除）。
-      // 真·分绿泡门禁（2026-09-28）：文字对话轮拆泡，语音轮不拆（泡间停顿
-      // 会拖慢 done，且语音 TTS 不消费气泡边界）；AGENT_BUBBLE_SPLIT=0 可
-      // 整体关停（回退单泡协议）。置位点在首个主回复 delta 之前，无竞态。
-      if (
-        decision.segmentable &&
-        !isVoiceMode(msgActor) &&
-        process.env.AGENT_BUBBLE_SPLIT !== "0"
-      ) {
+      // 真·分绿泡门禁（2026-09-28，2026-11-14 定稿）：文字对话轮恒拆泡，
+      // 语音轮不拆（泡间停顿会拖慢 done，且语音 TTS 不消费气泡边界）。
+      // 拆泡是产品定稿的呈现方式，不再提供开关；置位点在首个主回复 delta
+      // 之前，无竞态。
+      if (decision.segmentable && !isVoiceMode(msgActor)) {
         bubbleTracker.active = true;
         streamSegmenter.enableBubbleMode();
       }
@@ -1124,6 +1143,7 @@ async function processBatchedMessage(
             sessionId: msgActor,
             messageId: assistantMessageId,
             traceId: batched.originalMessageId,
+            threadId,
             phase: "live",
             line: heartbeatLine,
             percent: next,
@@ -1166,12 +1186,13 @@ async function processBatchedMessage(
           sessionId: msgActor,
           messageId: assistantMessageId,
           traceId: batched.originalMessageId,
+          threadId,
           finalText: FALLBACK_TEXT_BUSY(),
           toolCalls: [],
         },
       }),
     );
-    if (!isStale()) messageBatchProcessor.markReplyStarted(msgActor);
+    if (!isStale()) messageBatchProcessor.markReplyStarted(laneKey);
     return;
   }
 
@@ -1189,6 +1210,7 @@ async function processBatchedMessage(
           sessionId: msgActor,
           messageId: assistantMessageId,
           traceId: batched.originalMessageId,
+          threadId,
           phase: "live",
           line: event.message,
           toolName: "travel.plan-itinerary",
@@ -1304,12 +1326,41 @@ async function processBatchedMessage(
                 sessionId: msgActor,
                 messageId: assistantMessageId,
                 traceId: batched.originalMessageId,
+                threadId,
                 cards,
               },
             }),
           );
         } catch {
           /* 中途推卡失败不阻塞工具执行 */
+        }
+      },
+      // 浏览器工作预览帧（2026-11-12）：agent_browser 无头执行每步后推页面截图，
+      // 手机端右上角悬浮窗据此实时展示「Agent 正在控制浏览器」。单连接直发、
+      // 不进聊天流（与 media_ready 不同，不落消息、不参与 done 对账）。
+      pushBrowserPreview: (frame) => {
+        // 返回 false = 回合已收口/连接失效：连续预览流据此立即自停（不空烧）。
+        if (isStale()) return false;
+        try {
+          ctx.socket.send(
+            JSON.stringify({
+              type: "agent.browser.preview",
+              payload: {
+                sessionId: msgActor,
+                traceId: batched.originalMessageId,
+                threadId,
+                action: frame.action,
+                url: frame.url,
+                imageBase64: frame.imageBase64,
+                mode: frame.mode,
+                browserSessionId: frame.sessionId,
+              },
+            }),
+          );
+          return true;
+        } catch {
+          /* 预览帧推送失败不阻塞工具执行 */
+          return false;
         }
       },
       onAssistantDelta: (delta) => {
@@ -1356,6 +1407,7 @@ async function processBatchedMessage(
           {
             sessionId: msgActor,
             traceId: batched.originalMessageId,
+            threadId,
             assistantMessageId,
             send: (json) => ctx.socket.send(json),
           },
@@ -1376,6 +1428,7 @@ async function processBatchedMessage(
           {
             sessionId: msgActor,
             traceId: batched.originalMessageId,
+            threadId,
             assistantMessageId,
             send: (json) => ctx.socket.send(json),
           },
@@ -1507,6 +1560,7 @@ async function processBatchedMessage(
                     sessionId: msgActor,
                     messageId: assistantMessageId,
                     traceId: batched.originalMessageId,
+                    threadId,
                     cards: earlyCards,
                   },
                 }),
@@ -1537,6 +1591,7 @@ async function processBatchedMessage(
               sessionId: msgActor,
               messageId: info.messageId,
               traceId: batched.originalMessageId,
+              threadId,
               finalText: nextUp.text,
               toolCalls: [],
               source: info.source,
@@ -1576,6 +1631,7 @@ async function processBatchedMessage(
               sessionId: msgActor,
               messageId: assistantMessageId,
               traceId: batched.originalMessageId,
+              threadId,
               phase: "live",
               line: displayLine,
             },
@@ -1586,6 +1642,7 @@ async function processBatchedMessage(
           buildExecutionEventPayload({
             sessionId: msgActor,
             traceId: batched.originalMessageId,
+            threadId,
             eventId: `phase-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
             kind: "log",
             log: displayLine,
@@ -1600,6 +1657,7 @@ async function processBatchedMessage(
             buildExecutionEventPayload({
               sessionId: msgActor,
               traceId: batched.originalMessageId,
+              threadId,
               eventId: `plan-${step.id}-${Date.now()}`,
               kind: "plan_step",
               planStep: {
@@ -1618,6 +1676,7 @@ async function processBatchedMessage(
             buildExecutionEventPayload({
               sessionId: msgActor,
               traceId: batched.originalMessageId,
+              threadId,
               eventId: `plan-running-${Date.now()}`,
               kind: "plan_step",
               planStep: {
@@ -1692,6 +1751,7 @@ async function processBatchedMessage(
             toolName: reply.toolName,
             input: reply.toolInput,
             traceId: batched.originalMessageId,
+            threadId,
           },
         }),
       );
@@ -1714,6 +1774,7 @@ async function processBatchedMessage(
             ok: toolResult.ok,
             result: toolResult.result ?? {},
             traceId: batched.originalMessageId,
+            threadId,
             durationMs: Date.now() - startedAt,
           },
         }),
@@ -1900,6 +1961,7 @@ async function processBatchedMessage(
             toolName: "travel.plan-itinerary",
             input: forcedToolInput,
             traceId: batched.originalMessageId,
+            threadId,
           },
         }),
       );
@@ -1923,6 +1985,7 @@ async function processBatchedMessage(
             ok: forcedPlan.ok,
             result: forcedPlan.result ?? {},
             traceId: batched.originalMessageId,
+            threadId,
             durationMs: Date.now() - forcedStartedAt,
           },
         }),
@@ -2031,10 +2094,15 @@ async function processBatchedMessage(
     // - 普通分组(单次搜索)最多 maxPerGroup 张，不堆一墙；
     // - 对比分组(A/B)每侧各 maxPerSide 张，两侧对称；
     // - 主题多则每个主题都保留前几张，不因总量上限把后面的主题/某侧挤掉。
-    mediaCards = trimMediaCardsByTopic(mediaCards, {
+    // 渲染/入库对账（2026-11-12 用户口径「前端渲染几张，资料库就收几张」）：
+    // 图搜转存是落盘即进资料库，被裁掉的卡从未渲染，这里标记 libraryHidden，
+    // 避免「前端 4 张、资料库 +8」的数量错位。
+    const trimmed = splitMediaCardsByTopic(mediaCards, {
       maxPerGroup: 4,
       maxPerSide: 2,
     });
+    mediaCards = trimmed.kept;
+    hideUnrenderedMediaCardsFromLibrary(trimmed.removed);
     // 真实图片描述（Coze 式「一图一句」）：对裁剪后的图片卡逐张看图生成 caption，
     // 由 agent 用自己的口吻写（人格参照 = 用户原话 + 已说出口的正文）。
     // 失败/超时/模型不支持视觉时静默跳过——该张照片下方不带文字，版式不变。
@@ -2159,19 +2227,35 @@ async function processBatchedMessage(
     // 见 normalizeReplyCardLayout。
     finalText = normalizeReplyCardLayout(finalText);
 
+    // 行程轮 lead text 确定性收口（2026-11-12 用户定稿「简短介绍就行」）：
+    // 带卡回复的散文简介只留前两句（≤120 字）——此前「一两句话」只是
+    // prompt 软约束（summarizeItinerary displayNote），模型超发时行程卡前
+    // 会挂一整段长文（真机实测）。只收口行程轮且带卡的回复：纯文本轮
+    // （漏卡态）内容不被截丢。截断在版式归一化之后、WAL 回写之前——
+    // 落库文本与 done 帧同源，历史回放不会把长文再放出来。
+    //
+    // 2026-11-14 用户需求优先：正文是结构化形态（[RENDER_AS:structured]，
+    // 通常是用户点名要表格/清单/详细展开）时不收口——截断会把用户要的
+    // 交付物切掉，默认「简短」只对没点名详略的轮次生效。
+    const structuredBodyDelivered = finalText.includes("[RENDER_AS:structured]");
+    if (
+      !structuredBodyDelivered &&
+      (executedTravelPlanAttempted || travelReceiptResolution.toolName)
+    ) {
+      const clamped = clampTravelLeadText(finalText);
+      if (clamped !== finalText) {
+        console.log(
+          `[chat] travel lead text clamped: ${finalText.length} -> ${clamped.length} chars`,
+        );
+        finalText = clamped;
+      }
+    }
+
     // 回写 WAL 定稿文本（2026-10-24）：WAL 在 turn-finalizer 落的是模型原文，
     // 这里的卡片附加与协议标记剥离都发生在它之后——不覆盖的话，聊天记录回放
     // 既没有行程卡，又会把 [RENDER_HINT]/[NEXT_UP_*] 当正文漏给用户。
-    // 2026-11-09：本轮最终 mediaCards 一并补写——媒体卡是 done 帧的 side-channel，
-    // 正文文本通道不携带，WAL 里不落的话重装/换设备后历史回填永远没有照片。
-    void getTurnWalService()
-      .replaceAssistantText({
-        actorId: msgActor,
-        messageId: batched.originalMessageId,
-        assistantText: finalText,
-        ...(mediaCards.length > 0 ? { mediaCards } : {}),
-      })
-      .catch(() => {});
+    // （回写调用在下方 bubbleSplitLive 判定之后执行——2026-11-13 分泡对账
+    // 数组随行落盘，需要等 bubbleSplitLive 就绪。）
     updateEventAnswerSafely(msgActor, batched.originalMessageId, finalText);
 
     // 交错渲染块（renderBlocks）：把「清洗后的正文段落」与「媒体分组」按正文顺序交错，
@@ -2262,6 +2346,27 @@ async function processBatchedMessage(
       !sceneBlocksBubbles &&
       !longFormSingleBubble;
 
+    // 回写 WAL 定稿文本（2026-10-24）：WAL 在 turn-finalizer 落的是模型原文，
+    // 出口的卡片附加与协议标记剥离都发生在它之后——不覆盖的话，聊天记录回放
+    // 既没有行程卡，又会把 [RENDER_HINT]/[NEXT_UP_*] 当正文漏给用户。
+    // 2026-11-09：本轮最终 mediaCards 一并补写——媒体卡是 done 帧的 side-channel，
+    // 正文文本通道不携带，WAL 里不落的话重装/换设备后历史回填永远没有照片。
+    // 2026-11-13：挪到 bubbleSplitLive 判定之后——真实分泡轮把
+    // BubbleTracker.snapshot（id+定稿文本）一并落进 WAL 行，跨端历史回填
+    // 才能按泡重建（此前分泡结构只活在当轮内存 + 客户端本地 Isar，
+    // 重装后 /api/chat-data/history?full=1 只能回一条合并正文 →
+    // 「原本分绿泡、重装后单泡内分段」的根因）。塌缩/撤回/单泡接管轮不带
+    // bubbles：历史与当轮最终呈现（单泡 finalText）保持一致。
+    void getTurnWalService()
+      .replaceAssistantText({
+        actorId: msgActor,
+        messageId: batched.originalMessageId,
+        assistantText: finalText,
+        ...(mediaCards.length > 0 ? { mediaCards } : {}),
+        ...(bubbleSplitLive ? { bubbles: bubbleTracker.snapshot } : {}),
+      })
+      .catch(() => {});
+
     ctx.socket.send(
       JSON.stringify({
         type: ServerEventType.ChatAssistantDone,
@@ -2276,6 +2381,7 @@ async function processBatchedMessage(
           // 气泡拆分轮指向末泡 id（客户端按泡对账）；普通轮保持 assistant-$traceId
           messageId: bubbleTracker.outboundDoneMessageId,
           traceId: batched.originalMessageId,
+          threadId,
           // 真·分绿泡（2026-09-28）：各气泡定稿对账数组（id+定稿文本）。
           // 客户端据此逐泡定稿/补建漏收的泡；finalTextReplacesStream=true 时
           // 该数组同时是"待塌缩删除"的泡清单。普通轮不下发该字段。
@@ -2356,7 +2462,7 @@ async function processBatchedMessage(
       }
     }
     if (!isStale()) {
-      messageBatchProcessor.markReplyStarted(msgActor);
+      messageBatchProcessor.markReplyStarted(laneKey);
     }
     turnSucceeded = true;
   } catch (err) {
@@ -2379,6 +2485,7 @@ async function processBatchedMessage(
           // 错误收口：已推出的气泡原样定稿（半截也是用户亲眼所见），不回吞
           messageId: bubbleTracker.outboundDoneMessageId,
           traceId: batched.originalMessageId,
+          threadId,
           finalText: errText,
           ...(bubbleTracker.hasBubbles ? { bubbles: bubbleTracker.snapshot } : {}),
           toolCalls: [],
@@ -2386,7 +2493,7 @@ async function processBatchedMessage(
       }),
     );
     if (!isStale()) {
-      messageBatchProcessor.markReplyStarted(msgActor);
+      messageBatchProcessor.markReplyStarted(laneKey);
     }
   } finally {
     unsubscribeTravelProgress();
@@ -2396,8 +2503,8 @@ async function processBatchedMessage(
     // 清除所有可能残留的工具心跳定时器（如工具异常未触发 onToolExecuted）
     clearAllToolHeartbeats();
     // 清理本轮 AbortController(如未被新消息 abort 则正常清理)
-    if (activeTurnAborters.get(msgActor) === turnAbortController) {
-      activeTurnAborters.delete(msgActor);
+    if (activeTurnAborters.get(laneKey) === turnAbortController) {
+      activeTurnAborters.delete(laneKey);
     }
     // 中断/异常轮次兜底记账（2026-09-08）：轮次未正常收尾但已有部分回复流式
     // 送达用户时，以部分文本完成 STM 挂起项结清 / WAL / 日志记账。否则用户

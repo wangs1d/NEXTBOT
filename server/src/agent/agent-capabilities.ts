@@ -97,7 +97,12 @@ function buildStaticSections(): CapabilitySection[] {
     {
       domain: "wallet",
       lines: [
-        "1️⃣ 钱包与支付：真实资金/微信支付宝通道尚未接入，Agent 不代持资金；支付走 payment.* / alipay.* 技能族",
+        "1️⃣ 钱包与支付：Agent 不代持资金、不保存支付凭证；统一入口是 payment.pay（一次走完授权判定→额度/护栏→确认→渠道下单/收款码）",
+        "   - 支付前先用 payment.authorization_status 看用户是否已授权；没有授权时 payment.pay 会返回 authorizationUrl，把链接原样发给用户，由其设置额度并点「同意授权」（未授权前不会产生任何扣款）",
+        "   - nextAction=confirm 表示超过免确认额度：把金额与事由告诉用户，用户明确同意后用 confirmToken 调 payment.pay_confirm；不要自行确认、不要拆单",
+        "   - nextAction=pay 表示收款单/收银台已生成：把二维码/链接发给用户，付款后用 payment.pay_status 向渠道核对真实状态（用户的「我付了」不算数）",
+        "   - 退款用 payment.refund（渠道支持时原路退）；账单查询用 payment.receipt",
+        "   - 历史通道仍可用但不作为首选：payment.create_order（商户收款码）、alipay.*（钱包收银台代付，依赖 alipay-bot CLI）",
       ],
     },
     {

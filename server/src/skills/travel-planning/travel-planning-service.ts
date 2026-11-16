@@ -15,6 +15,8 @@
  * 缓存：POICacheManager（文件持久化 + 内存加速，全局共享）
  */
 
+import { haversineMeters } from "../../services/geo-utils.js";
+import { wgs84ToGcj02 } from "../../services/reverse-geocode-service.js";
 import type { Coordinates, AgentTrace } from './types.js';
 import type { TravelPersona } from '../../services/user-personalization/user-personalization-service.js';
 import https from 'node:https';
@@ -627,6 +629,17 @@ export function scoreCoverCandidate(url: string): number {
 const AMAP_KEY = process.env.AMAP_WEB_KEY || '';
 /** 高德POI搜索基础URL */
 const AMAP_POI_BASE = 'https://restapi.amap.com/v3/place/text';
+
+/**
+ * 地理编码中心点与高德权威坐标的最大允许偏差（米）。
+ *
+ * 县级市内部本就可能跨十几公里（如兴义市含下五屯/清水河/桔山等片区分隔 20km+），
+ * 但**同一个查询词**在高德与 Nominatim 上应当指向同一个「中心」，不该差出
+ * 20km。实测「贵州兴义」在 Nominatim 上落在清水河镇，与高德的兴义市中心
+ * 相距 19.3km —— 正是这个偏差让用户看到「离九华苑 20 多公里」。
+ * 阈值取 8km：既能挡住这类跨片区的脏坐标，又不至于误杀冷门地名的正常偏差。
+ */
+const CENTER_DRIFT_TOLERANCE_METERS = 8_000;
 /** 高德请求超时 */
 const AMAP_REQUEST_TIMEOUT_MS = 8000;
 
@@ -1431,18 +1444,6 @@ export class PlanningService {
       p.socialHeat?.level === 'hot' ? 2 : p.socialHeat?.level === 'mid' ? 1 : 0;
     const ratingRank = (p: RawPOI) =>
       Number.isFinite(Number(p.rating)) && Number(p.rating) > 0 ? Number(p.rating) : -1;
-    const take = (list: RawPOI[], type: 'attraction' | 'hotel' | 'restaurant') =>
-      list
-        .map((p, idx) => ({ p, idx }))
-        .sort(
-          (a, b) =>
-            favRank(b.p, type) - favRank(a.p, type) ||
-            ratingRank(b.p) - ratingRank(a.p) ||
-            heatRank(b.p) - heatRank(a.p) ||
-            a.idx - b.idx,
-        )
-        .slice(0, perCat)
-        .map((x) => x.p);
     // 画像信号（travel 双端②同源权重）：负反馈降权、出片/体验向加分。
     // 只影响「选一选」卡的入选排序，不删除（保留兜底池）。
     const hints = opts.profileHints ?? {};
@@ -1507,9 +1508,10 @@ export class PlanningService {
       return { list: [...picked, ...niche].map((x) => x.p), nicheCount: niche.length };
     };
     const viewTake = takeDiverseView();
+    // 2026-11-14 用户定稿：种草只选游玩地点，不再把住宿混进筛选卡
+    // （住宿已在预订卡按真实房价选过）。
     const cats: Array<{ key: 'view' | 'stay'; type: PoiMediaType; list: RawPOI[] }> = [
       { key: 'view', type: 'attraction', list: viewTake.list },
-      { key: 'stay', type: 'hotel', list: take(dest.hotels, 'hotel') },
     ];
     const jobs: Array<{
       cat: 'view' | 'stay';
@@ -2894,10 +2896,26 @@ export class PlanningService {
           const lat = parseFloat(String(item.lat));
           const lon = parseFloat(String(item.lon));
 
-          return {
-            center: { latitude: lat, longitude: lon },
-            displayName: String(item.display_name ?? '') || query,
-          };
+          // 2026-11-13 脏数据防线：Nominatim/Photon 的首个命中**必须自证**。
+          // 实测事故：「贵州兴义」经 Nominatim 拿到 (25.2613404, 104.8558378)，
+          // 该点实际落在兴义市**清水河镇**（距市中心 19.3km），却被当作城市中心
+          // 永久写进 POI 缓存 → 一切基于它的距离计算全错（用户实测「离九华苑
+          // 20 多公里」，真实值 0.16km）。
+          // 这里用高德逆地理反查该坐标：地址里必须出现查询名里的地名片段，
+          // 否则判定为「撞名/脏数据」，拒绝这个坐标。
+          const verified = await this.verifyGeocodedCenter(lat, lon, query);
+          const drift = await this.verifyCenterAgainstAmap(lat, lon, query);
+          if (!verified.ok || !drift.ok) {
+            console.warn(
+              `[OSM] 地理编码结果未通过校验(${query} → ${lat},${lon}: ` +
+                `${verified.reason}${drift.ok ? "" : " / " + drift.reason})，丢弃该坐标`,
+            );
+          } else {
+            return {
+              center: { latitude: lat, longitude: lon },
+              displayName: String(item.display_name ?? '') || query,
+            };
+          }
         }
       }
 
@@ -2916,12 +2934,162 @@ export class PlanningService {
       // 备用 geocoder：知识库未收录的冷门地名才走 Photon
       const photon = await this.geocodeByPhoton(query);
       if (photon) {
-        console.log(`[OSM] Photon 备用命中: ${photon.displayName} [${photon.center.longitude}, ${photon.center.latitude}]`);
-        return photon;
+        const verified = await this.verifyGeocodedCenter(
+          photon.center.latitude,
+          photon.center.longitude,
+          query,
+        );
+        const drift = await this.verifyCenterAgainstAmap(
+          photon.center.latitude,
+          photon.center.longitude,
+          query,
+        );
+        if (verified.ok && drift.ok) {
+          console.log(`[OSM] Photon 备用命中: ${photon.displayName} [${photon.center.longitude}, ${photon.center.latitude}]`);
+          return photon;
+        }
+        console.warn(
+          `[OSM] Photon 结果未通过校验(${query} → ${photon.center.latitude},${photon.center.longitude}: ` +
+            `${verified.reason}${drift.ok ? "" : " / " + drift.reason})，丢弃该坐标`,
+        );
       }
       // 诚实失败：绝不返回猜测坐标。历史版本兜底到「中国中心」——那会让整个行程
       // 建在错误的坐标上（假数据），现已改为向上抛错由调用方明确告知用户。
       throw new Error(`无法定位目的地「${query}」（地理编码服务不可用或地名无法识别）`);
+    }
+  }
+
+  /**
+   * 地理编码结果的地名自证（2026-11-13 新增）。
+   *
+   * 背景：Nominatim/Photon 的首个命中可能是「撞名」的脏数据——「贵州兴义」曾被
+   * 解析到兴义市清水河镇（距市中心 19.3km），该坐标被当作城市中心写进 POI 缓存后，
+   * 一切基于它的检索与距离计算全错（实测用户问「离九华苑多远」得到 20+ 公里，
+   * 真实值 0.16 公里）。
+   *
+   * 校验方式：用高德逆地理反查该坐标，检查返回地址里是否出现查询名中的地名片段。
+   * 高德是国内权威源，key 缺失时跳过校验（保持既有行为，不因缺 key 阻断功能）。
+   *
+   * 判定规则：
+   *   - 查询名里能提取出长度 ≥2 的中文地名片段 → 地址必须包含其中之一；
+   *   - 查询名是纯英文/数字（如 "Kyoto"）→ 无法做中文片段匹配，放行；
+   *   - 高德反查失败或无 key → 放行（不因外部服务故障阻断主链路）。
+   */
+  private async verifyGeocodedCenter(
+    lat: number,
+    lon: number,
+    query: string,
+  ): Promise<{ ok: boolean; reason: string }> {
+    if (!AMAP_KEY) return { ok: true, reason: "no-amap-key" };
+    // 提取查询名里的中文地名片段（去掉省/市/区等行政后缀词后仍留有专名）
+    const segments = extractPlaceNameSegments(query);
+    if (segments.length === 0) return { ok: true, reason: "no-chinese-segment" };
+
+    try {
+      const url = `https://restapi.amap.com/v3/geocode/regeo?key=${AMAP_KEY}` +
+        `&location=${lon},${lat}&extensions=base&output=JSON`;
+      const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+      const j = await res.json() as {
+        status?: string;
+        regeocode?: { formatted_address?: string; addressComponent?: Record<string, unknown> };
+      };
+      if (j.status !== "1" || !j.regeocode) {
+        // 反查失败：无法证伪，放行（外部服务故障不该阻断主链路）
+        return { ok: true, reason: "regeo-unavailable" };
+      }
+      const addr = String(j.regeocode.formatted_address ?? "");
+      const comp = j.regeocode.addressComponent ?? {};
+      const haystack = [
+        addr,
+        String(comp.province ?? ""),
+        String(comp.city ?? ""),
+        String(comp.district ?? ""),
+        String(comp.township ?? ""),
+      ].join(" ");
+      // 按片段长度从长到短匹配：先看完整地名（「贵州兴义」），再看碎片。
+      // 顺序很关键 —— 碎片（「州兴义」）在同市不同镇都会命中，没有区分力；
+      // 只有完整地名命中才说明坐标落在用户说的那个地方。
+      const ordered = [...segments].sort((a, b) => b.length - a.length);
+      const hit = ordered.find((seg) => haystack.includes(seg));
+      if (!hit) {
+        return { ok: false, reason: `地址「${addr || "未知"}」不含查询地名片段` };
+      }
+      // 命中的是完整地名还是碎片？碎片命中说明只能确认「同一行政区」，
+      // 不能确认「同一个地方」——不足以证明坐标正确，放行让上游决定，
+      // 但把这个事实如实记进 reason 供排障。
+      const isFragment = hit.length < ordered[0]!.length;
+      return { ok: true, reason: `matched:${hit}${isFragment ? "(fragment)" : ""}` };
+    } catch {
+      return { ok: true, reason: "regeo-error" };
+    }
+  }
+
+  /**
+   * 候选中心点与高德权威 geocode 结果的距离一致性校验（2026-11-13）。
+   *
+   * 这是比「地址含地名片段」强得多的判据：直接拿同一个查询词去问高德
+   * 「这个地名在哪」，再量两个坐标的间距。
+   *
+   * 实测事故：「贵州兴义」经 Nominatim 拿到清水河镇的坐标，与高德 geocode
+   * 给出的兴义市中心相距 19.3km —— 远超人能感知的「同一个市」的合理偏差
+   * （县级市内部本就可能跨十几公里，故阈值取 8km）。这个距离差正是用户
+   * 看到「离九华苑 20 多公里」的根源。
+   *
+   * 高德不可用时返回 ok（不因外部服务故障阻断主链路）。
+   */
+  private async verifyCenterAgainstAmap(
+    lat: number,
+    lon: number,
+    query: string,
+  ): Promise<{ ok: boolean; reason: string; distanceMeters?: number }> {
+    if (!AMAP_KEY) return { ok: true, reason: "no-amap-key" };
+    try {
+      const url = `https://restapi.amap.com/v3/geocode/geo?key=${AMAP_KEY}` +
+        `&address=${encodeURIComponent(query)}&output=JSON`;
+      const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+      const j = await res.json() as {
+        status?: string;
+        geocodes?: Array<{ location?: string; formatted_address?: string }>;
+      };
+      const loc = j.geocodes?.[0]?.location;
+      if (j.status !== "1" || !loc || !loc.includes(",")) {
+        return { ok: true, reason: "amap-geocode-unavailable" };
+      }
+      const [refLng, refLat] = loc.split(",").map(Number);
+      if (!Number.isFinite(refLat) || !Number.isFinite(refLng)) {
+        return { ok: true, reason: "amap-geocode-parse-failed" };
+      }
+      // 高德 geocode 与 Nominatim/Photon 都是「同一地点」的候选表示，
+      // 但坐标系可能不同（高德 GCJ-02 / OSM WGS-84）。这里对候选点做
+      // 坐标系兜底：若两者距离落在国内 GCJ-02 偏移量级内，说明候选点其实是
+      // WGS-84，先转换再比，避免「坐标系差异」被误判成「地点差异」。
+      const candidates = [lat, lon];
+      let best = haversineMeters(
+        { latitude: lat, longitude: lon },
+        { latitude: refLat, longitude: refLng },
+      );
+      // 用 GCJ-02 反算的候选点再试一次（WGS-84 → GCJ-02 后距离会显著缩小）
+      const shifted = wgs84ToGcj02(lat, lon);
+      const shiftedDist = haversineMeters(
+        { latitude: shifted.latitude, longitude: shifted.longitude },
+        { latitude: refLat, longitude: refLng },
+      );
+      if (shiftedDist < best) {
+        best = shiftedDist;
+        candidates[0] = shifted.latitude;
+        candidates[1] = shifted.longitude;
+      }
+      void candidates;
+      if (best > CENTER_DRIFT_TOLERANCE_METERS) {
+        return {
+          ok: false,
+          reason: `与高德权威坐标相距 ${Math.round(best)}m（超过 ${CENTER_DRIFT_TOLERANCE_METERS}m 容差）`,
+          distanceMeters: Math.round(best),
+        };
+      }
+      return { ok: true, reason: `within-tolerance:${Math.round(best)}m`, distanceMeters: Math.round(best) };
+    } catch {
+      return { ok: true, reason: "amap-geocode-error" };
     }
   }
 
@@ -6433,4 +6601,35 @@ export class PlanningService {
     }
     return '本地特色';
   }
+}
+
+/**
+ * 从目的地名里提取可用于「地名自证」的片段（2026-11-13）。
+ *
+ * 目标：拿这些片段去反查地址里找 —— 地址里出现任一片段即说明这个坐标确实
+ * 落在用户说的地方。做法：
+ *   1. 剥掉行政后缀（省/市/区/县/镇/乡/街道/村…）与常见修饰词；
+ *   2. 剩下的连续中文块按 2~6 字切分（地名通常 2~4 字），取子串集合；
+ *   3. 长度 <2 的片段没有辨识度（「兴」这种），丢弃。
+ *
+ * 例：「贵州兴义」→ 剥「州」得「贵州兴义」→ 片段含 ["贵州兴义", "九华苑"] 类子串；
+ *     「下五屯九华苑」→ 片段含 ["下五屯九华苑", "五屯九华苑", "九华苑"]。
+ */
+export function extractPlaceNameSegments(query: string): string[] {
+  const cleaned = query
+    .replace(/[省市区县镇乡村街道弄]/g, " ")
+    .replace(/[\s·,，.。、_-]+/g, " ")
+    .trim();
+  if (!cleaned) return [];
+  const out = new Set<string>();
+  for (const chunk of cleaned.split(/\s+/)) {
+    const zh = chunk.replace(/[^\u4e00-\u9fa5]/g, "");
+    if (zh.length < 2) continue;
+    for (let len = Math.min(zh.length, 6); len >= 2; len--) {
+      for (let i = 0; i + len <= zh.length; i++) {
+        out.add(zh.slice(i, i + len));
+      }
+    }
+  }
+  return [...out];
 }

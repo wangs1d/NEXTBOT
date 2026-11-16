@@ -14,14 +14,7 @@ import type {
   GuideCandidate,
   PlanningResult,
   PlanningService,
-  TransferSegment,
 } from "./travel-planning-service.js";
-import {
-  lookupTransportOptions,
-  lookupHotelOptions,
-  type TransportOptionDetail,
-  type HotelOptionDetail,
-} from "./travel-live-pricing.js";
 import { auditChatCompletion } from "../../services/llm-token-audit.js";
 import {
   extractWishlist,
@@ -167,54 +160,6 @@ export type PlanSessionPaceInfer = {
   options: string[];
 };
 
-// ────────────────────── 预订选择卡（酒店/机票/高铁，2026-10-27） ──────────────────────
-
-/** 预订卡的大交通选项（飞猪实时班次；票价取不到时 amount=null，卡面标「待核价」）。 */
-export type PlanSessionBookingTransport = {
-  key: string;
-  mode: "flight" | "train";
-  no?: string;
-  carrier?: string;
-  outbound?: TransportOptionDetail["outbound"];
-  inbound?: TransportOptionDetail["inbound"];
-  amount: number | null;
-  durationMin?: number;
-  bookingUrl?: string;
-  viaHub?: string;
-  /** 服务端推荐位（有实价且耗时合理的最低价），只作标记不替用户选 */
-  recommended?: boolean;
-};
-
-/** 预订卡的酒店选项（飞猪在售酒店，每晚价）。 */
-export type PlanSessionBookingHotel = {
-  key: string;
-  name: string;
-  amount: number | null;
-  rating?: number;
-  star?: string;
-  near?: string;
-  image?: string;
-  bookingUrl?: string;
-  fromPicks?: boolean;
-  recommended?: boolean;
-};
-
-/** 预订选择卡数据：会话内留存，供 /booking 回传校验与 generate 落实选择。 */
-export type PlanSessionBookingData = {
-  origin: string;
-  destination: string;
-  checkIn?: string;
-  checkOut?: string;
-  nights: number;
-  transports: PlanSessionBookingTransport[];
-  hotels: PlanSessionBookingHotel[];
-  /** 用户已确认的选择（key 回传；不订=缺省） */
-  selection?: { transportKey?: string; hotelKey?: string };
-  /** 飞猪体验模式：部分价格被平台脱敏，卡面如实说明 */
-  trial?: boolean;
-  preparedAt: number;
-};
-
 export type PlanSessionCard =
   | {
       type: "guide";
@@ -229,23 +174,6 @@ export type PlanSessionCard =
       sub: string;
       days: PlanSessionWeatherDay[];
       tip: string;
-    }
-  | {
-      /** 大交通与住宿预订选择卡：飞猪实时班次/房价，选中项进预算与行程。 */
-      type: "booking";
-      stage: string;
-      title: string;
-      sub: string;
-      origin: string;
-      destination: string;
-      checkIn?: string;
-      checkOut?: string;
-      nights: number;
-      transports: PlanSessionBookingTransport[];
-      hotels: PlanSessionBookingHotel[];
-      /** 已确认的回显选择（恢复会话时原样带回） */
-      selection?: { transportKey?: string; hotelKey?: string };
-      trial?: boolean;
     }
   | {
       /** 筛选卡之后的自选补充：直写非去不可的地方/酒店（可全部留空）。 */
@@ -373,7 +301,7 @@ export type PlanSessionTurn = {
   sessionId: string;
   /**
    * gathering=还有问题待对齐 / guide_ready=待勾选筛选卡 /
-   * wishlist_ready=待补充自选地点 / booking_ready=待选大交通与住宿 /
+   * wishlist_ready=待补充自选地点 /
    * ready=信息齐可生成 / budget_ready=已算好预算待确认 /
    * generated=用户确认后已出最终方案
    */
@@ -381,7 +309,6 @@ export type PlanSessionTurn = {
     | "gathering"
     | "guide_ready"
     | "wishlist_ready"
-    | "booking_ready"
     | "ready"
     | "budget_ready"
     | "generated";
@@ -456,10 +383,6 @@ export type PlanSession = {
   extras?: { view: string[]; stay: string[]; note?: string };
   /** 已发出补充卡、还在等用户回（自由文本也当补充处理） */
   awaitingExtras?: boolean;
-  /** 补完心愿后的预订选择（大交通/酒店真实班次与房价；用户选完才生成） */
-  booking?: PlanSessionBookingData;
-  /** 已发出预订选择卡、还在等用户回（暂不预订也算答复） */
-  awaitingBooking?: boolean;
 };
 
 /** 追问卡总数封顶：到顶后不再出卡，目的地在手就直接出方案。 */
@@ -1121,10 +1044,12 @@ function buildWeatherTip(picked: DailyForecast[]): string {
   return parts.join("；");
 }
 
-/** 规划流里是否穿插天气面板。当前产品口径暂不展示；保留实现，恢复时改这里。 */
-const PLAN_SESSION_WEATHER_ENABLED = false;
+/** 规划流里是否出天气面板。2026-11-14 用户定稿：天气放流程最后，
+ * 与最终方案同一轮下发（按已确定的游玩日期做预报）。 */
+const PLAN_SESSION_WEATHER_ENABLED = true;
 
-/** 目的地明确后只补一次天气面板（真实预报；失败静默省略，下轮不重复试）。 */
+/** 目的地明确后只补一次天气面板（真实预报；失败静默省略，下轮不重复试）。
+ * 2026-11-14 起改在「出最终方案」轮下发（用户定稿：天气放流程最后）。 */
 async function maybeWeatherCard(session: PlanSession): Promise<PlanSessionCard | null> {
   if (!PLAN_SESSION_WEATHER_ENABLED) return null;
   if (!session.destination || session.weatherSent) return null;
@@ -1239,12 +1164,11 @@ const DOSSIER_STEPS: Array<{ id: PlanSessionDossierStep["id"]; label: string }> 
   { id: "plan", label: "出方案" },
 ];
 
-/** 会话状态 → 当前停在哪一步（generated 视为五步全走完）。预订选择并入「核预算」步。 */
+/** 会话状态 → 当前停在哪一步（generated 视为五步全走完）。 */
 const DOSSIER_ACTIVE_INDEX: Record<PlanSessionTurn["state"], number> = {
   gathering: 0,
   guide_ready: 1,
   wishlist_ready: 2,
-  booking_ready: 1,
   ready: 3,
   budget_ready: 3,
   generated: 5,
@@ -1417,7 +1341,9 @@ const GUIDE_LABELS: Record<"view" | "stay", string> = {
 };
 
 /** 两段筛选的先后顺序：先景点、再住宿，每段一张独立卡。 */
-const GUIDE_ORDER: Array<"view" | "stay"> = ["view", "stay"];
+// 2026-11-14 用户定稿：种草只选游玩地点；住宿已在预订卡用真实房价选过，
+// 不再在筛选阶段单独问住宿。
+const GUIDE_ORDER: Array<"view" | "stay"> = ["view"];
 
 const GUIDE_SHORT_LABELS: Record<"view" | "stay", string> = {
   view: "景点",
@@ -1431,7 +1357,7 @@ const GUIDE_STAGE_TITLES: Record<"view" | "stay", (dest: string) => string> = {
 
 /** 每段卡出场时的引导语（段间过渡与打字岔开的召回都用它）。 */
 const GUIDE_STAGE_INVITE: Record<"view" | "stay", string> = {
-  view: "先挑想去的景点，勾掉不想要的——",
+  view: "点卡片右上角挑想去的景点——",
   stay: "接着挑住的地方——",
 };
 
@@ -1473,7 +1399,6 @@ function sessionStateLabel(session: PlanSession): PlanSessionTurn["state"] {
   if (session.budgetApproved) return "generated";
   if (session.budget) return "budget_ready";
   if (session.awaitingExtras) return "wishlist_ready";
-  if (session.awaitingBooking && session.booking) return "booking_ready";
   if (session.ready && pendingGuideStage(session)) return "guide_ready";
   if (session.ready) return "ready";
   return "gathering";
@@ -1489,7 +1414,6 @@ function resumeCardFor(session: PlanSession): PlanSessionCard | null {
   if (session.awaitingExtras) {
     return buildWishlistCard(session.guideSelections ?? { view: [], stay: [] });
   }
-  if (session.awaitingBooking && session.booking) return bookingCardFor(session);
   if (session.ready) {
     const stage = pendingGuideStage(session);
     return stage ? guideCardForStage(session, stage) : null;
@@ -1576,183 +1500,6 @@ function buildWishlistCard(
   };
 }
 
-// ────────────────────── 预订选择卡：准备 / 下发 / 落实 ──────────────────────
-
-function addDaysISO(date: string, days: number): string {
-  const ms = Date.parse(`${date}T00:00:00`);
-  if (!Number.isFinite(ms)) return date;
-  return new Date(ms + days * 86_400_000).toISOString().slice(0, 10);
-}
-
-/** 预订卡文案：飞猪实时班次/房价，选中进预算与行程，可不订。 */
-function bookingCardFor(session: PlanSession): PlanSessionCard | null {
-  const b = session.booking;
-  if (!b) return null;
-  return {
-    type: "booking",
-    stage: "订行程",
-    title: `${b.origin ? `${b.origin} → ` : ""}${b.destination} · 大交通与住宿`,
-    sub:
-      "班次与房价来自飞猪实时查询。选中的会按它的价格进预算、写进行程（车次/航班带接驳提醒），也可以先不订、按实时最低价做参考。",
-    origin: b.origin,
-    destination: b.destination,
-    ...(b.checkIn ? { checkIn: b.checkIn } : {}),
-    ...(b.checkOut ? { checkOut: b.checkOut } : {}),
-    nights: b.nights,
-    transports: b.transports,
-    hotels: b.hotels,
-    ...(b.selection ? { selection: b.selection } : {}),
-    ...(b.trial ? { trial: true } : {}),
-  };
-}
-
-/**
- * 补完心愿后的预订选择准备（2026-10-27）：往返大交通（机票/高铁）与目的地酒店
- * 全部来自飞猪实时查询——票价取不到（体验模式脱敏/未公布）就置 null 由卡面
- * 标「待核价」，绝不编造。出发地未知或同城不查大交通（只给酒店）。
- * 成功返回 true（session.booking 已就绪、awaitingBooking 置位）；失败/两手空
- * 返回 false，调用方维持原「ready 直接生成」路径，不让预订卡挡主链路。
- */
-async function prepareBooking(session: PlanSession): Promise<boolean> {
-  if (!session.destination) return false;
-  // 已在等用户选：复用现有卡，不重复打外网查询（用户没点卡、又发消息的场景）
-  if (session.awaitingBooking && session.booking) return true;
-  // 用户已确认过选择：不重发卡（选择已落实进生成链路）
-  if (session.booking?.selection) return false;
-  const days = effectiveDays(session);
-  // 晚数 = 天数-1（当天往返按 1 晚口径，与预算一致）；无天数按 1 晚
-  const nightCount = days ? Math.max(1, days - 1) : 1;
-  const checkIn = session.startDate || undefined;
-  const checkOut =
-    session.endDate || (checkIn ? addDaysISO(checkIn, nightCount) : undefined);
-  const trial = process.env.FLYAI_TRIAL === "1";
-  try {
-    const origin = (session.origin ?? "").trim();
-    const differentCity =
-      !!origin && origin.replace(/\s/g, "") !== session.destination.replace(/\s/g, "");
-    const [transportRes, hotels] = await Promise.all([
-      differentCity
-        ? lookupTransportOptions({
-            origin,
-            originRegion: session.locatedOrigin?.region || undefined,
-            destination: session.destination,
-            ...(checkIn ? { startDate: checkIn } : {}),
-            ...(checkOut ? { endDate: checkOut } : {}),
-          })
-        : Promise.resolve({ flights: [], trains: [] }),
-      lookupHotelOptions({
-        city: session.destination,
-        names: mergedWishlists(session).stay,
-        ...(checkIn ? { checkIn } : {}),
-        ...(checkOut ? { checkOut } : {}),
-      }),
-    ]);
-    // 大交通：机票在前、高铁在后，key 稳定（t0..）供 /booking 回传校验
-    const transportList = [...transportRes.flights, ...transportRes.trains];
-    const priced = transportList.filter((t) => t.amount != null && t.durationMin != null && t.durationMin <= 12 * 60);
-    const recommendedKey = priced.length
-      ? priced.reduce((a, b) => ((a.amount ?? 0) <= (b.amount ?? 0) ? a : b)).no
-      : undefined;
-    const transports: PlanSessionBookingTransport[] = transportList.map((t, i) => ({
-      key: `t${i}`,
-      mode: t.mode,
-      ...(t.no ? { no: t.no } : {}),
-      ...(t.carrier ? { carrier: t.carrier } : {}),
-      ...(t.outbound ? { outbound: t.outbound } : {}),
-      ...(t.inbound ? { inbound: t.inbound } : {}),
-      amount: t.amount,
-      ...(t.durationMin ? { durationMin: t.durationMin } : {}),
-      ...(t.bookingUrl ? { bookingUrl: t.bookingUrl } : {}),
-      ...(t.viaHub ? { viaHub: t.viaHub } : {}),
-      ...(t.no && t.no === recommendedKey ? { recommended: true } : {}),
-    }));
-    // 酒店：勾选置顶（fromPicks），推荐位给有实价里最便宜的
-    const hotelPriced = hotels.filter((h) => h.amount != null);
-    const recommendedHotel = hotelPriced.length
-      ? hotelPriced.reduce((a, b) => (a.amount ?? 0) <= (b.amount ?? 0) ? a : b).name
-      : undefined;
-    const hotelOptions: PlanSessionBookingHotel[] = hotels.map((h, i) => ({
-      key: `h${i}`,
-      name: h.name,
-      amount: h.amount,
-      ...(h.rating ? { rating: h.rating } : {}),
-      ...(h.star ? { star: h.star } : {}),
-      ...(h.near ? { near: h.near } : {}),
-      ...(h.image ? { image: h.image } : {}),
-      ...(h.bookingUrl ? { bookingUrl: h.bookingUrl } : {}),
-      ...(h.fromPicks ? { fromPicks: true } : {}),
-      ...(h.name === recommendedHotel ? { recommended: true } : {}),
-    }));
-    if (transports.length === 0 && hotelOptions.length === 0) return false;
-    session.booking = {
-      origin,
-      destination: session.destination,
-      ...(checkIn ? { checkIn } : {}),
-      ...(checkOut ? { checkOut } : {}),
-      nights: nightCount,
-      transports,
-      hotels: hotelOptions,
-      ...(trial ? { trial: true } : {}),
-      preparedAt: Date.now(),
-    };
-    session.awaitingBooking = true;
-    return true;
-  } catch (err) {
-    console.warn(
-      "[travel-plan-session] 预订选择准备失败，直接生成:",
-      err instanceof Error ? err.message : err,
-    );
-    return false;
-  }
-}
-
-/** 预订卡提交后的回话：报出所选班次/酒店，或如实说明按参考价走。 */
-function bookingSayOf(session: PlanSession): string {
-  const b = session.booking;
-  if (!b) return "";
-  const t = b.selection?.transportKey
-    ? b.transports.find((x) => x.key === b.selection!.transportKey)
-    : undefined;
-  const h = b.selection?.hotelKey
-    ? b.hotels.find((x) => x.key === b.selection!.hotelKey)
-    : undefined;
-  const parts: string[] = [];
-  parts.push(
-    t
-      ? `大交通按你选的${t.mode === "flight" ? "航班" : "车次"}${t.no ?? ""}算${
-          t.amount != null ? `（往返 ¥${t.amount}）` : "（票价以订票页为准）"
-        }`
-      : "大交通先按实时最低价做预算参考",
-  );
-  parts.push(
-    h ? `住宿按你选的「${h.name}」排` : "住宿按行程里的酒店实时价算",
-  );
-  return `${parts.join("；")}，记下了。`;
-}
-
-/**
- * 信息齐后、进「选一选」之前先过预订选择卡：prepareBooking 成功 →
- * booking_ready 轮（含预订卡）；失败/两手空 → null，调用方继续原筛选/生成路径。
- */
-async function bookingTurnOrNull(session: PlanSession): Promise<PlanSessionTurn | null> {
-  const prepared = await prepareBooking(session);
-  if (!prepared) return null;
-  const card = bookingCardFor(session);
-  if (!card) return null;
-  const say = "先把大交通和住宿定一下——都是实时班次和房价，选中的会算进预算和行程，不合适就先不订。";
-  session.history.push({ role: "assistant", content: say });
-  return {
-    ok: true,
-    sessionId: session.id,
-    state: "booking_ready",
-    say,
-    cards: [card],
-    draft: null,
-    budget: null,
-    dossier: buildDossier(session, "booking_ready"),
-  };
-}
-
 /** 两段筛选全部勾完：记账 + 进补心愿（endpoint 内使用，抽出来复用代选路径）。 */
 function finalizeGuideTurn(
   session: PlanSession,
@@ -1836,7 +1583,8 @@ function mergedWishlists(session: PlanSession): {
 
 /**
  * 统一轮处理（消息轮 / 点选轮同一链路）：编排器产出回应 + 下一张问题
- * 卡 + ready 判定，护栏过滤违规问题，天气面板穿插。
+ * 卡 + ready 判定，护栏过滤违规问题。天气卡不在这里穿插，挪到出最终
+ * 方案（approve）那一轮末尾。
  */
 async function runTurn(
   session: PlanSession,
@@ -1862,15 +1610,13 @@ async function runTurn(
 
   let ready = Boolean(session.destination) && orch.ready;
   let say = await backfillOriginFromLocation(session, orch.say);
-  // 目的地换了：旧候选和勾选全部作废，重新出一版筛选卡（预订选择一并作废）
+  // 目的地换了：旧候选和勾选全部作废，重新出一版筛选卡
   if (session.destination !== prevDestination) {
     session.guide = undefined;
     session.guideSent = false;
     session.guideSelections = undefined;
     session.extras = undefined;
     session.awaitingExtras = false;
-    session.booking = undefined;
-    session.awaitingBooking = false;
   }
   // ready 却天数/日期两头空：判不住，降回 gathering 并文字补问天数。
   if (ready && effectiveDays(session) == null) {
@@ -1879,8 +1625,6 @@ async function runTurn(
   }
 
   const cards: PlanSessionCard[] = [];
-  const wx = await maybeWeatherCard(session);
-  if (wx) cards.push(wx);
 
   const capReached = session.questionTurns >= MAX_QUESTION_TURNS;
   const question = ready || capReached ? null : filterQuestion(session, orch.question);
@@ -1927,15 +1671,9 @@ async function runTurn(
         : "想去哪儿玩？";
   }
 
-  // 信息齐 → 先过预订选择卡（大交通+住宿，真实班次与房价；选一选之前定乘坐
-  // 方式），再生成全量候选，下发第一段（景点）筛选卡。三段依次勾完才进入
-  // 生成，选中的地点作为心愿清单交给规划引擎。
+  // 信息齐 → 生成全量候选，下发景点筛选卡（2026-11-14 起只问游玩地点，
+  // 不做机票/高铁/酒店预订）。勾完进入补心愿，选中的地点作为心愿清单交给规划引擎。
   if (ready && service && !session.guideSent && !session.guideSelections) {
-    const bt = await bookingTurnOrNull(session);
-    if (bt) {
-      session.updatedAt = Date.now();
-      return bt;
-    }
     const built = await buildGuideCandidates(session, service);
     if (built) {
       session.guideSent = true;
@@ -1944,7 +1682,7 @@ async function runTurn(
       const stage = pendingGuideStage(session);
       const guideCard = stage ? guideCardForStage(session, stage) : null;
       if (guideCard && stage) {
-        const guideSay = `${session.destination}的候选整理好了，住宿后面接着挑。${GUIDE_STAGE_INVITE[stage]}`;
+        const guideSay = `${session.destination}的必玩景点整理好了。${GUIDE_STAGE_INVITE[stage]}`;
         session.history.push({ role: "assistant", content: guideSay });
         return {
           ok: true,
@@ -1979,7 +1717,7 @@ async function runTurn(
       sessionId: session.id,
       state: "guide_ready",
       say,
-      cards: [guideCardForStage(session, stage)!],
+      cards: [...cards.filter((c) => c.type !== "choice"), guideCardForStage(session, stage)!],
       draft: null,
       budget: null,
       dossier: buildDossier(session, "guide_ready"),
@@ -2239,57 +1977,6 @@ async function generateDraft(
   // 同行人既决定默认节奏（planning-service 的 paceForParty），也决定住宿/餐饮取向；
   // 原文里说过就结构化传下去，避免只靠 input 正则二次解析。
   const party = extractParty(input);
-  // 预订选择卡的用户选择（booking_ready 轮之后）：所选酒店置顶住宿心愿；
-  // 所选班次构造成真实 TransferSegment（含 ISO 时刻，行程按班次时刻排接驳），
-  // 有实价时再传 selectedTransport 让预算直接用所选价，不再现查。
-  const bk = session.booking;
-  const pickTransport = bk?.selection?.transportKey
-    ? bk.transports.find((t) => t.key === bk.selection!.transportKey)
-    : undefined;
-  const pickHotel = bk?.selection?.hotelKey
-    ? bk.hotels.find((h) => h.key === bk.selection!.hotelKey)
-    : undefined;
-  const stayWish =
-    pickHotel && !wish.stay.includes(pickHotel.name)
-      ? [pickHotel.name, ...wish.stay]
-      : wish.stay;
-  const transferSegs: TransferSegment[] = [];
-  if (pickTransport?.outbound) {
-    const leg = pickTransport.outbound;
-    transferSegs.push({
-      type: pickTransport.mode,
-      role: "arrival",
-      no: pickTransport.no ?? "",
-      ...(leg.depISO ? { depTime: leg.depISO } : {}),
-      ...(leg.arrISO ? { arrTime: leg.arrISO } : {}),
-      from: leg.from || session.origin || "出发地",
-      to: leg.to || session.destination || "目的地",
-    });
-  }
-  if (pickTransport?.inbound) {
-    const leg = pickTransport.inbound;
-    transferSegs.push({
-      type: pickTransport.mode,
-      role: "departure",
-      no: pickTransport.no ?? "",
-      ...(leg.depISO ? { depTime: leg.depISO } : {}),
-      ...(leg.arrISO ? { arrTime: leg.arrISO } : {}),
-      from: leg.from || session.destination || "目的地",
-      to: leg.to || session.origin || "出发地",
-    });
-  }
-  const selectedTransport =
-    pickTransport && pickTransport.amount != null
-      ? (() => {
-          const kind = pickTransport.mode === "flight" ? "往返机票" : "往返火车票";
-          return {
-            mode: pickTransport.mode,
-            amount: pickTransport.amount,
-            label: pickTransport.no ? `${kind}（${pickTransport.no}）` : kind,
-            ...(pickTransport.viaHub ? { viaHub: pickTransport.viaHub } : {}),
-          };
-        })()
-      : undefined;
   const result = await service.generateItinerary({
     actorId: session.actorId,
     input,
@@ -2298,15 +1985,13 @@ async function generateDraft(
     preferences: preferencesOf(session),
     // 结构化槽位：勾选 + 自选补充都真正进入规划（wishlist 会定向补搜并置顶）
     ...(wish.view.length ? { wishlist: wish.view } : {}),
-    ...(stayWish.length ? { stayWishlist: stayWish } : {}),
+    ...(wish.stay.length ? { stayWishlist: wish.stay } : {}),
     ...(party ? { party } : {}),
     ...(session.origin ? { origin: session.origin } : {}),
     ...(session.origin && session.originSource === "located" && session.locatedOrigin
       ? { originRegion: session.locatedOrigin.region || undefined, originSource: "located" as const }
       : {}),
     ...(session.startDate ? { startDate: session.startDate } : {}),
-    ...(transferSegs.length ? { transfers: transferSegs } : {}),
-    ...(selectedTransport ? { selectedTransport } : {}),
   });
   const planId = String(result.id ?? "");
   if (planId) {
@@ -2437,12 +2122,6 @@ const extrasSchema = z.object({
   note: z.string().max(200).optional(),
 });
 
-/** 预订选择卡提交：大交通/酒店各至多选一项，也可全不选（不订就不进预算）。 */
-const bookingSchema = z.object({
-  transportKey: z.string().min(1).max(8).optional(),
-  hotelKey: z.string().min(1).max(8).optional(),
-});
-
 /** 统一 503：规划服务未装配 */
 function requireService(
   deps: { travelPlanningService?: PlanningService },
@@ -2546,7 +2225,6 @@ export function registerTravelPlanSessionRoutes(
       "POST   /travel/plan-session/:id/turn   {message} 或 {cardId,values,note?} 追加一轮（每轮至多一张问题卡，题目与选项由 LLM 编排器生成）",
       "POST   /travel/plan-session/:id/guide  {view?,stay?,delegate?} 提交筛选卡勾选（景点→住宿两段依次勾选）",
       "POST   /travel/plan-session/:id/extras {view?,stay?,note?} 提交筛选后的自选补充（可空）",
-      "POST   /travel/plan-session/:id/booking {transportKey?,hotelKey?} 提交预订选择卡（实时机票/高铁/酒店，可全不选=先不订）",
       "POST   /travel/plan-session/:id/generate   信息齐后真实生成并返回预算明细（待确认）",
       "POST   /travel/plan-session/:id/approve    用户确认预算后下发最终草案",
       "GET    /travel/plan-session/:id        会话状态 + history + dossier + resumeCard（刷新恢复 / 继续上次规划；限本 actor）",
@@ -2806,97 +2484,6 @@ export function registerTravelPlanSessionRoutes(
     },
   );
 
-  // 预订选择卡提交：{transportKey?,hotelKey?}（均可空 = 先不订）。
-  // 选择落进 session.booking.selection，generate 时据此落实预算与行程交通段。
-  app.post<{ Params: { id: string } }>(
-    "/travel/plan-session/:id/booking",
-    async (request, reply) => {
-      const session = getSession(actorIdOf(request), request.params.id);
-      if (!session) {
-        return reply.code(404).send({ ok: false, error: "会话不存在或已过期，请重新发起" });
-      }
-      const body = bookingSchema.safeParse(request.body);
-      if (!body.success) {
-        return reply.code(400).send({ ok: false, error: body.error.flatten() });
-      }
-      if (!session.booking || !session.awaitingBooking) {
-        return reply.code(409).send({ ok: false, error: "当前没有待确认的预订选择" });
-      }
-      const { transportKey, hotelKey } = body.data;
-      if (transportKey && !session.booking.transports.some((t) => t.key === transportKey)) {
-        return reply.code(400).send({ ok: false, error: "所选大交通不在候选项里，请刷新后重选" });
-      }
-      if (hotelKey && !session.booking.hotels.some((h) => h.key === hotelKey)) {
-        return reply.code(400).send({ ok: false, error: "所选酒店不在候选项里，请刷新后重选" });
-      }
-      session.updatedAt = Date.now();
-      session.booking.selection = {
-        ...(transportKey ? { transportKey } : {}),
-        ...(hotelKey ? { hotelKey } : {}),
-      };
-      session.awaitingBooking = false;
-      session.ready = true;
-      const t = transportKey
-        ? session.booking.transports.find((x) => x.key === transportKey)
-        : undefined;
-      const h = hotelKey ? session.booking.hotels.find((x) => x.key === hotelKey) : undefined;
-      const picked: string[] = [];
-      if (t) picked.push(`大交通：${t.mode === "flight" ? "航班" : "车次"} ${t.no ?? ""}`.trim());
-      if (h) picked.push(`住宿：${h.name}`);
-      session.history.push({
-        role: "user",
-        content: picked.length > 0 ? `（预订）${picked.join("；")}` : "（预订）先不订，按参考价排",
-      });
-      const say = bookingSayOf(session);
-      session.history.push({ role: "assistant", content: say });
-      saveSession(session);
-      // 预订选择落定 → 进「选一选」：现做景点/住宿候选，下发第一段筛选卡。
-      // 候选构建失败/服务缺失时回 ready 兜底，流程不卡死。
-      const service = deps.travelPlanningService;
-      if (service) {
-        try {
-          const built = await buildGuideCandidates(session, service);
-          const stage = built ? pendingGuideStage(session) : null;
-          const guideCard = stage ? guideCardForStage(session, stage) : null;
-          if (guideCard && stage) {
-            session.guideSent = true;
-            const guideSay = `班次和住宿记下了。${session.destination}的候选整理好了，住宿后面接着挑。${GUIDE_STAGE_INVITE[stage]}`;
-            session.history.push({ role: "assistant", content: guideSay });
-            session.updatedAt = Date.now();
-            saveSession(session);
-            return {
-              ok: true,
-              sessionId: session.id,
-              state: "guide_ready",
-              say: guideSay,
-              cards: [guideCard],
-              draft: null,
-              budget: null,
-              dossier: buildDossier(session, "guide_ready"),
-            } satisfies PlanSessionTurn;
-          }
-        } catch (err) {
-          console.warn(
-            "[travel-plan-session] 预订提交后筛选候选构建失败，直接生成:",
-            err instanceof Error ? err.message : err,
-          );
-        }
-      }
-      session.updatedAt = Date.now();
-      saveSession(session);
-      return {
-        ok: true,
-        sessionId: session.id,
-        state: "ready",
-        say,
-        cards: [] as PlanSessionCard[],
-        draft: null,
-        budget: null,
-        dossier: buildDossier(session, "ready"),
-      } satisfies PlanSessionTurn;
-    },
-  );
-
   // 真实生成（与聊天 travel.plan-itinerary 同一引擎与冷层）
   app.post<{ Params: { id: string } }>("/travel/plan-session/:id/generate", async (request, reply) => {
     if (!requireService(deps, reply)) return;
@@ -2961,12 +2548,16 @@ export function registerTravelPlanSessionRoutes(
     }
     session.budgetApproved = true;
     saveSession(session);
+    // 天气卡放到流程最后（2026-11-14 用户定稿）：出最终方案时按已确定的
+    // 游玩日期下发一张独立预报卡，不再在追问/筛选阶段前置。
+    const wx = await maybeWeatherCard(session);
+    if (wx) saveSession(session);
     return {
       ok: true,
       sessionId: session.id,
       state: "generated",
       say: "方案出好了：每站的时刻、两站间距离、开放与预约提醒都写在卡片里；想改随时告诉我。",
-      cards: [] as PlanSessionCard[],
+      cards: wx ? [wx] : ([] as PlanSessionCard[]),
       draft: session.draft,
       // 预算卡已在流程里展示过，这里只下发草案，避免客户端重复挂预算卡
       budget: null,

@@ -6,14 +6,13 @@ import { join } from "node:path";
 import { formatMemoryTopicTag, inferMemoryTopic } from "../agent/memory-topic.js";
 import { sanitizeMemoryLinesForPrompt } from "../agent/memory-line-hygiene.js";
 import { gateLtmWrite } from "../agentic-memory/ltm-write-gate.js";
+import { assertMemoryWriter } from "../memory/memory-authority.js";
+import { AGENT_NAME_KV_KEY } from "./agent-identity.js";
 import {
   areLinesConflicting,
   dedupeMemoryLines,
-  dropExpiredCommitmentLines,
   extractOverwriteKey,
   limitLinesByChars,
-  normalizeMemoryLine,
-  stripMemoryLineDecorators,
 } from "./memory-record-utils.js";
 
 type SessionMemory = {
@@ -214,7 +213,19 @@ export class AgentMemorySyncService {
     return this.enqueueActorWrite(sessionId, () => this.applyPatchUnsafe(sessionId, basisRevision, patches));
   }
 
-  appendMemorySummaryLine(actorId: string, line: string, topicHint?: string): void {
+  /**
+   * 追加一行长期记忆摘要。
+   *
+   * @param producer 调用方模块名（写入契约的断言对象）。缺省视为本服务自身；
+   *   其它模块经此入口写入时必须显式声明自己是谁——否则契约抓不到
+   *   「第二个写者」（2026-11-13：Agent 取名走的就是这条路）。
+   */
+  appendMemorySummaryLine(
+    actorId: string,
+    line: string,
+    topicHint?: string,
+    producer = "AgentMemorySyncService",
+  ): void {
     // v3 写入门：KV 记忆字段与 Mem0/叙事同门——一次性提醒回执、任务态快照、
     // 协议残留进 memory_summary 就是化石（「01:00 准时喊你」×4 的根因收口）
     const verdict = gateLtmWrite(line, "kv:summary");
@@ -222,6 +233,7 @@ export class AgentMemorySyncService {
       console.log(`[ltm-gate] 拒绝 KV 写入(${verdict.reason}): ${line.slice(0, 60)}`);
       return;
     }
+    assertMemoryWriter("memory_summary", producer);
     void this.enqueueActorWrite(actorId, () => this.doAppendStructuredMemoryLine(actorId, verdict.cleaned, topicHint));
   }
 
@@ -247,6 +259,11 @@ export class AgentMemorySyncService {
    * 前可能还没落盘，会留下「账号/界面有名字、prompt 里却没名字」的半截态。
    */
   async setEntryAndWait(actorId: string, key: string, value: unknown): Promise<boolean> {
+    // Agent 自我身份（KV agent.name）有自己的权威契约条目——改名是「要么全写、
+    // 要么全失败」的原子操作，第二个写者会让 prompt 里的名字与账号名打架。
+    if (key === AGENT_NAME_KV_KEY) {
+      assertMemoryWriter("agent_name", "AgentIdentityTools");
+    }
     const ok = await this.enqueueActorWrite(actorId, () => {
       for (let i = 0; i < 12; i++) {
         const { revision } = this.getSnapshot(actorId, [key]);
@@ -316,11 +333,6 @@ export class AgentMemorySyncService {
       const { revision, entries } = this.getSnapshot(actorId, [
         "memory_summary",
         "memory_summary_forgotten",
-        "memory_preferences",
-        "memory_facts",
-        "memory_commitments",
-        "memory_open_loops",
-        "session_recap",
       ]);
 
       const prev = typeof entries.memory_summary === "string" ? entries.memory_summary : "";
@@ -333,16 +345,80 @@ export class AgentMemorySyncService {
         { preferLatest: true },
       );
       const forgottenTrimmed = limitLinesByChars(forgotten, archiveMaxChars, { preserveTail: true }).kept;
-      const slotPatches = this.buildStructuredMemorySlotPatches(line, topicHint, entries);
 
+      // 2026-11-12 收敛：不再把同一行镜像进 memory_preferences / memory_facts /
+      // memory_commitments / memory_open_loops。那四条槽由关键词正则分派，是
+      // 「比价这类任务内容进画像槽 → 每轮无条件注入」的根因；档案字段的权威源
+      // 是 structured_facts，在办事项的权威源是 commitments/tasks，本类只拥有
+      // memory.summary 一个概念（见 memory/memory-authority.ts）。
       const result = this.applyPatchUnsafe(actorId, revision, [
         { key: "memory_summary", op: "put", value: kept.join("\n") },
         { key: "memory_summary_forgotten", op: "put", value: forgottenTrimmed.join("\n") },
-        ...slotPatches,
       ]);
       if (result.ok) return true;
     }
     return false;
+  }
+
+  /**
+   * 摘要整体替换（唯一维护入口）：consolidation / forgotten 恢复等需要重写整串的
+   * 场景一律走这里，而不是各自 applyPatch 全量覆盖。
+   *
+   * 存在的理由（2026-11-12）：此前 MemoryManagerService 自己读 revision 后
+   * applyPatch 覆盖，与 append 路径并发时 CAS 失败会被静默丢弃（整理白算一场）。
+   * 收敛到本方法后：读-改-写在同一把 actor 队列里重试，transform 拿到的是最新串。
+   */
+  replaceSummaryLines(
+    actorId: string,
+    transform: (current: { summary: string[]; forgotten: string[] }) => {
+      summary: string[];
+      forgotten: string[];
+    },
+    producer = "AgentMemorySyncService",
+  ): Promise<boolean> {
+    assertMemoryWriter("memory_summary", producer);
+    return this.enqueueActorWrite(actorId, () => {
+      const maxRaw = process.env.AGENT_MEMORY_SUMMARY_MAX_CHARS;
+      const maxChars = maxRaw ? Math.max(1000, Number.parseInt(maxRaw, 10) || 16_000) : 16_000;
+      for (let i = 0; i < 12; i++) {
+        const { revision, entries } = this.getSnapshot(actorId, [
+          "memory_summary",
+          "memory_summary_forgotten",
+        ]);
+        const current = {
+          summary: (typeof entries.memory_summary === "string" ? entries.memory_summary : "")
+            .split("\n")
+            .filter(Boolean),
+          forgotten: (typeof entries.memory_summary_forgotten === "string"
+            ? entries.memory_summary_forgotten
+            : ""
+          )
+            .split("\n")
+            .filter(Boolean),
+        };
+        const next = transform({ summary: [...current.summary], forgotten: [...current.forgotten] });
+        if (next.summary.length === current.summary.length && next.forgotten.length === current.forgotten.length &&
+            next.summary.every((l, idx) => l === current.summary[idx])) {
+          return true; // 无变化（幂等）
+        }
+        const kept = limitLinesByChars(
+          dedupeMemoryLines(next.summary, { preferLatest: true }),
+          maxChars,
+          { preserveTail: true },
+        ).kept;
+        const forgottenKept = limitLinesByChars(
+          dedupeMemoryLines(next.forgotten, { preferLatest: true }),
+          Math.max(maxChars, 48_000),
+          { preserveTail: true },
+        ).kept;
+        const result = this.applyPatchUnsafe(actorId, revision, [
+          { key: "memory_summary", op: "put", value: kept.join("\n") },
+          { key: "memory_summary_forgotten", op: "put", value: forgottenKept.join("\n") },
+        ]);
+        if (result.ok) return true;
+      }
+      return false;
+    });
   }
 
   private doAppendMemorySlotLine(actorId: string, key: string, line: string, topicHint?: string): boolean {
@@ -379,52 +455,6 @@ export class AgentMemorySyncService {
     return false;
   }
 
-  private buildStructuredMemorySlotPatches(
-    line: string,
-    topicHint: string | undefined,
-    entries: Record<string, unknown>,
-  ): MemoryPatchOp[] {
-    const slotLine = `[${new Date().toISOString()}] ${formatMemoryTopicTag(topicHint ?? inferMemoryTopic(line))} ${line}`;
-    const patches: MemoryPatchOp[] = [];
-    const text = `${line}`.trim();
-    const preferenceMatch = /(喜欢|偏好|不喜欢|讨厌|习惯|不要|别|prefer|like|hate|dislike)/i.test(text);
-    // 亲密关系陈述（老婆/对象/正主…）也是事实：旧词表漏掉关系类，导致
-    // "我的老婆是刘浩存"进不了 memory_facts 槽位、槽位内新旧值也无法互相替换
-    const factMatch =
-      /(我是|我在做|我最近在|我的项目|我住在|我计划|我需要|(?:我的|未来的?)(?:老婆|媳妇|妻子|未婚妻|未婚夫|对象|正主|女朋友|女友|男朋友|男友)|my project|i am|i'm)/i.test(text) ||
-      /(?:^|\s)(?:i|user)\s+(?:live|lives|am living|am based|based)\s+(?:in|at)\s+/i.test(text);
-    // 承诺匹配（2026-09-05 扩充）：原词表漏掉管家的高频口头应承表述
-    // （"给你设个提醒/记下了/到点喊你"）与用户委托（"提醒我…"），这类话
-    // 承诺没进【待办与承诺】槽位，后续轮次 agent 会把约定细节说岔且无从对证
-    const commitmentMatch =
-      /(我会|我将|已经帮你|已为你|稍后|接下来|记下了|记着|给你设|帮你设|帮你记|给你记|提醒我|提醒你|到点喊|i will|i can|i'll)/i.test(
-        text,
-      );
-    const loopMatch = /(待办|未完成|后续|继续|下一步|pending|todo|follow up)/i.test(text);
-
-    const summaryAdd = (key: string, value: string, limitLines = 8): void => {
-      const prev = typeof entries[key] === "string" ? (entries[key] as string) : "";
-      let prevLines = prev.split("\n").filter(Boolean);
-      // 承诺/开环槽位写入时顺带清僵尸：超 TTL 未闭环的旧承诺不许再占行数预算。
-      if (key === "memory_commitments" || key === "memory_open_loops") {
-        prevLines = dropExpiredCommitmentLines(prevLines);
-      }
-      const merged = this.mergeMemorySlotLines(key, prevLines, value);
-      const kept = limitLinesByChars(merged, 6000, { preserveTail: true }).kept.slice(-limitLines);
-      patches.push({ key, op: "put", value: kept.join("\n") });
-    };
-
-    if (preferenceMatch) summaryAdd("memory_preferences", slotLine);
-    if (factMatch) summaryAdd("memory_facts", slotLine);
-    if (commitmentMatch) summaryAdd("memory_commitments", slotLine);
-    if (loopMatch) summaryAdd("memory_open_loops", slotLine);
-
-    // 不镜像进 session_recap：那是会话滚动摘要的短期槽（唯一合法写入者是
-    // appendSessionRecapLine）。此前每条长期行都同步写一份，等于把同一内容
-    // 同时挂到【持久记忆】和【短期上下文·会话回顾】两处，且短期槽被整理行占满。
-    return patches;
-  }
-
   private mergeMemorySummaryLines(prev: string, addition: string): string[] {
     const base = prev
       .split("\n")
@@ -439,88 +469,6 @@ export class AgentMemorySyncService {
         })
       : base;
     return dedupeMemoryLines([...filtered, addition], { preferLatest: true });
-  }
-
-  private mergeMemorySlotLines(key: string, existingLines: string[], addition: string): string[] {
-    if (key === "memory_preferences") {
-      return this.mergePreferenceLines(existingLines, addition);
-    }
-    if (key === "memory_facts") {
-      return this.mergeFactLines(existingLines, addition);
-    }
-    return dedupeMemoryLines([...existingLines, addition], { preferLatest: true });
-  }
-
-  private mergePreferenceLines(existingLines: string[], addition: string): string[] {
-    const additionSubject = this.extractPreferenceSubject(addition);
-    const filtered = additionSubject
-      ? existingLines.filter((line) => this.extractPreferenceSubject(line) !== additionSubject)
-      : existingLines;
-    return dedupeMemoryLines([...filtered, addition], { preferLatest: true });
-  }
-
-  private extractPreferenceSubject(line: string): string | null {
-    const plain = stripMemoryLineDecorators(line);
-    const normalized = normalizeMemoryLine(plain);
-    if (!normalized) return null;
-
-    const patterns: RegExp[] = [
-      /(?:^|\s)(?:user|i|we)\s+(?:really\s+)?(?:prefer|prefers|like|likes|dislike|dislikes|hate|hates)\s+(.+)$/,
-      /(?:^|\s)(?:user|i|we)\s+(?:do not want|dont want|does not want|doesnt want|want|wants)\s+(.+)$/,
-      /(?:^|\s)(?:用户|我)?\s*(?:喜欢|偏好|习惯|不喜欢|讨厌|不要|别)\s*(.+)$/,
-      // 购物偏好（2026-10-05 扩充，推荐线 P4）：「想买 X / 在用 X / 一直用 X」
-      // 是品类/品牌偏好的高频口语句式，进 user_profile 后 personalize 的
-      // 推荐决策能引用（如「你在用的 XM5 已是旗舰」）；金额预算不在此抽
-      // （subject 语义弱），预算随原话留在画像摘要里。
-      /(?:^|\s)(?:用户|我)?\s*(?:想买|想入手|打算买|准备买|考虑买|想换|想添置)\s*(.+)$/,
-      /(?:^|\s)(?:用户|我)?\s*(?:一直|都|全)?(?:在用|用的?是|用着)\s*(.+)$/,
-    ];
-
-    for (const pattern of patterns) {
-      const match = normalized.match(pattern);
-      const subject = match?.[1]?.trim();
-      if (subject) {
-        return subject.replace(/^(to|that)\s+/, "").trim();
-      }
-    }
-    return null;
-  }
-
-  private mergeFactLines(existingLines: string[], addition: string): string[] {
-    const additionSlot = this.extractFactSlot(addition);
-    const filtered = additionSlot
-      ? existingLines.filter((line) => this.extractFactSlot(line) !== additionSlot)
-      : existingLines;
-    return dedupeMemoryLines([...filtered, addition], { preferLatest: true });
-  }
-
-  private extractFactSlot(line: string): string | null {
-    const plain = stripMemoryLineDecorators(line);
-    const normalized = normalizeMemoryLine(plain);
-    if (!normalized) return null;
-
-    const slotPatterns: Array<{ slot: string; pattern: RegExp }> = [
-      { slot: "location", pattern: /(?:^|\s)(?:user|i)\s+(?:live|lives|am living|am based|based)\s+(?:in|at)\s+.+$/ },
-      { slot: "location", pattern: /(?:^|\s)(?:用户|我)\s*(?:住在|在)\s*.+$/ },
-      { slot: "project", pattern: /(?:^|\s)(?:my project|the project|users project|user project)\s+(?:is|uses|focuses on)\s+.+$/ },
-      { slot: "project", pattern: /(?:^|\s)(?:我的项目|项目)\s*(?:是|在做|使用|关于)\s*.+$/ },
-      { slot: "identity", pattern: /(?:^|\s)(?:user|i)\s+(?:am|m)\s+.+$/ },
-      { slot: "identity", pattern: /(?:^|\s)(?:用户|我)\s*(?:是)\s*.+$/ },
-      { slot: "need", pattern: /(?:^|\s)(?:user|i)\s+(?:need|needs|plan|plans)\s+.+$/ },
-      { slot: "need", pattern: /(?:^|\s)(?:用户|我)\s*(?:需要|计划)\s*.+$/ },
-      // 亲密关系单值槽位（root fix）：新值入槽时自动替换旧值行，
-      // "我的老婆是景甜"与"我的老婆是刘浩存"（含「未来老婆」等变体）不再并存
-      {
-        slot: "relationship",
-        pattern:
-          /(?:我的|未来的?|自家的)(?:老婆|媳妇|妻子|夫人|爱人|未婚妻|未婚夫|对象|正主|女朋友|女友|男朋友|男友)|(?:老婆|媳妇|妻子|未婚妻|对象|正主)(?:是|叫|才是)/,
-      },
-    ];
-
-    for (const { slot, pattern } of slotPatterns) {
-      if (pattern.test(normalized)) return slot;
-    }
-    return null;
   }
 
 }

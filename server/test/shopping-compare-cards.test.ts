@@ -625,3 +625,185 @@ test("决策页路由：POST /shopping/compare 只读触发（缺服务 503 / �
 
   await app.close();
 });
+
+/* ─────────────── 2026-11-13 阶段化交付协议（P0-1/P0-3/P0-4） ─────────────── */
+
+/**
+ * 登录闸门（2026-11-13 P0-3）：预检探到需要登录的平台时，
+ * **必须挂起任务、不产出任何报价**。
+ *
+ * 用户投诉原文：「说让我补京东的登录之后再补」+「要求把所有消息收齐再完成」——
+ * 旧实现是边取边撞墙，免登录平台取完价就返回 ok:true，LLM 拿到数据直接
+ * 总结输出，用户看到的是半成品答案 + 一句「京东之后补」。
+ */
+test("P0-3 登录闸门：预检命中登录墙 → 挂起任务，不产出任何报价", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "npc-gate-"));
+  const fetched: string[] = [];
+  const probed: string[] = [];
+  const pushedQrs: string[][] = [];
+  try {
+    const service = new ShoppingCompareService({
+      shoppingOrderService: {
+        listSupportedPlatforms: () => ["jd", "pdd", "suning"],
+        listPlatformsWithCookies: async () => [],
+        canUseVisibleBrowser: () => false,
+        // 预检：jd 需要登录，pdd 匿名可读
+        probeLoginWall: async (_ctx: unknown, platform: string) => {
+          probed.push(platform);
+          return platform === "jd"
+            ? { required: true, reason: "login" as const }
+            : { required: false };
+        },
+        // 批量推码
+        pushBatchLoginQrs: async (_ctx: unknown, platforms: string[]) => {
+          pushedQrs.push([...platforms]);
+          return new Map(platforms.map((p) => [p, `/agent/images/${p}-qr.png`]));
+        },
+        searchProduct: async (_ctx: unknown, platform: string) => {
+          fetched.push(platform);
+          return { ok: true, summary: "ok", products: [], platform };
+        },
+      } as unknown as ShoppingOrderService,
+      dataDir,
+    });
+
+    const res = (await service.comparePrices(
+      makeCtx(),
+      "Sony WH-1000XM5",
+      { platforms: ["jd", "pdd", "suning"] },
+    )) as Record<string, unknown>;
+
+    // 关键断言：本轮**不产出报价**（不是 ok:true 的半成品）
+    assert.equal(res.ok, false, "命中登录墙时不得返回 ok:true");
+    assert.equal(res.groups, undefined, "命中登录墙时不得产出报价分组");
+    assert.equal(res.awaitingLogin, true, "应标记 awaitingLogin");
+    assert.equal(res.summary, undefined);
+
+    // 预检发生在取价**之前**
+    assert.ok(probed.includes("jd"), `应预检 jd：${probed.join(",")}`);
+    assert.ok(
+      fetched.length === 0 || !fetched.includes("jd"),
+      `命中登录墙的平台不应进入取价：${fetched.join(",")}`,
+    );
+
+    // 登录信息完整：平台名单 + handoff 指引
+    const loginRequired = res.loginRequired as
+      | { platforms?: string[]; platformLabels?: string[] }
+      | undefined;
+    assert.ok(loginRequired?.platforms?.includes("jd"), "应点名待登录平台");
+    assert.ok(
+      (loginRequired?.platformLabels ?? []).length >= 1,
+      "应给出平台中文名",
+    );
+    const handoff = res.handoff as { instruction?: string; reason?: string } | undefined;
+    assert.equal(handoff?.reason, "login");
+    assert.ok(
+      handoff?.instruction?.includes("二维码"),
+      `handoff 指引应说明二维码已推：${handoff?.instruction}`,
+    );
+    await service.flush();
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 事实清单（P0-4）：未取到报价的平台必须**显式**出现在清单里，
+ * 模型才没有空间去编造「淘宝的价格」。
+ */
+test("P0-4 收齐闸门：事实清单分列已取到/未取到，模型只能复述", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "npc-facts-"));
+  try {
+    const service = new ShoppingCompareService({
+      shoppingOrderService: {
+        listSupportedPlatforms: () => ["pdd", "smzdm"],
+        listPlatformsWithCookies: async () => ["pdd", "smzdm"],
+        canUseVisibleBrowser: () => false,
+        probeLoginWall: async () => ({ required: false }),
+        searchProduct: async (_ctx: unknown, platform: string) => {
+          if (platform === "pdd") {
+            return {
+              ok: true,
+              summary: "ok",
+              products: [
+                { title: "Sony WH-1000XM5 头戴降噪耳机", price: 1869, url: "https://pdd.com/xm5" },
+              ],
+              platform,
+            };
+          }
+          // smzdm：结构化取价失败（普通空结果，不是登录墙）
+          return { ok: false, error: "读取失败", retryable: false };
+        },
+      } as unknown as ShoppingOrderService,
+      dataDir,
+    });
+
+    const res = (await service.comparePrices(
+      makeCtx(),
+      "Sony WH-1000XM5",
+      { platforms: ["pdd", "smzdm"] },
+    )) as Record<string, unknown>;
+
+    assert.equal(res.ok, true);
+    const factSheet = String(res.factSheet ?? "");
+    assert.ok(factSheet.includes("【已取到报价】"), `清单应分列：${factSheet}`);
+    assert.ok(factSheet.includes("【未取到报价的平台】"), `清单应分列：${factSheet}`);
+    assert.ok(factSheet.includes("拼多多"), `已取到清单应点名平台：${factSheet}`);
+    assert.ok(factSheet.includes("¥1869"), `已取到清单应带价格：${factSheet}`);
+    assert.ok(
+      factSheet.includes("什么值得买"),
+      `未取到清单必须点名缺价平台：${factSheet}`,
+    );
+    assert.ok(
+      factSheet.includes("绝对不要给出价格"),
+      `清单应带约束语句：${factSheet}`,
+    );
+
+    // 覆盖度：如实给出已比价家数
+    const coverage = res.coverage as number | undefined;
+    assert.ok(typeof coverage === "number" && coverage > 0 && coverage <= 1);
+    await service.flush();
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 报价来源可追溯（P0-5）：每条报价必须带平台中文名 + 直达链接 + 抓取时刻，
+ * 否则用户问不出「这价格是哪来的」。
+ */
+test("P0-5 来源绑定：比价卡每条报价带平台名/链接/抓取时刻", () => {
+  const card = buildToolCard(
+    "shopping.compare.prices",
+    {
+      ok: true,
+      query: "Sony WH-1000XM5",
+      groups: [
+        {
+          matchType: "exact",
+          confidence: 1,
+          minPriceCny: 1869,
+          offers: [
+            {
+              platform: "jd",
+              title: "Sony WH-1000XM5 头戴降噪耳机",
+              priceCny: 1869,
+              shop: "京东自营",
+              url: "https://jd.com/xm5",
+              fetchedAt: 1_700_000_000_000,
+            },
+          ],
+        },
+      ],
+      bestIndex: 0,
+    },
+  );
+  assert.ok(card);
+  const groups = (card.priceCompare?.groups ?? []) as Array<Record<string, unknown>>;
+  assert.equal(groups.length, 1);
+  const g = groups[0]!;
+  assert.equal(g.platformLabel, "京东", "平台中文名必须下发");
+  assert.equal(g.sourceUrl, "https://jd.com/xm5", "直达链接必须下发");
+  assert.equal(g.fetchedAt, 1_700_000_000_000, "抓取时刻必须下发");
+  assert.equal(g.orderable, true, "京东应可下单");
+});

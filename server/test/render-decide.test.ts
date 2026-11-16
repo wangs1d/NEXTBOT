@@ -87,6 +87,66 @@ test("天气上下文：weather.get_local 真实回执 → weather 卡，正文�
   assertNoBareJson(out, "weather");
 });
 
+test("用户点名要表格：模型声明 structured 时不被天气场景压回 plain（表格与卡片并存）", () => {
+  const out = process(
+    [
+      "[RENDER_HINT:structured]",
+      "| 日期 | 天气 | 气温 | 降水 |",
+      "| --- | --- | --- | --- |",
+      "| 今天 | 阴 | 18–25° | 10% |",
+      "| 明天 | 小雨 | 17–23° | 70% |",
+    ].join("\n"),
+    {
+      userText: "使用表格的方式，把未来5天的天气给我",
+      toolName: "weather.get_local",
+      toolResult: {
+        ok: true,
+        summary: "北海阴",
+        weatherText: "阴",
+        todayRangeC: "18–25°",
+        locationLabel: "北海市",
+        dailyForecast: [
+          { date: "2026-11-14", dayLabel: "今天", weatherText: "阴", minC: 18, maxC: 25, rainPct: 10 },
+          { date: "2026-11-15", dayLabel: "明天", weatherText: "小雨", minC: 17, maxC: 23, rainPct: 70 },
+        ],
+      },
+    },
+  );
+  assert.ok(
+    out.startsWith("[RENDER_AS:structured]"),
+    `用户点名表格时正文应走结构化形态，实际：${out.slice(0, 120)}`,
+  );
+  assert.ok(out.includes("| 明天 | 小雨 |"), "用户要的表格必须原样保留");
+  assert.equal(collectCardPayloads(out).length, 1, "天气卡作为概览并存，不被正文表格顶掉");
+});
+
+test("非天气场景同样按用户要求：日程要表格时不被工具卡场景压回 plain", () => {
+  const out = process(
+    [
+      "[RENDER_HINT:structured]",
+      "| 时间 | 事项 |",
+      "| --- | --- |",
+      "| 09:00 | 站会 |",
+    ].join("\n"),
+    {
+      userText: "用表格列出我的日程",
+      toolName: "calendar",
+      toolResult: {
+        ok: true,
+        action: "list_tasks",
+        count: 1,
+        tasks: [{ title: "站会", nextRunAt: "2026-11-15T09:00:00" }],
+      },
+    },
+  );
+  assert.ok(
+    out.startsWith("[RENDER_AS:structured]"),
+    `任何场景都应尊重模型的形态声明，实际：${out.slice(0, 120)}`,
+  );
+  assert.ok(out.includes("| 09:00 | 站会 |"), "用户要的表格必须保留");
+  assert.equal(collectCardPayloads(out).length, 1, "日程卡作为概览并存");
+});
+
 test("没有工具回执的散文：不出任何业务卡", () => {
   const out = process("今天风挺大的，出门记得把外套扣好，别着凉。", { userText: "今天天气怎么样" });
   assert.ok(!out.includes("[AGENT_RESULT_CARD_START]"), `无回执不应出卡：${out.slice(0, 200)}`);

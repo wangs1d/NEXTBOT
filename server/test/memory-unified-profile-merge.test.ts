@@ -91,7 +91,7 @@ test("统一抽取：普通轮不带 profileContext 时 prompt 不增加画像�
   assert.ok(!user!.content.includes("【当前用户画像】"), "普通轮不应注入当前画像");
 });
 
-test("ingest 低信号（legacy 调度）：profileOps 随统一抽取产物经写入钩子透出", async () => {
+test("ingest 低信号：不再捎带画像抽取，候选交给夜间批处理（唯一路径）", async () => {
   const { client } = capturingClient({
     ...BASE_PAYLOAD,
     profileOps: [{ op: "ADD", section: "interest", line: "喜欢钓鱼" }],
@@ -100,9 +100,6 @@ test("ingest 低信号（legacy 调度）：profileOps 随统一抽取产物经�
     add: async () => ({ results: [] }),
   } as unknown as Memory;
 
-  // legacy 模式：低信号轮仍捎带画像抽取（旧行为回归保护）
-  const prevSched = process.env.PROFILE_WRITE_SCHEDULING;
-  process.env.PROFILE_WRITE_SCHEDULING = "legacy";
   const ingest = new AgenticMemoryIngestService(memory);
   ingest.setExtractionClient(client);
   let snapshotRequested = 0;
@@ -114,52 +111,34 @@ test("ingest 低信号（legacy 调度）：profileOps 随统一抽取产物经�
   const events: Mem0WriteEvent[] = [];
   ingest.addWriteHook((e) => events.push(e));
 
-  try {
-    await ingest.ingestText("actor-merge-prof", "test-source", "我喜欢钓鱼", { context: "main" });
-    // 低信号抽取是 fire-and-forget，等一拍让钩子落地
-    await new Promise((r) => setTimeout(r, 100));
+  // 2026-11-13：PROFILE_WRITE_SCHEDULING 回滚档已删除，低信号轮不再有第二条
+  // 抽取路径。行为与旧 batch 档一致，但不再依赖环境变量。
+  await ingest.ingestText("actor-merge-prof-batch", "test-source", "我喜欢钓鱼", { context: "main" });
+  await new Promise((r) => setTimeout(r, 100));
 
-    assert.equal(snapshotRequested, 1, "命中个人陈述预筛时应读取一次画像快照");
-    assert.equal(events.length, 1, "应触发一次写入钩子");
-    assert.deepEqual(events[0]!.profileOps, [{ op: "ADD", section: "interest", line: "喜欢钓鱼" }]);
-  } finally {
-    if (prevSched === undefined) delete process.env.PROFILE_WRITE_SCHEDULING;
-    else process.env.PROFILE_WRITE_SCHEDULING = prevSched;
-  }
+  assert.equal(snapshotRequested, 0, "低信号轮不读画像快照（省每轮注入成本）");
+  assert.equal(events.length, 0, "低信号轮不透出 profileOps（夜间批处理覆盖）");
 });
 
-test("ingest 低信号（batch 调度，默认）：不再捎带画像抽取，候选交给夜间批处理", async () => {
-  const { client } = capturingClient({
-    ...BASE_PAYLOAD,
-    profileOps: [{ op: "ADD", section: "interest", line: "喜欢钓鱼" }],
-  });
+test("ingest 低信号：统一写入者缺位时不落 Mem0（不再有第二套抽取语义）", async () => {
+  let addCalls = 0;
   const memory = {
-    add: async () => ({ results: [] }),
+    add: async () => {
+      addCalls += 1;
+      return { results: [] };
+    },
   } as unknown as Memory;
 
-  const prevSched = process.env.PROFILE_WRITE_SCHEDULING;
-  delete process.env.PROFILE_WRITE_SCHEDULING; // 默认 batch
   const ingest = new AgenticMemoryIngestService(memory);
-  ingest.setExtractionClient(client);
-  let snapshotRequested = 0;
-  ingest.setProfileSnapshotProvider(async () => {
-    snapshotRequested += 1;
-    return "# 用户画像\n- 居住地：杭州";
-  });
+  // 不设 lowSignalSink = 统一写入者未接管（AGENT_MEMORY_CONSOLIDATION_ENABLED=0）
+  await ingest.ingestText("actor-no-writer", "test-source", "今天天气不错", { context: "main" });
 
-  const events: Mem0WriteEvent[] = [];
-  ingest.addWriteHook((e) => events.push(e));
-
-  try {
-    await ingest.ingestText("actor-merge-prof-batch", "test-source", "我喜欢钓鱼", { context: "main" });
-    await new Promise((r) => setTimeout(r, 100));
-
-    assert.equal(snapshotRequested, 0, "batch 模式低信号轮不读画像快照（省每轮注入成本）");
-    assert.equal(events.length, 0, "batch 模式低信号轮不透出 profileOps（夜间批处理覆盖）");
-  } finally {
-    if (prevSched === undefined) delete process.env.PROFILE_WRITE_SCHEDULING;
-    else process.env.PROFILE_WRITE_SCHEDULING = prevSched;
-  }
+  assert.equal(
+    addCalls,
+    0,
+    "统一写入者缺位时低信号内容直接丢弃——旧实现会直写 Mem0(infer:true)，" +
+      "那是与 extractUnified 语义不一致的第二套抽取器",
+  );
 });
 
 test("画像聚合器：消费统一抽取的 profileOps 走确定性落位（不再调 LLM）", async () => {

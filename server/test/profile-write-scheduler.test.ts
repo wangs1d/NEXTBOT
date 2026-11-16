@@ -369,20 +369,13 @@ test("回归：NAME_RE 不再把「我是做后端的」捕成称呼", () => {
   assert.equal(name[0]?.displayName, "王铭川", "「我叫」仍正常捕获");
 });
 
-test("批调度开关：默认 batch，legacy 显式关闭", async () => {
-  const mod = await import("../src/services/profile-write-scheduler.js");
-  const prev = process.env.PROFILE_WRITE_SCHEDULING;
-  try {
-    delete process.env.PROFILE_WRITE_SCHEDULING;
-    assert.equal(mod.isProfileWriteBatchMode(), true, "默认 batch");
-    process.env.PROFILE_WRITE_SCHEDULING = "legacy";
-    assert.equal(mod.isProfileWriteBatchMode(), false);
-    process.env.PROFILE_WRITE_SCHEDULING = "batch";
-    assert.equal(mod.isProfileWriteBatchMode(), true);
-  } finally {
-    if (prev === undefined) delete process.env.PROFILE_WRITE_SCHEDULING;
-    else process.env.PROFILE_WRITE_SCHEDULING = prev;
-  }
+test("批调度开关已移除：画像写入只有夜间批一条路径（2026-11-13）", async () => {
+  const mod = (await import("../src/services/profile-write-scheduler.js")) as Record<string, unknown>;
+  assert.equal(
+    mod.isProfileWriteBatchMode,
+    undefined,
+    "PROFILE_WRITE_SCHEDULING 回滚档已删除——低信号轮不再二次抽取画像",
+  );
 });
 
 test("seedWal 辅助自检：天文件落盘", async () => {

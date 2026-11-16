@@ -43,6 +43,17 @@ const SYMBOL_ALIASES: Record<string, string> = {
   亚马逊: "usAMZN",
   谷歌: "usGOOG",
   Meta: "usMETA",
+  // 外汇（2026-11-14 接线审计：复合层 quote 分支宣传「汇率」，执行器却解析不了
+  // 汇率词——真实探针里「BTC」直接报错。腾讯接口 wh 前缀全市场可用，补齐口语高频对）
+  美元汇率: "whUSDCNY",
+  美元人民币: "whUSDCNY",
+  欧元汇率: "whEURCNY",
+  港币汇率: "whHKDCNY",
+  英镑汇率: "whGBPCNY",
+  澳元汇率: "whAUDCNY",
+  加元汇率: "whCADCNY",
+  新加坡元汇率: "whSGDCNY",
+  新币汇率: "whSGDCNY",
 };
 
 /** 直接代码形态：两位市场前缀 + 4-6 位数字 / 或市场前缀 + 字母代码（usDJI/hkHSI）。 */
@@ -53,6 +64,7 @@ const MARKET_LABELS: Record<string, string> = {
   sz: "A股",
   hk: "港股",
   us: "美股",
+  wh: "外汇",
 };
 
 function resolveSymbol(raw: string): string | null {
@@ -93,11 +105,20 @@ type TencentQuoteLine = {
 /** 解析一行 `v_sh000001="1~上证指数~000001~3245.60~..."`。
  *  字段口径（0 起）：1=名称 3=最新价 4=昨收 30=时间 31=涨跌 32=涨跌幅。
  *  涨跌/涨跌幅自算（最新价 vs 昨收），不依赖 31/32——各市场字段布局有差异，
- *  但 3/4 两位全市场稳定，方向性数据必须用最稳的口径。 */
+ *  但 3/4 两位全市场稳定，方向性数据必须用最稳的口径。
+ *  外汇（wh 前缀，2026-11-14 实测）布局不同：4 位恒为 0，昨收落在 6 位，
+ *  时间在 5 位（14 位数字）——4 位无效时取 6 位兜底。 */
 function parseQuoteLine(code: string, fields: string[]): TencentQuoteLine | null {
   const name = fields[1]?.trim() ?? "";
   const price = Number(fields[3]);
-  const prevClose = Number(fields[4]);
+  const prevPrimary = Number(fields[4]);
+  const prevFallback = Number(fields[6]);
+  const prevClose =
+    Number.isFinite(prevPrimary) && prevPrimary > 0
+      ? prevPrimary
+      : Number.isFinite(prevFallback) && prevFallback > 0
+        ? prevFallback
+        : NaN;
   if (!name || !Number.isFinite(price) || price <= 0 || !Number.isFinite(prevClose) || prevClose <= 0) {
     return null;
   }
@@ -110,7 +131,7 @@ function parseQuoteLine(code: string, fields: string[]): TencentQuoteLine | null
     prevClose,
     change,
     changePct,
-    quoteTime: parseQuoteTime(fields[30]),
+    quoteTime: parseQuoteTime(fields[30]) ?? parseQuoteTime(fields[5]),
   };
 }
 
@@ -145,7 +166,7 @@ export function registerMarketQuoteTools(registry: ToolRegistry): void {
       return {
         ok: false,
         error:
-          "没有可识别的标的代码。支持常见别名（上证指数/纳指/道指/特斯拉等）或交易所代码（sh000001/usIXIC/hk00700），请核对后重试。",
+          "没有可识别的标的代码。支持常见别名（上证指数/纳指/道指/特斯拉/美元汇率等）或交易所代码（sh000001/usIXIC/hk00700/whUSDCNY），请核对后重试。",
         unresolved,
       };
     }

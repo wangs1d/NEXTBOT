@@ -4,6 +4,11 @@ import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
 import type { NarrativeMemoryPort } from "./narrative-memory-port.js";
 import type { UnifiedExtraction } from "../agentic-memory/unified-extractor.js";
 import { isReverseAddressClaim } from "../agentic-memory/unified-extractor.js";
+import type { StructuredFactStore } from "../agentic-memory/structured-fact-store.js";
+import {
+  detectProfileFieldFromText,
+  normalizeDetectedProfileFact,
+} from "../memory/fact-vocabulary.js";
 import { getDailyJournalService } from "./daily-journal-service.js";
 import { getDailyDigestService } from "./daily-digest-service.js";
 import { getShortTermMemoryGatewayService } from "./short-term-memory-gateway.js";
@@ -11,14 +16,13 @@ import { resolvePrimaryLlmClientConfig, bypassChatRequestExtras } from "../exter
 import { UserFactStore } from "./user-fact-store.js";
 import OpenAI from "openai";
 import { mkdir } from "node:fs/promises";
-import { mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { writeJsonAtomic } from "../storage/atomic-json.js";
 import { maybeRunSoulReflection } from "../agent/soul-store.js";
 import { auditChatCompletion } from "./llm-token-audit.js";
 import {
-  isProfileWriteBatchMode,
   getDefaultProfileConsolidator,
   type ProfileConsolidationStats,
 } from "./profile-write-scheduler.js";
@@ -43,6 +47,8 @@ export type NightlySleepAgentReport = {
   extraction?: {
     llmCalls: number;
     factsApplied: number;
+    /** 承诺类条目数（权威源 commitments 表，不计入 factsApplied） */
+    commitmentsRouted: number;
     conflictsResolved: number;
     rejectedOps: number;
     duplicates: number;
@@ -98,10 +104,108 @@ export function isNoiseLogLine(role: string, content: string): boolean {
   return CONSOLIDATE_NOISE_RE.test(content) || text.length <= 1;
 }
 
+export type SolidifyVerdict = {
+  solidify: boolean;
+  reason:
+    | "ok"
+    | "assistant_self_talk"
+    | "noise"
+    | "bare_question"
+    | "one_shot_reminder"
+    | "task_instruction";
+};
+
+/** 一次性提醒回执（"一分钟后提醒我…"）：由日程/提醒系统承载，不进长期记忆 */
+const ONE_SHOT_REMINDER_TEXT_RE =
+  /((?:\d+|[一二两三四五六七八九十半]+)\s*(?:秒|分(?:钟)?|小时|天))[^，。！？,.!?]{0,4}?(?:提醒|喊|叫)/;
+
+/** 工具调用 / 动作指令：是"要去做的事"，不是"关于用户的事实" */
+const TOOL_CALL_TEXT_RE = /\b[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*\b/i;
+const TOOL_WORD_RE = /(请使用|调用|工具)/;
+const ACTION_VERB_RE = /(发一条|发消息|打个电话|打电话|拨出|订一|买一|查一下|播放|设个|创建|删除|看看|找个|找一下|安排|加个|预约|规划|搜索|搜几张|搜几|整理|生成|写一|做个)/;
+/** 状态陈述标记：出现这些词说明在讲"我是谁/我要什么"，即便含动作词也值得保留 */
+const STATE_MARKER_RE = /(我是|我在|我住|我喜欢|我不吃|我的|叫我|记住|记一下|记下)/;
+
+/**
+ * journal 行是否值得固化进长期记忆（2026-11-12 固化过滤）。
+ *
+ * 实测问题（真实用户 226 行 journal 回放）：
+ *   - 旧规则会固化 223 行（98.7%），其中 105 行是助手自述（46%）；
+ *   - 另有大量"请使用 xxx 工具给好友发消息"这类动作指令，被当成用户事实；
+ *   - 同一句话既落 U 行又落 prefer 行，固化后变成两条。
+ *
+ * 规则：助手发言 / commit 派生存 / 寒暄 / 短问句 / 一次性提醒 / 动作指令 一律不固化；
+ * 用户的状态陈述（我是/我在/我喜欢/叫我…）与 fact 事件行保留。
+ */
+export function shouldSolidifyJournalLine(role: string, content: string): SolidifyVerdict {
+  // commit 行只由助手承诺句派生（journalLinesFromText 的 assistant 分支），
+  // 与 A 行同源；承诺的权威是 commitments 表，不进长期记忆。
+  if (role === "A" || role === "commit") {
+    return { solidify: false, reason: "assistant_self_talk" };
+  }
+  if (isNoiseLogLine(role, content)) return { solidify: false, reason: "noise" };
+  const text = content.trim();
+  if (!text) return { solidify: false, reason: "noise" };
+  // 问句（带问号，或以 吗/呢/嘛 收尾）：答案才是信息，问答原文保留在 L0
+  if ((/[？?]$/.test(text) && text.length <= 30) || /(?:吗|呢|嘛)$/.test(text)) {
+    return { solidify: false, reason: "bare_question" };
+  }
+  // 只有话题没有陈述（"明天天气"/"后天日程"）：也是问句，不是事实
+  if (/^(?:今天|明天|后天|大后天|现在|这周|下周)?(?:的)?(?:天气|时间|几点|日程|行程|温度)[呢啊呀？?]?$/.test(text)) {
+    return { solidify: false, reason: "bare_question" };
+  }
+  // 疑问词收尾/内含（"今天天气怎么样"/"我老婆是谁"/"我真名叫什么"）
+  if (
+    /(谁|什么|啥|哪个|哪里|哪儿|多少|几点|怎么样|如何|为什么|干嘛|多久)/.test(text) &&
+    text.length <= 40 &&
+    !/(我是|我叫|我在|我住|我喜欢|我的)/.test(text)
+  ) {
+    return { solidify: false, reason: "bare_question" };
+  }
+  // 纯客套（"谢谢 哈哈哈"）
+  if (/^(?:(?:谢谢|多谢|感谢|好|行|嗯|哦|哈+|呵+|嘿+|啊+|哎)[\s，。！？~,.!?]*)+$/.test(text)) {
+    return { solidify: false, reason: "noise" };
+  }
+  // 去句读后过短（"我就存"）：无信息量
+  if (text.replace(/[\s，。！？!?、；;,.]/g, "").length <= 3) {
+    return { solidify: false, reason: "noise" };
+  }
+  if (ONE_SHOT_REMINDER_TEXT_RE.test(text)) {
+    return { solidify: false, reason: "one_shot_reminder" };
+  }
+  // 钟点型叫醒/提醒（"明天早上8点叫我起床"）：同样归日程系统
+  if (/(?:\d{1,2}|[一二三四五六七八九十]+)\s*点.{0,8}(?:叫|喊|提醒)/.test(text)) {
+    return { solidify: false, reason: "one_shot_reminder" };
+  }
+  if (/叫[我你].{0,4}(?:起床|吃饭|睡觉|出门)/.test(text)) {
+    return { solidify: false, reason: "one_shot_reminder" };
+  }
+  // 动作指令 / 工具调用：是"要我做事"，不是"关于你的事实"
+  const looksLikeAction =
+    TOOL_CALL_TEXT_RE.test(text) || TOOL_WORD_RE.test(text) || ACTION_VERB_RE.test(text);
+  if (looksLikeAction && !STATE_MARKER_RE.test(text)) {
+    return { solidify: false, reason: "task_instruction" };
+  }
+  return { solidify: true, reason: "ok" };
+}
+
 /** 事实文本归一（去空白/句读、小写），用于批内与跨批去重 */
 function normalizeFactText(text: string): string {
   return text.replace(/\s+/g, "").replace(/[，。！？!?、；;,.\s]/g, "").toLowerCase();
 }
+
+/**
+ * 夜间抽到的一条事实。
+ *
+ * profile：标准档案字段（称呼/职业/居住地…）的字段名 + 短值。
+ * 有它就走权威库（structured_facts），没有就留在长尾事实库（行式 JSON）。
+ * 词表口径见 memory/fact-vocabulary.ts。
+ */
+export type NightlyExtractedFact = {
+  kind: "preference" | "fact" | "commitment";
+  text: string;
+  profile?: { field: string; value: string };
+};
 
 /**
  * M1-④：无 LLM 时的确定性事实兜底。
@@ -110,12 +214,12 @@ function normalizeFactText(text: string): string {
  * 抽取，零模型）。夜间直接按标签落库，保证「没有模型也能固化事实」。
  */
 export function deriveDeterministicFacts(transcript: string): {
-  facts: Array<{ kind: "preference" | "fact" | "commitment"; text: string }>;
+  facts: NightlyExtractedFact[];
   duplicates: number;
 } {
   const kindMap = { prefer: "preference", fact: "fact", commit: "commitment" } as const;
   const seen = new Set<string>();
-  const facts: Array<{ kind: "preference" | "fact" | "commitment"; text: string }> = [];
+  const facts: NightlyExtractedFact[] = [];
   let duplicates = 0;
   for (const line of transcript.split("\n")) {
     const m = line.match(/^\[[^\]]*\s(fact|prefer|commit)\]\s*(.+)$/);
@@ -157,6 +261,12 @@ export class NightlyMemoryTaskService {
    * 每个 actor 独立补跑自己的当日 journal。
    */
   private lastProcessedDayByActor = new Map<string, string>();
+  /**
+   * 水位是否已从磁盘加载（2026-11-12 幂等加固）。
+   * 原来只存内存：进程重启后同一晚会再跑一遍——实测 2026-10-21 15:02 与 16:01
+   * 两次夜间报告，计划动作被重复计算。
+   */
+  private runStateLoaded = false;
   /** 正在处理中的 actor（防止同一 actor 的夜间任务并发重入） */
   private readonly actorsInFlight = new Set<string>();
   private memoryManager: MemoryManagerService | null = null;
@@ -273,7 +383,6 @@ export class NightlyMemoryTaskService {
   async forceRunNightTasks(): Promise<{
     consolidated: boolean;
     archived: boolean;
-    synced: boolean;
     slotResync?: Record<string, { facts: number; preferences: number; keptRecent: number }>;
     /** ⑥ 巩固流水线收尾统计（关闭的悬空问句 / 生成的一日回顾条数 / 遗忘衰减扫描） */
     pipeline?: {
@@ -286,10 +395,6 @@ export class NightlyMemoryTaskService {
     const result = {
       consolidated: false,
       archived: false,
-      synced: false,
-      slotResync: undefined as
-        | Record<string, { facts: number; preferences: number; keptRecent: number }>
-        | undefined,
       pipeline: undefined as
         | {
             recaps: number;
@@ -300,29 +405,21 @@ export class NightlyMemoryTaskService {
       error: undefined as string | undefined,
     };
     this.lastJournalFixation = null;
+    this.lastExtractionMetrics = null;
 
     try {
-      // 记忆架构收敛：原「DailyDigest 归档 → 长期图」已移除——与下方
-      // consolidateDailyJournals（journal → 长期图）对同批当天对话双写长期记忆，
-      // 白天只写 journal 一份原始流水，夜间固化单一入口。
-      result.archived = true;
-
-      // 派生视图强制重同步（确定性，零 LLM）：让事实主库的习惯门槛/保鲜规则
-      // 立即作用于 KV 槽位（2026-11-07 习惯画像定稿）。放在最前——即使后续
-      // LLM 巩固阶段缓慢/失败，槽位也已与主库收敛；数据手术后的立即收敛口。
-      result.slotResync = await this.resyncDerivedSlotsForAllActors();
-
       await this.extractFactsFromJournals();
       await this.consolidateUserProfiles();
       // 顺序修复（M1-②）：memory_summary 巩固必须先读当天 journal 行；
       // consolidateDailyJournals 固化成功后会删除 journal md，放到后面就再也读不到。
       await this.consolidateSummaries();
       await this.consolidateDailyJournals();
+      // archived = 当日 journal 已固化进长期图（单一固化入口）。
+      // 原先此处还有一轮「DailyDigest 归档 → 长期图」，与 consolidateDailyJournals
+      // 对同批当天对话双写长期记忆，已移除——白天只写 journal 一份原始流水。
+      result.archived = true;
       result.pipeline = await this.runDreamPhase();
       result.consolidated = true;
-
-      await this.syncToLongTermStorage();
-      result.synced = true;
     } catch (err) {
       result.error = err instanceof Error ? err.message : String(err);
       console.error("[NightlyMemory] Force run failed:", err);
@@ -479,7 +576,45 @@ export class NightlyMemoryTaskService {
    * 夜间任务主入口。actorIds 缺省处理全部 actor；传参时只处理这些 actor
    * （sleeping 逐 actor 触发用）。每个 actor 有独立当日水位线，重复触发是幂等的。
    */
+  /** 持久化水位文件（一小份 JSON，只存 actor→已处理日期） */
+  private runStatePath(): string {
+    return join(getDataDir(), "nightly-run-state.json");
+  }
+
+  private loadRunState(): void {
+    if (this.runStateLoaded) return;
+    this.runStateLoaded = true;
+    try {
+      const raw = readFileSync(this.runStatePath(), "utf8");
+      const parsed = JSON.parse(raw) as { lastProcessedDay?: Record<string, string> };
+      for (const [actorId, day] of Object.entries(parsed.lastProcessedDay ?? {})) {
+        if (typeof day === "string" && day) this.lastProcessedDayByActor.set(actorId, day);
+      }
+    } catch {
+      /* 首次运行/文件缺失：从空水位开始 */
+    }
+  }
+
+  private persistRunState(): void {
+    try {
+      const path = this.runStatePath();
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(
+        path,
+        JSON.stringify(
+          { version: 1, lastProcessedDay: Object.fromEntries(this.lastProcessedDayByActor) },
+          null,
+          2,
+        ),
+        "utf8",
+      );
+    } catch (err) {
+      console.warn(`[NightlyMemory] 水位持久化失败（不影响本轮）：${err}`);
+    }
+  }
+
   private async runNightTasks(actorIds?: string[]): Promise<void> {
+    this.loadRunState();
     const today = this.getTodayKey();
     const candidates = (actorIds ?? this.getAllActorIds()).filter(
       (id) => this.lastProcessedDayByActor.get(id) !== today && !this.actorsInFlight.has(id),
@@ -505,12 +640,12 @@ export class NightlyMemoryTaskService {
       await this.runDreamPhase(candidates);
       // M3：提交后不变量自检（同 kind+subject 不得双 active / active 必须有非空证据值）。
       await this.auditFactStoreInvariants(candidates);
-      await this.syncToLongTermStorage(candidates);
       await this.cleanupOldStorage();
       for (const id of candidates) {
         this.lastProcessedDayByActor.set(id, today);
         this.actorsInFlight.delete(id);
       }
+      this.persistRunState();
       console.log("[NightlyMemory] All night tasks completed successfully");
     } catch (err) {
       for (const id of candidates) this.actorsInFlight.delete(id);
@@ -520,6 +655,7 @@ export class NightlyMemoryTaskService {
 
   /** 是否存在今天尚未处理的 actor（昼夜切换兜底 / 调度判定用） */
   private hasDueActors(): boolean {
+    this.loadRunState();
     const today = this.getTodayKey();
     return this.getAllActorIds().some(
       (id) => this.lastProcessedDayByActor.get(id) !== today && !this.actorsInFlight.has(id),
@@ -624,7 +760,9 @@ export class NightlyMemoryTaskService {
         if (!roleMatch) continue;
         const role = roleMatch[2]!;
         const content = roleMatch[3]!.slice(0, 300);
-        if (isNoiseLogLine(role, content)) continue;
+        // 夜间事实提炼的原料同样过固化过滤：否则 LLM 会把助手发言
+        // 提炼成"用户事实"（实测 ledger 42% 助手自述的另一条来源）。
+        if (!shouldSolidifyJournalLine(role, content).solidify) continue;
         transcriptLines.push(`[${dateKey} ${m[1]} ${role}] ${content}`);
       }
     }
@@ -649,6 +787,7 @@ export class NightlyMemoryTaskService {
     let totalIngested = 0;
     let totalEventLines = 0;
     let totalFailed = 0;
+    let totalAssistantSkipped = 0;
     let consolidatedActors = 0;
 
     for (const actorId of targets) {
@@ -661,6 +800,10 @@ export class NightlyMemoryTaskService {
         const failedDates = new Set<string>();
         let eventLines = 0;
         let failed = 0;
+        let assistantSkipped = 0;
+        let duplicateSkipped = 0;
+        /** 同一 actor 本次固化已消费的内容（U 行与 prefer/fact 行会重复同一句） */
+        const seenSolidified = new Set<string>();
         for (const { dateKey, lines, turnIds } of unconsolidated) {
           let ingested = 0;
           let noiseSkipped = 0;
@@ -680,11 +823,21 @@ export class NightlyMemoryTaskService {
               role === "fact" && /^e-[\w-]+$/.test(journalToken)
                 ? { sourceEventIds: [`evt:${actorId}:${journalToken.slice(2)}`] }
                 : {};
-            // P2-6：U/A 闲聊/语气填充行不固化（fact/prefer/commit 恒保留）
-            if (isNoiseLogLine(role, content)) {
-              noiseSkipped += 1;
+            // P2-6 + 2026-11-12：固化过滤。助手发言（A/commit 派生）不进长期记忆；
+            // 寒暄/短问句/一次性提醒/动作指令也跳过（fact/prefer 状态陈述保留）。
+            const verdict = shouldSolidifyJournalLine(role, content);
+            if (!verdict.solidify) {
+              if (verdict.reason === "assistant_self_talk") assistantSkipped += 1;
+              else noiseSkipped += 1;
               continue;
             }
+            // 同一句话可能同时落 U 行与 prefer/fact 行：按归一内容去重，只固化一次。
+            const dedupeKey = normalizeFactText(content);
+            if (seenSolidified.has(dedupeKey)) {
+              duplicateSkipped += 1;
+              continue;
+            }
+            seenSolidified.add(dedupeKey);
             const roleLabel = role === "U" ? "用户" : role === "A" ? "助手" : role;
             const isEventLine = provenance.sourceEventIds !== undefined;
             const highSignal = role === "prefer" || role === "fact" || role === "commit";
@@ -732,7 +885,17 @@ export class NightlyMemoryTaskService {
           }
           // 当天存在任何未落库的行时，整天都不标记已固化，避免删除后不可重试。
           // 纯噪音轮次（全部被 isNoiseLogLine 过滤）同样视为已消费，否则永远 pending。
-          if ((ingested > 0 || noiseSkipped > 0 || lines.length === 0) && !failedDates.has(dateKey)) {
+          // 一天只要"全部行都被处理过"（落库/被过滤）就算消费完成；否则永远 pending。
+          // 2026-11-12：assistantSkipped / duplicateSkipped 也是有效处理结果，必须计入，
+          // 否则整天都是助手发言时会被无限重跑。
+          if (
+            (ingested > 0 ||
+              noiseSkipped > 0 ||
+              assistantSkipped > 0 ||
+              duplicateSkipped > 0 ||
+              lines.length === 0) &&
+            !failedDates.has(dateKey)
+          ) {
             dateKeys.push(dateKey);
             consumedTurnIds.push(...turnIds);
           }
@@ -740,6 +903,13 @@ export class NightlyMemoryTaskService {
         }
         totalEventLines += eventLines;
         totalFailed += failed;
+        totalAssistantSkipped += assistantSkipped;
+        if (assistantSkipped > 0 || duplicateSkipped > 0) {
+          console.log(
+            `[NightlyMemory] actor=${actorId} 固化过滤：跳过助手发言 ${assistantSkipped} 行、` +
+              `重复内容 ${duplicateSkipped} 行（均不进长期记忆）`,
+          );
+        }
 
         if (failedDates.size > 0) {
           // 失败日期保持 pending：turns 原文不丢，outbox 记录 attempts 供次日重试
@@ -890,12 +1060,10 @@ export class NightlyMemoryTaskService {
   }
 
   /**
-   * 结构化事实库（计划到期扫描用）。动态导入避免 nightly ⇄ agentic-memory 的
-   * 静态循环；未装配时返回 null（夜间任务照常跑，不做计划扫描）。
+   * 结构化事实库（计划到期扫描 + 档案字段落位用）。动态导入避免
+   * nightly ⇄ agentic-memory 的静态循环；未装配时返回 null（夜间任务照常跑）。
    */
-  private async getStructuredFactStore(): Promise<
-    { sweepUpcomingPlans: (actorId: string, at: Date | string) => number } | null
-  > {
+  private async getStructuredFactStore(): Promise<StructuredFactStore | null> {
     try {
       const { getMemoryComponents } = await import("../agentic-memory/index.js");
       return getMemoryComponents().factStore ?? null;
@@ -926,10 +1094,9 @@ export class NightlyMemoryTaskService {
   /**
    * 画像批抽取（每 actor 每晚最多 1 次 LLM）：读 turn-wal 自 checkpoint 以来的
    * 轮次（候选优先，预算内非候选补位）→ 批量 extractUnified → 确定性落位 →
-   * 推进 checkpoint。仅 batch 调度模式生效；自 checkpoint 起没有新轮次才零成本跳过。
+   * 推进 checkpoint。自 checkpoint 起没有新轮次才零成本跳过。
    */
   private async consolidateUserProfiles(actorIds?: string[]): Promise<void> {
-    if (!isProfileWriteBatchMode()) return;
     const consolidate = this.profileConsolidator ?? getDefaultProfileConsolidator();
     for (const actorId of actorIds ?? this.getAllActorIds()) {
       try {
@@ -972,6 +1139,7 @@ export class NightlyMemoryTaskService {
     const metrics: NonNullable<NightlySleepAgentReport["extraction"]> = {
       llmCalls: 0,
       factsApplied: 0,
+      commitmentsRouted: 0,
       conflictsResolved: 0,
       rejectedOps: 0,
       duplicates: 0,
@@ -985,7 +1153,7 @@ export class NightlyMemoryTaskService {
         const built = await this.buildNightlyTranscript(journal, actorId);
         if (!built) continue;
 
-        let facts: Array<{ kind: "preference" | "fact" | "commitment"; text: string }> = [];
+        let facts: NightlyExtractedFact[] = [];
         if (llm) {
           // M2：夜间唯一一次结构化 LLM 调用（facts + conflicts + themes 合并输出，
           // 每条带 evidence 行号；非法/无证据 op 丢弃）。
@@ -1023,13 +1191,12 @@ export class NightlyMemoryTaskService {
         }
         if (unique.length === 0) continue;
 
-        const { canonical, kvWritten } = await this.applyNightlyFacts(
-          actorId,
-          unique,
-          built.observedOn,
-        );
-        appliedCounts.set(actorId, canonical + kvWritten);
-        metrics.factsApplied += canonical + kvWritten;
+        const { canonical, commitments } = await this.applyNightlyFacts(actorId, unique);
+        // 口径分离：承诺归 commitments 表，不进事实主库，也不算「事实已落库」。
+        // 旧实现把两者相加计入 factsApplied，报告里的数字比真实落库事实高一倍。
+        appliedCounts.set(actorId, canonical);
+        metrics.factsApplied += canonical;
+        metrics.commitmentsRouted += commitments;
       } catch (err) {
         console.error(`[NightlyMemory] fact extraction failed for ${actorId}:`, err);
       }
@@ -1037,112 +1204,100 @@ export class NightlyMemoryTaskService {
     return appliedCounts;
   }
 
-  /** 事实落库：偏好/事实 → 事实主库，承诺/待办 → KV 槽位，最后同步派生视图。 */
+  /**
+   * 事实落库：**档案字段 → 权威库（structured_facts）**，其余 → 长尾事实库
+   * （行式 JSON）；承诺/待办 → commitments 表（只统计，不写长期记忆）。
+   *
+   * 2026-11-13（词表统一）：此前夜间抽到的档案字段类事实（称呼/职业/居住地…）
+   * 与对话内统一抽取**各存一份、字段名还不一样**（这里的 subject 是
+   * 「身份/居住地/项目/配偶」，那边是标准档案字段）。同一件事两个口径，
+   * 召回时自相矛盾。现在：
+   *   - 模型给了标准字段（field+value）→ 直接落权威库，行式库不再存；
+   *   - 没给但句式能认出来（"职业：后端开发"/"用户住在兴义"）→ 同样落权威库；
+   *   - 认不准 → 留长尾事实库（宁可长尾，也不要把猜错的值写进权威库）。
+   */
   private async applyNightlyFacts(
     actorId: string,
-    facts: Array<{ kind: "preference" | "fact" | "commitment"; text: string }>,
-    observedOn?: string,
-  ): Promise<{ canonical: number; kvWritten: number }> {
+    facts: NightlyExtractedFact[],
+  ): Promise<{ canonical: number; commitments: number; profileRouted: number }> {
     let canonical = 0;
-    let kvWritten = 0;
+    let commitments = 0;
+    let profileRouted = 0;
     for (const fact of facts) {
       const text = fact.text.trim().slice(0, 200);
       if (!text) continue;
       if (fact.kind === "preference" || fact.kind === "fact") {
-        // 稳定偏好/事实 → 事实主库（subject 归一 + provenance，冲突即替换）。
-        // observedOn 是习惯画像多日门槛的证据依据（2026-11-07）：单日观察的
-        // 习惯断言入库但不进派生槽位，直到累计 ≥2 个不同观察日。
+        // 档案字段优先：模型给的字段优先，认不出才从句式里兜底识别。
+        const detected = fact.profile ?? detectProfileFieldFromText(text);
+        if (detected) {
+          const applied = await this.applyProfileFact(actorId, detected.field, detected.value, text);
+          if (applied) {
+            profileRouted += 1;
+            canonical += 1;
+            continue; // 权威库已持有，不再往行式库存第二份
+          }
+        }
+        // 稳定偏好/事实 → 长尾事实库（subject 归一 + provenance，冲突即替换）。
+        // 档案字段类已在上面被识别并落权威库，这里只剩认不出的长尾。
         await this.getFactStore().upsertFact(actorId, {
           kind: fact.kind,
           value: text,
           source: "nightly-extract",
           confidence: 0.7,
-          observedOn,
         });
         canonical += 1;
       } else {
-        // 承诺/待办（时效性内容）→ KV 槽位快速路径
-        this.memorySync!.appendMemorySummaryLine(actorId, `承诺：${text}`, "consolidate");
-        kvWritten += 1;
+        // 承诺/待办（时效性内容）：权威源是 commitments 表（状态机 + 截止时间）。
+        // 2026-11-12：不再写进 memory_summary——任务内容进长期记忆会永久常驻，
+        // 正是「比价每轮出现」的事故形态。白天 writeDecided 已把承诺写入
+        // commitments 表，这里只统计数量，供报告观察。
+        commitments += 1;
       }
     }
-    // 派生视图同步：事实主库 → KV 结构化槽位（事实为主、槽位为视图，
-    // 与事实冲突的旧行被替换，当天 per-turn 捕获的未提升行保留）
     if (canonical > 0) {
-      const sync = await this.getFactStore().syncDerivedSlots(actorId, this.memorySync!);
-      // 单一权威源（2026-10-09）：派生同步可能把行式事实写回 KV，随后清掉其中的
-      // 档案字段副本（称呼/职业/居住地…）——这些字段的权威块由 prompt 单独注入，
-      // KV 再留一份只会双写漂移。
-      const strippedCopies = await this.stripProfileFieldCopiesFromKv(actorId);
+      // 事实的权威 = structured_facts（档案字段）/ 长尾事实库（其余），
+      // prompt 直接读事实档案块，不经 KV 槽位。
       console.log(
         `[NightlyMemory] 事实提炼: actor=${actorId} 主库 ${canonical} 条` +
-          `（偏好 ${sync.preferences} / 事实 ${sync.facts}），承诺 ${kvWritten} 条走 KV，` +
-          `槽位保留近期行 ${sync.keptRecent}` +
-          (strippedCopies > 0 ? `，清档案字段副本 ${strippedCopies} 行` : ""),
+          (profileRouted > 0 ? `（其中档案字段 ${profileRouted} 条走权威库）` : "") +
+          `；承诺 ${commitments} 条归 commitments（不入长期记忆）`,
       );
-    } else if (kvWritten > 0) {
-      console.log(`[NightlyMemory] 事实提炼: actor=${actorId} 承诺 ${kvWritten} 条走 KV 槽位`);
+    } else if (commitments > 0) {
+      console.log(`[NightlyMemory] 事实提炼: actor=${actorId} 承诺 ${commitments} 条归 commitments`);
     }
-    return { canonical, kvWritten };
+    return { canonical, commitments, profileRouted };
   }
 
   /**
-   * 派生视图强制重同步（确定性，零 LLM）：把事实主库（含习惯门槛/保鲜规则）
-   * 重新归并进所有 actor 的 KV 槽位，并清除被压制习惯的旧残行。
-   * forceRunNightTasks 每次收尾调用——即使提取被跳过，槽位也与主库一致。
+   * 档案字段落权威库（structured_facts）。
+   *
+   * 置信度给 0.55（低于 0.6 的「低置信」阈值）——夜间抽取是批量猜测，
+   * 提示层会把它标成〔置信度低〕，模型转述时不会把话说满。
+   * 返回是否真的落库（没有 factStore 时返回 false，调用方退回长尾事实库）。
    */
-  private async resyncDerivedSlotsForAllActors(): Promise<
-    Record<string, { facts: number; preferences: number; keptRecent: number }>
-  > {
-    const out: Record<string, { facts: number; preferences: number; keptRecent: number }> = {};
-    if (!this.memorySync) return out;
-    for (const actorId of this.getAllActorIds()) {
-      try {
-        out[actorId] = await this.getFactStore().syncDerivedSlots(actorId, this.memorySync);
-      } catch (err) {
-        console.error(`[NightlyMemory] slot resync failed for ${actorId}:`, err);
-      }
-    }
-    return out;
-  }
-
-  /**
-   * 清理 KV 槽位里的档案字段副本（权威库已有该字段值时）。返回清掉的行数。
-   * 与 profile-fact-authority 共用同一判定，保证与画像投影口径一致。
-   */
-  private async stripProfileFieldCopiesFromKv(actorId: string): Promise<number> {
-    if (!this.memorySync) return 0;
+  private async applyProfileFact(
+    actorId: string,
+    field: string,
+    value: string,
+    sourceText: string,
+  ): Promise<boolean> {
     try {
-      const { getMemoryComponents } = await import("../agentic-memory/index.js");
-      const factStore = getMemoryComponents().factStore;
-      if (!factStore) return 0;
-      const facts = factStore.getActiveFacts(actorId);
-      if (facts.length === 0) return 0;
-      const { canonicalFieldMap, cleanProfileFieldCopiesFromSlot } = await import(
-        "./user-personalization/profile-fact-authority.js"
+      const factStore = await this.getStructuredFactStore();
+      if (!factStore) return false;
+      const result = factStore.applyFact(
+        {
+          actorId,
+          field,
+          value,
+          sourceRef: `nightly:${sourceText.slice(0, 60)}`,
+          confidence: 0.55,
+        },
+        "NightlyMemoryTaskService",
       );
-      const fields = new Set(canonicalFieldMap(facts).keys());
-      if (fields.size === 0) return 0;
-      const knownValues = new Map<string, readonly string[]>(
-        [...fields].map((f) => [
-          f,
-          factStore.getAllValuesForField?.(actorId, f) ?? [],
-        ]),
-      );
-      let removed = 0;
-      for (const key of ["memory_facts", "memory_preferences"]) {
-        const { entries } = this.memorySync.getSnapshot(actorId, [key]);
-        const raw = typeof entries[key] === "string" ? (entries[key] as string) : "";
-        if (!raw) continue;
-        const r = cleanProfileFieldCopiesFromSlot(raw, fields, knownValues);
-        if (r.changed) {
-          this.memorySync.setEntry(actorId, key, r.value);
-          removed += r.removed;
-        }
-      }
-      return removed;
-    } catch {
-      return 0;
+      return !!result;
+    } catch (err) {
+      console.warn("[NightlyMemory] 档案字段落权威库失败（退回长尾事实库）:", err);
+      return false;
     }
   }
 
@@ -1159,7 +1314,7 @@ export class NightlyMemoryTaskService {
     transcript: string,
   ):
     Promise<{
-      facts: Array<{ kind: "preference" | "fact" | "commitment"; text: string }>;
+      facts: NightlyExtractedFact[];
       conflicts: Array<{ kind: "preference" | "fact"; text: string }>;
       themes: number;
       rejected: number;
@@ -1175,7 +1330,7 @@ export class NightlyMemoryTaskService {
       const durableSystem =
         "你是记忆巩固器。从对话日志中提取「值得跨会话长期记住」的用户信息，忽略闲聊、临时上下文和一次性任务细节。" +
         "每条日志行以 #n 标注行号。只输出 JSON：" +
-        '{"facts":[{"kind":"preference|fact|commitment","text":"...","evidence":[n]}],' +
+        '{"facts":[{"kind":"preference|fact|commitment","text":"...","field":"称呼|职业|居住地|技术栈|生日|公司|学历","value":"短值","evidence":[n]}],' +
         '"conflicts":[{"kind":"preference|fact","text":"...","evidence":[n]}],' +
         "\"themes\":[{\"text\":\"...\",\"evidence\":[n]}]}，facts 最多 12 条。" +
         "evidence 必须是实际支撑该条目的日志行号；没有证据的条目一律不要输出。" +
@@ -1183,6 +1338,9 @@ export class NightlyMemoryTaskService {
         "fact=稳定身份/背景事实（text 以「用户」开头或用无主语短语，如「用户住在兴义」「职业：后端开发」）；" +
         "commitment=需要后续跟进的承诺或待办（text 需含「我会/我将/计划/待办」等词）；" +
         "conflicts=与已知长期记忆矛盾的新陈述（取新值，系统按「显式纠正>新近>置信度>证据数」裁决）。" +
+        "【档案字段】称呼/职业/居住地/技术栈/生日/公司/学历 这类字段有专属权威库，" +
+        "遇到时除 text 外必须额外输出 field（上述标准字段名之一）与 value（≤12 字、无主语的短值，" +
+        "如 value=兴义）；不属于这七类的条目不要输出 field/value 两个键。" +
         "习惯纪律：单日/单次观察到的行为不得写成 preference 或带「习惯/总是/每天」字样的 fact；" +
         "设提醒/定闹钟≠事件已发生：「用户定了9点闹钟」不能推出「用户9点起床」，更不能推出作息习惯；" +
         "一次性事务（比价、下单、当次安排）不提取为 fact/preference。" +
@@ -1214,7 +1372,13 @@ export class NightlyMemoryTaskService {
       if (!content) return empty;
 
       const parsed = JSON.parse(content) as {
-        facts?: Array<{ kind?: string; text?: string; evidence?: unknown }>;
+        facts?: Array<{
+          kind?: string;
+          text?: string;
+          field?: unknown;
+          value?: unknown;
+          evidence?: unknown;
+        }>;
         conflicts?: Array<{ kind?: string; text?: string; evidence?: unknown }>;
         themes?: Array<{ text?: string; evidence?: unknown }>;
       };
@@ -1229,7 +1393,7 @@ export class NightlyMemoryTaskService {
           (n) => typeof n === "number" && Number.isInteger(n) && n >= 1 && n <= maxEvidenceId,
         );
 
-      const facts: Array<{ kind: "preference" | "fact" | "commitment"; text: string }> = [];
+      const facts: NightlyExtractedFact[] = [];
       for (const f of parsed.facts ?? []) {
         if (
           f &&
@@ -1239,7 +1403,15 @@ export class NightlyMemoryTaskService {
           validKind(f.kind, ["preference", "fact", "commitment"]) &&
           hasEvidence(f.evidence)
         ) {
-          facts.push({ kind: f.kind as "preference" | "fact" | "commitment", text: f.text.trim() });
+          facts.push({
+            kind: f.kind as "preference" | "fact" | "commitment",
+            text: f.text.trim(),
+            // 档案字段（2026-11-13 词表统一）：模型给的 field/value 必须能归一到
+            // 标准档案字段、值得像短值，否则一律视为「没给」。
+            ...(normalizeDetectedProfileFact(f.field, f.value)
+              ? { profile: normalizeDetectedProfileFact(f.field, f.value)! }
+              : {}),
+          });
         } else {
           rejected += 1;
         }
@@ -1350,56 +1522,14 @@ export class NightlyMemoryTaskService {
     }
   }
 
-  private async syncToLongTermStorage(actorIds?: string[]): Promise<void> {
-    // 缺口 7 修复：真实落地长期存储同步
-    // 原策略：只 getSnapshot 打日志，不写入任何长期后端
-    // 新策略：把每个 actor 的 memory_summary 持久化到本地文件 data/long-term-memory/<actorId>.json
-    //         作为长期归档（崩溃恢复 + 跨实例迁移的备份）
-    if (!this.memorySync) return;
-
-    try {
-      console.log("[NightlyMemory] Syncing to long-term storage (local archive)");
-      const targets = actorIds ?? this.getAllActorIds();
-      const longTermDir = join(getDataDir(), "long-term-memory");
-      try {
-        mkdirSync(longTermDir, { recursive: true });
-      } catch {
-        // 目录已存在则忽略
-      }
-
-      let syncedCount = 0;
-      for (const actorId of targets) {
-        try {
-          const { entries } = this.memorySync.getSnapshot(actorId, [
-            "memory_summary",
-            "memory_summary_forgotten",
-          ]);
-          const summary = typeof entries.memory_summary === "string" ? entries.memory_summary : "";
-          const forgotten = typeof entries.memory_summary_forgotten === "string" ? entries.memory_summary_forgotten : "";
-          if (!summary && !forgotten) continue;
-
-          const archive = {
-            actorId,
-            syncedAt: new Date().toISOString(),
-            memorySummary: summary,
-            memorySummaryForgotten: forgotten,
-          };
-          const filePath = join(longTermDir, `${actorId}.json`);
-          await writeJsonAtomic(filePath, archive);
-          syncedCount++;
-        } catch (err) {
-          console.log(`[NightlyMemory] sync ${actorId} 失败: ${err}`);
-        }
-      }
-      console.log(`[NightlyMemory] Long-term storage sync completed: ${syncedCount}/${targets.length} actors archived`);
-    } catch (err) {
-      console.error("[NightlyMemory] Long-term sync failed:", err);
-    }
-  }
-
+  /**
+   * 存量清理（2026-11-13 起仅为一次性存量清除）：
+   * `data/long-term-memory/` 已无写者——「长期归档同步」步骤随 syncToLongTermStorage
+   * 一并删除（该目录内容与 KV memory_summary 逐字节相同，只是同一份数据的第二个副本）。
+   * 这里只负责把升级前遗留的旧文件按 30 天 TTL 清掉，之后该目录不再产生新文件。
+   */
   private async cleanupOldStorage(): Promise<void> {
-    // 缺口 7 修复：清理过期的长期存储归档
-    // 删除 30 天前的 long-term-memory 归档文件（保留近期备份）
+    // 清理过期的长期存储归档（升级前存量；保留近期文件以免误删刚升级的数据）
     try {
       const longTermDir = join(getDataDir(), "long-term-memory");
       let files: string[] = [];

@@ -1,8 +1,10 @@
+import "dart:async";
 import "dart:math" as math;
 
 import "package:flutter/material.dart";
 
 import "../core/services/schedule_api_client.dart";
+import "mobile_page_cache.dart";
 import "mobile_theme.dart";
 
 /// 手机端行程表 v2：一天一页 + 顶部日期条跳转，只读。
@@ -24,10 +26,18 @@ class MobileSchedulePage extends StatefulWidget {
     required this.scheduleApi,
     required this.sessionId,
     this.onGoToChat,
+    this.now,
   });
 
   final ScheduleApiClient scheduleApi;
   final String sessionId;
+
+  /// 当前时刻来源（默认真实时钟）。
+  ///
+  /// 注入点存在的唯一理由：本页的「今天/下一件/倒计时」全部相对 now 计算，
+  /// 用 `DateTime.now()` 硬编码时，凡是「now + N 小时」构造的测试数据在
+  /// 深夜会跨到次日（20 点后 +4h 就跨天），测试随运行时刻红绿不定。
+  final DateTime Function()? now;
 
   /// 空日引导点击时跳回对话 tab。
   final VoidCallback? onGoToChat;
@@ -63,10 +73,13 @@ class MobileSchedulePageState extends State<MobileSchedulePage> {
   /// 当前周页（0 = 今天所在周，每页 [_weekSize] 天，‹›翻页）。
   int _weekPage = 0;
 
+  /// 当前时刻（测试可注入固定时钟）。
+  DateTime _now() => (widget.now ?? DateTime.now)();
+
   @override
   void initState() {
     super.initState();
-    final DateTime today = _dateOf(DateTime.now());
+    final DateTime today = _dateOf(_now());
     _days = List<DateTime>.generate(
       _lookaheadDays,
       (int i) => today.add(Duration(days: i)),
@@ -84,14 +97,40 @@ class MobileSchedulePageState extends State<MobileSchedulePage> {
 
   /// 外部触发的重新拉取（2026-10-08）：页面在 IndexedStack 里保活，initState
   /// 只拉一次——对话里刚建的提醒不切不刷新。主壳在每次切到本 tab 时调用。
-  void refresh() => _load();
+  /// 已有数据时静默后台刷新（秒进不转圈），无数据才走完整加载。
+  void refresh() {
+    if (!_loading) unawaited(_load(silent: _entries.isNotEmpty));
+  }
 
-  Future<void> _load() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    final DateTime now = DateTime.now();
+  /// 磁盘缓存 key：上次成功拉取的任务列表落盘（stale-while-revalidate 用）。
+  String get _cacheKey => "schedule_${widget.sessionId}";
+
+  /// [silent]=true 时已有数据保持展示，成功换数据、失败不闪错误页。
+  Future<void> _load({bool silent = false}) async {
+    // 无数据时的完整加载（首次进入 / 错误重试）：先读磁盘缓存命中立即上屏，
+    // 网络后台静默刷新——首次进 tab 不再整页转圈等网络（2026-11-13，
+    // 与目标/资料库页同口径；此前本页是三个 tab 里唯一无缓存的）。
+    if (!silent && _entries.isEmpty) {
+      if (_error == null) {
+        final Map<String, dynamic>? cached =
+            await MobilePageCache.instance.read(_cacheKey);
+        if (!mounted) return;
+        if (cached != null) {
+          _apply(_asList(cached["tasks"]));
+          unawaited(_fetch(silent: true));
+          return;
+        }
+      }
+      setState(() {
+        _loading = true;
+        _error = null;
+      });
+    }
+    await _fetch(silent: silent);
+  }
+
+  Future<void> _fetch({required bool silent}) async {
+    final DateTime now = _now();
     final DateTime from = DateTime(now.year, now.month, now.day);
     final DateTime to = from.add(const Duration(days: _lookaheadDays));
     final ScheduleApiResult<List<Map<String, dynamic>>> result =
@@ -102,20 +141,42 @@ class MobileSchedulePageState extends State<MobileSchedulePage> {
     );
     if (!mounted) return;
     if (!result.ok) {
+      // 静默刷新失败：已有数据保持展示（不闪错误页）；无数据才落到错误态。
+      if (silent && _entries.isNotEmpty) return;
       setState(() {
         _loading = false;
         _error = result.error ?? "拉取日程失败";
       });
       return;
     }
+    final List<Map<String, dynamic>> tasks =
+        result.value ?? const <Map<String, dynamic>>[];
+    MobilePageCache.instance.write(_cacheKey, <String, dynamic>{
+      "tasks": tasks,
+    });
+    _apply(tasks);
+  }
+
+  /// 任务列表解析 + 上屏（网络与缓存两条路共用同一入口）。
+  /// [_parse] 按「今天零点」过滤窗口，旧缓存里已过期的条目自然滤除，
+  /// 秒出的是当日有效视图，几秒后静默刷新换最新数据。
+  void _apply(List<Map<String, dynamic>> tasks) {
+    final DateTime now = _now();
+    final DateTime from = DateTime(now.year, now.month, now.day);
     setState(() {
-      _entries = _parse(result.value ?? const <Map<String, dynamic>>[], from);
+      _entries = _parse(tasks, from);
       _byDay = <String, List<_ScheduleEntry>>{};
       for (final _ScheduleEntry e in _entries) {
         (_byDay[_keyOf(e.at)] ??= <_ScheduleEntry>[]).add(e);
       }
       _loading = false;
     });
+  }
+
+  static List<Map<String, dynamic>> _asList(Object? raw) {
+    return ((raw as List<dynamic>?) ?? const <dynamic>[])
+        .whereType<Map<String, dynamic>>()
+        .toList(growable: false);
   }
 
   /// 服务端任务记录 → 展示条目。时刻口径与后台一致：
@@ -411,7 +472,7 @@ class MobileSchedulePageState extends State<MobileSchedulePage> {
 
   /// 一天一页：日头 + 当天卡片列表(或空日卡) + 底部提示。
   Widget _dayPage(MobilePalette p, int i) {
-    final DateTime now = DateTime.now();
+    final DateTime now = _now();
     final DateTime day = _days[i];
     final List<_ScheduleEntry> items = _itemsOf(day);
     final bool isToday = i == 0;

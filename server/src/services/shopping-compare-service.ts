@@ -104,6 +104,41 @@ export interface CompareResult {
   bestIndex: number | null;
 }
 
+/**
+ * 一轮比价的「待登录会话」（2026-11-13 P1）。
+ *
+ * 为什么需要它：登录闸门把任务挂起后，用户是在**卡片里**完成登录的（扫码 /
+ * 跳过这家 / 让二维码重推），这些动作都不经过模型。如果不留住「这一轮要比
+ * 什么、哪几家待登录、哪家被跳过了」，卡片就没法自己把这一轮续跑完——
+ * 只能退回去让用户再说一句「我扫好了」，多一轮往返，还容易漏。
+ */
+export interface PendingCompareSession {
+  id: string;
+  actorId: string;
+  /** 会话 id（与 actorId 一起定位唯一一轮） */
+  sessionId: string;
+  query: string;
+  /** 续跑时要沿用的取价参数 */
+  opts: {
+    maxPrice?: number;
+    sort?: "default" | "price_asc" | "price_desc" | "sales";
+    limit?: number;
+  };
+  /** 本轮参与比价的全部平台 */
+  platforms: string[];
+  /** 需要用户登录的平台 */
+  loginPlatforms: string[];
+  /** 用户主动「跳过这家」的平台 */
+  skipped: string[];
+  /** 已推给用户的登录二维码（platform → 图片地址 + 点码深链），跳过一家后重发其余 */
+  qrItems: Array<{ platform: string; platformLabel: string; qrImage: string; qrLink?: string; qrLinkFallback?: string }>;
+  createdAt: number;
+  expiresAt: number;
+}
+
+/** 待登录会话的存活时长：二维码本身约 2–5 分钟失效，给 20 分钟余量够用户从容处理。 */
+const PENDING_COMPARE_TTL_MS = 20 * 60 * 1000;
+
 /** 一条降价监控 */
 export interface PriceWatch {
   id: string;
@@ -393,8 +428,27 @@ function readEnvInt(name: string, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+/**
+ * 布尔型 env（2026-11-13）：开关型配置要能显式关掉（"0"/"false"/"off"），
+ * 不能像 [readEnvInt] 那样把 0 当无效值回退到默认值——否则「关掉批量模式」
+ * 这个操作根本做不到。
+ */
+function readEnvBool(name: string, fallback: boolean): boolean {
+  const raw = process.env[name];
+  if (raw == null || raw === "") return fallback;
+  const v = raw.trim().toLowerCase();
+  if (v === "0" || v === "false" || v === "off" || v === "no") return false;
+  if (v === "1" || v === "true" || v === "on" || v === "yes") return true;
+  return fallback;
+}
+
 export class ShoppingCompareService {
   private readonly watches = new Map<string, PriceWatch>();
+  /**
+   * 待登录的比价会话（2026-11-13 P1）：登录闸门挂起后留给卡片动作续跑用的
+   * 凭据。key = `${actorId}::${sessionId}`（同一会话只保留最近一轮）。
+   */
+  private readonly pendingCompares = new Map<string, PendingCompareSession>();
   private readonly dataDir: string;
   private readonly watchWriter: JsonFileWriter;
   private readonly clock: () => number;
@@ -407,6 +461,22 @@ export class ShoppingCompareService {
   private readonly maxPlatforms = readEnvInt("SHOPPING_COMPARE_MAX_PLATFORMS", 4);
   /** 缺省轮首次比价的登录探测平台数：一次做齐多平台登录建档（2026-11-12）。 */
   private readonly loginProbeCount = readEnvInt("SHOPPING_COMPARE_LOGIN_PROBE_COUNT", 3);
+  /**
+   * 登录批量模式（2026-11-13 P0-2，默认开）：一次把本轮**所有**需要登录的
+   * 平台推码（合并成一张登录卡），而不是撞墙一家推一家。
+   *
+   * 用户投诉：「说让我补京东的登录之后再补」——一次一张的预算让用户要扫三轮
+   * 才能比完。对齐主流 agent（Grok Bot / Muse / ChatGPT Agent）的做法：
+   * 需要用户本人做的环节**一次交齐**，用户处理完直接续跑。
+   * 关掉（=0）则退回旧的「一次一张」行为，便于灰度对比。
+   */
+  private readonly loginBatchMode = readEnvBool("SHOPPING_COMPARE_LOGIN_BATCH", true);
+  /**
+   * 预检登录墙（2026-11-13 P0-1，默认开）：取价**之前**先探出所有要登录的
+   * 平台，一次推码、等用户登录完，再统一取价、一次性交付。
+   * 关掉则退回旧的「边取边撞墙」行为。
+   */
+  private readonly preflightLoginMode = readEnvBool("SHOPPING_COMPARE_PREFLIGHT", true);
   /** 监控复查间隔（默认 60 分钟） */
   private readonly watchTickMs = Math.max(readEnvInt("PRICE_WATCH_TICK_MS", 60 * 60 * 1000), 5 * 60 * 1000);
 
@@ -557,6 +627,56 @@ export class ShoppingCompareService {
   }
 
   /**
+   * 登录态预检（2026-11-13 P0-1）：**只探测登录墙，不取价**。
+   *
+   * 现状问题：登录态是「取价时顺手撞出来的」，所以永远半路撞墙——先交一份
+   * 半成品答案，再让用户补登录（用户投诉：说让我补京东登录之后再补）。
+   *
+   * 改成两段式：先把所有待登录平台一次性探出来并推码（合并成一张登录卡），
+   * 等用户扫码登录完，再统一取价、一次性交付。
+   *
+   * 只探登录墙（不抓商品）：用 adapter 的搜索页 URL 走一次导航，判登录页。
+   * 命中即登记 needsLogin；不命中则该平台匿名可读，直接进取价队列。
+   */
+  private async preflightLogin(
+    ctx: ToolContext,
+    platforms: string[],
+    query: string,
+    opts: { preferVisible?: boolean } = {},
+  ): Promise<{ needsLogin: string[]; ready: string[] }> {
+    const needsLogin: string[] = [];
+    const ready: string[] = [];
+    const service = this.deps.shoppingOrderService;
+    for (const platform of platforms) {
+      // 已有授权 Cookie 的平台不必探（登录态确定）。
+      // 注意：这里用 try/catch 而非 .catch()——被替换/裁剪过的 service 实现
+      // 可能**同步**抛（方法不存在时是 TypeError），.catch() 抓不到同步抛出。
+      let hasCookie = false;
+      try {
+        const list = await service.listPlatformsWithCookies(resolveActorId(ctx), [platform]);
+        hasCookie = Array.isArray(list) && list.includes(platform);
+      } catch {
+        hasCookie = false;
+      }
+      if (hasCookie) {
+        ready.push(platform);
+        continue;
+      }
+      try {
+        const probe = await service.probeLoginWall(ctx, platform, query, {
+          preferVisible: opts.preferVisible,
+        });
+        if (probe?.required) needsLogin.push(platform);
+        else ready.push(platform);
+      } catch {
+        // 探测失败不当登录墙：交给取价阶段的真实结果判定
+        ready.push(platform);
+      }
+    }
+    return { needsLogin, ready };
+  }
+
+  /**
    * 单平台取报价：客户端在线时在**用户可见的内置浏览器**里真跑一遍
    * （页面导航/翻页/读数全程可见，用户能看到 agent 在干什么），
    * 内置浏览器不可用才回落 Playwright + 已授权 Cookie 的无头通道。
@@ -631,11 +751,58 @@ export class ShoppingCompareService {
   async comparePrices(
     ctx: ToolContext,
     query: string,
-    opts: { platforms?: string[]; maxPrice?: number; sort?: "default" | "price_asc" | "price_desc" | "sales"; limit?: number } = {},
-  ): Promise<{ ok: true; summary: string } & CompareResult & Record<string, unknown> | { ok: false; error: string; retryable?: boolean }> {
+    opts: {
+      platforms?: string[];
+      maxPrice?: number;
+      sort?: "default" | "price_asc" | "price_desc" | "sales";
+      limit?: number;
+      /**
+       * 续跑参数（2026-11-13 P1）：登录闸门挂起后，用户在卡片里登录/跳过后
+       * 再续跑这一轮时传入。存在即表示「这是续跑」——
+       *   · assumeLogin：已知仍需登录的平台（不再进闸门，直接记入「未取到」）
+       *   · skipped：用户主动「跳过这家」的平台（记入「未取到」，原因=已跳过）
+       */
+      pending?: { assumeLogin?: string[]; skipped?: string[] };
+    } = {},
+  ): Promise<
+    | ({ ok: true; summary: string } & CompareResult & Record<string, unknown>)
+    | {
+        ok: false;
+        error: string;
+        retryable?: boolean;
+        /**
+         * 本轮因登录墙挂起，**尚未产出任何报价**（2026-11-13 P0-3）。
+         * 模型据此知道不能先给半个答案，只能让用户扫码后继续。
+         */
+        awaitingLogin?: boolean;
+        loginRequired?: {
+          platform: string;
+          label: string;
+          platforms?: string[];
+          platformLabels?: string[];
+          pushedLabels?: string[];
+        };
+        handoff?: {
+          platforms: string[];
+          labels: string[];
+          reason: "login" | "captcha";
+          instruction: string;
+          doneAction: string;
+        };
+        unavailablePlatforms?: Array<Record<string, unknown>>;
+        retryHint?: string;
+      }
+  > {
     const actorId = resolveActorId(ctx);
     const q = query.trim();
     if (!q) return { ok: false, error: "缺少 query（比价关键词）" };
+    // 续跑模式（2026-11-13 P1）：这一轮是登录闸门挂起后被卡片动作续跑的。
+    // 平台池在原轮已经定好，续跑时**不再扩池**、也不再走「点名的都是登录平台
+    // 就塞免登录平台保底」那套——否则会把用户明确跳过的平台又塞回来。
+    const pending = opts.pending;
+    const isResume = pending != null;
+    const assumeLoginSet = new Set(pending?.assumeLogin ?? []);
+    const skippedSet = new Set(pending?.skipped ?? []);
     const supported = this.deps.shoppingOrderService.listSupportedPlatforms();
     // 免登录平台（苏宁/什么值得买）：匿名能读到真实价，是每轮比价的保底出价来源。
     // 列表由 adapter.category 派生（见 listDefaultComparePlatforms），非手写数组。
@@ -695,6 +862,7 @@ export class ShoppingCompareService {
     const loginPlatforms = new Set(listLoginRequiredL1Platforms());
     if (
       !isDefaultRound &&
+      !isResume &&
       requested.every((p) => loginPlatforms.has(p)) &&
       defaultPlatforms.length > 0
     ) {
@@ -737,6 +905,15 @@ export class ShoppingCompareService {
     const loginQueue = requested.filter((p) => loginPlatforms.has(p));
     const nonLoginPlatforms = requested.filter((p) => !loginPlatforms.has(p));
 
+    // 续跑分流（2026-11-13 P1）：
+    //   · 用户「跳过这家」的平台 → 不取价，记入「未取到（已跳过）」
+    //   · 已知仍需登录的平台 → 不取价，记入「未取到（需要登录）」
+    // 这两类平台**不进预检、不进闸门**：用户已经表过态了，再拦一次就是
+    // 「不让人把流程走完」。
+    const bypassPlatforms = new Set<string>([...assumeLoginSet, ...skippedSet]);
+    const probeQueue = loginQueue.filter((p) => !bypassPlatforms.has(p));
+    const fetchNonLoginPlatforms = nonLoginPlatforms.filter((p) => !skippedSet.has(p));
+
     const outcomes: Array<{ platform: string; quotes: PlatformQuotes }> = [];
     let handoffPending = false;
     const tryFetch = async (platform: string, preferVisible: boolean): Promise<void> => {
@@ -758,18 +935,129 @@ export class ShoppingCompareService {
       }
     };
 
+    // ── P0-1 预检登录墙（2026-11-13）──
+    // 取价**之前**先探出所有要登录的平台。为什么必须前置：
+    // 旧流程是「边取边撞墙」——免登录平台取完价就返回 ok:true，LLM 拿到数据
+    // 直接总结输出，用户看到的是**半成品答案**（+一句"京东要登录，之后补"）。
+    // 前置预检让「登录」成为任务的第一阶段而不是中途打断。
+    const preflight = this.preflightLoginMode
+      ? await this.preflightLogin(ctx, probeQueue, q, { preferVisible: visible })
+      : { needsLogin: [] as string[], ready: probeQueue };
+    const preflightBlocked = preflight.needsLogin.length > 0 && !isResume;
+
+    // 续跑模式（2026-11-13 P1）：用户已经表过态了（登录过/跳过），这一轮
+    // **不再被闸门拦住**。预检发现仍需登录的平台 → 归入「未取到」清单，
+    // 由卡片如实呈现，不打断整轮交付。
+    if (isResume) {
+      for (const p of preflight.needsLogin) bypassPlatforms.add(p);
+    }
+
+    // ── P0-3 登录闸门（2026-11-13）──
+    // 预检探到需要登录的平台 → **先推码、挂起任务**，不取价、不交答案。
+    //
+    // 为什么必须在这里拦（旧位置在取价之后，是错的）：旧流程是「边取边撞墙」
+    // ——免登录平台取完价就返回 ok:true，LLM 拿到数据直接总结输出，用户看到
+    // 半成品答案 +「京东要登录，之后补」。用户要的是「先给二维码，等登录完
+    // 再一次性交付」——所以闸门必须在**任何取价之前**。
+    if (preflightBlocked && preflight.needsLogin.length > 0) {
+      const labels = preflight.needsLogin.map((p) => platformLabel(p));
+      // 批量推码：一次把要登录的几家全推出去（合并成一张多平台登录卡），
+      // 用户扫任意一张即可全部放行——不再「补完京东再说淘宝」。
+      // 用 try/catch 而非 .catch()：service 实现可能同步抛（方法缺失等）。
+      let pushed = new Map<string, { imageUrl: string; qrLink?: string; qrLinkFallback?: string }>();
+      try {
+        const result = await this.deps.shoppingOrderService.pushBatchLoginQrs(
+          ctx,
+          preflight.needsLogin,
+          q,
+        );
+        if (result) pushed = result;
+      } catch (err) {
+        console.log(`[ShoppingCompare] 批量推码失败（忽略）: ${err}`);
+      }
+      const pushedLabels = preflight.needsLogin
+        .filter((p) => pushed.has(p))
+        .map((p) => platformLabel(p));
+      // 记住这一轮（2026-11-13 P1）：卡片里的「跳过这家 / 重新出码 / 继续比价」
+      // 都要靠它续跑——不记的话，卡片只能把用户推回对话里再说一遍。
+      this.rememberPendingCompare(ctx, {
+        query: q,
+        opts: {
+          ...(opts.maxPrice != null ? { maxPrice: opts.maxPrice } : {}),
+          ...(opts.sort ? { sort: opts.sort } : {}),
+          ...(opts.limit != null ? { limit: opts.limit } : {}),
+        },
+        platforms: requested,
+        loginPlatforms: preflight.needsLogin,
+        skipped: [],
+        qrItems: preflight.needsLogin
+          .filter((p) => pushed.has(p))
+          .map((p) => {
+            const q = pushed.get(p)!;
+            return {
+              platform: p,
+              platformLabel: platformLabel(p),
+              qrImage: q.imageUrl,
+              ...(q.qrLink ? { qrLink: q.qrLink } : {}),
+              ...(q.qrLinkFallback ? { qrLinkFallback: q.qrLinkFallback } : {}),
+            };
+          }),
+      });
+      // 可见浏览器在线：页面留给用户现场登录（长流程 handoff）
+      if (visible) {
+        try {
+          this.deps.onUserActionRequired?.({
+            actorId,
+            sessionId: ctx.sessionId,
+            platforms: preflight.needsLogin,
+            platformLabels: labels,
+            reason: "login",
+          });
+        } catch (err) {
+          console.log(`[ShoppingCompare] 用户交接失败（忽略）: ${err}`);
+        }
+      }
+      const canReceive = pushedLabels.length > 0;
+      const waitSeconds = Math.round(Math.max(20_000, getLoginWaitMs()) / 1000);
+      const instruction = canReceive
+        ? `${pushedLabels.join("、")}的登录二维码已推到聊天${pushedLabels.length > 1 ? "（扫任意一个即可）" : ""}` +
+          `（最长等待约 ${waitSeconds} 秒）。请扫码登录，登录完我会自动把${labels.join("、")}的价格一起补齐，给你完整的比价结果。`
+        : `${labels.join("、")}需要你本人登录才能取价，但这轮二维码没能推到聊天（客户端不在线或图片服务未装配）。请稍后重试比价。`;
+      return {
+        ok: false,
+        error: `「${q}」比价进行中：${instruction}`,
+        retryable: true,
+        // 明确标记：本轮尚未产出任何报价，模型不得编造价格
+        awaitingLogin: true,
+        loginRequired: {
+          platform: preflight.needsLogin[0]!,
+          label: platformLabel(preflight.needsLogin[0]!),
+          platforms: preflight.needsLogin,
+          platformLabels: labels,
+          ...(pushedLabels.length > 0 ? { pushedLabels } : {}),
+        },
+        handoff: {
+          platforms: preflight.needsLogin,
+          labels,
+          reason: "login" as const,
+          instruction,
+          doneAction: "我已完成",
+        },
+      };
+    }
+
     // 免登录平台先取价：它们是本轮报价主体，不该被登录等待拖住。
     if (visible) {
       // 可见面板只有一个：被登录墙/验证码拦住的平台留在面板上等用户操作，
       // 其余平台回落**无头**通道继续取数（不抢面板），最后仍合并成一次交接。
-      for (const platform of nonLoginPlatforms) {
+      for (const platform of fetchNonLoginPlatforms) {
         await tryFetch(platform, !handoffPending);
         const last = outcomes[outcomes.length - 1]?.quotes;
         if (last?.loginRequired || last?.humanRequired) handoffPending = true;
       }
     } else {
       const settled = await Promise.allSettled(
-        nonLoginPlatforms.map(async (platform) => ({
+        fetchNonLoginPlatforms.map(async (platform) => ({
           platform,
           quotes: await this.fetchPlatformQuotes(ctx, platform, q, fetchOpts),
         })),
@@ -781,8 +1069,16 @@ export class ShoppingCompareService {
 
     // 登录族平台串行过推码预算：撞墙即停（后续延后），没撞墙（匿名可读或
     // 已有 Cookie 正常出价）则继续下一家。
-    for (const platform of loginQueue) {
-      if (qrBudgetUsed) {
+    //
+    // 2026-11-13 P0-2 改版：预算不再是「一张」，而是**本轮 needsLogin 的全部
+    // 平台**——用户投诉「说让我补京东的登录之后再补」，一次只推一张导致用户
+    // 要扫三轮才能比完。现在一次把要登录的几家全推出去（合并成一张登录卡，
+    // 卡内分区展示），用户扫任意一张即可全部放行。
+    //
+    // 2026-11-13 P1：队列换成 probeQueue——续跑时「用户跳过的 / 仍需登录的」
+    // 已经在 bypassPlatforms 里，不该再被推码打扰。
+    for (const platform of preflight.ready) {
+      if (qrBudgetUsed && !this.loginBatchMode) {
         deferredLoginPlatforms.push(platform);
         continue;
       }
@@ -804,7 +1100,8 @@ export class ShoppingCompareService {
     const unavailable: Array<{
       platform: string;
       label: string;
-      reason: "login" | "captcha" | "no_data";
+      /** skipped = 用户主动「跳过这家」（2026-11-13 P1） */
+      reason: "login" | "captcha" | "no_data" | "skipped";
       humanRequired: boolean;
       detail?: string;
     }> = [];
@@ -836,6 +1133,22 @@ export class ShoppingCompareService {
       if (quotes.loginRequired) loginPendingPlatforms.push(platform);
       if (quotes.loginQrImage) qrPushedLabels.push(platformLabel(platform));
       if (quotes.error) failedPlatforms.push(`${platformLabel(platform)}（${platform}）：${quotes.error}`);
+    }
+
+    // 续跑时没进取价队列的平台（2026-11-13 P1）：如实进「未取到」清单。
+    //   · 用户点过「跳过这家」→ 原因=已跳过（不是平台的问题，是用户的选择）
+    //   · 已知仍需登录 → 原因=需要登录（用户已表过态，不再打断整轮交付）
+    for (const platform of bypassPlatforms) {
+      if (searchedPlatforms.includes(platform)) continue;
+      if (unavailable.some((u) => u.platform === platform)) continue;
+      const skipped = skippedSet.has(platform);
+      unavailable.push({
+        platform,
+        label: platformLabel(platform),
+        reason: skipped ? "skipped" : "login",
+        humanRequired: false,
+        detail: skipped ? "用户选择跳过这家" : "需要登录（尚未完成）",
+      });
     }
 
     // 普通失败（无匹配/读取失败）平台的自主兜底衔接：对齐主流「固定脚本 →
@@ -903,15 +1216,23 @@ export class ShoppingCompareService {
     }
 
     if (tagged.length === 0) {
+      // 续跑时平台全被用户跳过 → 如实说「没有要比的平台」，别拿「登录态失效」
+      // 这种误导性的诊断去搪塞（用户是自己选的）。
+      const allSkipped =
+        isResume &&
+        unavailable.length > 0 &&
+        unavailable.every((u) => u.reason === "skipped");
       return {
         ok: false,
-        error:
-          `${loginFallbackNote}所有平台均未返回「${q}」的结果。` +
-          (handoff
-            ? handoff.instruction
-            : failedPlatforms.length
-              ? `失败详情：${failedPlatforms.join("；")}`
-              : "可能登录态失效，请检查 Cookie 导入与授权"),
+        error: allSkipped
+          ? `「${q}」这一轮没有要比价平台了——你把要登录的几家都跳过了。` +
+            "想继续的话重新说一次要比的东西，我重新来一轮。"
+          : `${loginFallbackNote}所有平台均未返回「${q}」的结果。` +
+            (handoff
+              ? handoff.instruction
+              : failedPlatforms.length
+                ? `失败详情：${failedPlatforms.join("；")}`
+                : "可能登录态失效，请检查 Cookie 导入与授权"),
         retryable: true,
         ...(unavailable.length > 0 ? { unavailablePlatforms: unavailable } : {}),
         ...(handoff ? { handoff } : {}),
@@ -970,7 +1291,10 @@ export class ShoppingCompareService {
       ? `。首次比价顺手建档：${onboardingLabels.map(platformLabel).join("、")}的登录二维码已推到聊天，扫码登录后以后比价这家就有实时价（其他平台我会逐个带你登录）`
       : "";
     // 没取到数的平台分两类文案：需要用户登录/验证的（交人），与普通无匹配/读取失败的（如实说明）
-    const noDataLabels = unavailable.filter((u) => !u.humanRequired).map((u) => u.label);
+    // 用户「跳过这家」的平台不算「没取到报价」——单独一句话说明，不混进失败清单。
+    const noDataLabels = unavailable
+      .filter((u) => !u.humanRequired && u.reason !== "skipped")
+      .map((u) => u.label);
     const noDataText = noDataLabels.length
       ? `；${noDataLabels.join("、")}这次没取到报价（无匹配或读取失败）`
       : "";
@@ -978,6 +1302,68 @@ export class ShoppingCompareService {
     const verifyText = verifyLabels.length
       ? `；${verifyLabels.join("、")}需要完成安全验证，验证完我接着补价`
       : "";
+
+    // ── P0-4 收齐闸门 + 事实清单（2026-11-13）──
+    // 服务端**自己**生成一份事实清单交给 LLM，LLM 的职责被压缩为「复述这份
+    // 清单 + 给结论」，不再负责「组织比价」。
+    //
+    // 为什么必须服务端生成：用户投诉「话都没说清楚说什么淘宝，没有搜索到
+    // 报价，那价格哪来的」——旧流程把各平台报价塞进一个 summary 字符串，
+    // LLM 拿到后自行组织，就可能把 A 平台的价格说成 B 平台的。事实清单把
+    // 「哪个平台、什么价、什么链接、什么时候抓的」逐条钉死，模型没有自由
+    // 发挥空间；没取到价的平台在清单里显式列为「未取到」，模型无从编造。
+    const quotedPlatforms = new Set(searchedPlatforms);
+    const factsQuoted: string[] = [];
+    for (const g of groups) {
+      const offer = g.offers[0];
+      if (!offer) continue;
+      const label = platformLabel(offer.platform);
+      const price = offer.priceCny != null ? `¥${offer.priceCny}` : "价格待查";
+      const shop = offer.shop ? `（${offer.shop}）` : "";
+      const url = offer.url ? ` ${offer.url}` : "";
+      factsQuoted.push(`- ${label} ${price} ${offer.title}${shop}${url}`);
+    }
+    const factsMissing: string[] = [];
+    for (const u of unavailable) {
+      const why =
+        u.reason === "login"
+          ? "需要登录（未完成）"
+          : u.reason === "captcha"
+            ? "需要安全验证（未完成）"
+            : u.reason === "skipped"
+              ? "用户选择跳过这家（不参与本轮比价）"
+              : "未取到报价（无匹配或读取失败）";
+      factsMissing.push(`- ${u.label}：${why}`);
+    }
+    for (const p of deferredLoginPlatforms) {
+      factsMissing.push(`- ${platformLabel(p)}：本轮未取价（待上一家登录完成后接入）`);
+    }
+    const factSheet = [
+      "【已取到报价】",
+      ...(factsQuoted.length > 0 ? factsQuoted : ["- （无）"]),
+      "【未取到报价的平台】",
+      ...(factsMissing.length > 0 ? factsMissing : ["- （无）"]),
+      "【约束】只能复述上面清单里的价格；清单里没有的平台绝对不要给出价格；" +
+      "不要为未取到报价的平台估算或编造价格。",
+    ].join("\n");
+
+    // 收齐闸门：required 里没被满足的（既没报价、也不是明确的登录待办）必须
+    // 在交付里显式呈现，不能让 LLM 用一句「部分平台没取到价」糊过去。
+    // 用户主动跳过的平台**不算缺口**——那是用户的选择，不该被算成「没比到」。
+    const skippedPlatforms = unavailable.filter((u) => u.reason === "skipped");
+    const countedUnavailable = unavailable.filter((u) => u.reason !== "skipped");
+    const effectiveRequested = Math.max(1, requested.length - skippedPlatforms.length);
+    const satisfied = quotedPlatforms.size + countedUnavailable.length;
+    const coverage = effectiveRequested > 0 ? Math.min(1, satisfied / effectiveRequested) : 1;
+    const missingCount = Math.max(0, effectiveRequested - satisfied);
+    const coverageNote =
+      missingCount === 0
+        ? `已比价 ${searchedPlatforms.length} 家`
+        : `已比价 ${searchedPlatforms.length} 家，${missingCount} 家未取到报价`;
+    const skippedNote =
+      skippedPlatforms.length > 0
+        ? `（用户已跳过 ${skippedPlatforms.map((u) => u.label).join("、")}）`
+        : "";
 
     // 决策页存档（fire-and-forget：存储失败/未装配不影响比价回执）
     const fetchedAt = Date.now();
@@ -999,7 +1385,9 @@ export class ShoppingCompareService {
 
     return {
       ok: true,
-      summary: `${loginFallbackNote}「${q}」跨 ${platformSummary || requested.length} 个平台聚合出 ${groups.length} 组报价${bestText}${loginText}${onboardingNote}${deferredText}${verifyText}${noDataText}`,
+      summary:
+        `${loginFallbackNote}「${q}」${coverageNote}${skippedNote}，聚合出 ${groups.length} 组报价${bestText}` +
+        `${loginText}${onboardingNote}${deferredText}${verifyText}${noDataText}\n${factSheet}`,
       query: q,
       platforms: requested,
       searchedPlatforms,
@@ -1007,6 +1395,15 @@ export class ShoppingCompareService {
       bestOffer,
       bestIndex,
       fetchedAt,
+      // 事实清单：模型复述的依据（每条报价带平台/链接/抓取时刻）
+      factSheet,
+      quotedPlatforms: [...quotedPlatforms],
+      missingPlatforms: unavailable.map((u) => ({
+        platform: u.platform,
+        label: u.label,
+        reason: u.reason,
+      })),
+      coverage,
       ...(loginPendingPlatforms.length > 0
         ? { loginRequired: { platform: loginPendingPlatforms[0], label: platformLabel(loginPendingPlatforms[0]) } }
         : {}),
@@ -1015,6 +1412,190 @@ export class ShoppingCompareService {
       ...(retryHint ? { retryHint } : {}),
       ...(decisionPageUrl ? { decisionPageUrl } : {}),
     };
+  }
+
+  // ---- 待登录比价会话（2026-11-13 P1）：卡片动作续跑用 ----
+
+  /**
+   * 会话定位键：**只用 actorId**。
+   *
+   * 为什么不用 chat sessionId：比价工具跑在对话轮里（ctx.sessionId = 聊天
+   * 会话 id），而卡内动作走 card.action 通道（那边只有 boundActorId，拿不到
+   * 聊天会话 id）。按 `${actorId}::${sessionId}` 存，两边永远对不上——卡上的
+   * 「跳过这家 / 继续比价」会一律报「登录会话已过期」。按 actor 存就稳了：
+   * 一个人同一时刻只有一轮待登录比价。
+   */
+  private pendingKey(actorId: string): string {
+    return actorId;
+  }
+
+  /** 记住一轮被登录闸门挂起的比价（闸门命中时调用）。 */
+  private rememberPendingCompare(
+    ctx: ToolContext,
+    input: {
+      query: string;
+      opts: PendingCompareSession["opts"];
+      platforms: string[];
+      loginPlatforms: string[];
+      skipped: string[];
+      qrItems: PendingCompareSession["qrItems"];
+    },
+  ): PendingCompareSession {
+    const actorId = resolveActorId(ctx);
+    const sessionId = ctx.sessionId || actorId;
+    const now = Date.now();
+    const session: PendingCompareSession = {
+      id: randomUUID(),
+      actorId,
+      sessionId,
+      query: input.query,
+      opts: input.opts,
+      platforms: input.platforms,
+      loginPlatforms: input.loginPlatforms,
+      skipped: input.skipped,
+      qrItems: input.qrItems,
+      createdAt: now,
+      expiresAt: now + PENDING_COMPARE_TTL_MS,
+    };
+    this.pendingCompares.set(this.pendingKey(actorId), session);
+    return session;
+  }
+
+  /**
+   * 取当前会话的待登录比价（没有或已过期返回 null）。
+   *
+   * 过期即删：二维码早就失效了，再续跑也只会拿到「这家还没登录」，
+   * 不如让用户重新发起一轮。
+   */
+  getPendingCompare(ctx: ToolContext): PendingCompareSession | null {
+    const actorId = resolveActorId(ctx);
+    const key = this.pendingKey(actorId);
+    const session = this.pendingCompares.get(key);
+    if (!session) return null;
+    if (Date.now() > session.expiresAt) {
+      this.pendingCompares.delete(key);
+      return null;
+    }
+    return session;
+  }
+
+  /**
+   * 更新待登录会话里的二维码（2026-11-13 P1：失效重推后调用）。
+   *
+   * 换图不动平台名单；点码深链（qrLink）跟着新码一起换。
+   */
+  updatePendingQrImages(
+    ctx: ToolContext,
+    images: Array<{ platform: string; imageUrl: string; qrLink?: string; qrLinkFallback?: string }>,
+  ): PendingCompareSession | null {
+    const session = this.getPendingCompare(ctx);
+    if (!session) return null;
+    const map = new Map(session.qrItems.map((q) => [q.platform, q]));
+    for (const img of images) {
+      if (!img.platform || !img.imageUrl) continue;
+      map.set(img.platform, {
+        platform: img.platform,
+        platformLabel: platformLabel(img.platform),
+        qrImage: img.imageUrl,
+        ...(img.qrLink ? { qrLink: img.qrLink } : {}),
+        ...(img.qrLinkFallback ? { qrLinkFallback: img.qrLinkFallback } : {}),
+      });
+    }
+    session.qrItems = [...map.values()];
+    this.pendingCompares.set(this.pendingKey(session.actorId), session);
+    return session;
+  }
+
+  /**
+   * 「跳过这家」（2026-11-13 P1）：用户放弃某个待登录平台。
+   *
+   * 语义要严格：跳过**只是不再等这家**，不是「这家没有价」——续跑时它会
+   * 出现在「未取到报价」清单里（原因=已跳过），模型不得替它编价。
+   */
+  skipLoginPlatform(
+    ctx: ToolContext,
+    platform: string,
+  ): {
+    session: PendingCompareSession;
+    skipped: string[];
+    /** 还剩哪些待登录平台（跳过之后） */
+    remaining: string[];
+  } | null {
+    const session = this.getPendingCompare(ctx);
+    if (!session) return null;
+    const p = platform.trim();
+    if (p && !session.skipped.includes(p)) session.skipped.push(p);
+    const remaining = session.loginPlatforms.filter((x) => !session.skipped.includes(x));
+    this.pendingCompares.set(this.pendingKey(session.actorId), session);
+    return { session, skipped: [...session.skipped], remaining };
+  }
+
+  /**
+   * 续跑：登录（和跳过）都处理完后，**统一取价、一次性交付**。
+   *
+   * 这就是用户要的那条链路：预检登录态 → 推齐二维码 → 等用户处理 → 同批次
+   * 统一取价 → 事实清单校验 → 横向轮播卡一次性交付，中间不出半成品答案。
+   *
+   * 返回值与 comparePrices 的成功形状一致（可直接喂给卡面 builder）。
+   */
+  async resumeCompareAfterLogin(
+    ctx: ToolContext,
+    opts: { skipPending?: boolean } = {},
+  ): Promise<
+    | { ok: true; result: Record<string, unknown> }
+    | { ok: false; error: string; stillWaiting?: boolean }
+  > {
+    const session = this.getPendingCompare(ctx);
+    if (!session) {
+      return { ok: false, error: "这次比价的登录会话已经过期了，重新说一次要比的东西就行" };
+    }
+    // 哪些平台现在真的登录好了（以已授权 Cookie 为准）
+    const loginReady = await this.deps.shoppingOrderService
+      .listPlatformsWithCookies(session.actorId, session.loginPlatforms)
+      .catch(() => [] as string[]);
+    const readySet = new Set(loginReady);
+    // 仍需登录的（用户没扫 / 没扫成功）——它们不打断整轮，但要如实进清单
+    let stillNeedLogin = session.loginPlatforms.filter(
+      (p) => !readySet.has(p) && !session.skipped.includes(p),
+    );
+    if (readySet.size === 0 && stillNeedLogin.length > 0 && session.skipped.length === 0) {
+      // 一家都没登录成：先别急着交半成品（用户还在扫），如实说还在等
+      return {
+        ok: false,
+        error: "还没检测到登录成功——请扫卡片上的二维码，扫完再点一次「我扫好了」",
+        stillWaiting: true,
+      };
+    }
+    // 「先比已登录的」：用户明确表态剩下的不等了 → 记成跳过（不是缺价）
+    if (opts.skipPending) {
+      for (const p of stillNeedLogin) {
+        if (!session.skipped.includes(p)) session.skipped.push(p);
+      }
+      stillNeedLogin = [];
+    }
+    const platforms = session.platforms.filter((p) => !session.skipped.includes(p));
+    if (platforms.length === 0) {
+      // 全被跳过了：没有要比价的平台，如实说，别拿别的话搪塞
+      this.pendingCompares.delete(this.pendingKey(session.actorId));
+      return {
+        ok: false,
+        error: `「${session.query}」这一轮没有要比价的平台了——要登录的几家都被跳过了。重新说一次要比的东西，我再来一轮。`,
+      };
+    }
+    const result = await this.comparePrices(ctx, session.query, {
+      platforms,
+      ...session.opts,
+      pending: { assumeLogin: stillNeedLogin, skipped: [...session.skipped] },
+    });
+    if (!result.ok) {
+      return {
+        ok: false,
+        error: String((result as { error?: unknown }).error ?? "比价没跑通"),
+      };
+    }
+    // 本轮已交付：从待登录会话里摘掉（避免下一轮误续跑）
+    this.pendingCompares.delete(this.pendingKey(session.actorId));
+    return { ok: true, result: result as unknown as Record<string, unknown> };
   }
 
   // ---- 服务/保险类调研比价（shopping.compare.research 工具） ----

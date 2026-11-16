@@ -1,3 +1,4 @@
+import "../../core/ui/card_metrics.dart";
 import "package:flutter/material.dart";
 import "package:flutter/services.dart";
 
@@ -172,7 +173,7 @@ class _AgentActionChoiceCardState extends State<AgentActionChoiceCard>
       width: double.infinity,
       child: Container(
         // 与 AgentResultCard 一致:最大 360,避免宽屏拉成横幅
-        constraints: const BoxConstraints(maxWidth: 390),
+        constraints: BoxConstraints(maxWidth: CardMetrics.maxWidth(context)),
         decoration: BoxDecoration(
           color: cs.surfaceContainerHigh,
           borderRadius: BorderRadius.circular(radius),

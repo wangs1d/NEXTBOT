@@ -1,11 +1,15 @@
 import "dart:async";
+import "dart:convert";
+import "dart:io" show Platform;
 import "dart:ui" show ImageFilter;
 
 import "package:flutter/material.dart";
+import "package:http/http.dart" as http;
 
 import "../app/ambient_feeds_controller.dart";
 import "../core/config/api_config.dart";
 import "../core/services/image_preview_launcher.dart";
+import "../core/services/nb_http.dart";
 import "../core/services/schedule_api_client.dart";
 import "../core/services/side_chat_api.dart";
 import "../core/utils/agent_result_parser.dart";
@@ -13,26 +17,29 @@ import "../features/chat/image_preview_panel.dart";
 import "../features/chat/travel_plan_launcher.dart";
 import "../features/chat/travel_plan_mobile_page.dart";
 import "../features/chat/travel_plan_models.dart";
+import "mobile_browser_preview_overlay.dart";
 import "mobile_chat_controller.dart";
 import "mobile_chat_page.dart";
-import "mobile_goals_page.dart";
+import "mobile_dynamics_page.dart";
 import "mobile_library_page.dart";
 import "mobile_line_icons.dart";
 import "mobile_profile_page.dart";
 import "mobile_schedule_page.dart";
 import "mobile_sidebar.dart";
 import "mobile_theme.dart";
+import "startup_media_prefetch.dart";
 
-/// 手机端主壳：底部 4 tab —— 对话 / 日程 / 目标 / 资料库；
+/// 手机端主壳：底部 4 tab —— 对话 / 日程 / 动态 / 资料库；
 /// 设置迁到左侧抽屉左下角（点击进入原「我的」页）。
 ///
 /// - 日程为手机专属「行程表」[MobileSchedulePage]：一天一页 + 顶部日期条跳转，只读展示未来 30 天
-/// - 目标为「在办事项」统一视图 [MobileGoalsPage]（服务端 goals/view 单源只读）
+/// - 动态为 Agent 主动性聚合 [MobileDynamicsPage]（账单/快递/提醒/邮件要事，服务端 /api/dynamics 单源）
 /// - 资料库为产出物归档 [MobileLibraryPage]（文件/笔记/行程规划，服务端聚合）
 /// - 「设置」不再占 tab；抽屉左下角齿轮 → [MobileProfilePage]（简报/邮箱/设备/审批/模型服务等）
 /// - 底栏为 4 tab 玻璃胶囊（54px 高、左右 8px、圆角 27，选中 34px 圆环）
 /// - 左上角汉堡键打开 288px 抽屉：主界面整体右移、右侧留 32px 缝隙（等价于主界面右移只剩左条）
-/// - 各 tab 惰性构建 + IndexedStack 保活:未访问过的 tab 不发任何网络请求
+/// - 各 tab 惰性构建 + IndexedStack 保活；启动空闲期后台错峰预构建其余
+///   3 个 tab（2026-11-13），点击时零构建零请求秒进
 class MobileHomePage extends StatefulWidget {
   const MobileHomePage({
     super.key,
@@ -109,8 +116,8 @@ class MobileHomePageState extends State<MobileHomePage>
       GlobalKey<MobileSchedulePageState>();
 
   /// 目标页 / 资料库页句柄：同日程页口径，切 tab 时触发重拉。
-  final GlobalKey<MobileGoalsPageState> _goalsKey =
-      GlobalKey<MobileGoalsPageState>();
+  final GlobalKey<MobileDynamicsPageState> _dynamicsKey =
+      GlobalKey<MobileDynamicsPageState>();
   final GlobalKey<MobileLibraryPageState> _libraryKey =
       GlobalKey<MobileLibraryPageState>();
 
@@ -145,11 +152,22 @@ class MobileHomePageState extends State<MobileHomePage>
     // 按钮经 TravelPlanLauncher 静态回调打开原生行程页。此前手机端从未注册
     // handler（桌面 main.dart 独有），点击恒为 no-op。
     TravelPlanLauncher.setHandler(_openTravelPlanPanel);
+    // 内联规划流最终方案的「查看完整行程」：按 planId 拉取完整行程并打开详情页。
+    TravelPlanLauncher.setPlanIdHandler(_openTravelPlanById);
     // 图片预览入口接线（2026-11-04）：搜索/识图照片点击 → 全屏查看页。
     // 此前手机端从未注册 handler（桌面 main.dart 独有），点击恒为 no-op；
     // 且外层壳的 context 不在手机嵌套导航器内，必须在主壳这里注册、
     // 用主壳自己的 context 才能推全屏路由。
     ImagePreviewLauncher.setHandler(_openImagePreview);
+    // 启动期照片预取（2026-11-12）：第一帧画完之后再跑，只读上次落盘的资料库
+    // 元数据把图预热进磁盘缓存——用户点开资料库时照片已在本地，不再是
+    // 「进页面后一张张浮出来」。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      StartupMediaPrefetch.scheduleWarm();
+      // 其余 3 个 tab 空闲期预构建（2026-11-13）：点击时只切 index，不再
+      // 「点下去卡一下 + 转圈等网络」。
+      unawaited(_prewarmRemainingTabs());
+    });
   }
 
   /// agent 名称变化时失效对话 tab 缓存：IndexedStack 保活的 MobileChatPage
@@ -183,6 +201,36 @@ class MobileHomePageState extends State<MobileHomePage>
     unawaited(
       TravelPlanMobilePage.show(context, plan: TravelPlanData.from(data)),
     );
+  }
+
+  /// 按 planId 拉完整行程并打开原生行程详情页（内联规划最终方案）。
+  Future<void> _openTravelPlanById(String planId) async {
+    if (planId.isEmpty || ApiConfig.isOssEdition) return;
+    try {
+      final Uri uri = Uri.parse(
+        "${ApiConfig.httpBase}/travel/plans/${Uri.encodeComponent(planId)}"
+        "?sessionId=${Uri.encodeQueryComponent(ApiConfig.effectiveActorId)}",
+      );
+      final http.Response res =
+          await NbHttp.get(uri).timeout(const Duration(seconds: 20));
+      if (res.statusCode != 200) return;
+      final Object? decoded = jsonDecode(res.body);
+      final Object? rawPlan = decoded is Map ? decoded["plan"] : null;
+      if (rawPlan is! Map<String, dynamic> || !mounted) return;
+      await TravelPlanMobilePage.show(
+        context,
+        plan: TravelPlanData.fromPlanJson(rawPlan),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text("行程加载失败：$e", style: const TextStyle(fontSize: 12)),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
   }
 
   @override
@@ -231,7 +279,7 @@ class MobileHomePageState extends State<MobileHomePage>
     };
   }
 
-  /// 切到指定 tab(0=对话 1=日程 2=目标 3=资料库;供行程表空态跳回对话页等跨页联动)。
+  /// 切到指定 tab(0=对话 1=日程 2=动态 3=资料库;供行程表空态跳回对话页等跨页联动)。
   void goToTab(int index) {
     if (index < 0 || index > 3) return;
     _switchTab(index);
@@ -240,13 +288,13 @@ class MobileHomePageState extends State<MobileHomePage>
   void _switchTab(int index) {
     // 首次进入走页面 initState 的 _load（避免双拉）；已构建过的页面才补一次重拉。
     final bool scheduleAlreadyBuilt = _tabCache[1] != null;
-    final bool goalsAlreadyBuilt = _tabCache[2] != null;
+    final bool dynamicsAlreadyBuilt = _tabCache[2] != null;
     final bool libraryAlreadyBuilt = _tabCache[3] != null;
     setState(() => _tabIndex = index);
     if (index == 1 && scheduleAlreadyBuilt) {
       _scheduleKey.currentState?.refresh();
-    } else if (index == 2 && goalsAlreadyBuilt) {
-      _goalsKey.currentState?.refresh();
+    } else if (index == 2 && dynamicsAlreadyBuilt) {
+      _dynamicsKey.currentState?.refresh();
     } else if (index == 3 && libraryAlreadyBuilt) {
       _libraryKey.currentState?.refresh();
     }
@@ -281,6 +329,15 @@ class MobileHomePageState extends State<MobileHomePage>
               child: IndexedStack(index: _tabIndex, children: _buildTabs()),
             ),
             bottomNavigationBar: _buildBottomBar(context),
+          ),
+          // 「Agent 正在控制浏览器」悬浮窗（2026-11-12）：压在所有 tab 之上、
+          // 跨 tab 常驻——浏览器任务进行中自动弹出，展示服务端无头浏览器
+          // 实时画面（手机端没有可见内置浏览器，这里是唯一画面出口）。
+          Positioned.fill(
+            child: IgnorePointer(
+              ignoring: !_chatController.browserPreviewVisible,
+              child: MobileBrowserPreviewOverlay(controller: _chatController),
+            ),
           ),
         ],
       ),
@@ -469,18 +526,13 @@ class MobileHomePageState extends State<MobileHomePage>
     });
   }
 
-  /// 点某条旁聊：关抽屉 → 切到独立线程（正在生成时拒绝，避免流式事件串线程）。
+  /// 点某条旁聊：关抽屉 → 切到独立线程（生成中也可切，2026-11-12 P1
+  /// 多会话并发：流式事件按 threadId 落回各自线程，切换不再被锁）。
   Future<void> _openSideChat(SideChatSummary chat) async {
     _lastSideChatId = chat.sessionId;
     // 抽屉直接收起（不播反向滑动）：新界面要从侧边栏所在方向整体滑入，
     // 抽屉同时滑出会与入场动画互相打架（2026-11-07 反馈）。
     _stowDrawerForSideEnter();
-    if (!_chatController.canSwitchSession) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("正在回复，稍后再切换旁聊")),
-      );
-      return;
-    }
     // enterSideChat 的同步段已完成切线程，紧接着播放入场动画。
     final Future<bool> entering =
         _chatController.enterSideChat(sessionId: chat.sessionId);
@@ -522,16 +574,25 @@ class MobileHomePageState extends State<MobileHomePage>
   }
 
   List<Widget> _buildTabs() {
-    return <Widget>[
-      for (int i = 0; i < 4; i++)
-        _tabCache[i] ??= (i == 0
-            ? _buildTab(i)
+    // 真·惰性（2026-11-12 修正）：此前这个循环对 0..3 全量赋值，首帧就把
+    // 日程/目标/资料库三页一起建起来 → 冷启动同时发 4 个请求抢带宽，首屏
+    // 反而更慢（与注释声称的「未访问过的 tab 不发请求」相反）。
+    // 现在只保「对话页常驻 + 当前 tab」，其余留空占位，切过去时才建。
+    final List<Widget> tabs = <Widget>[];
+    for (int i = 0; i < 4; i++) {
+      final bool needed = i == 0 || i == _tabIndex;
+      if (_tabCache[i] == null && needed) {
+        _tabCache[i] = i == 0
+            ? _buildTab(0)
             : Padding(
                 // 玻璃底栏 overlay 高 69 + 7 缝隙，非对话页留出底部安全区。
                 padding: const EdgeInsets.only(bottom: 76),
                 child: _buildTab(i),
-              )),
-    ];
+              );
+      }
+      tabs.add(_tabCache[i] ?? const SizedBox.shrink());
+    }
+    return tabs;
   }
 
   Widget _buildTab(int index) {
@@ -550,14 +611,42 @@ class MobileHomePageState extends State<MobileHomePage>
           onGoToChat: () => goToTab(0),
         );
       case 2:
-        return MobileGoalsPage(
-          key: _goalsKey,
-          onCreateGoal: () => goToTab(0),
+        return MobileDynamicsPage(
+          key: _dynamicsKey,
         );
       case 3:
         return MobileLibraryPage(key: _libraryKey);
     }
     return const SizedBox.shrink();
+  }
+
+  /// 启动空闲期预构建其余 3 个 tab（2026-11-13 卡顿根治）：
+  /// 此前「惰性构建」把整页 widget 树构建 + 首次数据拉取全压在用户点击的
+  /// 那一帧——先同步建 30 天 PageView/列表（卡一下），再等网络转圈才进得去。
+  /// 现在首屏让路 2.5s 后，后台**一次一个**错峰预构建（构建即触发各页自己的
+  /// initState 数据拉取：目标/资料库读启动期热好的页面缓存，日程带 SWR 缓存
+  /// 拉网络），用户点击时 IndexedStack 只切 index：零构建、零请求、秒进。
+  /// 错峰 900ms 是为了不和对话页的 WS/历史消息请求抢带宽（保留惰性构建的
+  /// 原始动机），且单次构建的 10~30ms 不与首屏帧重叠。
+  ///
+  /// widget 测试环境（FLUTTER_TEST，FakeAsync）跳过：延迟 Timer 会在测试
+  /// 结束时留下 pending timer 导致 invariant 断言失败。
+  Future<void> _prewarmRemainingTabs() async {
+    if (Platform.environment.containsKey("FLUTTER_TEST")) return;
+    await Future<void>.delayed(const Duration(milliseconds: 2500));
+    for (final int i in <int>[1, 2, 3]) {
+      if (!mounted) return;
+      if (_tabCache[i] == null) {
+        setState(() {
+          _tabCache[i] = Padding(
+            // 玻璃底栏 overlay 高 69 + 7 缝隙，非对话页留出底部安全区。
+            padding: const EdgeInsets.only(bottom: 76),
+            child: _buildTab(i),
+          );
+        });
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 900));
+    }
   }
 
   /// 玻璃 tab 栏（2026-11-07 参考图定稿）：60px 高、左右 10px、底部 9px、

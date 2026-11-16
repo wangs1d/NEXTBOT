@@ -467,6 +467,7 @@ export class MemoryConsolidationService {
             actorId,
             `[fast-path][${d.decision.decision}][${d.decision.semanticClass}] ${d.candidate.text}`,
             d.candidate.topicHint,
+            "MemoryConsolidationService",
           );
         } catch (err) {
           console.warn(

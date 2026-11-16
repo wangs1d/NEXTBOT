@@ -23,13 +23,22 @@ export type TurnWalEntry = {
    */
   profileCandidate?: boolean;
   /**
-   * 媒体卡（2026-11-09）：本轮 done 帧下发的照片/视频卡（search_images /
-   * 图像生成 / 中途推卡）。WAL 首次 append 时还不存在（done 阶段才构建），
-   * 由出口 replaceAssistantText 一并补写。没有这个字段，重装/换设备后
-   * /api/chat-data/history?full=1 回填的文字历史永远没有图片。
+   * 媒体卡（2026-11-09）：本轮 done 阶段构建，由出口 replaceAssistantText 一并补写。
+   * 没有这个字段，重装/换设备后 /api/chat-data/history?full=1 回填的文字历史永远没有图片。
    * URL 指向服务端转存资产（/agent/images/*.png），卡片原样透传不脱敏。
    */
   mediaCards?: unknown[];
+  /**
+   * 真·分绿泡对账数组（2026-11-13）：本轮分泡的 {id, text} 快照，来源
+   * BubbleTracker.snapshot，仅在 bubbleSplitLive（真实分泡且未塌缩/撤回/
+   * 单泡接管）的轮次由出口 replaceAssistantText 补写。
+   *
+   * 动机：分泡结构此前只活在当轮内存 + 客户端本地 Isar；WAL 只落合并
+   * assistantText → 重装/换设备后历史回填必然「整轮塌成单泡内分段」。
+   * bubbles 落盘后，history 接口透传，客户端回填按泡重建多条消息。
+   * 旧行/非分泡轮缺省——客户端按无 bubbles 降级单泡，完全兼容。
+   */
+  bubbles?: Array<{ id: string; text: string }>;
 };
 
 /**
@@ -87,6 +96,11 @@ export class TurnWalService {
     assistantText: string;
     /** 本轮最终媒体卡（done 阶段构建）；有值时一并补写进 WAL 行。 */
     mediaCards?: unknown[];
+    /**
+     * 真·分绿泡对账数组（2026-11-13）：bubbleSplitLive 轮携带
+     * BubbleTracker.snapshot 一并补写进 WAL 行，供跨端历史回填逐泡重建。
+     */
+    bubbles?: Array<{ id: string; text: string }>;
     now?: Date;
   }): Promise<boolean> {
     const target = entry.messageId.trim();
@@ -106,6 +120,7 @@ export class TurnWalService {
         messageId: target,
         assistantText: redactSensitiveText(entry.assistantText),
         ...(entry.mediaCards ? { mediaCards: entry.mediaCards } : {}),
+        ...(entry.bubbles && entry.bubbles.length > 0 ? { bubbles: entry.bubbles } : {}),
       });
       if (replaced == null) return false;
       // 整文件重写走临时文件 + rename，避免进程中断留下半截 JSONL
@@ -119,8 +134,8 @@ export class TurnWalService {
 
 /**
  * 在 JSONL 原文里把匹配 (actorId, messageId) 的那一行的 assistantText 换掉
- * （可选：一并补写本轮 mediaCards）。未命中返回 null（调用方据此跳过重写）；
- * 其余行逐字保留。
+ * （可选：一并补写本轮 mediaCards / bubbles 分泡对账数组）。未命中返回 null
+ * （调用方据此跳过重写）；其余行逐字保留。
  */
 export function replaceAssistantTextInJsonl(
   raw: string,
@@ -129,6 +144,7 @@ export function replaceAssistantTextInJsonl(
     messageId: string;
     assistantText: string;
     mediaCards?: unknown[];
+    bubbles?: Array<{ id: string; text: string }>;
   },
 ): string | null {
   let hit = false;
@@ -150,6 +166,7 @@ export function replaceAssistantTextInJsonl(
       ...(entry.mediaCards && entry.mediaCards.length > 0
         ? { mediaCards: entry.mediaCards }
         : {}),
+      ...(entry.bubbles && entry.bubbles.length > 0 ? { bubbles: entry.bubbles } : {}),
     });
   });
   return hit ? lines.join("\n") : null;

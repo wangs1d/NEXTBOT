@@ -10,6 +10,9 @@ class TravelPlanLauncher {
 
   static void Function(AgentResultData data)? _handler;
 
+  /// 按 planId 打开完整行程（手机端聊天内联规划出的最终方案）。
+  static Future<void> Function(String planId)? _planIdHandler;
+
   /// 当前最近一次打开的行程卡片数据（面板打开后可读取）。
   static AgentResultData? last;
 
@@ -18,9 +21,19 @@ class TravelPlanLauncher {
     _handler = handler;
   }
 
+  /// 主壳注册「按 planId 拉完整行程并打开详情页」回调。
+  static void setPlanIdHandler(Future<void> Function(String planId) handler) {
+    _planIdHandler = handler;
+  }
+
   /// 请求以独立界面展示行程规划。
   static void open(AgentResultData data) {
     last = data;
     _handler?.call(data);
+  }
+
+  /// 请求按 planId 展示完整行程。
+  static Future<void> openPlanById(String planId) async {
+    await _planIdHandler?.call(planId);
   }
 }

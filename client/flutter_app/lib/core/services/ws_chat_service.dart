@@ -87,6 +87,14 @@ class WsChatService {
   DateTime _lastInboundAt = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime _connectedAt = DateTime.fromMillisecondsSinceEpoch(0);
 
+  /// 上一条连接是否是「连上就掉」的短命连接。
+  ///
+  /// 必须在 [_markDisconnected] 清零 [_connectedAt] **之前**算好：旧实现直接在
+  /// [_calculateBackoffDelay] 里读 [_connectedAt]，而那时它已被重置为 epoch0，
+  /// 于是「短命连接快重试」分支永远不成立——手机网络抖动时每次掉线都要按
+  /// 2s/4s/8s/16s/30s 指数退避干等，用户看到的就是「断了一直连不回来」。
+  bool _lastConnectionWasBrief = false;
+
   /// 最近一次空闲探测（`reason=idle_probe`/`pre_send_probe`）的发出时刻；
   /// 收到任意入站即复位。用于给 ack 留出往返时间，不再同步判死。
   DateTime _probeSentAt = DateTime.fromMillisecondsSinceEpoch(0);
@@ -180,7 +188,25 @@ class WsChatService {
   /// 已被中间设备掐断，回前台必须重新握一次手，服务端主动消息才送得进来。
   /// 不强制断开现有连接（与 [retryConnect] 的差异）。
   void ensureConnected() {
-    if (_isConnected || _isConnecting || _manualClose) return;
+    if (_isConnecting || _manualClose) return;
+    if (_isConnected) {
+      // 回前台健康检查（2026-11-14 真机「断连重连」根修）：进程被系统冻结 /
+      // 网络切换（Wi‑Fi ⇄ 蜂窝）之后，socket 往往仍是 `_isConnected=true`
+      // 且 `closeCode == null`，但早已收不到任何入站。旧实现直接 return，
+      // 只能等 75s 心跳阈值 + 10s 宽限才判死——用户看到的就是「回前台先
+      // 断着，过一会儿才自己连上」。入站静默超过两个心跳周期即视为半死链路，
+      // 立即重建（服务端对重复连接幂等：旧 socket 断开只清理自己）。
+      final DateTime last = _lastInboundAt;
+      if (last == DateTime.fromMillisecondsSinceEpoch(0)) return;
+      final Duration idle = DateTime.now().difference(last);
+      if (idle <= _heartbeatInterval * 2) return;
+      debugPrint(
+          "[ws] resume on a stale link (${idle.inSeconds}s without inbound), reconnecting");
+      retryConnect();
+      return;
+    }
+    // 通道还在但尚未标记已连接：多半卡在建连窗口，交给建连超时兜底，
+    // 这里再抢一次只会制造重复 socket。
     if (_channel != null && _channel!.closeCode == null) return;
     retryConnect();
   }
@@ -421,6 +447,11 @@ class WsChatService {
   void _markDisconnected() {
     _connectTimer?.cancel();
     _connectTimer = null;
+    // 先记下「这条连接活了多久」再清零，供 [_calculateBackoffDelay] 决定
+    // 是快重试还是指数退避（见 [_lastConnectionWasBrief]）。
+    _lastConnectionWasBrief = _connectedAt !=
+            DateTime.fromMillisecondsSinceEpoch(0) &&
+        DateTime.now().difference(_connectedAt) < _minHealthyConnectionDuration;
     _isConnected = false;
     _isConnecting = false;
     _connectedAt = DateTime.fromMillisecondsSinceEpoch(0);
@@ -657,9 +688,7 @@ class WsChatService {
   }
 
   Duration _calculateBackoffDelay() {
-    final bool wasBriefConnection =
-        _connectedAt != DateTime.fromMillisecondsSinceEpoch(0) &&
-        DateTime.now().difference(_connectedAt) < _minHealthyConnectionDuration;
+    final bool wasBriefConnection = _lastConnectionWasBrief;
     if (wasBriefConnection && _reconnectAttempts <= 2) {
       // 短命连接（连上就掉）快重试，同样叠抖动：多设备同刻被踢时打散。
       return Duration(milliseconds: 800 + _rng.nextInt(240));
@@ -848,6 +877,12 @@ class WsChatService {
     _manualClose = true;
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
+    // 建连超时兜底同样要收：close 发生在「正在建连」窗口内时，这个 12s 计时器
+    // 原本会活到触发，之后对着已关闭的 channel 走 _handleDisconnect——
+    // 既是真机上的无用重连噪声，也会让「页面已销毁仍有 pending timer」的
+    // widget 测试整片失败。
+    _connectTimer?.cancel();
+    _connectTimer = null;
     _stopHeartbeat();
     _ackWatchdog?.cancel();
     _ackWatchdog = null;

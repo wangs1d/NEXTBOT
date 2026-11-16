@@ -1,3 +1,5 @@
+import "dart:async";
+import "dart:io";
 import "dart:typed_data";
 
 import "package:flutter/material.dart";
@@ -419,6 +421,8 @@ Future<void> showImagePreviewFullScreenFromUrls(
       .where((String u) => u.isNotEmpty)
       .toList(growable: false);
   if (valid.isEmpty) return Future<void>.value();
+  // 打开即预热全组：邻图提前落盘（后台通道），翻到时不再对着转圈等下载。
+  MediaDiskCache.instance.warm(valid.map(_resolveMediaUrl));
   return Navigator.of(context, rootNavigator: true).push(
     MaterialPageRoute<void>(
       fullscreenDialog: true,
@@ -442,6 +446,7 @@ Future<void> showImagePreviewFullScreenFromUrls(
                   ),
                 ),
         ],
+        urls: <String>[for (final String u in valid) _resolveMediaUrl(u)],
         index: index.clamp(0, valid.length - 1),
         source: source,
       ),
@@ -479,6 +484,7 @@ Future<void> showImagePreviewFullScreenFromBytes(
                   ),
                 ),
         ],
+        providers: <ImageProvider>[for (final Uint8List b in valid) MemoryImage(b)],
         index: index.clamp(0, valid.length - 1),
         source: source,
       ),
@@ -492,10 +498,19 @@ class _PagedPreviewFullScreenPage extends StatefulWidget {
   const _PagedPreviewFullScreenPage({
     required this.pages,
     required this.index,
+    this.urls,
+    this.providers,
     this.source,
   });
 
   final List<WidgetBuilder> pages;
+
+  /// URL 版每页的完整地址（与 [pages] 一一对应）：供邻图预解码。
+  final List<String>? urls;
+
+  /// 字节版每页的图片 provider（与 [pages] 一一对应）：供邻图预解码。
+  final List<ImageProvider>? providers;
+
   final int index;
   final String? source;
 
@@ -534,6 +549,10 @@ class _PagedPreviewFullScreenPageState
   void initState() {
     super.initState();
     _transform.addListener(_onTransformChanged);
+    // precacheImage 要读 MediaQuery 等 inherited widget，首帧后再预解码。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _predecodeAround();
+    });
     _snap.addListener(() {
       final double t = Curves.easeOutCubic.transform(_snap.value);
       setState(() => _dx = _snapFrom + (_snapTo - _snapFrom) * t);
@@ -552,8 +571,35 @@ class _PagedPreviewFullScreenPageState
         setState(() {
           _index = (_index + delta).clamp(0, widget.pages.length - 1);
         });
+        // 新的当前图与邻图立即预解码：提交瞬间子树重建、新图片 state 起步，
+        // 没有预热过的图要闪一帧占位再异步解码——这正是「翻动闪动」的根源。
+        _predecodeAround();
       }
     });
+  }
+
+  /// 预解码当前张两侧的邻图（URL 版经磁盘缓存取文件，字节版直接内存图）。
+  /// 解码产物进引擎 ImageCache，翻页提交时首帧即出真图，无占位闪烁。
+  void _predecodeAround() {
+    for (final int i in <int>[_index - 1, _index + 1]) {
+      if (i < 0 || i >= widget.pages.length) continue;
+      final ImageProvider? provider =
+          widget.providers != null && i < widget.providers!.length
+              ? widget.providers![i]
+              : null;
+      if (provider != null) {
+        precacheImage(provider, context);
+        continue;
+      }
+      final List<String>? urls = widget.urls;
+      if (urls == null || i >= urls.length) continue;
+      final String url = urls[i];
+      unawaited(() async {
+        final File? file = await MediaDiskCache.instance.fileFor(url);
+        if (file == null || !mounted) return;
+        await precacheImage(FileImage(file), context);
+      }());
+    }
   }
 
   void _onTransformChanged() {
@@ -726,30 +772,34 @@ class _PagedPreviewFullScreenPageState
                     ],
                   ),
                 ),
-                // 页码指示：多图时贴底部居中，纯白低调
+                // 页码指示点：每张照片一个小圆点，贴底部居中（纯白当前张，
+                // 其余半透明白）。2026-11-12 恢复——跟手分页重构时被误换成
+                // 「1 / N」文字胶囊，与桌面预览面板的圆点样式保持一致。
                 if (widget.pages.length > 1)
                   Positioned(
                     left: 0,
                     right: 0,
                     bottom: 14,
                     child: IgnorePointer(
-                      child: Center(
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 10, vertical: 4),
-                          decoration: BoxDecoration(
-                            color: Colors.black.withValues(alpha: 0.45),
-                            borderRadius: BorderRadius.circular(999),
-                          ),
-                          child: Text(
-                            "${_index + 1} / ${widget.pages.length}",
-                            style: const TextStyle(
-                              fontSize: 12,
-                              color: Colors.white,
-                              fontWeight: FontWeight.w600,
+                      child: Row(
+                        key: const ValueKey<String>("preview_page_dots"),
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: <Widget>[
+                          for (int i = 0; i < widget.pages.length; i++)
+                            AnimatedContainer(
+                              duration: const Duration(milliseconds: 180),
+                              width: 6,
+                              height: 6,
+                              margin:
+                                  const EdgeInsets.symmetric(horizontal: 3),
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: i == _index
+                                    ? Colors.white
+                                    : Colors.white.withValues(alpha: 0.38),
+                              ),
                             ),
-                          ),
-                        ),
+                        ],
                       ),
                     ),
                   ),

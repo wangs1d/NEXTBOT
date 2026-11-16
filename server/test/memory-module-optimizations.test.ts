@@ -136,20 +136,23 @@ test("P2-1 目录统计：规模/分类/时间分布/高频主题", async () => 
       "[昨天] 用户调试了 BM25 索引",
       "[10天前] 用户讨论过工具路由架构",
     ].join("\n"),
+    // 2026-11-13：memory_preferences / memory_facts 移出盘点范围（写入侧
+    // 2026-11-12 起已停写、读路径一并下线）。档案字段不再计入记忆目录，
+    // 否则目录会报两个永远为空的存储，让 gap 判定失真。
     memory_preferences: "[今天] 用户喜欢深色模式\n[今天] 用户喜欢深色模式",
     memory_facts: "[3天前] 用户名字是小李",
   }));
   const report = await inv.getReport("u1");
-  assert.equal(report.stats.totalLines, 6, "总行数应为 6");
-  assert.equal(report.stats.timeDistribution.today, 3, "今天 3 条");
+  assert.equal(report.stats.totalLines, 3, "总行数只统计在盘点范围内的槽位");
+  assert.equal(report.stats.timeDistribution.today, 1, "今天 1 条");
   assert.equal(report.stats.timeDistribution.yesterday, 1, "昨天 1 条");
   assert.equal(report.stats.timeDistribution.older, 1, "10天前归 older");
-  assert.ok(report.summary.includes("我对你现有 6 条记忆"), `摘要应含总条数，实际: ${report.summary}`);
+  assert.ok(report.summary.includes("我对你现有 3 条记忆"), `摘要应含总条数，实际: ${report.summary}`);
   assert.ok(report.summary.length > 0);
 });
 
 test("P2-1 同步缓存读：未命中空串 → getReport 后可读 → invalidate 后失效", async () => {
-  const inv = new MemoryInventory(fakeKv({ memory_facts: "[今天] 用户在做记忆模块测试" }));
+  const inv = new MemoryInventory(fakeKv({ memory_summary: "[今天] 用户在做记忆模块测试" }));
   assert.equal(inv.getCachedSummary("u1"), "", "未刷新缓存应返回空串");
   await inv.getReport("u1");
   const cached = inv.getCachedSummary("u1");

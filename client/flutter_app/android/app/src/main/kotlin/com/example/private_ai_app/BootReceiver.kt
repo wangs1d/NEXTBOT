@@ -35,6 +35,17 @@ class BootReceiver : BroadcastReceiver() {
         } catch (e: Exception) {
             Log.w(TAG, "start foreground service on boot failed", e)
         }
+        // 地理围栏重建（2026-11-13）：Android 的邻近警报注册是**易失**的——
+        // 设备重启后系统清空本应用注册的全部围栏。此前 BootReceiver 只重建闹钟，
+        // 于是「设好到公司/到家的围栏，手机重启一次后围栏静默失效」，
+        // 端上无任何迹象（服务端只看到"从此不再有事件"）。
+        // 围栏定义在 syncFences 时已落盘，这里按定义重建。
+        try {
+            val n = GeofencePlugin.restoreOnBoot(context)
+            Log.i(TAG, "geofence restored on $action: $n")
+        } catch (e: Exception) {
+            Log.w(TAG, "geofence restore on boot failed", e)
+        }
     }
 }
 

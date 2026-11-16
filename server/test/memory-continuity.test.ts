@@ -200,6 +200,16 @@ describe("记忆连续性集成测试", { concurrency: false }, () => {
           }
           return { ok: true };
         },
+        // 2026-11-12 单一写者契约：摘要整串重写改由 owner 的 replaceSummaryLines 执行。
+        replaceSummaryLines: async (_actorId: string, transform: any) => {
+          const next = transform({
+            summary: storedSummary.split("\n").filter(Boolean),
+            forgotten: storedForgotten.split("\n").filter(Boolean),
+          });
+          storedSummary = next.summary.join("\n");
+          storedForgotten = next.forgotten.join("\n");
+          return true;
+        },
       };
 
       const svc = new MemoryManagerService(null, mockMemorySync as any, { enabled: true });
@@ -237,6 +247,15 @@ describe("记忆连续性集成测试", { concurrency: false }, () => {
             if (p.key === "memory_summary_forgotten") storedForgotten = p.value;
           }
           return { ok: true };
+        },
+        replaceSummaryLines: async (_actorId: string, transform: any) => {
+          const next = transform({
+            summary: storedSummary.split("\n").filter(Boolean),
+            forgotten: storedForgotten.split("\n").filter(Boolean),
+          });
+          storedSummary = next.summary.join("\n");
+          storedForgotten = next.forgotten.join("\n");
+          return true;
         },
       };
 

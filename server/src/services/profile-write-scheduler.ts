@@ -1,11 +1,11 @@
 /**
- * 用户画像写入调度（2026-10-22 三层写入架构）：
+ * 用户画像写入调度（2026-10-22 三层写入架构，2026-11-13 收敛为两条路径）：
  *
  *   T0（每轮，零 LLM）：turn-wal 全文追加 + 对完整 userText 跑画像抽取 hint
  *       正则，命中即标记 profileCandidate（本模块供标记判据，标记本体在
  *       TurnWalService.append 落盘时写入）。
  *   T1（当轮，零额外调用）：仅 personalFact / 明确「记住」的高信号轮由统一
- *       抽取捎带 profileOps（ingest.ts 侧按 isProfileWriteBatchMode 收窄）。
+ *       抽取捎带 profileOps（ingest.ts 的 ingestHighSignal 路径）。
  *   T2（夜间，每 actor 每天最多 1 次 LLM）：本模块 consolidateProfileFromWal
  *       读 turn-wal 自 checkpoint 以来的轮次全文（user 侧 only，候选优先、
  *       预算内非候选补位），一次批量 extractUnified（带当前画像上下文）
@@ -16,7 +16,11 @@
  * at-least-once（抽取失败不推进，下晚重试；applyOps 幂等吸收重复）；输入
  * 超预算时分晚处理（checkpoint 只推进到本次实际处理到的位置）。
  *
- * 回滚开关：PROFILE_WRITE_SCHEDULING=legacy 回到「低信号轮也捎带、无夜间批」的旧行为。
+ * 2026-11-13 移除 PROFILE_WRITE_SCHEDULING=legacy 回滚档：旧档让**低信号轮
+ * 也跑一次 extractUnified**，与夜间批构成两套并行的画像写入实现（同一份数据
+ * 两个写者，残片上抽画像还是 token 与噪音的主要来源）。画像写入的逃生阀不是
+ * 「复活双写」，而是关掉统一写入者本身（见 ingest.ts 的 lowSignalSink 缺失
+ * 分支）——那时画像由 T2 批抽取单独承担，与本模块的 checkpoint 重试语义一致。
  */
 
 import { getDataDir, resolveDataPath } from "../config/data-dir.js";
@@ -26,12 +30,6 @@ import { join } from "node:path";
 import { getShortTermMemoryConfig, getCalendarDay } from "./short-term-memory-config.js";
 import { writeJsonAtomic } from "../storage/atomic-json.js";
 import type { UnifiedExtraction, UnifiedProfileOp } from "../agentic-memory/unified-extractor.js";
-
-export function isProfileWriteBatchMode(): boolean {
-  const raw = process.env.PROFILE_WRITE_SCHEDULING?.trim().toLowerCase();
-  if (!raw) return true; // 默认 batch
-  return raw !== "legacy" && raw !== "0" && raw !== "off" && raw !== "false";
-}
 
 /* ───────────────────────── checkpoint ───────────────────────── */
 

@@ -19,6 +19,8 @@
  * 多等一拍——宁可慢，不可把正文饿死。
  */
 
+import { resolveThinkingEffort } from "./thinking-policy.js";
+
 export type ProviderModelProfile = {
   /**
    * 旗下模型是否存在默认开思考链的型号（文档性声明：提示"接这个 provider
@@ -99,16 +101,19 @@ export function deepseekThinkingExtras(
   model: string,
   disableThinking: boolean,
 ): Record<string, unknown> {
-  void model; // 思考开关与模型无关（flash / v4-pro 均识 thinking 字段）
-  if (!disableThinking) {
-    const effort = process.env.DEEPSEEK_REASONING_EFFORT?.trim().toLowerCase();
-    return effort ? { reasoning_effort: effort } : {};
-  }
-  return { thinking: { type: "disabled" } };
+  if (disableThinking) return { thinking: { type: "disabled" } };
+  // 开思考：与智谱同一条策略（DeepSeek 不传档位时服务端默认 high，不算坑，
+  // 但仍然显式下发——依赖厂商默认值的行为会随模型版本静默漂移）。
+  const { effort } = resolveThinkingEffort("deepseek", model, {
+    envOverride: "DEEPSEEK_REASONING_EFFORT",
+    budgetEnv: "DEEPSEEK_THINKING_BUDGET_MS",
+    fallback: "high",
+  });
+  return { reasoning_effort: effort };
 }
 
 /**
- * 智谱 GLM 系「关思考」意图的请求参数（provider 路径与裸 SDK 旁路共用同一判定）。
+ * 智谱 GLM 系「思考档位」请求参数（provider 路径与裸 SDK 旁路共用同一判定）。
  *
  * 2026-11-05 实测（glm-5.3-flash，OpenAI 兼容端点 open.bigmodel.cn/api/paas/v4）：
  * - `thinking: {type:"disabled"}` → 400 / 错误码 1210（"该模型始终思考，不支持关闭
@@ -116,19 +121,35 @@ export function deepseekThinkingExtras(
  * - `thinking: {type:"enabled",effort:"low"}` → 200 但仍烧 47 个思考 token（只是降档）；
  * - `reasoning_effort: "low"` → 200 且 `reasoning_tokens=0`（**唯一等效关思考的姿势**，
  *   正文干净）。
- * 因此「关思考」降级为 effort=low；思考开启时允许 `ZHIPU_REASONING_EFFORT`
- * （low|high|max）调档，不设则用服务端默认。
+ *
+ * 2026-11-12 补一条更要紧的（首字延迟根因，真机日志 + 对照实测）：
+ * **思考开启时不能返回空对象**。此前 `disableThinking !== true` 一律返回 `{}`，
+ * 意味着「不下发档位」，而智谱对空档位的处理不是 high，是**更深的自动思考**：
+ *   - 不发档位：reasoning 298-637 tokens，首字 6.1-13.7s（线上实测 30-52s）
+ *   - 显式 high：reasoning 0-78 tokens，首字 1.1-2.4s
+ *   - 两者正文质量无可见差异（同一 prompt 逐条比对过）
+ * 所以「开思考」必须显式落到某一档，默认 {@link ZHIPU_DEFAULT_REASONING_EFFORT}，
+ * 允许 `ZHIPU_REASONING_EFFORT`（low|high|max）调。这跟 Anthropic 废弃
+ * `budget_tokens` 转 adaptive thinking 是同一个结论：**能控的只有档位，不是预算**
+ * （实测 `thinking.budget_tokens=512` 被服务端忽略，照样烧 665 个思考 token）。
  */
+/** 思考开启时的默认档：显式 high。不设则落服务端 auto（比 high 深 10 倍、慢 6 倍）。 */
+const ZHIPU_DEFAULT_REASONING_EFFORT = "high";
+
 export function zhipuThinkingExtras(
   model: string,
   disableThinking: boolean,
 ): Record<string, unknown> {
-  void model; // 关思考姿势与具体 GLM 型号无关（1210 报错文案即指向 effort 档位）
-  if (!disableThinking) {
-    const effort = process.env.ZHIPU_REASONING_EFFORT?.trim().toLowerCase();
-    return effort ? { reasoning_effort: effort } : {};
-  }
-  return { reasoning_effort: "low" };
+  // 关思考：GLM 硬拒 thinking:disabled（400/1210），唯一等效姿势是 effort=low。
+  if (disableThinking) return { reasoning_effort: "low" };
+  // 开思考：档位由策略层决定（env 覆盖 > 历史延迟样本 > 默认 high）。
+  // 关键契约：这里永远不会返回空对象——空对象 = 不下发 = 服务端 auto 深度思考。
+  const { effort } = resolveThinkingEffort("zhipu", model, {
+    envOverride: "ZHIPU_REASONING_EFFORT",
+    budgetEnv: "ZHIPU_THINKING_BUDGET_MS",
+    fallback: ZHIPU_DEFAULT_REASONING_EFFORT,
+  });
+  return { reasoning_effort: effort };
 }
 
 export const PROVIDER_MODEL_PROFILES: Record<string, ProviderModelProfile> = {

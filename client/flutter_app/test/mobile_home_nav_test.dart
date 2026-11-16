@@ -1,4 +1,4 @@
-// 手机端主壳 widget 测试：5 tab 自绘导航卡、设置页菜单、简报页渲染。
+// 手机端主壳 widget 测试：4 tab 自绘导航卡、设置页菜单、简报页渲染。
 // 网络依赖通过注入 http.Client mock 解决；本地存储走临时目录。
 library;
 
@@ -9,7 +9,10 @@ import "package:flutter_test/flutter_test.dart";
 import "package:http/http.dart" as http;
 import "package:path_provider_platform_interface/path_provider_platform_interface.dart";
 import "package:nextbot/mobile_ui/mobile_briefing_page.dart";
+import "package:nextbot/mobile_ui/mobile_chat_controller.dart";
 import "package:nextbot/mobile_ui/mobile_home.dart";
+import "package:nextbot/mobile_ui/mobile_line_icons.dart";
+import "package:nextbot/mobile_ui/mobile_profile_page.dart";
 
 import "helpers/temp_path_provider.dart";
 
@@ -60,20 +63,16 @@ void main() {
     PathProviderPlatform.instance = TempPathProviderPlatform();
   });
 
-  testWidgets("主壳渲染 5 个 tab 图标热区,默认落在对话页", (WidgetTester tester) async {
+  testWidgets("主壳渲染 4 个 tab 图标热区,默认落在对话页", (WidgetTester tester) async {
     await tester.pumpWidget(const MaterialApp(home: MobileHomePage()));
     await tester.pump(const Duration(milliseconds: 100));
     expect(find.byType(MobileHomePage), findsOneWidget);
-    // 自绘 tab 卡无文字标签：按图标断言（2026-11-07 5 tab 定稿）
-    // 对话 tab 默认选中 → 填充图标；其余 4 个未选中 → 线性图标
-    // 2026-11-07 图标对齐参考图：日程=book、目标=check_box
-    expect(find.byIcon(Icons.chat_bubble_rounded), findsOneWidget);
-    expect(find.byIcon(Icons.chat_bubble_outline_rounded), findsNothing);
-    expect(find.byIcon(Icons.book_outlined), findsOneWidget);
-    expect(find.byIcon(Icons.check_box_outlined), findsOneWidget);
-    expect(find.byIcon(Icons.folder_outlined), findsOneWidget);
-    expect(find.byIcon(Icons.settings_outlined), findsOneWidget);
-    // 图库 tab 已收掉,不应再出现
+    // 底栏图标是自绘的 [MobileLineIcon]（CustomPaint，按参考图 1:1 画），
+    // 不是 Material Icons —— 4 个 tab 恰好 4 个绘制件，选中态只换颜色不换图标。
+    expect(find.byType(MobileLineIcon), findsNWidgets(4));
+    // 设置不占底栏（收进左侧抽屉左下角齿轮），底栏只有 4 格；
+    // 图库也已退出一级 tab（收进桌面端常用工具），底栏不该再出现。
+    expect(find.byIcon(Icons.settings_outlined), findsNothing);
     expect(find.text("图库"), findsNothing);
   });
 
@@ -82,13 +81,14 @@ void main() {
     tester.view.physicalSize = const Size(412, 1800);
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
+    // 「我的」已不占 tab（抽屉左下角齿轮进入），直接挂页面断言菜单；
+    // onLogout 必传：null 时隐藏退出登录项（登录门禁在根组件）。
+    final MobileChatController controller = MobileChatController();
     await tester.pumpWidget(
-      // onLogout 必传：null 时「设置」页隐藏退出登录项（登录门禁在根组件）
-      // 2026-11-07 5 tab：index 4 = 设置（原「我的」页整体后移）
-      MaterialApp(home: MobileHomePage(initialTabIndex: 4, onLogout: () {})),
+      MaterialApp(
+        home: MobileProfilePage(chatController: controller, onLogout: () {}),
+      ),
     );
-    await tester.pump(const Duration(milliseconds: 100));
-    await tester.pump(const Duration(milliseconds: 100));
     await tester.pump(const Duration(milliseconds: 100));
     await tester.pump(const Duration(milliseconds: 100));
     await tester.pump(const Duration(milliseconds: 100));
@@ -107,6 +107,11 @@ void main() {
     expect(find.text("退出登录"), findsOneWidget);
     // 连接状态行(测试环境 WS 连不上 → 未连接)
     expect(find.text("未连接"), findsOneWidget);
+    // 收尾：先卸载页面再销毁控制器——WS 的重连计时器必须在此之前收掉，
+    // 否则会留到测试框架的 pending-timer 校验之后（不是产品 bug，是收尾顺序）。
+    await tester.pumpWidget(const SizedBox());
+    controller.dispose();
+    await tester.pump();
   });
 
   testWidgets("简报页渲染服务端样例数据", (WidgetTester tester) async {

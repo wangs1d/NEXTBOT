@@ -153,6 +153,12 @@ class _ShoppingCandidatesCardState extends State<ShoppingCandidatesCard> {
     final String sortLabel = shopStr(p["sortLabel"]);
     final String footer = shopStr(p["footer"]);
     final List<dynamic> chips = p["chips"] is List ? p["chips"] as List : const <dynamic>[];
+    // 未取到报价的平台（2026-11-13 P0-4）：必须在卡里**显式成行**。
+    //
+    // 用户投诉「说让我补京东的登录之后再补」「淘宝没搜索到报价，那价格哪来的」
+    // ——缺口如果只存在于服务端内部，模型就会自由发挥出一个「淘宝价」。
+    // 缺口写进卡里 = 用户看得见，模型也没处编。
+    final List<Map<String, dynamic>> missing = shopMaps(p["missingPlatforms"]);
 
     return ShopCardShell(
       cs: cs,
@@ -210,13 +216,37 @@ class _ShoppingCandidatesCardState extends State<ShoppingCandidatesCard> {
           ),
           // 卡内动作条（2026-11-06）：没选中就只留「换一家」——一个没东西可点的
           // 主按钮占着位子教用户做事，是废话 UI（用户原话）。选中后主按钮才淡入。
+          //
+          // 2026-11-13 改版：主按钮**始终在**，指向**当前这一页**的卡，
+          // 文案带平台名（「去京东下单」）——用户点之前就知道会跳去哪家买，
+          // 而不是点完才知道「原来这是淘宝的价」。比价场景里平台归属是核心
+          // 信息，不能藏在卡片角落；也不能让用户先点卡、再找按钮，两步走。
+          //
+          // 不可下单的源（什么值得买）不给这个按钮：给一个点不动的按钮只会
+          // 教用户做事。
           if (_picked < 0)
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 10, 12, 0),
               child: Row(
                 children: <Widget>[
+                  if (shopBool(items[_page]["orderable"])) ...<Widget>[
+                    Expanded(
+                      flex: 3,
+                      child: ShopButton(
+                        cs: cs,
+                        label: "去${_labelOf(items[_page])}下单",
+                        primary: true,
+                        onTap: () {
+                          setState(() => _picked = _page);
+                          _placePicked(items);
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                  ],
                   if (items.length > 1)
                     Expanded(
+                      flex: shopBool(items[_page]["orderable"]) ? 2 : 3,
                       child: ShopButton(
                         cs: cs,
                         label: "换一家看看",
@@ -242,7 +272,9 @@ class _ShoppingCandidatesCardState extends State<ShoppingCandidatesCard> {
                       flex: 3,
                       child: ShopButton(
                         cs: cs,
-                        label: _submitting ? "正在打开结算页…" : "选规格，去下单",
+                        label: _submitting
+                            ? "正在打开${_labelOf(items[_picked])}…"
+                            : "去${_labelOf(items[_picked])}下单",
                         primary: true,
                         onTap: _submitting ? null : () => _placePicked(items),
                       ),
@@ -262,6 +294,11 @@ class _ShoppingCandidatesCardState extends State<ShoppingCandidatesCard> {
                   ),
                 ],
               ),
+            ),
+          if (missing.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 10, 12, 0),
+              child: _MissingPlatformsNote(cs: cs, items: missing),
             ),
           if (chips.isNotEmpty)
             Padding(
@@ -357,6 +394,16 @@ class _CandidateTile extends StatelessWidget {
   final String badge;
   final VoidCallback onTap;
 
+  /// 卡内元信息尾巴：抓取时刻 + 评分。
+  ///
+  /// 抓取时刻是**来源凭据**的一部分（用户会问「这价格哪来的、什么时候抓的」），
+  /// 服务端已在 shopItems[] 下发 [fetchedAt]，这里只做展示格式化。
+  String _metaTail(num? rating) {
+    final String clock = shopClock(item["fetchedAt"]);
+    final String score = rating != null ? shopMoney(rating) : "";
+    return <String>[clock, score].where((String s) => s.isNotEmpty).join(" · ");
+  }
+
   @override
   Widget build(BuildContext context) {
     final String image = shopStr(item["image"]);
@@ -391,7 +438,22 @@ class _CandidateTile extends StatelessWidget {
             SizedBox(
               height: 96,
               width: double.infinity,
-              child: _Thumb(cs: cs, url: image),
+              child: Stack(
+                fit: StackFit.expand,
+                children: <Widget>[
+                  _Thumb(cs: cs, url: image),
+                  // 平台来源浮标（2026-11-13）：贴在图上，永不被店铺名挤掉。
+                  Positioned(
+                    top: 5,
+                    left: 5,
+                    child: ShopPlatformTag(
+                      cs: cs,
+                      platform: shopStr(item["platform"]),
+                      label: platform,
+                    ),
+                  ),
+                ],
+              ),
             ),
             Expanded(
               child: Padding(
@@ -440,28 +502,17 @@ class _CandidateTile extends StatelessWidget {
                       ],
                     ),
                     const SizedBox(height: 3),
-                    Row(
-                      children: <Widget>[
-                        Expanded(
-                          child: Text(
-                            shop.isEmpty ? platform : shop,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: 9,
-                              color: cs.onSurfaceVariant,
-                            ),
-                          ),
-                        ),
-                        if (rating != null)
-                          Text(
-                            shopMoney(rating),
-                            style: TextStyle(
-                              fontSize: 9,
-                              color: cs.onSurfaceVariant,
-                            ),
-                          ),
-                      ],
+                    // 来源行（2026-11-13）：平台名**始终在**，店铺名跟随其后。
+                    //
+                    // 旧实现是 `shop.isEmpty ? platform : shop`——只要有店铺名
+                    // 就把平台名顶掉，用户看到的只有「京东自营旗舰店」这种
+                    // 无法指认来源的字样。现在平台名与店铺名同时在场。
+                    ShopSourceLine(
+                      cs: cs,
+                      platform: shopStr(item["platform"]),
+                      label: platform,
+                      shop: shop,
+                      trailing: _metaTail(rating),
                     ),
                   ],
                 ),
@@ -549,6 +600,73 @@ class _QuickChip extends StatelessWidget {
             color: solid ? cs.surface : cs.onSurfaceVariant,
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// 未取到报价的平台提示条（2026-11-13 P0-4）。
+///
+/// 收齐闸门的**可见面**：哪几家没比到、为什么（要登录 / 验证码 / 无同款），
+/// 一行说清。缺口显式化之后，「淘宝的价格从哪来」这个问题才有答案——
+/// 因为卡里根本没写淘宝有价。
+class _MissingPlatformsNote extends StatelessWidget {
+  const _MissingPlatformsNote({required this.cs, required this.items});
+
+  final ColorScheme cs;
+  final List<Map<String, dynamic>> items;
+
+  static const Map<String, String> _reasonText = <String, String>{
+    "login": "需要登录",
+    "captcha": "需要验证",
+    "no_data": "无同款",
+    // 用户主动「跳过这家」：是选择，不是平台没价（2026-11-13 P1）
+    "skipped": "已跳过",
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final List<String> names = <String>[];
+    final List<String> reasons = <String>[];
+    for (final Map<String, dynamic> it in items) {
+      final String label = shopStr(it["platformLabel"]).isEmpty
+          ? shopStr(it["platform"])
+          : shopStr(it["platformLabel"]);
+      if (label.isEmpty) continue;
+      names.add(label);
+      final String reason =
+          _reasonText[shopStr(it["reason"])] ?? shopStr(it["reason"]);
+      if (reason.isNotEmpty && !reasons.contains(reason)) {
+        reasons.add(reason);
+      }
+    }
+    if (names.isEmpty) return const SizedBox.shrink();
+
+    final String reasonText =
+        reasons.isEmpty ? "" : "（${reasons.join("、")}，未参与比价）";
+    return Container(
+      padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest.withValues(alpha: 0.45),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: ShopTokens.warn.withValues(alpha: 0.42)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Icon(Icons.info_outline_rounded, size: 12, color: ShopTokens.warn),
+          const SizedBox(width: 5),
+          Expanded(
+            child: Text(
+              "未取到报价：${names.join("、")}$reasonText",
+              style: TextStyle(
+                fontSize: 9.5,
+                height: 1.45,
+                color: ShopTokens.warn,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

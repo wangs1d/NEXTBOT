@@ -45,21 +45,34 @@ class MobilePageCache {
       key.replaceAll(RegExp(r"[^A-Za-z0-9_.-]"), "_");
 
   /// 读缓存：先内存后磁盘。任何失败返回 null（调用方回退网络加载）。
+  ///
+  /// 磁盘段整体带 1s 兜底超时（2026-11-13）：path_provider 的 platform
+  /// channel 在 widget 测试 FakeAsync 环境下（未 mock 时）永不返回，页面
+  /// await 它会整页卡死在 spinner；真实设备上该调用毫秒级，超时只在异常
+  /// 环境生效——缓存是 best-effort，兜底失败就走网络直拉。
   Future<Map<String, dynamic>?> read(String key) async {
     final String k = _safeKey(key);
     final Map<String, dynamic>? hot = _mem[k];
     if (hot != null) return hot;
     try {
-      final Directory? dir = await _ensureDir();
-      if (dir == null) return null;
-      final File file = File("${dir.path}${Platform.pathSeparator}$k.json");
-      if (!file.existsSync()) return null;
-      final Object? decoded = jsonDecode(await file.readAsString());
-      if (decoded is Map<String, dynamic>) {
-        return _mem[k] = decoded;
-      }
+      return await _readDisk(k).timeout(
+        const Duration(seconds: 1),
+        onTimeout: () => null,
+      );
     } catch (e) {
       debugPrint("[MobilePageCache] 读缓存失败($k): $e");
+      return null;
+    }
+  }
+
+  Future<Map<String, dynamic>?> _readDisk(String k) async {
+    final Directory? dir = await _ensureDir();
+    if (dir == null) return null;
+    final File file = File("${dir.path}${Platform.pathSeparator}$k.json");
+    if (!file.existsSync()) return null;
+    final Object? decoded = jsonDecode(await file.readAsString());
+    if (decoded is Map<String, dynamic>) {
+      return _mem[k] = decoded;
     }
     return null;
   }

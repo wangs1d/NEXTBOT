@@ -29,7 +29,12 @@ export type NarrativeMemoryPort = {
     actorId: string,
     text: string,
     source: string,
-    opts?: { highSignal?: boolean; context?: NarrativeMemoryContext },
+    opts?: {
+      highSignal?: boolean;
+      context?: NarrativeMemoryContext;
+      /** 写入契约的调用方身份（memory.cognition / memory.longterm 的 producer） */
+      writer?: string;
+    },
   ): Promise<void>;
   /**
    * 统一写入者出口：候选已经过整合链路裁决（decideMemoryWrite / 回声过滤 /
@@ -112,7 +117,12 @@ export class NarrativeMemoryFacade implements NarrativeMemoryPort {
     actorId: string,
     text: string,
     source: string,
-    opts?: { highSignal?: boolean; context?: NarrativeMemoryContext },
+    opts?: {
+      highSignal?: boolean;
+      context?: NarrativeMemoryContext;
+      /** 写入契约的调用方身份（memory.cognition / memory.longterm 的 producer） */
+      writer?: string;
+    },
   ): Promise<void> {
     const context = (opts?.context ?? "main") as MemoryContextKind;
 
@@ -129,6 +139,7 @@ export class NarrativeMemoryFacade implements NarrativeMemoryPort {
       await this.humanLikeMemory.ingest(actorId, text, source, {
         context,
         metadata: { highSignal: opts?.highSignal === true },
+        writer: opts?.writer ?? "NarrativeMemoryFacade",
       });
     }
 

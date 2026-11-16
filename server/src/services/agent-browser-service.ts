@@ -23,7 +23,7 @@
  */
 import { randomUUID } from "crypto";
 
-import type { Browser, BrowserContext, Page } from "playwright";
+import type { Browser, BrowserContext, CDPSession, Page } from "playwright";
 
 import { resolveActorId } from "../agent/actor-id.js";
 import type { AuditService } from "./audit-service.js";
@@ -96,6 +96,47 @@ const ACTION_STATE_CAPTURE_MS = 2500;
 /** screenshot base64 截断上限（字符），避免 tool loop token 膨胀。 */
 const SCREENSHOT_BASE64_BUDGET = 2000;
 
+// ─── 预览帧（2026-11-12 手机悬浮窗「Agent 正在控制浏览器」画面源）───────────
+
+/** 同会话预览帧最小推送间隔（毫秒）：动作可能连环触发，节流防刷屏。 */
+const PREVIEW_MIN_INTERVAL_MS = 1_000;
+
+/** 单帧捕获超时（毫秒）：best-effort，绝不拖慢工具回执。 */
+const PREVIEW_CAPTURE_TIMEOUT_MS = 3_000;
+
+/** 预览帧 JPEG 压缩质量（全视口整幅下推，客户端 contain 等比完整显示）。 */
+const PREVIEW_QUALITY = 40;
+
+// ─── 连续预览流（2026-11-13，对齐 Grok 式「直播」预览）──────────────────────
+
+/** CDP screencast 推流的最小帧间隔（毫秒）：页面有变化才推，上限约 2.5fps。 */
+const STREAM_MIN_FRAME_INTERVAL_MS = 400;
+
+/** 流的空闲自停（毫秒）：页面无变化 / 无新动作一段时间后自动停，不烧带宽。 */
+const STREAM_IDLE_STOP_MS = 12_000;
+
+/** 流的硬性寿命（毫秒）：自最后一次动作起算——动画页（轮播图）每帧都「有
+ * 变化」，光靠空闲计时会永不自停；超限即停，下一个动作再拉起。 */
+const STREAM_MAX_LIFETIME_MS = 60_000;
+
+/** screencast 压缩参数：宽 800 + q45，单帧约 10-30KB base64。 */
+const STREAM_SCREENCAST_PARAMS = {
+  format: "jpeg",
+  quality: 45,
+  maxWidth: 800,
+  maxHeight: 600,
+  everyNthFrame: 1,
+} as const;
+
+/** 每会话的连续预览流句柄。 */
+interface PreviewStreamHandle {
+  cdp: CDPSession;
+  idleTimer: NodeJS.Timeout | null;
+  lastPushAt: number;
+  /** 流本次拉起的时刻（硬性寿命从最后一次动作重算）。 */
+  startedAt: number;
+}
+
 // ─── 类型 ──────────────────────────────────────────────────────────────────
 
 /** 服务返回的通用结构。 */
@@ -121,6 +162,8 @@ interface AgentBrowserSession {
   humanNotified?: HumanRequirementReason;
   /** 已推送到聊天的交接图（登录二维码/验证页截图），同一理由不重复推。 */
   humanCardPushed?: HumanRequirementReason;
+  /** 最近一次预览帧推送时刻（同会话节流，防刷屏）。 */
+  lastPreviewAt?: number;
   /** 模型显式 handoff 的去重（同一条指引不重复推卡）。 */
   lastHandoffInstruction?: string;
   /** 正在等用户本人处理（登录/验证）：TTL 清理跳过，避免用户还没登录会话就过期。 */
@@ -177,6 +220,7 @@ function humanHandoffHint(reason: HumanRequirementReason, mode: "shared" | "head
  */
 export class AgentBrowserService {
   private readonly sessions = new Map<string, AgentBrowserSession>();
+  private readonly streams = new Map<string, PreviewStreamHandle>();
   private cleanupTimer: NodeJS.Timeout | null = null;
 
   constructor(
@@ -211,6 +255,10 @@ export class AgentBrowserService {
       await this.closeSession(session).catch(() => {});
     }
     this.sessions.clear();
+    // 兜底：清掉可能残留的连续预览流
+    for (const sessionId of [...this.streams.keys()]) {
+      this.stopPreviewStream(sessionId);
+    }
   }
 
   // ─── 8 个原子操作 ────────────────────────────────────────────────────────
@@ -338,6 +386,8 @@ export class AgentBrowserService {
     this.enforceMaxSessions();
 
     this.sessions.set(sessionId, session);
+    // 连续预览流：会话建立即拉起（页面加载过程就是直播）
+    this.ensurePreviewStream(ctx, session);
 
     // 新标签页跟随（仅无头路径有 context；内置浏览器走同一面板页，不新开 target）
     context?.on("page", (popup) => {
@@ -376,6 +426,8 @@ export class AgentBrowserService {
 
     // 打开即观察（主流同款）：open 回执直接带可交互元素表，模型首步不用再 extract_text
     const pageState = await this.capturePageState(session);
+    // 预览帧：打开成功即推首帧（手机悬浮窗立即可见「正在打开的页面」）
+    this.pushPreviewFrame(ctx, session, "open");
 
     return {
       ok: true,
@@ -418,6 +470,8 @@ export class AgentBrowserService {
     const sel = String(selector ?? "").trim();
     if (!sel) return { ok: false, error: "缺少 selector" };
 
+    // 连续预览流：动作执行期间页面持续变化，确保流在跑
+    this.ensurePreviewStream(ctx, session);
     try {
       const timeout = opts?.timeout ?? getActionTimeoutMs();
       await session.page.click(sel, {
@@ -431,6 +485,8 @@ export class AgentBrowserService {
       await this.waitForNavSettled(session);
       // 动作后检查页面是否落到登录墙/验证码（主流 Agent 的动作后 checkpoint）
       const human = await this.checkHumanAfterAction(ctx, session);
+      // 预览帧：点击后页面可能已跳转，推最新画面
+      this.pushPreviewFrame(ctx, session, "click");
       const base: AgentBrowserResult = {
         ok: true,
         url: session.page.url(),
@@ -461,6 +517,8 @@ export class AgentBrowserService {
     const value = String(text ?? "");
     if (value.length === 0) return { ok: false, error: "缺少 text" };
 
+    // 连续预览流：逐字输入过程就是直播素材
+    this.ensurePreviewStream(ctx, session);
     try {
       const append = opts?.append ?? false;
       const locator = session.page.locator(sel);
@@ -485,6 +543,8 @@ export class AgentBrowserService {
       });
       await this.waitForNavSettled(session);
       const human = await this.checkHumanAfterAction(ctx, session);
+      // 预览帧：输入完成后推最新画面
+      this.pushPreviewFrame(ctx, session, "type");
       const base: AgentBrowserResult = {
         ok: true,
         selector: sel,
@@ -507,6 +567,8 @@ export class AgentBrowserService {
     const session = this.getSessionForActor(ctx, sessionId);
     if (!session) return { ok: false, error: "会话不存在或已过期" };
 
+    // 连续预览流：滚动期间页面持续变化
+    this.ensurePreviewStream(ctx, session);
     try {
       if (opts?.selector) {
         // 滚动到指定元素
@@ -527,6 +589,8 @@ export class AgentBrowserService {
         mode: opts?.selector ? "to_element" : typeof opts?.deltaY === "number" ? "delta" : "absolute",
         url: session.currentUrl,
       });
+      // 预览帧：滚动后推最新画面
+      this.pushPreviewFrame(ctx, session, "scroll");
       return { ok: true, url: session.page.url() };
     } catch (e) {
       return { ok: false, error: this.formatPlaywrightError(e), retryable: true };
@@ -569,6 +633,8 @@ export class AgentBrowserService {
         hasSelector: Boolean(opts?.selector),
         bytes: buffer.length,
       });
+      // 预览帧：复用本次截图 buffer（截元素图时不推——悬浮窗只看整页）
+      if (!opts?.selector) this.pushPreviewFrame(ctx, session, "screenshot", buffer);
 
       return {
         ok: true,
@@ -757,9 +823,13 @@ export class AgentBrowserService {
 
     try {
       const waitTimeout = Math.min(timeout ?? getActionTimeoutMs(), 60_000);
+      // 连续预览流：等待期间页面可能自行变化（倒计时/跳转），保持直播
+      this.ensurePreviewStream(ctx, session);
       await session.page.waitForSelector(sel, { state: "visible", timeout: waitTimeout });
       this.touch(session);
       await this.audit(ctx, "wait_for", sessionId, { selector: sel, timeout: waitTimeout });
+      // 预览帧：等待结束后推最新画面（页面可能已自行变化）
+      this.pushPreviewFrame(ctx, session, "wait_for");
       const base: AgentBrowserResult = { ok: true, selector: sel, url: session.page.url() };
       return await this.withPageState(base, session);
     } catch (e) {
@@ -847,6 +917,162 @@ export class AgentBrowserService {
       pageState: state,
       hint: (result as { hint?: string }).hint ?? hint,
     } as AgentBrowserResult;
+  }
+
+  /**
+   * 推送浏览器工作预览帧（2026-11-12）：agent_browser 每执行一步动作后，把
+   * 当前页面截图经 agent.browser.preview 事件推给发起聊天的客户端——手机端
+   * 没有可见浏览器（WebView2 仅 Windows），悬浮窗的画面只能来自这里。
+   *
+   * best-effort：未装配推送通道（程序化调用方）、节流窗口内、捕获超时/失败
+   * 都静默跳过，绝不抛错、绝不阻塞工具回执。可传入已捕获的 buffer 复用
+   * （screenshot 动作不重复截屏）。
+   */
+  private pushPreviewFrame(
+    ctx: ToolContext,
+    session: AgentBrowserSession,
+    action: string,
+    buffer?: Buffer,
+  ): void {
+    const push = ctx.pushBrowserPreview;
+    if (!push) return;
+    const now = Date.now();
+    if (session.lastPreviewAt && now - session.lastPreviewAt < PREVIEW_MIN_INTERVAL_MS) return;
+    session.lastPreviewAt = now;
+    void (async () => {
+      try {
+        const data =
+          buffer ??
+          (await Promise.race([
+            session.page.screenshot({
+              type: "jpeg",
+              quality: PREVIEW_QUALITY,
+              timeout: PREVIEW_CAPTURE_TIMEOUT_MS,
+            }),
+            new Promise<null>((resolve) => {
+              const t = setTimeout(() => resolve(null), PREVIEW_CAPTURE_TIMEOUT_MS);
+              t.unref?.();
+            }),
+          ]));
+        if (!data || data.length === 0) return;
+        push({
+          sessionId: session.sessionId,
+          action,
+          url: session.page.url(),
+          imageBase64: data.toString("base64"),
+          mode: session.mode,
+        });
+      } catch {
+        /* 预览帧失败不影响主流程 */
+      }
+    })();
+  }
+
+  /**
+   * 确保会话的连续预览流在跑（2026-11-13，对齐 Grok 式「直播」预览）。
+   *
+   * 与按动作截帧（pushPreviewFrame）互补：screencast 只在页面**有变化**时出帧，
+   * CDP 端自动做 damage 检测——导航过渡、动画、逐字输入期间是连续画面，静止
+   * 页面零帧零流量。动作入口（open/click/type/scroll/wait_for/screenshot）调用
+   * 本方法拉起/续命；空闲 STREAM_IDLE_STOP_MS 后自动停。
+   *
+   * 仅无头模式：共享模式（用户可见的 WebView2）页面就在用户眼前，无需推流。
+   * best-effort：CDP 不可用 / 推送通道缺失都静默跳过，绝不影响工具执行。
+   */
+  private ensurePreviewStream(ctx: ToolContext, session: AgentBrowserSession): void {
+    const push = ctx.pushBrowserPreview;
+    if (!push) return;
+    if (session.mode !== "headless") return;
+
+    const existing = this.streams.get(session.sessionId);
+    if (existing) {
+      // 同一次工具调用内的续命：重置硬性寿命起点（新动作 = 用户还在看）
+      existing.startedAt = Date.now();
+      this.rearmStreamIdleTimer(session.sessionId);
+      return;
+    }
+
+    void (async () => {
+      try {
+        const cdp = await session.page.context().newCDPSession(session.page);
+        let busy = false;
+        cdp.on("Page.screencastFrame", (evt: {
+          data: string;
+          sessionId: number;
+        }) => {
+          // CDP 协议要求 ack，否则会停止出帧。
+          void cdp
+            .send("Page.screencastFrameAck", { sessionId: evt.sessionId })
+            .catch(() => {});
+          const handle = this.streams.get(session.sessionId);
+          if (!handle) return;
+          const now = Date.now();
+          // 硬性寿命：自最后一次动作起超限即停（动画页空闲计时永不触发）
+          if (now - handle.startedAt > STREAM_MAX_LIFETIME_MS) {
+            this.stopPreviewStream(session.sessionId);
+            return;
+          }
+          if (now - handle.lastPushAt < STREAM_MIN_FRAME_INTERVAL_MS) return;
+          if (busy) return;
+          busy = true;
+          handle.lastPushAt = now;
+          try {
+            const alive = push({
+              sessionId: session.sessionId,
+              action: "stream",
+              url: session.page.url(),
+              imageBase64: evt.data,
+              mode: session.mode,
+            });
+            // 通道失效（回合收口/连接关闭）：立即停流，不空烧
+            if (alive === false) {
+              this.stopPreviewStream(session.sessionId);
+              return;
+            }
+          } catch {
+            // 推送通道失效（连接关闭）：立即停流
+            this.stopPreviewStream(session.sessionId);
+          } finally {
+            busy = false;
+          }
+          // 页面在动 = 用户在看，续命
+          this.rearmStreamIdleTimer(session.sessionId);
+        });
+        await cdp.send("Page.startScreencast", { ...STREAM_SCREENCAST_PARAMS });
+        this.streams.set(session.sessionId, {
+          cdp,
+          idleTimer: null,
+          lastPushAt: 0,
+          startedAt: Date.now(),
+        });
+        this.rearmStreamIdleTimer(session.sessionId);
+      } catch {
+        /* CDP screencast 不可用：降级为按动作截帧，不影响主流程 */
+      }
+    })();
+  }
+
+  /** 续命：重置流的空闲自停计时器。 */
+  private rearmStreamIdleTimer(sessionId: string): void {
+    const handle = this.streams.get(sessionId);
+    if (!handle) return;
+    if (handle.idleTimer) clearTimeout(handle.idleTimer);
+    handle.idleTimer = setTimeout(() => this.stopPreviewStream(sessionId), STREAM_IDLE_STOP_MS);
+    handle.idleTimer.unref?.();
+  }
+
+  /** 停止并清理会话的连续预览流（幂等）。 */
+  private stopPreviewStream(sessionId: string): void {
+    const handle = this.streams.get(sessionId);
+    if (!handle) return;
+    this.streams.delete(sessionId);
+    if (handle.idleTimer) clearTimeout(handle.idleTimer);
+    void handle.cdp
+      .send("Page.stopScreencast")
+      .catch(() => {});
+    void handle.cdp
+      .detach()
+      .catch(() => {});
   }
 
   /**
@@ -972,6 +1198,8 @@ export class AgentBrowserService {
   private async closeSession(session: AgentBrowserSession): Promise<void> {
     if (session.closed) return;
     session.closed = true;
+    // 连续预览流随会话一起停
+    this.stopPreviewStream(session.sessionId);
     // 内置浏览器：只释放面板队列（页面留痕不关闭，用户还能回看）
     if (session.lease) {
       await session.lease.release().catch(() => {});

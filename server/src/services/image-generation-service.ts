@@ -274,6 +274,40 @@ export class ImageGenerationService {
   }
 
   /**
+   * 缩略图（2026-11-12）：把 `/agent/images/...` 的原图按需压成窄幅 webp 并落盘缓存。
+   *
+   * 动机：资料库/图库网格的格子只有 100~130px，此前直接拉原图（生成图常 1~3MB
+   * PNG），一屏三十张就是几十 MB —— 手机端"照片一张张慢慢浮出来"的带宽根因。
+   * 客户端用 `?w=400` 请求，这里首次 sharp 压一次、落盘到 `images-thumbs/`，
+   * 之后直接静态返回；文件不可变，配 immutable 长缓存。
+   *
+   * 与业务目录隔离（`<storageRoot>-thumbs`）：不影响 listImages 的合法文件名扫描，
+   * 也不会被原图的清理/删除逻辑误删。
+   *
+   * 失败（sharp 不可用 / 解码失败）返回 null，调用方回退原图，展示不受影响。
+   */
+  async thumbnailPath(actorId: string, fileName: string, width: number): Promise<string | null> {
+    const source = this.resolveFilePath(actorId, fileName);
+    if (!source) return null;
+    const safeActorId = actorId.replace(/[^a-zA-Z0-9_-]/g, "_") || "anonymous";
+    const dir = join(`${this.storageRoot}-thumbs`, safeActorId);
+    const target = join(dir, `${fileName.replace(/\.png$/i, "")}@${width}.webp`);
+    try {
+      if (existsSync(target)) return target;
+      await mkdir(dir, { recursive: true });
+      const sharp = await loadSharp();
+      const buf = await sharp(source)
+        .resize({ width, withoutEnlargement: true })
+        .webp({ quality: 78 })
+        .toBuffer();
+      await writeFile(target, buf);
+      return target;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * 列出该 actor 名下的图片（资料库聚合用）：按修改时间倒序。
    * 生成图与图搜转存图共用本目录，故一个列表即覆盖「创建过 / 搜索过」的照片。
    * 只读元数据，不读文件内容；仅返回可经 /agent/images/ 拉流的合法 PNG。

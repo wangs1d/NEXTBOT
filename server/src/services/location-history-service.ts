@@ -42,6 +42,15 @@ export type LocationSample = {
   country: string | null;
   timezone: string | null;
   source: LocationSampleSource;
+  /**
+   * 水平精度半径（米，68% 置信）；null=设备未提供。
+   *
+   * 2026-11-13 补列。此前精度元数据只活在 WS 契约里，落库时被整段丢弃——
+   * 于是「这个 fix 有多准」在历史数据上永久不可知，服务端也无法在入库环节
+   * 裁决低精度 fix（室内漂移会把人判到隔壁街区）。有了它，常去地点挖掘
+   * （DBSCAN）与围栏判定才能按精度加权，而不是把所有点当同等可信。
+   */
+  accuracyMeters: number | null;
 };
 
 /** 常去地点（DBSCAN 簇的摘要形态） */
@@ -59,6 +68,28 @@ export type FrequentPlace = {
   lastSeenAt: string;
   /** 簇内样本到质心的最大距离（米），供「到达判定」半径参考 */
   radiusMeters: number;
+};
+
+/**
+ * 停留段（stay point）：一段时间内持续停留在同一地点的轨迹切片。
+ *
+ * 与「常去地点」的区别：常去地点回答「去过哪几次」，停留段回答「待了多久」——
+ * 地点语义（家/公司）必须看停留时长和时段，路过一次便利店不能算家。
+ */
+export type DwellEpisode = {
+  /** 段内样本质心 */
+  latitude: number;
+  longitude: number;
+  startAt: string;
+  endAt: string;
+  durationMinutes: number;
+  sampleCount: number;
+  /** 段内最常见的逆地理标签（城市级，仅作展示兜底） */
+  label: string | null;
+  /** 段内最常见的上报时区（时间分布统计用） */
+  timezone: string | null;
+  /** 段内最优水平精度（米，越小越可信） */
+  accuracyMeters: number | null;
 };
 
 export type MovementStats = {
@@ -81,6 +112,18 @@ export type LocationHistoryOptions = {
   now?: () => Date;
 };
 
+/**
+ * label 是否只是客户端兜底的坐标串（如「25.0631, 104.8918」）。
+ *
+ * 客户端在逆地理失败时会把坐标直接当 label 上报；这类 label 不是地名，
+ * 服务端补到真实地址后应该覆盖它，否则常去地点/停留段投票永远投给坐标串。
+ */
+function isCoordinateLabel(raw: string | null | undefined): boolean {
+  const value = raw?.trim();
+  if (!value) return true;
+  return /^-?\d{1,3}(?:\.\d+)?\s*[,，]\s*-?\d{1,3}(?:\.\d+)?$/.test(value);
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS location_samples (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,11 +137,27 @@ CREATE TABLE IF NOT EXISTS location_samples (
   region TEXT,
   country TEXT,
   timezone TEXT,
-  source TEXT NOT NULL DEFAULT 'report'
+  source TEXT NOT NULL DEFAULT 'report',
+  accuracy_meters REAL
 );
 CREATE INDEX IF NOT EXISTS idx_location_samples_actor_time
   ON location_samples(actor_id, recorded_at);
 `;
+
+/**
+ * 存量库平滑迁移：给已存在的 location_samples 补精度列。
+ *
+ * CREATE TABLE IF NOT EXISTS 对老库不会补列，所以老库（2026-11-13 前建的）
+ * 缺 accuracy_meters，读写会直接报 "no such column"。这里做一次幂等的
+ * ALTER TABLE——列已存在时 SQLite 报错，忽略即可（表是新建的则根本没这问题）。
+ */
+function ensureAccuracyColumn(db: SqliteDatabase): void {
+  try {
+    db.exec("ALTER TABLE location_samples ADD COLUMN accuracy_meters REAL");
+  } catch {
+    // 列已存在：预期路径，静默。
+  }
+}
 
 function rowToSample(row: Record<string, unknown>): LocationSample {
   return {
@@ -114,6 +173,8 @@ function rowToSample(row: Record<string, unknown>): LocationSample {
     country: (row.country as string | null) ?? null,
     timezone: (row.timezone as string | null) ?? null,
     source: (row.source as LocationSampleSource) ?? "report",
+    accuracyMeters:
+      row.accuracy_meters == null ? null : Number(row.accuracy_meters),
   };
 }
 
@@ -135,6 +196,7 @@ export class LocationHistoryService {
     this.db = new Database(file);
     this.db.pragma("journal_mode = WAL");
     this.db.exec(SCHEMA);
+    ensureAccuracyColumn(this.db);
     this.retentionDays = opts?.retentionDays ?? getLocationHistoryRetentionDays();
     this.dbscanEpsMeters = opts?.dbscanEpsMeters ?? getLocationDbscanEpsMeters();
     this.dbscanMinPoints = opts?.dbscanMinPoints ?? getLocationDbscanMinPoints();
@@ -144,14 +206,25 @@ export class LocationHistoryService {
   /** 写入一条位置样本（写入侧不区分模式；是否落历史由装配层的开关决定）。 */
   record(
     actorId: string,
-    loc: { latitude: number; longitude: number; city?: string; district?: string; region?: string; country?: string; timezone?: string; label?: string },
+    loc: {
+      latitude: number;
+      longitude: number;
+      city?: string;
+      district?: string;
+      region?: string;
+      country?: string;
+      timezone?: string;
+      label?: string;
+      /** 水平精度半径（米，68% 置信）。缺省=null=设备未提供 */
+      accuracyMeters?: number;
+    },
     source: LocationSampleSource = "report",
     at: Date = this.now(),
   ): LocationSample {
     const stmt = this.db.prepare(
       `INSERT INTO location_samples
-        (actor_id, recorded_at, latitude, longitude, label, city, district, region, country, timezone, source)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (actor_id, recorded_at, latitude, longitude, label, city, district, region, country, timezone, source, accuracy_meters)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     const info = stmt.run(
       actorId,
@@ -165,6 +238,10 @@ export class LocationHistoryService {
       loc.country?.trim() || null,
       loc.timezone?.trim() || null,
       source,
+      // 精度：负数/NaN 视为未提供（写 null），避免脏值污染「这个 fix 有多准」的统计
+      Number.isFinite(loc.accuracyMeters) && (loc.accuracyMeters as number) >= 0
+        ? (loc.accuracyMeters as number)
+        : null,
     );
     this.pruneExpired(true);
     return {
@@ -180,7 +257,75 @@ export class LocationHistoryService {
       country: loc.country?.trim() || null,
       timezone: loc.timezone?.trim() || null,
       source,
+      accuracyMeters:
+        Number.isFinite(loc.accuracyMeters) && (loc.accuracyMeters as number) >= 0
+          ? (loc.accuracyMeters as number)
+          : null,
     };
+  }
+
+  /**
+   * 用逆地理结果回填一条已入库样本的行政区/地址。
+   *
+   * 为什么必须回填：客户端上报通常只有经纬度（label 甚至是坐标串），而逆地理
+   * 在 ingest 主链路上是异步 fire-and-forget，只更新了 ActorContext 快照。
+   * 历史表此前因此留下大量 city/district/region 为 null 的样本——地点语义和
+   * 常去地点只能拿到坐标，回答「家在哪个城市」时没有可引用的行政区。
+   *
+   * 写入规则：
+   *   - 只补空，不覆盖客户端已解析出的行政区（客户端可能更贴近真实 fix）；
+   *   - label 仅在原值是空/坐标串时覆盖，避免把「兴义市 · 黔西南…」这类
+   *     客户端地名换成服务端的长地址；
+   *   - expected 用于防止在途逆地理把 A 点的地址写到 B 点（位置已移动）。
+   */
+  enrich(
+    sampleId: number,
+    hit: {
+      label?: string;
+      city?: string;
+      district?: string;
+      region?: string;
+      country?: string;
+      timezone?: string;
+    },
+    expected?: { latitude: number; longitude: number },
+  ): boolean {
+    if (!Number.isFinite(sampleId)) return false;
+    const row = this.db
+      .prepare(`SELECT latitude, longitude, label FROM location_samples WHERE id = ?`)
+      .get(sampleId) as
+      | { latitude: number; longitude: number; label: string | null }
+      | undefined;
+    if (!row) return false;
+    if (expected) {
+      const moved = haversineMeters(
+        { latitude: Number(row.latitude), longitude: Number(row.longitude) },
+        expected,
+      );
+      if (!Number.isFinite(moved) || moved > 50) return false;
+    }
+    const label = isCoordinateLabel(row.label) ? hit.label?.trim() || null : null;
+    const info = this.db
+      .prepare(
+        `UPDATE location_samples SET
+           label = COALESCE(?, label),
+           city = COALESCE(NULLIF(city, ''), ?),
+           district = COALESCE(NULLIF(district, ''), ?),
+           region = COALESCE(NULLIF(region, ''), ?),
+           country = COALESCE(NULLIF(country, ''), ?),
+           timezone = COALESCE(NULLIF(timezone, ''), ?)
+         WHERE id = ?`,
+      )
+      .run(
+        label,
+        hit.city?.trim() || null,
+        hit.district?.trim() || null,
+        hit.region?.trim() || null,
+        hit.country?.trim() || null,
+        hit.timezone?.trim() || null,
+        sampleId,
+      );
+    return Number(info.changes) > 0;
   }
 
   /** 按时间范围查询（升序，最多 limit 条，缺省 2000）。 */
@@ -210,6 +355,18 @@ export class LocationHistoryService {
       .prepare(`SELECT COUNT(*) AS c FROM location_samples WHERE actor_id = ?`)
       .get(actorId) as { c: number };
     return Number(row.c);
+  }
+
+  /**
+   * 有位置样本的全部 actor。
+   * 启动时用它做一次地点语义回填：老数据可能在首次上报的 prune 里被清掉，
+   * 必须在清理前先把「家/公司」算出来并持久化。
+   */
+  listActors(): string[] {
+    const rows = this.db
+      .prepare(`SELECT DISTINCT actor_id FROM location_samples`)
+      .all() as Array<{ actor_id: string }>;
+    return rows.map((row) => String(row.actor_id));
   }
 
   /**
@@ -247,6 +404,103 @@ export class LocationHistoryService {
       .prepare(`DELETE FROM location_samples WHERE recorded_at < ?`)
       .run(cutoff);
     return Number(info.changes);
+  }
+
+  /**
+   * 停留段抽取：把近 days 天样本切成「同一地点持续停留」的切片。
+   *
+   * 判据（缺省值刻意保守，宁可判不出也不把路过当家）：
+   *   - 相邻样本间隔 ≤ 30 分钟（太稀疏无法证明连续停留）
+   *   - 距当前质心 ≤ 150 米（室内漂移/小区内走动仍算同一地点）
+   *   - 停留时长 ≥ 20 分钟
+   *   - 水平精度 ≤ 300 米（低精度 fix 不参与，避免 WiFi 漂移伪造停留）
+   *
+   * 输出按时间升序，供地点语义层做时间分布与聚类。
+   */
+  dwellEpisodes(
+    actorId: string,
+    opts?: {
+      days?: number;
+      maxGapMs?: number;
+      radiusMeters?: number;
+      minDurationMs?: number;
+      maxAccuracyMeters?: number;
+      maxSamples?: number;
+    },
+  ): DwellEpisode[] {
+    const days = Math.min(opts?.days ?? this.retentionDays, this.retentionDays);
+    const maxGapMs = opts?.maxGapMs ?? 30 * 60 * 1000;
+    const radiusMeters = opts?.radiusMeters ?? 150;
+    const minDurationMs = opts?.minDurationMs ?? 20 * 60 * 1000;
+    const maxAccuracyMeters = opts?.maxAccuracyMeters ?? 300;
+    const from = new Date(this.now().getTime() - days * 24 * 60 * 60 * 1000);
+    const samples = this.query(actorId, from, this.now(), opts?.maxSamples ?? 5000).filter(
+      (s) => s.accuracyMeters == null || s.accuracyMeters <= maxAccuracyMeters,
+    );
+    if (samples.length === 0) return [];
+
+    const episodes: DwellEpisode[] = [];
+    let bucket: LocationSample[] = [];
+
+    const flush = (): void => {
+      if (bucket.length === 0) return;
+      const startMs = Date.parse(bucket[0].recordedAt);
+      const endMs = Date.parse(bucket[bucket.length - 1].recordedAt);
+      if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs - startMs < minDurationMs) {
+        bucket = [];
+        return;
+      }
+      const lat = bucket.reduce((sum, s) => sum + s.latitude, 0) / bucket.length;
+      const lng = bucket.reduce((sum, s) => sum + s.longitude, 0) / bucket.length;
+      const labelCounts = new Map<string, number>();
+      const tzCounts = new Map<string, number>();
+      let bestAccuracy: number | null = null;
+      for (const s of bucket) {
+        const label = s.label?.trim();
+        if (label) labelCounts.set(label, (labelCounts.get(label) ?? 0) + 1);
+        const tz = s.timezone?.trim();
+        if (tz) tzCounts.set(tz, (tzCounts.get(tz) ?? 0) + 1);
+        if (s.accuracyMeters != null && (bestAccuracy == null || s.accuracyMeters < bestAccuracy)) {
+          bestAccuracy = s.accuracyMeters;
+        }
+      }
+      const top = (m: Map<string, number>): string | null =>
+        [...m.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+      episodes.push({
+        latitude: lat,
+        longitude: lng,
+        startAt: bucket[0].recordedAt,
+        endAt: bucket[bucket.length - 1].recordedAt,
+        durationMinutes: Math.round((endMs - startMs) / 60_000),
+        sampleCount: bucket.length,
+        label: top(labelCounts),
+        timezone: top(tzCounts),
+        accuracyMeters: bestAccuracy,
+      });
+      bucket = [];
+    };
+
+    for (const sample of samples) {
+      const prev = bucket[bucket.length - 1];
+      if (!prev) {
+        bucket = [sample];
+        continue;
+      }
+      const gapMs = Date.parse(sample.recordedAt) - Date.parse(prev.recordedAt);
+      const centroid = {
+        latitude: bucket.reduce((sum, s) => sum + s.latitude, 0) / bucket.length,
+        longitude: bucket.reduce((sum, s) => sum + s.longitude, 0) / bucket.length,
+      };
+      const samePlace = haversineMeters(centroid, sample) <= radiusMeters;
+      if (Number.isFinite(gapMs) && gapMs >= 0 && gapMs <= maxGapMs && samePlace) {
+        bucket.push(sample);
+      } else {
+        flush();
+        bucket = [sample];
+      }
+    }
+    flush();
+    return episodes;
   }
 
   /**

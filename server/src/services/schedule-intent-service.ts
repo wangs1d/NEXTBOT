@@ -99,7 +99,9 @@ export class ScheduleIntentService {
     if (!draft) {
       return {
         matched: false,
-        hint: "未能解析时间或事项。请包含具体时刻或相对时间，如「一分钟后提醒我吃药」「明天 9:00 提醒我开会」。",
+        hint:
+          "未能解析时间或事项。用户只说了要做什么、没给具体时刻时，先问清几点再创建，" +
+          "不要自行假设或补一个默认时间。示例：「一分钟后提醒我吃药」「明天 9:00 提醒我开会」。",
       };
     }
     if (draft.kind === "reminder" && needsRecurrenceConfirmation(userText)) {
@@ -141,6 +143,10 @@ export class ScheduleIntentService {
     if (ruleDraft) {
       return this.ensureReminderCopy(sessionId, userText, applyRecurrenceFromUserText(userText, ruleDraft));
     }
+    // 时间锚定闸（2026-11-15 根修「设置一个闹钟 → 明早 08:00 自动建」）：用户原句里
+    // 没有任何可锚定的时刻时，解析模型给出的 runAt 只能是它替用户编的默认值。
+    // 这类句子不调模型、直接判不可解析，让上游先问清时间（留空比替用户决定安全）。
+    if (!hasStatedTimeAnchor(userText)) return null;
     const modelDraft = await this.parseByModel(sessionId, userText, userTimezone);
     if (!modelDraft) return null;
     return this.ensureReminderCopy(
@@ -288,6 +294,7 @@ export class ScheduleIntentService {
       "可解析格式示例：明天 09:00 提醒我开会；今天 18:00 调用 https://api.com/sync 同步；每天 7:00 天气提醒（kind 为 weather_brief）。",
       "recurrence 规则：仅当用户明确说出「每天/每日/每周/每年」等重复词时用 daily、weekly 或 yearly；明确单次（仅一次/明天/今天/后天）用 none。",
       "若只有时刻与提醒事项、未说明单次或每天/每周/每年，返回 {\"ok\":false,\"reason\":\"needs_recurrence\"}，不要猜测 recurrence。",
+      "若用户句子里没有给出任何可锚定的时间（既无相对时间如「十分钟后」，也无钟点如「八点/08:00」，也无日期+钟点），返回 {\"ok\":false,\"reason\":\"needs_time\"}，绝对不要替用户假设或补一个默认时刻。",
       "若用户要「天气/气温/穿衣/带伞」类定时简报，kind 用 weather_brief，不要填 reminderMessage 或 action。",
       "category：行程/正事用 itinerary；喝水/睡觉/锻炼等生活琐事用 trivia（照常提醒，不进今日安排）；不确定用 itinerary。",
       "JSON 结构：",
@@ -898,6 +905,15 @@ function parseHourMinuteFromPrompt(text: string): { hours: number; minutes: numb
 /** 供测试与即时提醒快路径：解析用户句中的可执行时间点（相对或绝对）。 */
 export function parseScheduleTimeFromPrompt(text: string, timezone?: string, now?: Date): Date | null {
   return parseDateTimeFromPrompt(text, timezone, now);
+}
+
+/**
+ * 用户原句里是否真的给出了可锚定的时刻。
+ * 只说了事项（「设置一个闹钟」「提醒我交周报」）时，任何 runAt 都是解析器凭空
+ * 补的默认值——2026-11-15 事故：该句被补成「明早 08:00 起床」并建了会响的闹钟。
+ */
+export function hasStatedTimeAnchor(text: string): boolean {
+  return parseDateTimeFromPrompt(text) !== null;
 }
 
 const RELATIVE_TIME_STRIP_RE =

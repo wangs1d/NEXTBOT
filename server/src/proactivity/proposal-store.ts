@@ -34,7 +34,11 @@ export class ProposalStore {
     for (const p of raw.pending ?? []) {
       const aid = String(p.actorId ?? "");
       const stale = nowMs - p.createdAt > PROPOSAL_PENDING_MAX_AGE_MS;
-      if (aid.includes("exportActors") || aid.startsWith("()=>") || stale) {
+      // 2026-11-12 修订：携带 firedAt 的离线补推提案豁免 48h 僵尸清理——
+      // 补推语义（用户拍板）不设保质期，客户端按原定触发时刻落屏；不带
+      // firedAt 的陈旧挂起（旧版本产生的、无法如实标注"几点该响的"）
+      // 维持 48h 清理，避免三周前的"该睡觉啦"冒充新消息误投。
+      if (aid.includes("exportActors") || aid.startsWith("()=>") || (stale && p.firedAt === undefined)) {
         dropped++;
         continue;
       }
@@ -83,6 +87,27 @@ export class ProposalStore {
       this.dirty = true;
     }
     return p;
+  }
+
+  /**
+   * 运行期僵尸清理（2026-11-12）：启动清理只在构造函数跑一次，长驻进程里
+   * defer-forever 的挂起提案（设备长期离线、arbiter 不停顺延 deliverAfter）
+   * 此前会无限滞留——生产实证：proposals.json 里挂了 22 天的「该睡觉啦」。
+   * 规则与启动清理一致（48h 超龄 + 无 firedAt 豁免补推），返回丢弃条数。
+   */
+  pruneStale(nowMs: number): number {
+    let dropped = 0;
+    for (const [key, p] of this.pending) {
+      if (nowMs - p.createdAt > PROPOSAL_PENDING_MAX_AGE_MS && p.firedAt === undefined) {
+        this.pending.delete(key);
+        dropped++;
+      }
+    }
+    if (dropped > 0) {
+      this.dirty = true;
+      console.log(`[ProposalStore] 运行期清理：丢弃 ${dropped} 条超龄挂起提案`);
+    }
+    return dropped;
   }
 
   /** 投递后记入已投递指纹（prune 超窗旧键） */

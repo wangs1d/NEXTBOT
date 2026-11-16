@@ -26,6 +26,7 @@ import "../../widgets/app_window_titlebar.dart";
 import "media_disk_cache.dart";
 import "travel_image_warmer.dart";
 import "travel_plan_mobile_page.dart";
+import "travel_seed_place_card.dart";
 import "travel_plan_models.dart";
 import "travel_plan_panel.dart";
 import "travel_plan_window.dart";
@@ -33,6 +34,8 @@ import "travel_theme.dart";
 
 part "travel_ticket_book.dart";
 part "travel_plan_text_sheet.dart";
+part "travel_plan_flow_controller.dart";
+part "travel_plan_inline_view.dart";
 
 // ═══════════════════════════════════════════════════════════════════
 // 旅游界面 v3（应用内「常用工具 → 行程」入口）· 左侧 tab 双空间
@@ -1962,206 +1965,6 @@ class _WishlistCardData {
   bool get hasSelection => view.isNotEmpty || stay.isNotEmpty;
 }
 
-/// 预订卡的大交通腿（去程/返程；飞猪实时班次）。
-class _BookingLegData {
-  _BookingLegData({
-    required this.from,
-    required this.to,
-    required this.date,
-    required this.dep,
-    required this.arr,
-    required this.fromStation,
-    required this.toStation,
-    required this.durationMin,
-  });
-
-  factory _BookingLegData.fromJson(Map<String, dynamic> json) {
-    return _BookingLegData(
-      from: json["from"]?.toString() ?? "",
-      to: json["to"]?.toString() ?? "",
-      date: json["date"]?.toString() ?? "",
-      dep: json["dep"]?.toString() ?? "",
-      arr: json["arr"]?.toString() ?? "",
-      fromStation: json["fromStation"]?.toString() ?? "",
-      toStation: json["toStation"]?.toString() ?? "",
-      durationMin: (json["durationMin"] as num?)?.toInt(),
-    );
-  }
-
-  final String from;
-  final String to;
-  final String date;
-  final String dep;
-  final String arr;
-  final String fromStation;
-  final String toStation;
-  final int? durationMin;
-
-  /// 「17:40 萧山机场 → 20:15 天府机场」；缺时刻的段如实只报城市。
-  String get summary {
-    final String fromP = fromStation.isNotEmpty ? fromStation : from;
-    final String toP = toStation.isNotEmpty ? toStation : to;
-    final String depP = dep.isNotEmpty ? "$dep " : "";
-    final String arrP = arr.isNotEmpty ? " $arr" : "";
-    return "$depP$fromP →$arrP $toP";
-  }
-}
-
-/// 预订卡的大交通选项（票价取不到时 amount=null → 卡面标「待核价」）。
-class _BookingTransportData {
-  _BookingTransportData({
-    required this.key,
-    required this.mode,
-    required this.no,
-    required this.carrier,
-    required this.outbound,
-    required this.inbound,
-    required this.amount,
-    required this.durationMin,
-    required this.viaHub,
-    required this.recommended,
-  });
-
-  factory _BookingTransportData.fromJson(Map<String, dynamic> json) {
-    return _BookingTransportData(
-      key: json["key"]?.toString() ?? "",
-      mode: json["mode"]?.toString() == "train" ? "train" : "flight",
-      no: json["no"]?.toString() ?? "",
-      carrier: json["carrier"]?.toString() ?? "",
-      outbound: json["outbound"] is Map<String, dynamic>
-          ? _BookingLegData.fromJson(json["outbound"] as Map<String, dynamic>)
-          : null,
-      inbound: json["inbound"] is Map<String, dynamic>
-          ? _BookingLegData.fromJson(json["inbound"] as Map<String, dynamic>)
-          : null,
-      amount: (json["amount"] as num?)?.toDouble(),
-      durationMin: (json["durationMin"] as num?)?.toInt(),
-      viaHub: json["viaHub"]?.toString() ?? "",
-      recommended: json["recommended"] == true,
-    );
-  }
-
-  final String key;
-  final String mode;
-  final String no;
-  final String carrier;
-  final _BookingLegData? outbound;
-  final _BookingLegData? inbound;
-  final double? amount;
-  final int? durationMin;
-  final String viaHub;
-  final bool recommended;
-
-  bool get isTrain => mode == "train";
-
-  /// 「2小时35分」；null=平台未给耗时。
-  String? get durationLabel {
-    final int? m = durationMin;
-    if (m == null || m <= 0) return null;
-    return "${m ~/ 60}小时${m % 60 == 0 ? "" : "${m % 60}分"}";
-  }
-}
-
-/// 预订卡的酒店选项（飞猪在售，每晚价）。
-class _BookingHotelData {
-  _BookingHotelData({
-    required this.key,
-    required this.name,
-    required this.amount,
-    required this.rating,
-    required this.star,
-    required this.near,
-    required this.image,
-    required this.fromPicks,
-    required this.recommended,
-  });
-
-  factory _BookingHotelData.fromJson(Map<String, dynamic> json) {
-    return _BookingHotelData(
-      key: json["key"]?.toString() ?? "",
-      name: json["name"]?.toString() ?? "",
-      amount: (json["amount"] as num?)?.toDouble(),
-      rating: (json["rating"] as num?)?.toDouble(),
-      star: json["star"]?.toString() ?? "",
-      near: json["near"]?.toString() ?? "",
-      image: json["image"]?.toString() ?? "",
-      fromPicks: json["fromPicks"] == true,
-      recommended: json["recommended"] == true,
-    );
-  }
-
-  final String key;
-  final String name;
-  final double? amount;
-  final double? rating;
-  final String star;
-  final String near;
-  final String image;
-  final bool fromPicks;
-  final bool recommended;
-}
-
-/// 预订选择卡：大交通 + 住宿两段单选，可全不选（先不订按参考价走）。
-class _BookingCardData {
-  _BookingCardData({
-    required this.stage,
-    required this.title,
-    required this.sub,
-    required this.origin,
-    required this.destination,
-    required this.checkIn,
-    required this.checkOut,
-    required this.nights,
-    required this.transports,
-    required this.hotels,
-    required this.transportKey,
-    required this.hotelKey,
-    required this.trial,
-  });
-
-  factory _BookingCardData.fromJson(Map<String, dynamic> json) {
-    final Map<String, dynamic> sel = json["selection"] is Map<String, dynamic>
-        ? json["selection"] as Map<String, dynamic>
-        : const <String, dynamic>{};
-    return _BookingCardData(
-      stage: json["stage"]?.toString() ?? "预订安排",
-      title: json["title"]?.toString() ?? "",
-      sub: json["sub"]?.toString() ?? "",
-      origin: json["origin"]?.toString() ?? "",
-      destination: json["destination"]?.toString() ?? "",
-      checkIn: json["checkIn"]?.toString() ?? "",
-      checkOut: json["checkOut"]?.toString() ?? "",
-      nights: (json["nights"] as num?)?.toInt() ?? 0,
-      transports: <_BookingTransportData>[
-        for (final dynamic t in (json["transports"] as List<dynamic>? ?? const <dynamic>[]))
-          if (t is Map<String, dynamic>) _BookingTransportData.fromJson(t),
-      ],
-      hotels: <_BookingHotelData>[
-        for (final dynamic h in (json["hotels"] as List<dynamic>? ?? const <dynamic>[]))
-          if (h is Map<String, dynamic>) _BookingHotelData.fromJson(h),
-      ],
-      transportKey: sel["transportKey"]?.toString() ?? "",
-      hotelKey: sel["hotelKey"]?.toString() ?? "",
-      trial: json["trial"] == true,
-    );
-  }
-
-  final String stage;
-  final String title;
-  final String sub;
-  final String origin;
-  final String destination;
-  final String checkIn;
-  final String checkOut;
-  final int nights;
-  final List<_BookingTransportData> transports;
-  final List<_BookingHotelData> hotels;
-  /// 已确认的回显选择（恢复会话时原样带回，卡面勾上）。
-  final String transportKey;
-  final String hotelKey;
-  final bool trial;
-}
-
 /// 相邻两站的真实交通腿（OSRM 路网优先，失败降级估算）。
 class _DraftLegData {
   _DraftLegData({
@@ -2517,7 +2320,6 @@ enum _FlowKind {
   choice,
   guide,
   wishlist,
-  booking,
   typing,
   budget,
   draft,
@@ -2532,7 +2334,6 @@ class _FlowItem {
     this.choice,
     this.guide,
     this.wishlist,
-    this.booking,
     this.budget,
     this.draft,
   });
@@ -2547,8 +2348,6 @@ class _FlowItem {
       _FlowItem._(_FlowKind.guide, guide: data);
   factory _FlowItem.wishlist(_WishlistCardData data) =>
       _FlowItem._(_FlowKind.wishlist, wishlist: data);
-  factory _FlowItem.booking(_BookingCardData data) =>
-      _FlowItem._(_FlowKind.booking, booking: data);
   factory _FlowItem.typing() => _FlowItem._(_FlowKind.typing);
   factory _FlowItem.budget(_BudgetData data) =>
       _FlowItem._(_FlowKind.budget, budget: data);
@@ -2558,11 +2357,13 @@ class _FlowItem {
 
   final _FlowKind kind;
   final String text;
+  /// 全库自增序号：作为列表/卡片稳定 key，避免换卡重建时丢输入态。
+  final int seq = _nextSeq++;
+  static int _nextSeq = 0;
   final _WeatherCardData? weather;
   final _ChoiceCardData? choice;
   final _GuideCardData? guide;
   final _WishlistCardData? wishlist;
-  final _BookingCardData? booking;
   final _BudgetData? budget;
   final _DraftData? draft;
 }
@@ -2717,9 +2518,7 @@ class _TurnResult {
             else if (c["type"] == "guide")
               _GuideCardData.fromJson(c)
             else if (c["type"] == "wishlist")
-              _WishlistCardData.fromJson(c)
-            else if (c["type"] == "booking")
-              _BookingCardData.fromJson(c),
+              _WishlistCardData.fromJson(c),
       ],
       budget: json["budget"] is Map<String, dynamic>
           ? _BudgetData.fromJson(json["budget"] as Map<String, dynamic>)
@@ -2786,18 +2585,10 @@ class _PlanningStageState extends State<_PlanningStage> {
   final FocusNode _inputFocus = FocusNode();
   final ScrollController _scroll = ScrollController();
 
-  /// 是否已发起规划（idle → flow）。
-  bool _flowStarted = false;
+  /// 会话状态机（与手机聊天内联流共用同一份实现）。
+  late final TravelPlanFlowController _ctrl;
 
-  /// 等待服务端回执（输入框 / 卡片按钮禁用）。
-  bool _busy = false;
-
-  String? _sessionId;
-
-  final List<_FlowItem> _flow = <_FlowItem>[];
-
-  /// 右侧档案栏快照（服务端每轮回执整份替换；null=旧服务端，不显示档案栏）。
-  _DossierData? _dossier;
+  int _lastFlowLength = 0;
 
   /// 从档案栏点「改」带过来的输入提示（null=常规提示语）。
   String? _adjustHintText;
@@ -2811,18 +2602,38 @@ class _PlanningStageState extends State<_PlanningStage> {
   @override
   void initState() {
     super.initState();
+    _ctrl = TravelPlanFlowController(
+      onActiveChanged: widget.onActiveSessionChanged,
+      onPlanGenerated: widget.onPlanGenerated,
+      onGenerated: (_DraftData draft, String pricingMode) {
+        if (!mounted) return;
+        setState(() => _ticketMoment = _TicketPrintMoment(
+              draft: draft,
+              pricingMode: pricingMode,
+            ));
+      },
+    )..addListener(_onFlowChanged);
     // 主对话交接：进来就把原话当作第一条用户消息，直接起会话。
     final String seed = (widget.seedMessage ?? "").trim();
     if (seed.isEmpty) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || _flowStarted) return;
-      _append(_FlowItem.user(seed));
-      unawaited(_start(seed));
+      if (!mounted || _ctrl.flowStarted) return;
+      unawaited(_ctrl.sendText(seed));
     });
+  }
+
+  void _onFlowChanged() {
+    if (!mounted) return;
+    final int len = _ctrl.flow.length;
+    final bool grew = len != _lastFlowLength;
+    _lastFlowLength = len;
+    setState(() {});
+    if (grew) _scrollToBottom();
   }
 
   @override
   void dispose() {
+    _ctrl.dispose();
     _input.dispose();
     _inputFocus.dispose();
     _scroll.dispose();
@@ -2831,39 +2642,11 @@ class _PlanningStageState extends State<_PlanningStage> {
 
   // ── 流操作 ─────────────────────────────────────────────────────
 
-  void _append(_FlowItem item) {
-    setState(() => _flow.add(item));
-    _scrollToBottom();
-  }
-
-  /// 档案栏整份替换：结论口径只在服务端，客户端不存增量。
-  void _setDossier(_DossierData? data) {
-    if (!mounted) return;
-    setState(() => _dossier = data);
-  }
-
   /// 档案栏的「钱的水位」：直接读流里最新那张预算卡，与卡面永远一致。
-  _BudgetData? get _latestBudget {
-    for (final _FlowItem f in _flow.reversed) {
-      if (f.kind == _FlowKind.budget) return f.budget;
-    }
-    return null;
-  }
+  _BudgetData? get _latestBudget => _ctrl.latestBudget;
 
   /// 档案栏的「核实风险」：读最新草案的核实闸结果。
-  _DraftData? get _latestDraft {
-    for (final _FlowItem f in _flow.reversed) {
-      if (f.kind == _FlowKind.draft) return f.draft;
-    }
-    return null;
-  }
-
-  /// 移除 typing 占位（有则移除）。
-  void _removeTyping() {
-    final int i = _flow.lastIndexWhere((_FlowItem f) => f.kind == _FlowKind.typing);
-    if (i < 0) return;
-    setState(() => _flow.removeAt(i));
-  }
+  _DraftData? get _latestDraft => _ctrl.latestDraft;
 
   void _scrollToBottom() {
     unawaited(Future<void>.delayed(const Duration(milliseconds: 60)).then((_) {
@@ -2876,501 +2659,27 @@ class _PlanningStageState extends State<_PlanningStage> {
     }));
   }
 
-  void _insertSayAndCards(_TurnResult r) {
-    _notifyActive();
-    _removeTyping();
-    if (r.dossier != null) _setDossier(r.dossier);
-    if (r.say.isNotEmpty) _append(_FlowItem.say(r.say));
-    for (final Object card in r.cards) {
-      if (card is _WeatherCardData) {
-        _append(_FlowItem.weather(card));
-      } else if (card is _ChoiceCardData) {
-        _append(_FlowItem.choice(card));
-      } else if (card is _GuideCardData) {
-        _append(_FlowItem.guide(card));
-      } else if (card is _WishlistCardData) {
-        _append(_FlowItem.wishlist(card));
-      } else if (card is _BookingCardData) {
-        _append(_FlowItem.booking(card));
-      }
-    }
-    if (r.budget != null) _append(_FlowItem.budget(r.budget!));
-    if (r.draft != null) {
-      _append(_FlowItem.draft(r.draft!));
-      unawaited(Future<void>.delayed(Duration.zero).then((_) => widget.onPlanGenerated()));
-    }
-  }
-
-  /// 用户重新补充信息：未答的问题卡与上一版预算/最终方案都不再代表当前需求，先移出流。
-  void _dropStaleOutput() {
-    // 档案栏里「改」的输入提示属于一次性引导，任何一次作答/发话后都收回。
-    _adjustHintText = null;
-    _flow.removeWhere(
-      (_FlowItem f) =>
-          f.kind == _FlowKind.choice ||
-          f.kind == _FlowKind.guide ||
-          f.kind == _FlowKind.wishlist ||
-          f.kind == _FlowKind.booking ||
-          f.kind == _FlowKind.budget ||
-          f.kind == _FlowKind.draft,
-    );
-  }
-
-  // ── 服务端调用 ─────────────────────────────────────────────────
-
-  static const Duration _turnTimeout = Duration(seconds: 40);
-  static const Duration _generateTimeout = Duration(seconds: 150);
-
-  Future<Map<String, dynamic>?> _post(
-    String path,
-    Map<String, dynamic> body,
-    Duration timeout,
-  ) async {
-    final http.Response resp = await NbHttp.post(
-          Uri.parse("${ApiConfig.httpBase}$path"),
-          headers: const <String, String>{"Content-Type": "application/json"},
-          body: jsonEncode(body),
-        )
-        .timeout(timeout);
-    final Object? decoded = jsonDecode(resp.body);
-    if (decoded is! Map<String, dynamic>) {
-      throw Exception("HTTP ${resp.statusCode}");
-    }
-    if (resp.statusCode != 200 || decoded["ok"] != true) {
-      final String error = decoded["error"]?.toString() ?? "HTTP ${resp.statusCode}";
-      final String hint = decoded["hint"]?.toString() ?? "";
-      throw Exception(hint.isEmpty ? error : "$error（$hint）");
-    }
-    return decoded;
-  }
-
-  Future<Map<String, dynamic>?> _get(String path, Duration timeout) async {
-    final http.Response resp =
-        await NbHttp.get(Uri.parse("${ApiConfig.httpBase}$path")).timeout(timeout);
-    final Object? decoded = jsonDecode(resp.body);
-    if (decoded is! Map<String, dynamic>) {
-      throw Exception("HTTP ${resp.statusCode}");
-    }
-    if (resp.statusCode != 200 || decoded["ok"] != true) {
-      final String error = decoded["error"]?.toString() ?? "HTTP ${resp.statusCode}";
-      throw Exception(error);
-    }
-    return decoded;
-  }
-
   /// 发送输入框内容（idle 时发起会话，flow 中续说）。
   Future<void> _send() async {
     final String text = _input.text.trim();
-    if (text.isEmpty || _busy) return;
+    if (text.isEmpty || _ctrl.busy) return;
     _input.clear();
     _inputFocus.unfocus();
-    setState(_dropStaleOutput);
-    _append(_FlowItem.user(text));
-    if (!_flowStarted) {
-      await _start(text);
-    } else {
-      await _turnMessage(text);
-    }
+    _adjustHintText = null;
+    await _ctrl.sendText(text);
   }
 
-  Future<void> _start(String message) async {
-    setState(() {
-      _busy = true;
-      _flowStarted = true;
-      _sessionId = null;
-      _dossier = null;
-    });
-    _append(_FlowItem.typing());
-    bool ready = false;
-    try {
-      final Map<String, dynamic>? decoded =
-          await _post("/travel/plan-session", <String, dynamic>{"message": message}, _turnTimeout);
-      _sessionId = decoded?["sessionId"]?.toString();
-      final _TurnResult r = _TurnResult.fromJson(decoded ?? <String, dynamic>{});
-      _insertSayAndCards(r);
-      ready = r.state == "ready";
-    } catch (e) {
-      _recoverFromError(e);
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-    // 信息齐 → 真实生成（_busy 已清零，_generate 内部自管忙态）
-    if (ready) await _generate();
-  }
-
-  Future<void> _turnMessage(String message) async {
-    final String? id = _sessionId;
-    if (id == null) {
-      await _start(message);
-      return;
-    }
-    setState(() => _busy = true);
-    _append(_FlowItem.typing());
-    bool ready = false;
-    try {
-      final Map<String, dynamic>? decoded = await _post(
-        "/travel/plan-session/$id/turn",
-        <String, dynamic>{"message": message},
-        _turnTimeout,
-      );
-      final _TurnResult r = _TurnResult.fromJson(decoded ?? <String, dynamic>{});
-      _insertSayAndCards(r);
-      ready = r.state == "ready";
-    } catch (e) {
-      _recoverFromError(e);
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-    if (ready) await _generate();
-  }
-
-  /// 点选回传（单选立即 / 多选确认）。
-  Future<void> _sendChoice(
-    _FlowItem item,
-    _ChoiceCardData card,
-    List<String> values,
-    String? note,
-  ) async {
-    final String? id = _sessionId;
-    if (id == null || _busy) return;
-    // 串行节奏：答完这张卡立即从流里消失，下一张由服务端回执带来。
-    setState(() {
-      _flow.remove(item);
-      _dropStaleOutput();
-      _busy = true;
-    });
-    _append(_FlowItem.typing());
-    bool ready = false;
-    try {
-      final Map<String, dynamic>? decoded = await _post(
-        "/travel/plan-session/$id/turn",
-        <String, dynamic>{
-          "cardId": card.id,
-          "values": values,
-          if (note != null && note.trim().isNotEmpty) "note": note.trim(),
-        },
-        _turnTimeout,
-      );
-      final _TurnResult r = _TurnResult.fromJson(decoded ?? <String, dynamic>{});
-      _insertSayAndCards(r);
-      ready = r.state == "ready";
-    } catch (e) {
-      _recoverFromError(e);
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-    if (ready) await _generate();
-  }
-
-  /// 筛选卡确认：勾选结果作为心愿清单提交，随后进入真实生成（核价）。
-  Future<void> _submitGuide(
-    _FlowItem item,
-    _GuideCardData card, {
-    bool delegate = false,
-  }) async {
-    final String? id = _sessionId;
-    if (id == null || _busy) return;
-    final Map<String, List<String>> selected = <String, List<String>>{
-      "view": <String>[],
-      "stay": <String>[],
-    };
-    for (final _GuideCatData cat in card.cats) {
-      for (final _GuideItemData entry in cat.items) {
-        if (entry.picked) selected[cat.key]?.add(entry.name);
-      }
-    }
-    if (!delegate &&
-        selected.values.every((List<String> l) => l.isEmpty)) {
-      return;
-    }
-    setState(() {
-      _flow.remove(item);
-      _dropStaleOutput();
-      _busy = true;
-    });
-    _append(_FlowItem.typing());
-    bool ready = false;
-    try {
-      final Map<String, dynamic>? decoded = await _post(
-        "/travel/plan-session/$id/guide",
-        delegate
-            ? <String, dynamic>{"delegate": true}
-            : <String, dynamic>{
-                "view": selected["view"],
-                "stay": selected["stay"],
-              },
-        _turnTimeout,
-      );
-      final _TurnResult r = _TurnResult.fromJson(decoded ?? <String, dynamic>{});
-      _insertSayAndCards(r);
-      ready = r.state == "ready";
-    } catch (e) {
-      _recoverFromError(e);
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-    if (ready) await _generate();
-  }
-
-  /// 自选补充：带上用户自己写的景点/酒店/餐厅（可为空=跳过），随后进入核价。
-  Future<void> _submitExtras(
-    _FlowItem item,
-    Map<String, List<String>> extras,
-    String note,
-  ) async {
-    final String? id = _sessionId;
-    if (id == null || _busy) return;
-    final List<String> added = <String>[
-      ...?extras["view"],
-      ...?extras["stay"],
-    ];
-    setState(() {
-      _flow.remove(item);
-      _dropStaleOutput();
-      _busy = true;
-    });
-    _append(_FlowItem.user(
-      added.isEmpty ? "没有补充了，直接算预算" : "还想加：${added.join("、")}",
-    ));
-    _append(_FlowItem.typing());
-    bool ready = false;
-    try {
-      final Map<String, dynamic>? decoded = await _post(
-        "/travel/plan-session/$id/extras",
-        <String, dynamic>{
-          "view": extras["view"] ?? const <String>[],
-          "stay": extras["stay"] ?? const <String>[],
-          if (note.trim().isNotEmpty) "note": note.trim(),
-        },
-        _turnTimeout,
-      );
-      final _TurnResult r = _TurnResult.fromJson(decoded ?? <String, dynamic>{});
-      _insertSayAndCards(r);
-      ready = r.state == "ready";
-    } catch (e) {
-      _recoverFromError(e);
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-    if (ready) await _generate();
-  }
-
-  /// 预订选择卡：提交所选班次/酒店（可全不选=先不订，按参考价走），
-  /// 服务端回 ready 后自动进入真实生成——所选班次进预算与行程交通段。
-  Future<void> _submitBooking(
-    _FlowItem item,
-    _BookingCardData card,
-    String? transportKey,
-    String? hotelKey,
-  ) async {
-    final String? id = _sessionId;
-    if (id == null || _busy) return;
-    String labelOf(String? key, List<String> Function() pick) {
-      if (key == null || key.isEmpty) return "";
-      final List<String> names = pick();
-      return names.isEmpty ? "" : names.first;
-    }
-
-    final String tLabel = labelOf(transportKey, () => <String>[
-          for (final _BookingTransportData t in card.transports)
-            if (t.key == transportKey)
-              "${t.isTrain ? "车次" : "航班"} ${t.no}${t.carrier.isEmpty ? "" : " ${t.carrier}"}",
-        ]);
-    final String hLabel = labelOf(hotelKey, () => <String>[
-          for (final _BookingHotelData h in card.hotels)
-            if (h.key == hotelKey) h.name,
-        ]);
-    final String picked = <String>[
-      if (tLabel.isNotEmpty) "大交通：$tLabel",
-      if (hLabel.isNotEmpty) "住宿：$hLabel",
-    ].join("；");
-    setState(() {
-      _flow.remove(item);
-      _dropStaleOutput();
-      _busy = true;
-    });
-    _append(_FlowItem.user(picked.isEmpty ? "先不订，按参考价算" : picked));
-    _append(_FlowItem.typing());
-    bool ready = false;
-    try {
-      final Map<String, dynamic>? decoded = await _post(
-        "/travel/plan-session/$id/booking",
-        <String, dynamic>{
-          if (transportKey != null && transportKey.isNotEmpty)
-            "transportKey": transportKey,
-          if (hotelKey != null && hotelKey.isNotEmpty) "hotelKey": hotelKey,
-        },
-        _turnTimeout,
-      );
-      final _TurnResult r = _TurnResult.fromJson(decoded ?? <String, dynamic>{});
-      _insertSayAndCards(r);
-      ready = r.state == "ready";
-    } catch (e) {
-      _recoverFromError(e);
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-    if (ready) await _generate();
-  }
-
-  Future<void> _generate() async {
-    final String? id = _sessionId;
-    if (id == null || _busy) return;
-    setState(() => _busy = true);
-    _append(_FlowItem.typing());
-    try {
-      final Map<String, dynamic>? decoded =
-          await _post("/travel/plan-session/$id/generate", <String, dynamic>{}, _generateTimeout);
-      final _TurnResult r = _TurnResult.fromJson(decoded ?? <String, dynamic>{});
-      if (r.dossier != null) _setDossier(r.dossier);
-      _removeTyping();
-      _notifyActive();
-      if (r.say.isNotEmpty) _append(_FlowItem.say(r.say));
-      // flow A：生成完先只给预算明细，用户确认后才出最终方案。
-      if (r.budget != null) _append(_FlowItem.budget(r.budget!));
-      if (r.draft != null) {
-        _append(_FlowItem.draft(r.draft!));
-        unawaited(Future<void>.delayed(Duration.zero).then((_) => widget.onPlanGenerated()));
-      }
-    } catch (e) {
-      _recoverFromError(e);
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  /// 预算确认 → 服务端下发最终草案。
-  Future<void> _approve() async {
-    final String? id = _sessionId;
-    if (id == null || _busy) return;
-    if (_flow.any((_FlowItem f) => f.budget?.approved == true)) return;
-    setState(() => _busy = true);
-    _append(_FlowItem.typing());
-    try {
-      final Map<String, dynamic>? decoded = await _post(
-        "/travel/plan-session/$id/approve",
-        <String, dynamic>{},
-        _turnTimeout,
-      );
-      final _TurnResult r = _TurnResult.fromJson(decoded ?? <String, dynamic>{});
-      setState(() {
-        for (final _FlowItem f in _flow) {
-          if (f.kind == _FlowKind.budget) f.budget!.approved = true;
-        }
-      });
-      _insertSayAndCards(r);
-      // 出票时刻：预算确认且服务端下发最终草案 → 播打印出票动画。
-      if (r.draft != null && mounted) {
-        String pricingMode = "";
-        for (final _FlowItem f in _flow) {
-          if (f.kind == _FlowKind.budget) pricingMode = f.budget?.pricingMode ?? "";
-        }
-        setState(() => _ticketMoment = _TicketPrintMoment(
-              draft: r.draft!,
-              pricingMode: pricingMode,
-            ));
-      }
-    } catch (e) {
-      _recoverFromError(e);
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  /// 失败恢复：typing 移除 + 错误条目；会话失效时清空 sessionId，
-  /// 下一条消息重新发起。
-  void _recoverFromError(Object e) {
-    _removeTyping();
-    final String msg = "$e".replaceFirst("Exception: ", "");
-    final bool expired = msg.contains("会话不存在") || msg.contains("已过期");
-    if (expired) _sessionId = null;
-    _append(_FlowItem.error(expired ? "会话已过期，在下方重新说一句发起吧" : "出错了：$msg"));
-  }
-
-  // ── 历史规划会话（侧边栏驱动）────────────────────────────────
-
-  /// 会话变化上报宿主（出 sessionId / 每轮成功 / 点「新会话」）。
-  void _notifyActive() {
-    widget.onActiveSessionChanged(_sessionId);
-  }
-
-  /// history 载荷 → 对话流条目（恢复时用户气泡 / Agent 说话块原样重建）。
-  static List<_FlowItem> _flowFromHistory(List<dynamic>? history) => <_FlowItem>[
-        for (final dynamic h in history ?? const <dynamic>[])
-          if (h is Map<String, dynamic>)
-            if ((h["role"]?.toString() ?? "") == "user" &&
-                (h["content"]?.toString() ?? "").isNotEmpty)
-              _FlowItem.user(h["content"].toString())
-            else if ((h["role"]?.toString() ?? "") == "assistant" &&
-                (h["content"]?.toString() ?? "").isNotEmpty)
-              _FlowItem.say(h["content"].toString()),
-      ];
-
-  /// 服务端恢复卡（guide/wishlist 等确定性重建的挂起卡）→ 流条目。
-  static _FlowItem? _flowItemFromCard(Object? card) {
-    if (card is! Map<String, dynamic>) return null;
-    return switch (card["type"]?.toString()) {
-      "weather" => _FlowItem.weather(_WeatherCardData.fromJson(card)),
-      "choice" => _FlowItem.choice(_ChoiceCardData.fromJson(card)),
-      "guide" => _FlowItem.guide(_GuideCardData.fromJson(card)),
-      "wishlist" => _FlowItem.wishlist(_WishlistCardData.fromJson(card)),
-      "booking" => _FlowItem.booking(_BookingCardData.fromJson(card)),
-      _ => null,
-    };
-  }
-
-  /// 侧边栏点历史会话 → 拉全量状态恢复对话流。可从 idle 进入，也可在
-  /// 对话中直接切换（切换前旧会话已落盘，丢不了）。
+  /// 侧边栏点历史会话 → 拉全量状态恢复对话流。
   Future<void> _resumeSession(_PlanSessionSummary s) async {
-    if (_busy) return;
-    if (_flowStarted && _sessionId == s.id) return;
-    setState(() => _busy = true);
+    if (_ctrl.busy) return;
     try {
-      final Map<String, dynamic>? decoded =
-          await _get("/travel/plan-session/${s.id}", _turnTimeout);
-      if (decoded == null) throw Exception("空回执");
-      final String state = decoded["state"]?.toString() ?? "gathering";
-      final _DossierData? dossier = decoded["dossier"] is Map<String, dynamic>
-          ? _DossierData.fromJson(decoded["dossier"] as Map<String, dynamic>)
-          : null;
-      final _BudgetData? budget = decoded["budget"] is Map<String, dynamic>
-          ? _BudgetData.fromJson(decoded["budget"] as Map<String, dynamic>)
-          : null;
-      final _DraftData? draft = decoded["draft"] is Map<String, dynamic>
-          ? _DraftData.fromJson(decoded["draft"] as Map<String, dynamic>)
-          : null;
-      final List<_FlowItem> restored =
-          _flowFromHistory(decoded["history"] as List<dynamic>?);
-      final _FlowItem? resumeCard = _flowItemFromCard(decoded["resumeCard"]);
+      await _ctrl.resume(s.id);
       if (!mounted) return;
       setState(() {
-        _flowStarted = true;
-        _sessionId = s.id;
-        _dossier = dossier;
         _adjustHintText = null;
         _ticketMoment = null;
         _guidePreview = null;
-        _flow
-          ..clear()
-          ..addAll(restored);
-        if (state == "generated" && draft != null) {
-          // 已出方案：预算卡标已确认 + 草案卡补回，档案栏口径与中断前一致
-          if (budget != null) {
-            budget.approved = true;
-            _flow.add(_FlowItem.budget(budget));
-          }
-          _flow.add(_FlowItem.draft(draft));
-        } else if (state == "budget_ready" && budget != null) {
-          _flow.add(_FlowItem.budget(budget));
-        }
-        if (resumeCard != null) _flow.add(resumeCard);
-        if (state == "gathering" && resumeCard == null) {
-          // choice 问题卡的选项不落盘，恢复不了原卡：引导直接接着说
-          _flow.add(_FlowItem.say("接着上次的继续——想补或想改什么，直接说就行。"));
-        }
       });
-      _notifyActive();
-      _scrollToBottom();
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -3381,27 +2690,21 @@ class _PlanningStageState extends State<_PlanningStage> {
         behavior: SnackBarBehavior.floating,
         duration: const Duration(seconds: 2),
       ));
-    } finally {
-      if (mounted) setState(() => _busy = false);
     }
   }
 
   /// 侧边栏「新会话」：清空当前流回 idle 开新的一条；刚才的会话已落盘，
   /// 侧边栏里随时点回来。
   void _startNewPlan() {
-    if (_busy) return;
-    if (!_flowStarted && _sessionId == null) return;
+    if (_ctrl.busy) return;
+    if (!_ctrl.flowStarted && _ctrl.sessionId == null) return;
     setState(() {
-      _flowStarted = false;
-      _sessionId = null;
-      _dossier = null;
       _adjustHintText = null;
       _ticketMoment = null;
       _guidePreview = null;
-      _flow.clear();
     });
+    _ctrl.reset();
     _input.clear();
-    _notifyActive();
   }
 
   /// 草案 → 打开完整行程界面。
@@ -3413,7 +2716,7 @@ class _PlanningStageState extends State<_PlanningStage> {
   /// 档案栏「改」：改口径走自由消息（服务端 answerUpdates 覆盖旧答案），
   /// 这里只负责聚焦输入框并给一句「该说什么」的提示。
   void _beginAdjust(_DossierFactData fact) {
-    if (_busy) return;
+    if (_ctrl.busy) return;
     setState(() => _adjustHintText =
         '想改「${fact.label} · ${fact.value}」？直接说，例如：${_adjustExample(fact.id)}');
     _inputFocus.requestFocus();
@@ -3437,7 +2740,7 @@ class _PlanningStageState extends State<_PlanningStage> {
   @override
   Widget build(BuildContext context) {
     final _StageColors c = _StageColors.of(context);
-    final _DossierData? dossier = _flowStarted ? _dossier : null;
+    final _DossierData? dossier = _ctrl.flowStarted ? _ctrl.dossier : null;
     return Stack(
       children: <Widget>[
         LayoutBuilder(
@@ -3472,7 +2775,7 @@ class _PlanningStageState extends State<_PlanningStage> {
                             colors: c,
                             budget: _latestBudget,
                             draft: _latestDraft,
-                            enabled: !_busy,
+                            enabled: !_ctrl.busy,
                             onEdit: _beginAdjust,
                           ),
                         ),
@@ -3545,7 +2848,7 @@ class _PlanningStageState extends State<_PlanningStage> {
             colors: c,
             sessions: widget.sessions,
             activeId: activeId,
-            busy: _busy,
+            busy: _ctrl.busy,
             onNew: _startNewPlan,
             onOpen: (_PlanSessionSummary s) => unawaited(_resumeSession(s)),
           ),
@@ -3554,19 +2857,10 @@ class _PlanningStageState extends State<_PlanningStage> {
     );
   }
 
-  /// 卡片类流条目（整个规划流程只把最后一张放进玻璃气泡）。
-  static bool _isCardKind(_FlowKind kind) =>
-      kind == _FlowKind.choice ||
-      kind == _FlowKind.guide ||
-      kind == _FlowKind.wishlist ||
-      kind == _FlowKind.booking ||
-      kind == _FlowKind.budget ||
-      kind == _FlowKind.draft;
-
-  /// 最后一张卡在 _flow 里的下标；没有卡片时为 -1。
-  int _lastCardIndex() {
-    for (int i = _flow.length - 1; i >= 0; i--) {
-      if (_isCardKind(_flow[i].kind)) return i;
+  /// 最后一张卡在流里的下标；没有卡片时为 -1。
+  int _lastCardIndex(List<_FlowItem> flow) {
+    for (int i = flow.length - 1; i >= 0; i--) {
+      if (_isPlanCardKind(flow[i].kind)) return i;
     }
     return -1;
   }
@@ -3574,31 +2868,46 @@ class _PlanningStageState extends State<_PlanningStage> {
   /// 中栏：对话流 + 输入框（idle 时输入框垂直居中）。
   /// Key 供实机取证定位「流内动作」与「档案栏动作」，避免两处同名文字互相误点。
   Widget _buildFlowColumn(_StageColors c) {
+    final List<_FlowItem> flow = _ctrl.flow;
+    final bool flowStarted = _ctrl.flowStarted;
+    final int cardIndex = _lastCardIndex(flow);
     // 文本类条目按原顺序保留；卡片类只渲染最后一张（其余隐藏）。
-    final List<_FlowItem> texts = <_FlowItem>[
-      for (final _FlowItem f in _flow)
-        if (!_isCardKind(f.kind)) f,
-    ];
-    final int cardIndex = _lastCardIndex();
+    // 卡后若还有文本（如最终方案后的天气卡），单独放卡片下方，保证「最后」。
+    final List<_FlowItem> before = <_FlowItem>[];
+    final List<_FlowItem> after = <_FlowItem>[];
+    for (int i = 0; i < flow.length; i++) {
+      if (_isPlanCardKind(flow[i].kind)) continue;
+      if (cardIndex >= 0 && i > cardIndex) {
+        after.add(flow[i]);
+      } else {
+        before.add(flow[i]);
+      }
+    }
     return Column(
       key: const Key("planning-flow"),
       children: <Widget>[
         // 对话流（idle 时隐藏）：flow 独占剩余空间；内容居中，与主对话同宽
-        if (_flowStarted)
+        if (flowStarted)
           Expanded(
             child: ListView.builder(
               controller: _scroll,
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-              itemCount: texts.length + 1,
+              itemCount: before.length + 1 + after.length,
               itemBuilder: (BuildContext context, int index) {
-                final Widget child = index < texts.length
-                    ? _buildFlowItem(context, texts[index], c)
-                    : _buildCardBubble(
-                        context,
-                        c,
-                        cardIndex < 0 ? null : _flow[cardIndex],
-                        cardIndex,
-                      );
+                final Widget child;
+                if (index < before.length) {
+                  child = _buildFlowItem(context, before[index], c);
+                } else if (index == before.length) {
+                  child = _buildCardBubble(
+                    context,
+                    c,
+                    cardIndex < 0 ? null : flow[cardIndex],
+                    cardIndex,
+                  );
+                } else {
+                  child = _buildFlowItem(
+                      context, after[index - before.length - 1], c);
+                }
                 return Align(
                   alignment: Alignment.topCenter,
                   child: ConstrainedBox(
@@ -3611,7 +2920,7 @@ class _PlanningStageState extends State<_PlanningStage> {
             ),
           ),
         // 输入区：idle 垂直居中，flow 落底部
-        if (_flowStarted)
+        if (flowStarted)
           _buildComposer(c)
         else
           Expanded(child: Center(child: _buildComposer(c))),
@@ -3629,11 +2938,12 @@ class _PlanningStageState extends State<_PlanningStage> {
     int cardIndex,
   ) {
     final bool hasCard = card != null;
+    final _DossierData? dossier = _ctrl.dossier;
     final List<_DossierStepData> steps =
-        _dossier?.steps ?? const <_DossierStepData>[];
+        dossier?.steps ?? const <_DossierStepData>[];
     final List<_DossierFactData> facts = <_DossierFactData>[
-      if (_dossier != null)
-        for (final _DossierFactData f in _dossier!.facts)
+      if (dossier != null)
+        for (final _DossierFactData f in dossier.facts)
           if (f.set) f,
     ];
     return Container(
@@ -3776,14 +3086,14 @@ class _PlanningStageState extends State<_PlanningStage> {
   Widget _buildComposer(_StageColors c) {
     return Padding(
       padding: EdgeInsets.fromLTRB(
-          24, 8, 24, _flowStarted ? 18 : 0),
+          24, 8, 24, _ctrl.flowStarted ? 18 : 0),
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: _kContentMaxWidth),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
             // 居中罗盘图标（仅 idle，无引导文案）
-            if (!_flowStarted) ...<Widget>[
+            if (!_ctrl.flowStarted) ...<Widget>[
               GestureDetector(
                 // 临时调试：点罗盘直接预览出票动画（验证后移除）。
                 onTap: _previewTicketMoment,
@@ -3803,14 +3113,14 @@ class _PlanningStageState extends State<_PlanningStage> {
               controller: _input,
               focusNode: _inputFocus,
               colors: c,
-              enabled: !_busy,
+              enabled: !_ctrl.busy,
               placeholder: _adjustHintText ??
-                  (_flowStarted
+                  (_ctrl.flowStarted
                       ? "随时补充或调整，比如：第二天想去都江堰"
                       : "想去哪儿玩？比如：成都吃三天"),
               onSend: _send,
             ),
-            if (!_flowStarted) const SizedBox(height: 48),
+            if (!_ctrl.flowStarted) const SizedBox(height: 48),
           ],
         ),
       ),
@@ -3821,14 +3131,6 @@ class _PlanningStageState extends State<_PlanningStage> {
   String get _agentLabel => (widget.agentName ?? "").trim();
 
   /// 分段筛选卡的说明文案：单段卡按段写，兼容多段合卡的旧口径。
-  String _guideStageDesc(_GuideCardData card) {
-    final String key = card.cats.length == 1 ? card.cats.first.key : "";
-    return switch (key) {
-      "view" => "点一行就是选它；想去的没在列表里，后面可以自己补。",
-      "stay" => "点一行就是选它；没合适的后面可以自己补。",
-      _ => "点一行就是选它；想去的没在列表里，下一步可以自己补。",
-    };
-  }
 
   /// 临时调试：点罗盘直接预览出票动画（验证后移除）。
   void _previewTicketMoment() {
@@ -3864,236 +3166,27 @@ class _PlanningStageState extends State<_PlanningStage> {
       ? "在输入框说想改哪里，比如：$example"
       : "告诉 $_agentLabel 想改哪里，比如：$example";
 
-  Widget _buildFlowItem(BuildContext context, _FlowItem item, _StageColors c) {
-    switch (item.kind) {
-      case _FlowKind.user:
-        return Align(
-          alignment: Alignment.centerRight,
-          child: Container(
-            margin: const EdgeInsets.only(bottom: 16),
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
-            constraints: const BoxConstraints(maxWidth: 420),
-            decoration: BoxDecoration(
-              color: c.accentSoft,
-              border: Border.all(color: c.borderSoft),
-              borderRadius: BorderRadius.circular(15),
-            ),
-            child: Text(item.text,
-                style: TextStyle(fontSize: 13.5, height: 1.6, color: c.text)),
-          ),
-        );
-      case _FlowKind.say:
-      case _FlowKind.error:
-        final bool isError = item.kind == _FlowKind.error;
-        return _AgentBlock(
-          name: _agentLabel,
-          colors: c,
-          child: Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-            decoration: BoxDecoration(
-              color: c.card,
-              border: Border.all(
-                  color: isError ? c.orange.withValues(alpha: 0.45) : c.borderSoft),
-              borderRadius: BorderRadius.circular(15),
-            ),
-            child: Text(
-              item.text,
-              style: TextStyle(
-                fontSize: 13.5,
-                height: 1.65,
-                color: isError ? c.orange : c.text,
-              ),
-            ),
-          ),
-        );
-      case _FlowKind.typing:
-        return _AgentBlock(name: _agentLabel, colors: c, child: _TypingDots(colors: c));
-      case _FlowKind.weather:
-        final _WeatherCardData card = item.weather!;
-        return _AgentBlock(
-          name: _agentLabel,
-          colors: c,
-          child: _StageCardShell(
-            colors: c,
-            icon: Icons.wb_sunny_outlined,
-            stage: card.title.isEmpty ? "目的地天气" : card.title,
-            trailing: card.sub.isEmpty
-                ? null
-                : Text(card.sub, style: TextStyle(fontSize: 10.5, color: c.muted)),
-            child: _WeatherPanel(card: card, colors: c),
-          ),
-        );
-      case _FlowKind.choice:
-        final _ChoiceCardData card = item.choice!;
-        final _CardProgress? progress = card.progress;
-        return _AgentBlock(
-          name: _agentLabel,
-          colors: c,
-          child: _StageCardShell(
-            colors: c,
-            icon: _stageIcon(card.id),
-            stage: card.stage.isNotEmpty ? card.stage : "行程偏好",
-            trailing: progress != null && progress.total > 0
-                ? _StageTrailing(
-                    text: "已确认 ${progress.done}/${progress.total}",
-                    colors: c,
-                  )
-                : null,
-            lead: card.title.isEmpty ? null : card.title,
-            desc: card.infer.isNotEmpty
-                ? "选了同行人，节奏我替你定；不合适点「改」。"
-                : card.multi
-                    ? "可以多选，选完按「就这些」。"
-                    : card.allowNote
-                        ? "点一个就好，也可以直接写。"
-                        : null,
-            child: _ChoiceCard(
-              card: card,
-              colors: c,
-              enabled: !_busy,
-              onConfirm: (List<String> values, String? note) =>
-                  _sendChoice(item, card, values, note),
-            ),
-          ),
-        );
-      case _FlowKind.guide:
-        final _GuideCardData card = item.guide!;
-        return _AgentBlock(
-          name: _agentLabel,
-          colors: c,
-          child: _StageCardShell(
-            colors: c,
-            icon: Icons.explore_outlined,
-            stage: card.stage.isEmpty ? "挑一挑" : card.stage,
-            lead: card.title.isEmpty ? "这三天想给${card.destination}留哪些地方？" : card.title,
-            desc: _guideStageDesc(card),
-            child: _GuideSelectCard(
-              card: card,
-              colors: c,
-              enabled: !_busy,
-              onConfirm: () => _submitGuide(item, card),
-              onDelegate: () => _submitGuide(item, card, delegate: true),
-              onPreview: (_GuideItemData entry, String catLabel, int index) =>
-                  setState(() => _guidePreview = _GuidePreviewData(
-                      catLabel: catLabel, item: entry, index: index)),
-            ),
-          ),
-        );
-      case _FlowKind.wishlist:
-        final _WishlistCardData card = item.wishlist!;
-        return _AgentBlock(
-          name: _agentLabel,
-          colors: c,
-          child: _StageCardShell(
-            colors: c,
-            icon: Icons.playlist_add_outlined,
-            stage: card.stage.isEmpty ? "再补一句" : card.stage,
-            trailing: _StageTrailing(text: "可跳过", colors: c),
-            lead: card.title,
-            desc: card.sub.isEmpty ? "写名字就行，几个用顿号隔开；没有就跳过。" : card.sub,
-            child: _WishlistAddCard(
-              card: card,
-              colors: c,
-              enabled: !_busy,
-              onSubmit: (Map<String, List<String>> extras, String note) =>
-                  _submitExtras(item, extras, note),
-            ),
-          ),
-        );
-      case _FlowKind.booking:
-        final _BookingCardData card = item.booking!;
-        return _AgentBlock(
-          name: _agentLabel,
-          colors: c,
-          child: _StageCardShell(
-            colors: c,
-            icon: Icons.book_online_outlined,
-            stage: card.stage.isEmpty ? "预订安排" : card.stage,
-            trailing: _StageTrailing(text: "可先不订", colors: c),
-            lead: card.title.isEmpty ? "先把大交通和住宿定一下" : card.title,
-            desc: card.sub.isEmpty
-                ? "实时班次与房价，选中的会算进预算和行程；不合适就先不订。"
-                : card.sub,
-            child: _BookingCard(
-              card: card,
-              colors: c,
-              enabled: !_busy,
-              onConfirm: (String? transportKey, String? hotelKey) =>
-                  _submitBooking(item, card, transportKey, hotelKey),
-            ),
-          ),
-        );
-      case _FlowKind.budget:
-        return _AgentBlock(
-          name: _agentLabel,
-          colors: c,
-          child: _StageCardShell(
-            colors: c,
-            icon: Icons.receipt_long_outlined,
-            stage: "预算确认",
-            lead: "确认这版预算，我就按它出方案",
-            child: _BudgetCard(
-              budget: item.budget!,
-              colors: c,
-              enabled: !_busy,
-              onApprove: _approve,
-              onAdjust: () {
-                _inputFocus.requestFocus();
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text(
-                        _adjustHint("住宿换民宿、预算再省一点"),
-                        style: const TextStyle(fontSize: 12)),
-                    behavior: SnackBarBehavior.floating,
-                    duration: const Duration(seconds: 2),
-                  ),
-                );
-              },
-            ),
-          ),
-        );
-      case _FlowKind.draft:
-        final _DraftData draft = item.draft!;
-        return _AgentBlock(
-          name: _agentLabel,
-          colors: c,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Align(
-                alignment: Alignment.centerLeft,
-                child: _DraftCard(
-                  draft: draft,
-                  colors: c,
-                  enabled: !_busy,
-                  onGenerate: () => _openDraft(draft),
-                  onAdjust: () {
-                    _inputFocus.requestFocus();
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: Text(
-                            _adjustHint("第二天想去都江堰"),
-                            style: const TextStyle(fontSize: 12)),
-                        behavior: SnackBarBehavior.floating,
-                        duration: const Duration(seconds: 2),
-                      ),
-                    );
-                  },
-                ),
-              ),
-              if (draft.days.isNotEmpty) ...<Widget>[
-                const SizedBox(height: 10),
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: _DraftDetailCard(draft: draft, colors: c),
-                ),
-              ],
-            ],
-          ),
-        );
-    }
-  }
+  Widget _buildFlowItem(BuildContext context, _FlowItem item, _StageColors c) =>
+      _buildPlanFlowItem(
+        context: context,
+        item: item,
+        c: c,
+        ctrl: _ctrl,
+        agentLabel: _agentLabel,
+        onOpenDraft: _openDraft,
+        onGuidePreview: (_GuideItemData entry, String catLabel, int index) =>
+            setState(() => _guidePreview = _GuidePreviewData(
+                catLabel: catLabel, item: entry, index: index)),
+        onAdjust: (String example) {
+          _inputFocus.requestFocus();
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(_adjustHint(example),
+                style: const TextStyle(fontSize: 12)),
+            behavior: SnackBarBehavior.floating,
+            duration: const Duration(seconds: 2),
+          ));
+        },
+      );
 }
 
 /// 说话块（用户给 Agent 取的名字 + 内容；未命名时不显示名字行）。
@@ -5230,31 +4323,73 @@ class _GuideSelectCard extends StatefulWidget {
 }
 
 class _GuideSelectCardState extends State<_GuideSelectCard> {
-  int get _pickedCount => widget.card.cats
+  /// 种草只选游玩地点（2026-11-14 用户定稿）：住宿留到预订卡用真实房价选。
+  /// 有景点段时隐藏住宿段；只有住宿段的旧卡照旧展示。
+  List<_GuideCatData> get _visibleCats {
+    final List<_GuideCatData> all = widget.card.cats;
+    final bool hasView = all.any((_GuideCatData c) => c.key == "view");
+    if (!hasView) return all;
+    return all.where((_GuideCatData c) => c.key == "view").toList();
+  }
+
+  int get _pickedCount => _visibleCats
       .expand((_GuideCatData c) => c.items)
       .where((_GuideItemData i) => i.picked)
       .length;
+
+  /// 景点段：按设计稿渲染「简短介绍 + 三图 + 右上圆选」种草卡。
+  /// 标题不单独占行，地名并入介绍开头；服务端介绍已带评分口径。
+  Widget _buildSeedPlaceCard(_StageColors c, _GuideItemData item) {
+    final String intro = item.intro.trim();
+    final String text = intro.isEmpty
+        ? item.name
+        : (item.name.isEmpty || intro.startsWith(item.name))
+            ? intro
+            : "${item.name}：$intro";
+    return TravelSeedPlaceCard(
+      place: TravelSeedPlace(
+        id: item.name,
+        name: item.name,
+        intro: text,
+        images: <String>[
+          for (final String p in item.photos.take(3))
+            LinkUtils.resolveMediaUrlForHeaders(p),
+        ],
+      ),
+      selected: item.picked,
+      onChanged: (bool picked) => setState(() => item.picked = picked),
+      theme: TravelSeedCardTheme(
+        background: c.card2,
+        text: c.text,
+        accent: c.accent,
+        onAccent: c.onAccent,
+        border: c.borderSoft,
+        photoFallback: c.card,
+        photoFallbackIcon: c.muted,
+      ),
+    );
+  }
 
   @override
   void initState() {
     super.initState();
     // 出卡即预热本屏实拍图：滚到哪都能直接见画面，不闪一层占位。
     TravelImageWarmer.warm(<String>[
-      for (final _GuideCatData cat in widget.card.cats)
+      for (final _GuideCatData cat in _visibleCats)
         for (final _GuideItemData i in cat.items)
-          for (final String u in i.photos) LinkUtils.resolveMediaUrl(u),
+          for (final String u in i.photos) LinkUtils.resolveMediaUrlForHeaders(u),
     ]);
   }
 
   @override
   Widget build(BuildContext context) {
     final _StageColors c = widget.colors;
-    final List<_GuideCatData> cats = widget.card.cats;
+    final List<_GuideCatData> cats = _visibleCats;
     final String singleKey =
         cats.length == 1 ? cats.first.key : "";
     final String measure = singleKey == "stay" ? "家" : "处";
     final String confirmLabel = switch (singleKey) {
-      "view" => "就这些景点，挑住的",
+      "view" => "就这些景点",
       "stay" => "就住这，排行程",
       _ => "就按这些排行程",
     };
@@ -5277,17 +4412,23 @@ class _GuideSelectCardState extends State<_GuideSelectCard> {
               ),
             ),
           for (int j = 0; j < cats[i].items.length; j++)
-            _GuideRow(
-              entry: cats[i].items[j],
-              catLabel: cats[i].label,
-              colors: c,
-              enabled: widget.enabled,
-              topSep: j > 0,
-              onToggle: () => setState(
-                  () => cats[i].items[j].picked = !cats[i].items[j].picked),
-              onPreview: (int photoIndex) =>
-                  widget.onPreview(cats[i].items[j], cats[i].label, photoIndex),
-            ),
+            if (cats[i].key == "view")
+              Padding(
+                padding: EdgeInsets.only(top: j == 0 ? 0 : 10),
+                child: _buildSeedPlaceCard(c, cats[i].items[j]),
+              )
+            else
+              _GuideRow(
+                entry: cats[i].items[j],
+                catLabel: cats[i].label,
+                colors: c,
+                enabled: widget.enabled,
+                topSep: j > 0,
+                onToggle: () => setState(
+                    () => cats[i].items[j].picked = !cats[i].items[j].picked),
+                onPreview: (int photoIndex) => widget.onPreview(
+                    cats[i].items[j], cats[i].label, photoIndex),
+              ),
         ],
         Container(
           margin: const EdgeInsets.only(top: 4),
@@ -5300,7 +4441,9 @@ class _GuideSelectCardState extends State<_GuideSelectCard> {
                 child: Text(
                   _pickedCount > 0
                       ? "已选 $_pickedCount $measure"
-                      : "还没选——点一行就是选它",
+                      : singleKey == "view"
+                          ? "还没选——点一张地点卡就是选它"
+                          : "还没选——点一行就是选它",
                   style: TextStyle(fontSize: 11.5, color: c.text2),
                 ),
               ),
@@ -5824,7 +4967,7 @@ class _PhotoTile extends StatelessWidget {
                 _GuidePhotoFallback(colors: c, name: name)
               else
                 CachedMediaImage(
-                  url: LinkUtils.resolveMediaUrl(url),
+                  url: LinkUtils.resolveMediaUrlForHeaders(url),
                   fit: BoxFit.cover,
                   errorBuilder:
                       (BuildContext _, Object __, StackTrace? ___) =>
@@ -6041,7 +5184,7 @@ class _GuideViewerOverlayState extends State<_GuideViewerOverlay> {
                                           minScale: 0.6,
                                           maxScale: 6,
                                           child: CachedMediaImage(
-                                            url: LinkUtils.resolveMediaUrl(
+                                            url: LinkUtils.resolveMediaUrlForHeaders(
                                                 photos[_index]),
                                             fit: BoxFit.contain,
                                             errorBuilder: (BuildContext _,
@@ -6108,7 +5251,7 @@ class _GuideViewerOverlayState extends State<_GuideViewerOverlay> {
                                                 ),
                                               ),
                                               child: CachedMediaImage(
-                                                url: LinkUtils.resolveMediaUrl(
+                                                url: LinkUtils.resolveMediaUrlForHeaders(
                                                     photos[i]),
                                                 fit: BoxFit.cover,
                                                 errorBuilder: (BuildContext _,
@@ -6283,373 +5426,6 @@ class _ViewerArrow extends StatelessWidget {
             border: Border.all(color: colors.borderSoft),
           ),
           child: Icon(icon, size: 16, color: colors.text2),
-        ),
-      ),
-    );
-  }
-}
-
-/// 预订选择卡：大交通（机票/高铁）与住宿两段单选，均可不选。
-/// 票价取不到时如实标「待核价」；选中的项由服务端算进预算与行程。
-class _BookingCard extends StatefulWidget {
-  const _BookingCard({
-    required this.card,
-    required this.colors,
-    required this.enabled,
-    required this.onConfirm,
-  });
-
-  final _BookingCardData card;
-  final _StageColors colors;
-  final bool enabled;
-  final void Function(String? transportKey, String? hotelKey) onConfirm;
-
-  @override
-  State<_BookingCard> createState() => _BookingCardState();
-}
-
-class _BookingCardState extends State<_BookingCard> {
-  /// 选中项（null=先不订）；恢复会话时用服务端回显的选择初始化。
-  String? _transportKey;
-  String? _hotelKey;
-  bool _inited = false;
-
-  void _ensureInit() {
-    if (_inited) return;
-    _inited = true;
-    _transportKey = widget.card.transportKey.isEmpty ? null : widget.card.transportKey;
-    _hotelKey = widget.card.hotelKey.isEmpty ? null : widget.card.hotelKey;
-  }
-
-  void _tapTransport(String key) {
-    if (!widget.enabled) return;
-    setState(() => _transportKey = _transportKey == key ? null : key);
-  }
-
-  void _tapHotel(String key) {
-    if (!widget.enabled) return;
-    setState(() => _hotelKey = _hotelKey == key ? null : key);
-  }
-
-  void _confirm() {
-    if (!widget.enabled) return;
-    _ensureInit();
-    widget.onConfirm(_transportKey, _hotelKey);
-  }
-
-  String _priceLabel(double? amount, {bool perNight = false}) {
-    if (amount == null) return "待核价";
-    final String n = amount == amount.roundToDouble()
-        ? amount.round().toString()
-        : amount.toStringAsFixed(2);
-    return "¥$n${perNight ? "/晚" : ""}";
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    _ensureInit();
-    final _StageColors c = widget.colors;
-    final _BookingCardData card = widget.card;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: <Widget>[
-        if (card.trial)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: Text(
-              "体验模式：部分价格被平台脱敏，标「待核价」的以下单页实价为准。",
-              style: TextStyle(fontSize: 10.5, height: 1.5, color: c.orange),
-            ),
-          ),
-        if (card.transports.isNotEmpty) ...<Widget>[
-          Text("大交通 · 往返", style: TextStyle(fontSize: 10.5, color: c.muted)),
-          const SizedBox(height: 6),
-          for (final _BookingTransportData t in card.transports)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 6),
-              child: _BookingTransportRow(
-                data: t,
-                colors: c,
-                selected: _transportKey == t.key,
-                enabled: widget.enabled,
-                priceLabel: _priceLabel(t.amount),
-                onTap: () => _tapTransport(t.key),
-              ),
-            ),
-        ],
-        if (card.hotels.isNotEmpty) ...<Widget>[
-          const SizedBox(height: 8),
-          Text(
-            card.nights > 0 ? "住宿 · ${card.nights} 晚" : "住宿",
-            style: TextStyle(fontSize: 10.5, color: c.muted),
-          ),
-          const SizedBox(height: 6),
-          for (final _BookingHotelData h in card.hotels)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 6),
-              child: _BookingHotelRow(
-                data: h,
-                colors: c,
-                selected: _hotelKey == h.key,
-                enabled: widget.enabled,
-                priceLabel: _priceLabel(h.amount, perNight: true),
-                onTap: () => _tapHotel(h.key),
-              ),
-            ),
-        ],
-        if (card.transports.isEmpty && card.hotels.isEmpty)
-          Text("这趟暂时没查到可选的班次和酒店，先按参考价排。",
-              style: TextStyle(fontSize: 11.5, color: c.muted)),
-        const SizedBox(height: 10),
-        Row(
-          children: <Widget>[
-            _KitPrimaryButton(
-              label: (_transportKey != null || _hotelKey != null)
-                  ? "就按这个安排，去挑景点"
-                  : "先不订，直接去挑景点",
-              colors: c,
-              enabled: widget.enabled,
-              onTap: _confirm,
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(
-                _transportKey == null && _hotelKey == null
-                    ? "两段都不选也行，选中的会算进预算和行程。"
-                    : "再点一下已选项可取消。",
-                maxLines: 2,
-                style: TextStyle(fontSize: 10.5, height: 1.4, color: c.muted),
-              ),
-            ),
-          ],
-        ),
-      ],
-    );
-  }
-}
-
-/// 大交通选项行：班次号 + 去返程时刻 + 实价/待核价，选中亮 accent。
-class _BookingTransportRow extends StatelessWidget {
-  const _BookingTransportRow({
-    required this.data,
-    required this.colors,
-    required this.selected,
-    required this.enabled,
-    required this.priceLabel,
-    required this.onTap,
-  });
-
-  final _BookingTransportData data;
-  final _StageColors colors;
-  final bool selected;
-  final bool enabled;
-  final String priceLabel;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final _StageColors c = colors;
-    final _BookingTransportData t = data;
-    final String head = t.no.isEmpty
-        ? (t.isTrain ? "火车" : "航班")
-        : "${t.no}${t.carrier.isEmpty ? "" : " · ${t.carrier}"}";
-    final List<String> lines = <String>[
-      if (t.outbound != null) "去程 ${t.outbound!.summary}",
-      if (t.inbound != null) "返程 ${t.inbound!.summary}",
-      if (t.viaHub.isNotEmpty) "经${t.viaHub}转机",
-    ];
-    return GestureDetector(
-      onTap: enabled ? onTap : null,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 120),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-        decoration: BoxDecoration(
-          color: selected ? c.accentSoft : c.card2,
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: selected ? c.accentBorder : c.borderSoft),
-        ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Icon(
-              t.isTrain ? Icons.train_rounded : Icons.flight_takeoff_rounded,
-              size: 15,
-              color: selected ? c.accent : c.text2,
-            ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  Row(
-                    children: <Widget>[
-                      Flexible(
-                        child: Text(
-                          head,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 12.5,
-                            fontWeight: FontWeight.w700,
-                            color: selected ? c.accent : c.text,
-                          ),
-                        ),
-                      ),
-                      if (t.recommended) ...<Widget>[
-                        const SizedBox(width: 6),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 6, vertical: 1.5),
-                          decoration: BoxDecoration(
-                            color: c.accent.withValues(alpha: 0.12),
-                            borderRadius: BorderRadius.circular(6),
-                          ),
-                          child: Text("推荐",
-                              style: TextStyle(
-                                  fontSize: 9.5, color: c.accent)),
-                        ),
-                      ],
-                    ],
-                  ),
-                  if (lines.isNotEmpty) ...<Widget>[
-                    const SizedBox(height: 3),
-                    Text(
-                      lines.join("\n"),
-                      style: TextStyle(
-                          fontSize: 10.5, height: 1.45, color: c.text2),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            const SizedBox(width: 8),
-            Text(
-              priceLabel,
-              style: TextStyle(
-                fontSize: 12.5,
-                fontWeight: FontWeight.w700,
-                color: priceLabel == "待核价" ? c.muted : (selected ? c.accent : c.text),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// 酒店选项行：名称 + 评分/档次/位置 + 每晚价，选中亮 accent。
-class _BookingHotelRow extends StatelessWidget {
-  const _BookingHotelRow({
-    required this.data,
-    required this.colors,
-    required this.selected,
-    required this.enabled,
-    required this.priceLabel,
-    required this.onTap,
-  });
-
-  final _BookingHotelData data;
-  final _StageColors colors;
-  final bool selected;
-  final bool enabled;
-  final String priceLabel;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final _StageColors c = colors;
-    final _BookingHotelData h = data;
-    final List<String> meta = <String>[
-      if (h.rating != null) "${h.rating}分",
-      if (h.star.isNotEmpty) h.star,
-      if (h.near.isNotEmpty) h.near,
-    ];
-    return GestureDetector(
-      onTap: enabled ? onTap : null,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 120),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-        decoration: BoxDecoration(
-          color: selected ? c.accentSoft : c.card2,
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: selected ? c.accentBorder : c.borderSoft),
-        ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Icon(Icons.hotel_outlined, size: 15, color: selected ? c.accent : c.text2),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  Row(
-                    children: <Widget>[
-                      Flexible(
-                        child: Text(
-                          h.name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 12.5,
-                            fontWeight: FontWeight.w700,
-                            color: selected ? c.accent : c.text,
-                          ),
-                        ),
-                      ),
-                      if (h.fromPicks) ...<Widget>[
-                        const SizedBox(width: 6),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 6, vertical: 1.5),
-                          decoration: BoxDecoration(
-                            color: c.accent.withValues(alpha: 0.12),
-                            borderRadius: BorderRadius.circular(6),
-                          ),
-                          child: Text("你选过",
-                              style: TextStyle(
-                                  fontSize: 9.5, color: c.accent)),
-                        ),
-                      ] else if (h.recommended) ...<Widget>[
-                        const SizedBox(width: 6),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 6, vertical: 1.5),
-                          decoration: BoxDecoration(
-                            color: c.accent.withValues(alpha: 0.12),
-                            borderRadius: BorderRadius.circular(6),
-                          ),
-                          child: Text("推荐",
-                              style: TextStyle(
-                                  fontSize: 9.5, color: c.accent)),
-                        ),
-                      ],
-                    ],
-                  ),
-                  if (meta.isNotEmpty) ...<Widget>[
-                    const SizedBox(height: 3),
-                    Text(
-                      meta.join(" · "),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                          fontSize: 10.5, height: 1.45, color: c.text2),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            const SizedBox(width: 8),
-            Text(
-              priceLabel,
-              style: TextStyle(
-                fontSize: 12.5,
-                fontWeight: FontWeight.w700,
-                color: priceLabel == "待核价" ? c.muted : (selected ? c.accent : c.text),
-              ),
-            ),
-          ],
         ),
       ),
     );

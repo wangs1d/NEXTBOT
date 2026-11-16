@@ -104,7 +104,10 @@ test("提前提醒只给枚举事实，不给任何成句台词（2026-11-05 二
     const reply = await registry.execute(
       "calendar", {
       action: "create",
-      text: "明天 10:00 提醒我看牙医", timezone: "Asia/Shanghai" },
+      // 后天而非明天：night_before 预告锚在「前一晚 21:00」——用明天做 fixture
+      // 的话，21:00 以后跑测试该时刻已过被过滤（fireMs > nowMs 门），测试变成
+      // 只在白天绿的时钟炸弹。后天保证两段预告恒在未来。
+      text: "后天 10:00 提醒我看牙医", timezone: "Asia/Shanghai" },
       ctx,
     );
     const result = reply.result as Record<string, unknown>;

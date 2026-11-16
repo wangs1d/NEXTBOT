@@ -9,7 +9,7 @@ import { ShortTermMemoryGatewayService } from "../src/services/short-term-memory
 // 存储文件放进系统临时目录，避免测试数据散落到仓库（见项目记忆：测试文件统一管理）
 const storePath = join(mkdtempSync(join(tmpdir(), "short-term-memory-")), "test-short-term-memory.json");
 
-test("buildPromptContext carries mission, preferences, open loops, and recent context across turns", () => {
+test("buildPromptContext carries mission, open loops, and recent context across turns", () => {
   const service = new ShortTermMemoryGatewayService(storePath);
   const sessionId = "session-memory-test";
 
@@ -23,7 +23,9 @@ test("buildPromptContext carries mission, preferences, open loops, and recent co
   const promptContext = service.buildPromptContext(sessionId, "continue that fix");
   assert.ok(promptContext);
   assert.match(promptContext!, /current-mission:/);
-  assert.match(promptContext!, /session-preferences:/);
+  // 2026-11-12 权威源收敛：会话层不再存 preferences/facts 副本（权威位置分别是
+  // USER_PROFILE.md 画像与 structured_facts 档案字段），session-preferences 行退役。
+  assert.doesNotMatch(promptContext!, /session-preferences:/);
   assert.match(promptContext!, /open-loops:/);
   assert.match(promptContext!, /agent-commitments:/);
   assert.match(promptContext!, /recent-context:/);

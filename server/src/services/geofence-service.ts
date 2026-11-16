@@ -24,7 +24,9 @@ import { getLocationDbPath } from "../config/location-env.js";
 import { haversineMeters } from "./geo-utils.js";
 
 export type GeofenceEventKind = "enter" | "leave" | "both";
-export type GeofenceActionType = "reminder" | "agent_task" | "webhook";
+// observe：只观察进出、不执行任何动作。用于「用户确认过的家/公司」注册系统围栏，
+// 让后台也能拿到 enter/leave（App 被杀也能触发），语义转换由服务端统一处理。
+export type GeofenceActionType = "reminder" | "agent_task" | "webhook" | "observe";
 
 export type GeofenceDefinition = {
   id: string;
@@ -68,7 +70,12 @@ export type GeofenceOptions = {
 };
 
 export const GEOFENCE_EVENT_KINDS: GeofenceEventKind[] = ["enter", "leave", "both"];
-export const GEOFENCE_ACTION_TYPES: GeofenceActionType[] = ["reminder", "agent_task", "webhook"];
+export const GEOFENCE_ACTION_TYPES: GeofenceActionType[] = [
+  "reminder",
+  "agent_task",
+  "webhook",
+  "observe",
+];
 
 const NAME_MAX = 80;
 const RADIUS_MIN = 20;
@@ -257,6 +264,10 @@ export function inferPlaceKind(name: string | undefined | null): "home" | "work"
       }
       break;
     }
+    case "observe": {
+      // 只观察：不需要动作配置
+      break;
+    }
   }
   return null;
 }
@@ -381,25 +392,43 @@ export class GeofenceService {
    *
    * 首次见到某围栏的位置只建立基线（不发事件）——用户创建围栏时人已在栏内，
    * 不应立刻触发「到达」；leave 后再次 enter 才是真正的事件。
+   *
+   * 精度裁决（2026-11-13）：loc.accuracyMeters 表示该 fix 的 68% 置信半径。
+   * 当 fix 精度差到「连围栏边界都定不了」（accuracy > 半径）时，本次判定不可信：
+   * 室内漂移的 WiFi fix 常有 100~500m 精度，会把人判到隔壁街区，进而误报
+   * 「到家/到公司」。此时**推进基线但不产生事件**，等下一个高精度 fix 纠正。
+   * 精度未知（undefined/null）时按老行为判定——多数上报带精度，缺省不阻塞主链路。
    */
   processLocationReport(
     actorId: string,
-    loc: { latitude: number; longitude: number },
+    loc: { latitude: number; longitude: number; accuracyMeters?: number },
   ): GeofenceTriggeredEvent[] {
     const fences = this.list(actorId).filter((f) => f.enabled);
     if (fences.length === 0) return [];
     const atIso = this.now().toISOString();
     const triggered: GeofenceTriggeredEvent[] = [];
+    const fixAccuracy =
+      typeof loc.accuracyMeters === "number" && Number.isFinite(loc.accuracyMeters)
+        ? loc.accuracyMeters
+        : null;
 
     for (const fence of fences) {
       const distance = haversineMeters(loc, fence);
       const inside = distance <= fence.radiusMeters;
+      // 精度不足以裁定边界：本次 inside 不可信 → **既不推进基线也不发事件**。
+      // 推进基线是错的：低精度 fix 若把 inside 误写成 true，随后的高精度 fix 会
+      // 因 wasInside === inside 被当成「没变化」而漏掉真正的到达事件。
+      // 保留旧基线，等下一个可信 fix 重新裁定。
+      const tooImprecise = fixAccuracy !== null && fixAccuracy > fence.radiusMeters;
       const state = this.db
         .prepare(`SELECT * FROM geofence_states WHERE fence_id = ?`)
         .get(fence.id) as Record<string, unknown> | undefined;
       const known = state !== undefined;
       const wasInside = known ? Number(state.inside) === 1 : null;
       const lastEventAtMs = known ? Date.parse(String(state.last_event_at ?? "")) : NaN;
+
+      // 低精度 fix：不写基线、不发事件，本次判定整体作废。
+      if (tooImprecise) continue;
 
       // 只推进 inside 基线；last_event / last_event_at 是防抖记账，不能被覆盖
       this.db

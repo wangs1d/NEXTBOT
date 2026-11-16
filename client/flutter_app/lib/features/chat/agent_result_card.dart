@@ -1,8 +1,10 @@
+import "../../core/ui/card_metrics.dart";
 import "dart:async";
 
 import "package:flutter/material.dart";
 
 import "../../core/config/api_config.dart";
+import "../../core/config/media_url.dart";
 import "../../core/services/image_preview_launcher.dart";
 import "../../core/services/phone_capture_service.dart";
 import "../../core/services/video_preview_launcher.dart";
@@ -11,7 +13,6 @@ import "../../core/utils/agent_result_parser.dart";
 import "../../core/utils/link_utils.dart";
 import "travel_plan_launcher.dart";
 import "product_pick_card.dart";
-import "price_compare_card.dart";
 import "shopping/shopping_shipment_card.dart";
 import "travel_plan_models.dart";
 import "travel_image_warmer.dart";
@@ -113,9 +114,6 @@ class AgentResultCard extends StatelessWidget {
             onUserAction: onUserAction,
           );
           if (shoppingCard != null) return shoppingCard;
-          if (data.priceCompare != null) {
-            return PriceCompareCard(data: data, cs: cs);
-          }
           return _SpecializedCard(data: data, cs: cs);
         case "search_result":
           // 搜索结果卡已整体退役（2026-11-05）：搜索到的条目只作为模型素材，
@@ -162,19 +160,23 @@ class AgentResultCard extends StatelessWidget {
           // 主推大图 +「为什么是它」+ 渠道实时价 CTA + 备选横滑。
           return ProductPickCard(data: data, cs: cs);
         case "price_compare":
-          // 跨平台实时比价卡（shopping.compare.prices）：新版优先读
-          // extra.shopping 载荷走手机端候选轮播（一屏 2.5 张、逐卡吸附）；
-          // 载荷缺失（历史消息/旧服务端）回退分组报价专用卡。
+          // 跨平台实时比价卡（shopping.compare.prices）。
+          //
+          // 2026-11-13 定稿：**只有横向轮播卡**（一屏露出约 2.5 张、逐卡吸附），
+          // 与 Grok Bot 的商品展示卡同构。每张卡在商品图左上角浮**平台来源标**
+          // （品牌色圆点 + 平台中文名），底行是「平台 · 店铺 · 抓取时刻」，
+          // 没比到价的平台在卡内**显式成行**——用户一眼知道哪家、哪家缺，
+          // 也不用担心模型编一个「淘宝价」出来。
+          //
+          // 竖直列表卡已于 2026-11-13 删除：比价只有这一种形态。
+          // 载荷缺失时（历史消息 / 旧服务端回执）回退通用卡，不白屏即可。
           final Widget? shoppingCompare = buildShoppingCard(
             data: data,
             cs: cs,
             onUserAction: onUserAction,
           );
           if (shoppingCompare != null) return shoppingCompare;
-          if (data.priceCompare == null) {
-            return _SpecializedCard(data: data, cs: cs);
-          }
-          return PriceCompareCard(data: data, cs: cs);
+          return _SpecializedCard(data: data, cs: cs);
         case "reminder_confirm":
           // 手机端提醒确认卡（2026-11-07 拍板方案 A）：只读、一轮一张、
           // 卡内多行；修改/取消由 card.update 原地换卡，不追加新卡。
@@ -215,7 +217,7 @@ class AgentResultCard extends StatelessWidget {
       child: Container(
         // 卡片宽度自然跟随内容(由外层 bubble 约束),最大 390,
         // 避免宽屏下拉成"横幅",实现"刚好包住每行最后那个字"的紧凑效果。
-        constraints: const BoxConstraints(maxWidth: 390),
+        constraints: BoxConstraints(maxWidth: CardMetrics.maxWidth(context)),
         padding: padding,
         decoration: BoxDecoration(
           color: cs.surfaceContainerHigh,
@@ -246,7 +248,7 @@ class AgentResultCard extends StatelessWidget {
                 // 卡片不承载网页跳转：条目只展示结果。
                 final String? thumb =
                     (it.thumbnailUrl != null && it.thumbnailUrl!.isNotEmpty)
-                        ? LinkUtils.resolveMediaUrl(it.thumbnailUrl!)
+                        ? LinkUtils.resolveMediaUrlForHeaders(it.thumbnailUrl!)
                         : null;
                 final Widget row = Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -458,7 +460,7 @@ class _SpecializedCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final (IconData icon, Color color) = _style;
     return Container(
-      constraints: const BoxConstraints(maxWidth: 390),
+      constraints: BoxConstraints(maxWidth: CardMetrics.maxWidth(context)),
       padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
       decoration: BoxDecoration(
         color: cs.surfaceContainerHigh,
@@ -559,7 +561,7 @@ class _ProgressCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      constraints: const BoxConstraints(maxWidth: 390),
+      constraints: BoxConstraints(maxWidth: CardMetrics.maxWidth(context)),
       padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
       decoration: BoxDecoration(
         color: cs.surfaceContainerHigh,
@@ -755,7 +757,7 @@ class _PermissionRequestCard extends StatelessWidget {
     final String buttonLabel =
         (action?.label.isNotEmpty ?? false) ? action!.label : "去系统设置授权";
     return Container(
-      constraints: const BoxConstraints(maxWidth: 390),
+      constraints: BoxConstraints(maxWidth: CardMetrics.maxWidth(context)),
       padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
       decoration: BoxDecoration(
         color: cs.primary.withValues(alpha: 0.06),
@@ -866,7 +868,7 @@ class _QuoteCard extends StatelessWidget {
         ? data.footer
         : (data.items.isNotEmpty ? data.items.first.text : "");
     return Container(
-      constraints: const BoxConstraints(maxWidth: 390),
+      constraints: BoxConstraints(maxWidth: CardMetrics.maxWidth(context)),
       padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
       decoration: BoxDecoration(
         color: cs.primary.withValues(alpha: 0.06),
@@ -936,7 +938,7 @@ class _TimelineCard extends StatelessWidget {
     final Color borderColor = cs.outline.withValues(alpha: 0.22);
 
     return Container(
-      constraints: const BoxConstraints(maxWidth: 390),
+      constraints: BoxConstraints(maxWidth: CardMetrics.maxWidth(context)),
       padding: padding,
       decoration: BoxDecoration(
         color: cs.surfaceContainerHigh,
@@ -1140,7 +1142,7 @@ class _MediaCard extends StatelessWidget {
           playableUrl: it.playableUrl,
         ));
       } else {
-        final String resolved = LinkUtils.resolveMediaUrl(previewUrl!);
+        final String resolved = LinkUtils.resolveMediaUrlForHeaders(previewUrl!);
         // 同一张图不重复展示：地址已在集内则跳过（服务端已去重，此处双保险）
         if (allPhotoUrls.contains(resolved)) continue;
         photos.add((
@@ -1220,7 +1222,7 @@ class _MediaCard extends StatelessWidget {
     }
 
     return Container(
-      constraints: const BoxConstraints(maxWidth: 390),
+      constraints: BoxConstraints(maxWidth: CardMetrics.maxWidth(context)),
       padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
       decoration: BoxDecoration(
         color: cs.surfaceContainerHigh,
@@ -1520,7 +1522,7 @@ class _TravelItineraryCardState extends State<_TravelItineraryCard> {
         plan.days.any((TravelPlanDay d) => d.entries.isNotEmpty);
 
     return Container(
-      constraints: const BoxConstraints(maxWidth: 460),
+      constraints: BoxConstraints(maxWidth: CardMetrics.maxWidth(context)),
       decoration: BoxDecoration(
         color: widget.cs.surfaceContainerHigh,
         borderRadius: BorderRadius.circular(14),
@@ -1785,6 +1787,25 @@ class _TravelItineraryCardState extends State<_TravelItineraryCard> {
 /// 海报背景（候选链版）：兜底渐变常驻底层；候选图从封面起逐张尝试，
 /// 某张加载失败自动落到下一张条目实拍，全失败才露纯渐变——不再「封面一张
 /// 挂掉就永远渐变」。加载中露渐变，不闪占位框。
+/// 海报候选链推进规则（纯函数，单测直接打这个）。
+///
+/// 契约：
+///  - 按 [candidates] 顺序返回**第一个**尚未失败的候选；
+///  - 失败按 URL 记账（[failed]），同一张失败的图在重建中重复回调 errorBuilder
+///    不会二次推进，避免跳过还没尝试过的候选；
+///  - 全部失败返回 null（调用方渲染渐变骨架，不再无休止重试）。
+///
+/// 之所以单独抽出来：这段规则此前只存在于私有 widget 的 errorBuilder 里，只能靠
+/// 「假 HTTP + 数帧」间接验证，测的其实是异步时序而不是规则本身（fake-async 下
+/// 磁盘缓存那条链根本推不动）。规则是契约，widget 只是它的适配器。
+@visibleForTesting
+String? nextPosterCandidate(List<String> candidates, Set<String> failed) {
+  for (final String c in candidates) {
+    if (!failed.contains(c)) return c;
+  }
+  return null;
+}
+
 class _PosterBackdrop extends StatefulWidget {
   const _PosterBackdrop({required this.candidates});
 
@@ -1802,8 +1823,7 @@ class _PosterBackdropState extends State<_PosterBackdrop> {
 
   @override
   Widget build(BuildContext context) {
-    final String? url =
-        widget.candidates.where((String c) => !_failed.contains(c)).firstOrNull;
+    final String? url = nextPosterCandidate(widget.candidates, _failed);
     if (url == null) return _TravelItineraryCard.posterFallback;
     return Stack(
       fit: StackFit.expand,
@@ -1901,7 +1921,7 @@ class MediaInlineRow extends StatelessWidget {
           playableUrl: it.playableUrl,
         ));
       } else {
-        final String resolved = LinkUtils.resolveMediaUrl(previewUrl!);
+        final String resolved = LinkUtils.resolveMediaUrlForHeaders(previewUrl!);
         if (allUrls.contains(resolved)) continue;
         photos.add((
           url: resolved,
@@ -2016,8 +2036,10 @@ class _VideoTile extends StatelessWidget {
   Widget build(BuildContext context) {
     // 有可播流 → 右侧双栏面板内联播放；无流只能打开播放页（角标同步区分，
     // 避免用户点了才发现被带到浏览器）。
+    // 播放目标是 Windows 视频面板（loadStringContent 的 null 原点，同站 Cookie
+    // 不发）→ 只能带 URL 凭证；见 MediaUrl.resolveForRenderer 的边界说明。
     final String? playable = (video.playableUrl ?? "").trim().isNotEmpty
-        ? LinkUtils.resolveMediaUrl(video.playableUrl!.trim())
+        ? MediaUrl.resolveForRenderer(video.playableUrl!.trim())
         : null;
     final Widget thumb = ClipRRect(
       borderRadius: BorderRadius.circular(8),
@@ -2029,7 +2051,7 @@ class _VideoTile extends StatelessWidget {
             if (video.thumbnailUrl != null &&
                 video.thumbnailUrl!.trim().isNotEmpty)
               MediaThumbnail(
-                url: LinkUtils.resolveMediaUrl(video.thumbnailUrl!),
+                url: LinkUtils.resolveMediaUrlForHeaders(video.thumbnailUrl!),
                 cs: cs,
                 errorIcon: Icons.video_file_outlined,
                 borderRadius: 0,
@@ -2121,7 +2143,7 @@ class _ProductCompareCard extends StatelessWidget {
         data.sides.isEmpty ? const <AgentResultCardSide>[] : data.sides;
 
     return Container(
-      constraints: const BoxConstraints(maxWidth: 390),
+      constraints: BoxConstraints(maxWidth: CardMetrics.maxWidth(context)),
       decoration: BoxDecoration(
         color: cs.surfaceContainerHigh,
         borderRadius: BorderRadius.circular(12),
@@ -2211,7 +2233,7 @@ class _ProductCompareCard extends StatelessWidget {
                   AspectRatio(
                     aspectRatio: 0.74,
                     child: CachedMediaImage(
-                      url: LinkUtils.resolveMediaUrl(side.image!),
+                      url: LinkUtils.resolveMediaUrlForHeaders(side.image!),
                       fit: BoxFit.cover,
                       filterQuality: FilterQuality.low,
                       errorBuilder: (_, __, ___) => _imageFallback(),
@@ -2498,7 +2520,7 @@ class _MorningBriefingChatCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      constraints: const BoxConstraints(maxWidth: 430),
+      constraints: BoxConstraints(maxWidth: CardMetrics.maxWidth(context)),
       decoration: BoxDecoration(
         color: cs.surfaceContainerHigh,
         borderRadius: BorderRadius.circular(10),

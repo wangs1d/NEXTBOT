@@ -9,7 +9,7 @@
  *
  * 数据源：
  *   - 路况/路线：高德 v3 驾车路径规划（实时时长估算），无 Key 自动降级 OSRM（computeRoute）
- *   - 天气：Open-Meteo（WeatherService.getBrief，免费无 Key）
+ *   - 天气：高德官方实况/4 日预报为主（AMAP_WEB_KEY），Open-Meteo 补逐小时与海外兜底
  *   - 票夹：travel-ticket-store（data/travel-tickets 落盘）
  *
  * 到站约车（opt-in）：用户在录入机票/火车票时勾选「到站约车」→ parse-ticket

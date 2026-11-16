@@ -1,4 +1,5 @@
 import { resolveActorId } from "../agent/actor-id.js";
+import { startBrowserPreviewStream } from "../services/browser-preview-stream.js";
 import type { BrowserSessionService } from "../services/browser-session-service.js";
 import { fetchPageWithCookies } from "../services/browser-page-fetch.js";
 import { isBrowserSessionSiteId, type BrowserSessionSiteId } from "../services/browser-session-sites.js";
@@ -56,7 +57,11 @@ export function registerBrowserTools(
       return { ok: false, error: message, siteId };
     }
 
-    const result = await fetchPageWithCookies(url, cookies);
+    const result = await fetchPageWithCookies(url, cookies, {
+      // 云端浏览器画面（2026-11-14）：手机端没有可见浏览器，抓页过程也推到悬浮窗。
+      onPage: (page) =>
+        startBrowserPreviewStream(ctx, page, { mode: "headless", sessionId: `fetch-${siteId}` }).stop,
+    });
     return {
       ok: result.ok,
       siteId,

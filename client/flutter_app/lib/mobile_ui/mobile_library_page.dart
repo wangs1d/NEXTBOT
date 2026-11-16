@@ -149,16 +149,27 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
   /// 预加载上限：资料全部在本机服务端，量级可控；封顶防极端大库挤爆弱网。
   static const int _warmImageCap = 120;
 
+  /// 卡面缩略图解码宽度（物理像素）：卡面 36px/格，3 倍密度足够；不设的话
+  /// Flutter 会按原图 1024~2048px 解码，一屏十几张就把手机内存和解码线程打满。
+  static const int _cardThumbCacheWidth = 160;
+
+  /// 详情页三列网格解码宽度（物理像素）。
+  static const int _gridThumbCacheWidth = 400;
+
   /// 图片预加载（2026-11-12）：数据一到就把照片（新→旧）+ 行程封面
   /// 预热进磁盘缓存，卡片/详情渲染即秒解，不再「进页后图慢慢浮出来」。
-  /// warm 内部有界并发（4 路）+ 静默容错，失败不影响展示。
+  /// warm 走后台通道（2 路）+ 静默容错，不抢占屏上正在渲染的图片。
   void _warmMedia(List<_LibGroup> groups) {
     final List<String> urls = <String>[];
     for (final _LibGroup g in groups) {
+      // 逐条判上限：原实现把 break 放在组循环末尾，单组超过上限仍会多塞一批。
       for (final _LibItem i in g.photos) {
-        urls.add(i.fileUrl);
+        if (urls.length >= _warmImageCap) break;
+        // 预热缩略图而不是原图：单张约几十 KB，120 张也不过几 MB。
+        urls.add(i.thumbUrl);
       }
       for (final _LibItem i in g.items) {
+        if (urls.length >= _warmImageCap) break;
         final String cover = i.coverUrl.trim();
         if (cover.isEmpty) continue;
         urls.add(cover.startsWith("http") ? cover : "${ApiConfig.httpBase}$cover");
@@ -166,7 +177,7 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
       if (urls.length >= _warmImageCap) break;
     }
     if (urls.isEmpty) return;
-    MediaDiskCache.instance.warm(urls.take(_warmImageCap));
+    MediaDiskCache.instance.warm(urls);
   }
 
   /// 打开已完成行程：先拉完整行程（GET /travel/plans/:id），再推原生行程页。
@@ -218,17 +229,19 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
     }).toList(growable: false);
   }
 
-  /// 筛选 chip 的计数：按条目数（与改版前一致，用户点前就知道筛完有多少条）。
+  /// 筛选 chip 的计数口径（2026-11-13 用户确认）：按卡片数统计——列表里一次
+  /// 对话 / 一次规划只渲染一张卡，chip 上的数字应等于点下去看到的卡片数，
+  /// 而不是卡内照片/文件条目数的累加（一张卡 12 张照片显示「图片 12」会对不上）。
   int _countOf(_LibFilter filter) {
     int n = 0;
     for (final _LibGroup g in _groups) {
-      n += g.items.where((i) => _matchFilter(i.type, filter)).length;
+      if (g.hasType(filter)) n += 1;
     }
     return n;
   }
 
-  int get _totalItems =>
-      _groups.fold<int>(0, (sum, g) => sum + g.items.length);
+  /// 「全部」chip：卡片总数（每张卡 = 一次对话 / 一次规划），与列表呈现一致。
+  int get _totalCards => _groups.length;
 
   /// 「文件」= 文档 + 表格；其余三类与条目类型一一对应。
   static bool _matchFilter(_LibType type, _LibFilter filter) {
@@ -335,7 +348,7 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
             scrollDirection: Axis.horizontal,
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
             children: [
-              _chip(p, "全部", null, _totalItems),
+              _chip(p, "全部", null, _totalCards),
               for (final _LibFilter f in _LibFilter.values)
                 if (_countOf(f) > 0 || _filter == f)
                   _chip(p, _filterLabel(f), f, _countOf(f)),
@@ -624,14 +637,17 @@ class _LibItem {
     return "$mm-$dd $hh:$mi";
   }
 
+  /// 类型轴隔离（2026-11-13）：四个筛选 chip 与服务端四个产物桶一一对应——
+  /// 文件←files、图片←images、笔记←notes、行程←travelPlans。files 桶（用户
+  /// 产出文件目录 data/user-files/）里即使落了 .png 后缀也不归入图片轴，
+  /// 否则会同时污染「图片」chip 计数和详情页照片网格（那个网格的图池来自
+  /// images 桶的缩略图链路，files 桶条目塞进去拉流行为不一致）。
   static _LibType _typeOfFileName(String name) {
     final String ext = name.contains(".")
         ? name.substring(name.lastIndexOf(".") + 1).toLowerCase()
         : "";
     const tables = {"xlsx", "xls", "csv", "tsv"};
-    const images = {"png", "jpg", "jpeg", "webp", "gif"};
     if (tables.contains(ext)) return _LibType.table;
-    if (images.contains(ext)) return _LibType.image;
     return _LibType.doc;
   }
 
@@ -662,6 +678,14 @@ class _LibItem {
   String get fileUrl => urlOverride.isNotEmpty
       ? "${ApiConfig.httpBase}$urlOverride"
       : "${ApiConfig.httpBase}/agent/files/${Uri.encodeQueryComponent(ApiConfig.effectiveActorId)}/${Uri.encodeQueryComponent(fileName)}";
+
+  /// 卡面/网格缩略图地址（2026-11-12）：图片条目让服务端按需压成 400px 宽
+  /// 的 webp。原来格子直接拉 1~3MB 的原始 PNG，一屏三十张就是几十 MB——
+  /// 「照片一张张慢慢浮出来」的带宽根因。全屏查看仍用 [fileUrl] 原图。
+  String get thumbUrl {
+    if (type != _LibType.image) return fileUrl;
+    return "$fileUrl${fileUrl.contains("?") ? "&" : "?"}w=400";
+  }
 }
 
 /// 对话卡片：最多 3 张照片缩略图 + 标题 + 产出统计，点卡进详情。
@@ -702,8 +726,10 @@ class _GroupCard extends StatelessWidget {
                               child: ClipRRect(
                                 borderRadius: BorderRadius.circular(8),
                                 child: CachedMediaImage(
-                                  url: photos[i].fileUrl,
+                                  url: photos[i].thumbUrl,
                                   fit: BoxFit.cover,
+                                  cacheWidth: MobileLibraryPageState
+                                      ._cardThumbCacheWidth,
                                   errorBuilder: (_, __, ___) => _iconTile(),
                                 ),
                               ),
@@ -855,8 +881,9 @@ class _GroupDetailPage extends StatelessWidget {
           child: ClipRRect(
             borderRadius: BorderRadius.circular(8),
             child: CachedMediaImage(
-              url: photo.fileUrl,
+              url: photo.thumbUrl,
               fit: BoxFit.cover,
+              cacheWidth: MobileLibraryPageState._gridThumbCacheWidth,
               errorBuilder: (_, __, ___) => Container(
                 color: _typeColor(_LibType.image).withValues(alpha: 0.10),
                 alignment: Alignment.center,

@@ -8,6 +8,7 @@ import "package:http/testing.dart";
 
 import "package:nextbot/core/config/api_config.dart";
 import "package:nextbot/core/presentation/user_avatar.dart";
+import "package:nextbot/features/chat/media_disk_cache.dart";
 import "package:nextbot/core/services/user_avatar_api.dart";
 
 /// 用户头像能力测试（客户端侧）：
@@ -169,13 +170,18 @@ void main() {
           ),
         ),
       ));
-      expect(find.byType(Image), findsOneWidget);
+      // 有图 → 交给 CachedMediaImage（磁盘缓存层），不再直接建 Image.network：
+      // 缓存命中才有 Image.file，测试环境无网络时停在加载占位。
+      expect(find.byType(CachedMediaImage), findsOneWidget);
       // 圆形裁剪容器按 size 落位
+      // CachedMediaImage 内部也会建 SizedBox，这里只取最外层那个定宽定高的。
       final SizedBox box = tester.widget<SizedBox>(
-        find.descendant(
-          of: find.byType(ClipOval),
-          matching: find.byType(SizedBox),
-        ),
+        find
+            .descendant(
+              of: find.byType(ClipOval),
+              matching: find.byType(SizedBox),
+            )
+            .first,
       );
       expect(box.width, 32);
       expect(box.height, 32);

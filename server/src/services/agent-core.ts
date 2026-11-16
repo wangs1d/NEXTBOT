@@ -23,6 +23,7 @@ import type { PhoneBridgeCoordinator } from "./phone-bridge-coordinator.js";
 import type { LocationCoordinator } from "./location-coordinator.js";
 import type { ActorContextService } from "./actor-context-service.js";
 import type { LocationHistoryService } from "./location-history-service.js";
+import type { PlaceSemanticsService } from "./place-semantics-service.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import { seedIdentityMarkdown } from "../agent/identity-markdown-seeder.js";
 import { isActorDisabled } from "./user-disable-gate.js";
@@ -225,7 +226,8 @@ import {
   extractMediaCards,
   resolveVideoMediaSource,
   stripResidualRenderDeclarations,
-  trimMediaCardsByTopic,
+  splitMediaCardsByTopic,
+  hideUnrenderedMediaCardsFromLibrary,
   type MediaCardItem,
 } from "./tool-result-processor.js";
 import { captionMediaCards, isImageCaptionEnabled } from "./image-caption-service.js";
@@ -259,6 +261,7 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
 import { TaskTier, buildModelOverrideOpts } from "../config/model-routing.js";
 import type { BrainCenter } from "../brain/index.js";
 import type { EmotionVector, MemoryRecallItem } from "../brain/types.js";
+import { prefetchProfileRecall } from "../brain/profile-semantic-recall.js";
 import { parseAgentAccessMode, type AgentAccessMode } from "../agent/agent-access-mode.js";
 import { TurnLifecycle } from "../agent/turn-lifecycle.js";
 import {
@@ -280,12 +283,7 @@ import { ToolContextFactory } from "../agent/execution/tool-context-factory.js";
 import { getToolCallGuard } from "./tool-call-guard.js";
 import { TurnFinalizer } from "../agent/execution/turn-finalizer.js";
 import { ToolPolicyResolver } from "../agent/execution/tool-policy-resolver.js";
-import {
-  appendLearningDecisionGuidance,
-  appendRecentConversationHistory,
-  appendWorkingMemorySummary,
-  recallItemsToNarrative,
-} from "../agent/execution/narrative-recall-composer.js";
+import { appendLearningDecisionGuidance } from "../agent/execution/narrative-recall-composer.js";
 
 export type { AgentReply } from "../agent/types.js";
 
@@ -306,6 +304,17 @@ export type HandleUserMessageOptions = {
    * WS 聊天主路径装配（chat.media_ready 挂到当前流式回复）；程序化调用方缺省为空。
    */
   pushMediaCards?: (cards: ToolMediaCard[]) => void;
+  /**
+   * Agent 浏览器工作预览帧（2026-11-12）：agent_browser 无头执行每步后推页面
+   * 截图（agent.browser.preview 事件）。WS 聊天主路径装配；程序化调用方缺省为空。
+   */
+  pushBrowserPreview?: (frame: {
+    sessionId: string;
+    action: string;
+    url: string;
+    imageBase64: string;
+    mode: string;
+  }) => boolean | void;
   chatUserMessageId?: string;
   userId?: string;
   clientIp?: string;
@@ -376,6 +385,8 @@ export class AgentCore {
   private phoneBridgeCoordinator: PhoneBridgeCoordinator | null = null;
   private locationCoordinator: LocationCoordinator | null = null;
   private locationHistory: LocationHistoryService | null = null;
+  /** 地点语义（家/公司）：prompt 里的「在家/在公司」与常去地点语义标签都读它 */
+  private placeSemantics: PlaceSemanticsService | null = null;
   private actorContext: ActorContextService | null = null;
   /** prompt 按要 GPS 的上次尝试时间（失败冷却用，per-actor）。 */
   private promptLocationLastAttemptAt = new Map<string, number>();
@@ -487,6 +498,16 @@ export class AgentCore {
   /** 在 bootstrap 注册位置历史后注入：常去地点背景由 DBSCAN 纯算法挖掘（零 LLM）。 */
   setLocationHistory(service: LocationHistoryService | null): void {
     this.locationHistory = service;
+  }
+
+  /** 注入地点语义（家/公司/常去地点）：prompt 的位置块与常去地点块读它。 */
+  setPlaceSemantics(service: PlaceSemanticsService | null): void {
+    this.placeSemantics = service;
+  }
+
+  /** 用户确认/纠正地点语义后失效常去地点 prompt 缓存（下次装配立即生效）。 */
+  invalidatePlacePrompt(actorId: string): void {
+    this.frequentPlacesCache.delete(actorId);
   }
 
   /**
@@ -732,6 +753,16 @@ export class AgentCore {
     fn: ((actorId: string) => string | null) | null,
   ): void {
     this.promptContextBuilder.setActiveGoalsProvider(fn);
+  }
+
+  /**
+   * 注入待办拉取器（commitments 表，2026-11-12 权威源收敛）。
+   * KV memory_open_loops / memory_commitments 已停写，待办块改由此读取。
+   */
+  setCommitmentsProvider(
+    fn: ((actorId: string) => string | null) | null,
+  ): void {
+    this.promptContextBuilder.setCommitmentsProvider(fn);
   }
 
   /**
@@ -1435,6 +1466,14 @@ if (route.plane === "task") {
       agentAccessMode?: AgentAccessMode;
       /** 中途推卡：购物等长工具把二维码即时呈现给用户（聊天主路径装配） */
       pushMediaCards?: (cards: ToolMediaCard[]) => void;
+      /** Agent 浏览器预览帧（agent_browser 无头执行时推页面截图） */
+      pushBrowserPreview?: (frame: {
+        sessionId: string;
+        action: string;
+        url: string;
+        imageBase64: string;
+        mode: string;
+      }) => void;
     },
   ): Promise<{ ok: boolean; result?: Record<string, unknown> }> {
     if (!reply.toolName || !reply.toolInput) return { ok: true };
@@ -1475,12 +1514,17 @@ if (route.plane === "task") {
       desktopBridgeOnline: this.desktopBridgeOnlineFor(actorId),
       phoneBridgeOnline: this.phoneBridgeOnlineFor(actorId),
       // 按需位置：自主任务/日程触发的工具（如天气）缺经纬度时也能向客户端请求实时 GPS
-      requestLocation: () =>
-        this.locationCoordinator?.requestLocation(actorId, `tool:${reply.toolName}`) ??
-        Promise.resolve(null),
+      requestLocation: (reason, locOpts) =>
+        this.locationCoordinator?.requestLocation(
+          actorId,
+          reason ?? `tool:${reply.toolName}`,
+          locOpts,
+        ) ?? Promise.resolve(null),
       getLastKnownLocation: () => this.locationCoordinator?.getLastKnown(actorId) ?? null,
       // 中途推卡：购物等长工具把二维码即时呈现给用户（聊天主路径装配）
       pushMediaCards: opts?.pushMediaCards,
+      // 浏览器预览帧：agent_browser 无头执行时推页面截图（手机悬浮窗画面源）
+      pushBrowserPreview: opts?.pushBrowserPreview,
     });
   }
 
@@ -1506,18 +1550,6 @@ if (route.plane === "task") {
    * P0/P4：每条带「[相对时间·记忆类型]」前缀（程序化计算，杜绝 LLM 生成时间标签失真），
    * 让 LLM 清楚知道每条记忆是什么时候发生的、属于哪类记忆，回答时不会张冠李戴。
    */
-  private recallItemsToNarrative(items: MemoryRecallItem[]): string | undefined {
-    const lines = items
-      .map((it) => {
-        const content = typeof it?.content === "string" ? it.content.trim() : "";
-        if (!content) return null;
-        const tag = [describeMemoryAge(it.timestamp), MEMORY_DOMAIN_LABELS[it.domain]].filter(Boolean).join("·");
-        return tag ? `[${tag}] ${content}` : content;
-      })
-      .filter((x): x is string => x !== null);
-    return lines.length > 0 ? lines.join("\n") : undefined;
-  }
-
   /** prompt 位置新鲜窗口：窗口内直接用缓存，超窗才向客户端要一次 GPS（≤1 次/窗口/actor）。 */
   private static readonly PROMPT_LOCATION_FRESH_MS = 5 * 60 * 1000;
   /** 按要 GPS 的失败冷却：客户端离线/拒绝定位时，避免每条消息都白等 6s 超时。 */
@@ -1550,11 +1582,19 @@ if (route.plane === "task") {
       location = {
         latitude: snapshot.latitude,
         longitude: snapshot.longitude,
+        ...(snapshot.accuracyMeters != null ? { accuracyMeters: snapshot.accuracyMeters } : {}),
         ...(snapshot.city ? { city: snapshot.city } : {}),
         ...(snapshot.district ? { district: snapshot.district } : {}),
         ...(snapshot.region ? { region: snapshot.region } : {}),
         ...(snapshot.country ? { country: snapshot.country } : {}),
         ...(snapshot.label ? { label: snapshot.label } : {}),
+        // 精确位置（2026-11-14）：快照里已有门牌/地标就一并注入，prompt 不再只到城市级。
+        ...(snapshot.address ? { address: snapshot.address } : {}),
+        ...(snapshot.township ? { township: snapshot.township } : {}),
+        ...(snapshot.poi ? { poi: snapshot.poi } : {}),
+        ...(snapshot.poiDistanceMeters != null
+          ? { poiDistanceMeters: snapshot.poiDistanceMeters }
+          : {}),
         // 时区不从位置带：它在【当前时间】块里由快照的 clock 字段独立表达
       };
       observedAt = snapshot.observedAt;
@@ -1579,15 +1619,47 @@ if (route.plane === "task") {
 
     if (!location) return undefined;
 
+    // 语义刷新：getPlaces 命中 TTL 缓存时零成本；未命中只读本地历史 + 已缓存 POI，
+    // 不发网络请求（POI 缺失时后台预热，下一轮可用）。
+    if (this.placeSemantics) {
+      try {
+        await this.placeSemantics.getPlaces(actorId);
+      } catch {
+        /* 语义计算失败：位置块退回纯坐标描述，不影响本轮 */
+      }
+    }
+
     const prompt = await resolveUserLocationPrompt({
       clientIp: opts?.clientIp,
       clientLocation: location,
     });
-    if (!prompt || observedAt == null) return prompt;
+    if (!prompt) return prompt;
+
+    // 语义前缀：让模型每轮都知道「用户现在在家/在公司/在某个已知地点」，
+    // 而不是只知道一串经纬度。用户确认过的语义优先于快照里的推断值。
+    const semantic = snapshot ? this.placeSemantics?.matchCached(actorId, snapshot) : null;
+    const kind =
+      snapshot && snapshot.placeKind !== "unknown" ? snapshot.placeKind : semantic?.record.kind;
+    const semanticLabel =
+      snapshot?.placeLabel?.trim() ||
+      semantic?.record.label?.trim() ||
+      semantic?.record.poiName?.trim() ||
+      "";
+    const prefix =
+      kind === "home"
+        ? `【当前位置】在家${semanticLabel ? `（${semanticLabel}）` : ""}。\n`
+        : kind === "work"
+          ? `【当前位置】在公司${semanticLabel ? `（${semanticLabel}）` : ""}。\n`
+          : semanticLabel
+            ? `【当前位置】在「${semanticLabel}」。\n`
+            : "";
+    const withPrefix = prefix ? `${prefix}${prompt}` : prompt;
+
+    if (observedAt == null) return withPrefix;
     const ageMin = Math.floor((Date.now() - observedAt) / 60_000);
-    if (ageMin < 5) return prompt;
+    if (ageMin < 5) return withPrefix;
     const ageText = ageMin < 60 ? `${ageMin} 分钟前` : `${Math.floor(ageMin / 60)} 小时前`;
-    return `${prompt}（定位时间：${ageText}，非实时）`;
+    return `${withPrefix}（定位时间：${ageText}，非实时）`;
   }
 
   /**
@@ -1638,14 +1710,46 @@ if (route.plane === "task") {
     let text: string | undefined;
     try {
       const places = history.mineFrequentPlaces(actorId, { maxPlaces: 5, minPoints: 3 });
-      if (places.length > 0) {
-        const lines = places.map((p, i) => {
-          const name = p.label?.trim() || `${p.latitude.toFixed(3)}, ${p.longitude.toFixed(3)}`;
-          return `${i + 1}. ${name}｜到访 ${p.visitCount} 次 · 覆盖 ${p.distinctDays} 天 · 最近 ${p.lastSeenAt.slice(0, 10)}`;
+      // 地点语义（家/公司）：与常去地点分开表述——常去地点是「去过几次」的统计，
+      // 语义是「这是什么地方」的判断。用户确认过的写「已确认」，推断写置信度，
+      // 让模型自己决定能不能当事实用（不许把推断当铁定）。
+      const kindText = (kind: string): string =>
+        kind === "home" ? "家" : kind === "work" ? "公司" : "常去地点";
+      const known = this.placeSemantics?.load(actorId) ?? [];
+      const knownLines = known
+        .filter((place) => place.kind !== "other")
+        .slice(0, 4)
+        .map((place) => {
+          const name =
+            place.label?.trim() ||
+            place.poiName?.trim() ||
+            `${place.latitude.toFixed(3)}, ${place.longitude.toFixed(3)}`;
+          // prompt 只保留地点名称：行政区/地址按需走 place 工具查询，
+          // 置信度百分比也不再常驻（2026-11-16 用户要求）。
+          return `- ${kindText(place.kind)}：${name}`;
         });
+
+      const lines = places.map((p, i) => {
+        const semantic = this.placeSemantics?.matchCached(actorId, p)?.record;
+        const baseName =
+          semantic?.label?.trim() ||
+          semantic?.poiName?.trim() ||
+          p.label?.trim() ||
+          `${p.latitude.toFixed(3)}, ${p.longitude.toFixed(3)}`;
+        const tag =
+          semantic && semantic.kind !== "other"
+            ? `（${kindText(semantic.kind)}${semantic.confirmed ? "，已确认" : "，推断"}）`
+            : "";
+        return `${i + 1}. ${baseName}${tag}｜到访 ${p.visitCount} 次 · 覆盖 ${p.distinctDays} 天 · 最近 ${p.lastSeenAt.slice(0, 10)}`;
+      });
+
+      if (places.length > 0 || knownLines.length > 0) {
         text = [
           "由用户位置历史自动聚类得出（系统背景，禁止主动向用户提及或反问本块；",
-          "回答「我常去哪/家/公司在哪」类问题时应以此为据，不确定时如实说明）：",
+          "本块只给地点名称，不含行政区/门牌，与【当前位置】是两件事。",
+          "用户问家/公司在哪个城市、具体地址时，必须调用 place 工具按需查询；",
+          "禁止用当前位置的城市/区县顶替，也禁止凭记忆猜城市）：",
+          ...knownLines,
           ...lines,
         ].join("\n");
       }
@@ -1656,8 +1760,7 @@ if (route.plane === "task") {
     return text;
   }
 
-  // buildRecentConversationHistoryBlock 已随 recallGate 管道拆除（2026-10-22）：
-  // v3 起主循环恒不注入该块，跨会话开放环路经恒驻速览与 brain.recall 承担。
+  // buildRecentConversationHistoryBlock 已随 recallGate 管道拆除（2026-10-22）：跨会话开放环路经恒驻速览与 brain.recall 承担。
 
   /**
    * 2026-07-29 修复 C1 配套：窥探当前 thread store 中的非 system 消息条数。
@@ -1716,9 +1819,8 @@ if (route.plane === "task") {
       workingMemorySummary,
       recentConversationHistory,
       personalization,
-      // v3 门控单点已随 recallGate 管道拆除（2026-10-22）：KV 长期字段注入与否
-      // 由 prompt-context-builder 内的 v3 常量语义（longTermEnabled=false）决定，
-      // 长期检索统一走 brain.recall 工具。
+      // 恒 undefined（recallGate 管道已于 2026-10-22 拆除）：KV 长期字段注入与否
+      // 由 prompt-context-builder 的 longTermEnabled 决定，长期检索统一走 brain.recall。
       onToolExecuteStart: opts?.onExternalToolExecuteStart,
       onAgentStatusLine: opts?.onAgentPhaseStatus,
       onToolExecuted: (info: ToolExecutedInfo) => {
@@ -1988,13 +2090,18 @@ if (route.plane === "task") {
           agentAccessMode: ctx.orchestrateToolCtx?.agentAccessMode,
           desktopBridgeOnline: ctx.orchestrateToolCtx?.desktopBridgeOnline,
           phoneBridgeOnline: ctx.orchestrateToolCtx?.phoneBridgeOnline,
-// 按需位置：位置类工具（weather.get_local 等）在缺少经纬度时可向客户端请求实时 GPS。
-          requestLocation: () =>
-            this.locationCoordinator?.requestLocation(actorId, "tool:standard-llm-path") ??
-            Promise.resolve(null),
+          // 按需位置：位置类工具（weather.get_local 等）在缺少经纬度时可向客户端请求实时 GPS。
+          requestLocation: (reason, locOpts) =>
+            this.locationCoordinator?.requestLocation(
+              actorId,
+              reason ?? "tool:standard-llm-path",
+              locOpts,
+            ) ?? Promise.resolve(null),
           getLastKnownLocation: () => this.locationCoordinator?.getLastKnown(actorId) ?? null,
           // 中途推卡：购物等长工具把二维码即时呈现给用户（聊天主路径装配）
           pushMediaCards: opts?.pushMediaCards,
+          // 浏览器预览帧：agent_browser 无头执行时推页面截图（手机悬浮窗画面源）
+          pushBrowserPreview: opts?.pushBrowserPreview,
         },
       },
       {
@@ -2176,6 +2283,11 @@ if (route.plane === "task") {
         // 由模型自然收尾（见 openai-compatible-tool-loop 的终止契约）。
       };
     };
+    // 画像 query 相关性召回预取（2026-11-12 按需注入根修）：embed 调用是异步的，
+    // 而 promptContextBuilder.build() 是同步链——在进入 build 前把本轮 query 的
+    // 画像语义命中算好进缓存，buildUserFactsBlock 内同步读取。失败静默（退化
+    // 为仅字面命中），绝不阻塞消息管线。
+    await prefetchProfileRecall(actorId, text);
     const baseStreamOpts = this.isChatLane(mode)
       ? ({
           ...(this.promptContextBuilder.build({
@@ -3238,10 +3350,14 @@ if (route.plane === "task") {
           const cards = extractMediaCards(mt.toolName, mt.result);
           if (cards.length > 0) mediaCards.push(...cards);
         }
-        mediaCards = trimMediaCardsByTopic(dedupMediaCards(mediaCards), {
+        // 渲染/入库对账（2026-11-12 用户口径「前端渲染几张，资料库就收几张」）：
+        // 被裁掉的卡从未渲染，标记 libraryHidden，与对话面同规则。
+        const trimmed = splitMediaCardsByTopic(dedupMediaCards(mediaCards), {
           maxPerGroup: 4,
           maxPerSide: 2,
         });
+        mediaCards = trimmed.kept;
+        hideUnrenderedMediaCardsFromLibrary(trimmed.removed);
         // 真实图片描述（Coze 式「一图一句」，2026-10-06 补接）：任务面照片轮此前
         // 只在 WS 对话面路径（chat-user-message）生成 caption，任务面收尾漏接
         // ——用户要的「每张照片一句解读」在照片任务上永远缺席（真链取证）。

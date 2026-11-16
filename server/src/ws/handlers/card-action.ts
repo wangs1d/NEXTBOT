@@ -3,9 +3,11 @@ import type { WebSocket } from "ws";
 import { ServerEventType } from "../../protocol.js";
 import type { ToolContext } from "../../tools/tool-registry.js";
 import type { ShoppingOrderService } from "../../services/shopping-order-service.js";
+import type { ShoppingCompareService } from "../../services/shopping-compare-service.js";
 import type { PaymentService } from "../../services/payment-service.js";
 import { BROWSER_SESSION_SITES } from "../../services/browser-session-sites.js";
 import { buildToolCard } from "../../services/tool-card-registry.js";
+import { getUnifiedPaymentService } from "../../payments/unified-payment-service.js";
 
 /**
  * 卡片内动作（card.action）——「一条回复内连续选择」的服务端半边。
@@ -34,6 +36,12 @@ export type CardActionDeps = {
   shoppingOrderService?: ShoppingOrderService | null;
   /** 支付服务（可选）：payment.pay.check 卡内确认用，未装配时如实报错 */
   paymentService?: PaymentService | null;
+  /**
+   * 比价服务（可选，2026-11-13 P1）：登录卡上的「跳过这家 / 重新出码 /
+   * 继续比价」都靠它续跑那一轮被登录闸门挂起的比价。未装配时这几个动作
+   * 如实报「比价服务未装配」，不影响其它购物动作。
+   */
+  shoppingCompareService?: ShoppingCompareService | null;
 };
 
 type CardActionPayload = {
@@ -72,6 +80,118 @@ function num(v: unknown): number | undefined {
     if (Number.isFinite(n)) return n;
   }
   return undefined;
+}
+
+/** 平台 id → 中文来源名（多平台登录卡点名用）。 */
+function platformLabelOf(id: string): string {
+  return (BROWSER_SESSION_SITES as Record<string, { label?: string } | undefined>)[id]?.label ?? id;
+}
+
+/**
+ * 多平台登录卡（2026-11-13 P1）——**卡形态的唯一真相源**。
+ *
+ * 三处都要用它：首次推码、跳过一家后的重发、二维码失效后的重推。
+ * 之所以要统一：卡是用户操作的唯一界面，一旦各处自己拼载荷，用户就会看到
+ * 「有的卡能跳这家、有的卡不能」这种不一致（2026-11-06 定稿的老毛病）。
+ *
+ * 载荷里给三样东西：
+ *   · qrItems         —— 每家的二维码（可为空 = 没截到码）
+ *   · pendingPlatforms—— 待登录清单（用户能逐家「跳过这家 / 重新出码」）
+ *   · actions.platforms—— 卡内动作回传时带上的平台名单
+ */
+function buildMultiLoginCard(opts: {
+  platforms: string[];
+  qrItems: Array<{ platform: string; platformLabel: string; qrImage: string; qrLink?: string; qrLinkFallback?: string }>;
+  title: string;
+  note: string;
+  primaryLabel: string;
+  secondaryLabel: string;
+  primaryAction: string;
+  secondaryAction?: string;
+  stage?: "login" | "login-consent";
+  readyPlatforms?: string[];
+  /** 次按钮要带的额外参数（如「先比已登录的」的 skipPending=true）。 */
+  secondaryPayload?: Record<string, unknown>;
+  extraActions?: Record<string, unknown>;
+}): Record<string, unknown> {
+  return {
+    title: opts.title,
+    items: [],
+    footer: opts.note,
+    cardType: "shopping_login",
+    extra: {
+      shopping: {
+        stage: opts.stage ?? "login",
+        title: opts.title,
+        multiLogin: true,
+        qrItems: opts.qrItems,
+        // 待登录清单（P1-2）：用户能逐家处理，不用回到对话里再说一遍
+        pendingPlatforms: opts.platforms.map((p) => ({
+          platform: p,
+          platformLabel: platformLabelOf(p),
+        })),
+        ...(opts.readyPlatforms
+          ? {
+              readyPlatforms: opts.readyPlatforms,
+              // 已登录平台的中文名（客户端要给人看中文，不能甩 id）
+              readyPlatformLabels: opts.readyPlatforms.map((p) => platformLabelOf(p)),
+            }
+          : {}),
+        note: opts.note,
+        primaryLabel: opts.primaryLabel,
+        secondaryLabel: opts.secondaryLabel,
+        primaryAction: opts.primaryAction,
+        secondaryAction: opts.secondaryAction ?? "local.dismiss",
+        ...(opts.secondaryPayload ? { secondaryPayload: opts.secondaryPayload } : {}),
+        actions: {
+          platforms: opts.platforms,
+          ...(opts.extraActions ?? {}),
+        },
+      },
+    },
+  };
+}
+
+/**
+ * 重新出码（2026-11-13 P1）：给待登录平台换一批新的二维码。
+ *
+ * 二维码会过期（平台侧一般 2–5 分钟），用户扫得慢、中途切走都会失效。
+ * 失效后必须能在卡里换一张新的，而不是让用户回到对话里问一句。
+ *
+ * 只落盘**不推流**：新码通过 card.update 原地换卡，聊天里不会堆两张码
+ * （用户会分不清哪张是能扫的那张）。
+ */
+async function refreshLoginQrs(
+  shoppingService: ShoppingOrderService,
+  compareService: ShoppingCompareService | null | undefined,
+  toolContext: ToolContext,
+  platforms: string[],
+  query: string,
+): Promise<Array<{ platform: string; platformLabel: string; qrImage: string; qrLink?: string; qrLinkFallback?: string }>> {
+  if (platforms.length === 0) return [];
+  let fresh: Array<{ platform: string; label: string; imageUrl: string; qrLink?: string; qrLinkFallback?: string }> = [];
+  try {
+    fresh = await shoppingService.captureBatchLoginQrs(toolContext, platforms, query);
+  } catch {
+    fresh = [];
+  }
+  // 记进待登录会话：续跑时卡上拿到的仍是最新那张码（点码深链一并更新）
+  compareService?.updatePendingQrImages(
+    toolContext,
+    fresh.map((f) => ({
+      platform: f.platform,
+      imageUrl: f.imageUrl,
+      ...(f.qrLink ? { qrLink: f.qrLink } : {}),
+      ...(f.qrLinkFallback ? { qrLinkFallback: f.qrLinkFallback } : {}),
+    })),
+  );
+  return fresh.map((f) => ({
+    platform: f.platform,
+    platformLabel: f.label,
+    qrImage: f.imageUrl,
+    ...(f.qrLink ? { qrLink: f.qrLink } : {}),
+    ...(f.qrLinkFallback ? { qrLinkFallback: f.qrLinkFallback } : {}),
+  }));
 }
 
 /** 规格卡带回来的「维度名 → 选项文案」，直接交给 settlement 前点选。 */
@@ -161,19 +281,21 @@ export async function handleCardActionEvent(
     send({
       ok: true,
       card: {
-        title: `扫码登录${platformLabel}`,
+        title: `登录${platformLabel}`,
         items: [],
         footer: `登录一次长期有效 · 只在这台服务上保存${platformLabel}的登录态`,
         cardType: "shopping_login",
         extra: {
           shopping: {
             stage: "login",
-            title: `扫码登录${platformLabel}`,
+            title: `登录${platformLabel}`,
             platform,
             platformLabel,
             ...(handoff.imageUrl ? { qrImage: handoff.imageUrl } : {}),
+            ...(handoff.qrLink ? { qrLink: handoff.qrLink } : {}),
+            ...(handoff.qrLinkFallback ? { qrLinkFallback: handoff.qrLinkFallback } : {}),
             note: handoff.imageUrl
-              ? `用${platformLabel} App 扫这个码，扫完点下面的按钮`
+              ? "点「点码登录」拉起 App 确认，或用 App 扫这个码，完成后点下面的按钮"
               : "登录页没截到二维码，稍后重试一次",
             primaryLabel: "我扫好了",
             secondaryLabel: "先不买",
@@ -286,6 +408,82 @@ export async function handleCardActionEvent(
 
       // 卡内扫码完成：校验登录态 → 落 Cookie → 接着把原动作做完。
       case "shopping.login.check": {
+        // 多平台登录卡（2026-11-13 P0-2）：一次推齐几家的码，用户点「我扫好了」
+        // 时逐家确认——扫了哪几家就绪、哪几家还差，如实回报，不假装全好了。
+        const multiPlatforms = Array.isArray(data.platforms)
+          ? (data.platforms as unknown[]).map((p) => str(p)).filter(Boolean)
+          : [];
+        if (multiPlatforms.length > 0) {
+          const checked = await shoppingService.checkMultiPlatformLogin(
+            toolContext,
+            multiPlatforms,
+          );
+          const compareService = deps.shoppingCompareService;
+          const pendingSession = compareService?.getPendingCompare(toolContext) ?? null;
+          if (checked.ready.length === 0) {
+            // 一家都没扫成功：二维码多半已经过期（平台侧一般 2–5 分钟失效）。
+            // 这时不只报错——**把卡换成带「重新出码 / 跳过这家」的版本**，
+            // 让用户能在卡里直接处理，而不是回到对话里问一句。
+            const freshQrs = await refreshLoginQrs(
+              shoppingService,
+              compareService,
+              toolContext,
+              multiPlatforms,
+              pendingSession?.query ?? "",
+            );
+            send({
+              ok: true,
+              card: buildMultiLoginCard({
+                platforms: multiPlatforms,
+                qrItems: freshQrs,
+                title: `请扫码登录（${multiPlatforms.map((p) => platformLabelOf(p)).join("、")}）`,
+                note: "还没检测到登录成功——码可能已过期，点「重新出码」换一张新的再扫",
+                primaryLabel: "我扫好了",
+                secondaryLabel: "先不比了",
+                primaryAction: "shopping.login.check",
+                stage: "login",
+                extraActions: { readyPlatforms: checked.ready },
+              }),
+            });
+            return true;
+          }
+          const readyLabels = checked.ready.map((p) => platformLabelOf(p));
+          const pendingLabels = checked.pending.map((p) => platformLabelOf(p));
+          // 有待登录比价在等 → 主按钮直接**续跑比价**（用户要的「登录完再统一
+          // 取价、一次性交付」），不要让用户再说一句「我扫好了」。
+          const canResume = !!compareService && !!pendingSession;
+          send({
+            ok: true,
+            card: buildMultiLoginCard({
+              platforms: checked.pending.length > 0 ? checked.pending : checked.ready,
+              qrItems: [],
+              title:
+                pendingLabels.length > 0
+                  ? `${readyLabels.join("、")}登录成功`
+                  : "登录成功",
+              note:
+                pendingLabels.length > 0
+                  ? `还差：${pendingLabels.join("、")}（可重新出码，或跳过这家只比其余平台）`
+                  : canResume
+                    ? "全部登录完成，点「继续比价」我把这轮的价格一次性给你"
+                    : "登录都好了，但刚才那轮比价已经过期——回一句「继续比价」我重新来一轮",
+              primaryLabel:
+                pendingLabels.length > 0 ? "继续比价（补齐剩余平台）" : "继续比价",
+              secondaryLabel: "先比已登录的",
+              primaryAction: canResume ? "shopping.compare.resume" : "shopping.login.check",
+              // 「先比已登录的」= 剩下的不等了，只比已登录的（服务端据此把剩下
+              // 的记成「已跳过」，不是「没价」）
+              secondaryAction: canResume ? "shopping.compare.resume" : "local.dismiss",
+              secondaryPayload: canResume
+                ? { skipPending: true }
+                : undefined,
+              stage: "login-consent",
+              readyPlatforms: checked.ready,
+              extraActions: { readyPlatforms: checked.ready },
+            }),
+          });
+          return true;
+        }
         const token = str(data.token);
         if (!token) {
           send({ ok: false, error: "登录会话已失效，重新点一次商品" });
@@ -358,6 +556,159 @@ export async function handleCardActionEvent(
           { messageId: payload.messageId, cardId: payload.cardId, actionId: next, stage: payload.stage, payload: nextData },
           deps,
         );
+      }
+
+      // 「跳过这家」（2026-11-13 P1）：用户放弃某个待登录平台。
+      //
+      // 语义严格：**只是不再等这家**，不是「这家没有价」。跳过后这家会进
+      // 「未取到报价」清单（原因=已跳过），模型不得替它编价；等剩下的平台
+      // 都处理完，统一取价、一次性交付。
+      case "shopping.login.skip": {
+        const compareService = deps.shoppingCompareService;
+        if (!compareService) {
+          send({ ok: false, error: "比价服务未装配" });
+          return true;
+        }
+        const target = str(data.platform);
+        const skipped = compareService.skipLoginPlatform(toolContext, target);
+        if (!skipped) {
+          send({ ok: false, error: "这次登录会话已经过期了，重新说一次要比的东西就行" });
+          return true;
+        }
+        const remaining = skipped.remaining;
+        if (remaining.length === 0) {
+          // 没有待登录平台了 → 立刻续跑：统一取价、一次性交付比价卡
+          const resumed = await compareService.resumeCompareAfterLogin(toolContext);
+          if (!resumed.ok) {
+            send({
+              ok: false,
+              error: resumed.error,
+              ...(resumed.stillWaiting ? { stillWaiting: true } : {}),
+            });
+            return true;
+          }
+          const card = buildToolCard("shopping.compare.prices", resumed.result);
+          if (!card) {
+            send({ ok: false, error: "比价没取到结果，再试一次" });
+            return true;
+          }
+          send({ ok: true, card });
+          return true;
+        }
+        // 还剩几家要登录 → 卡上撤掉跳过的那家，其余原样留着继续扫
+        const qrMap = new Map(skipped.session.qrItems.map((q) => [q.platform, q]));
+        const qrItems = remaining.map((p) => {
+          const q = qrMap.get(p);
+          return {
+            platform: p,
+            platformLabel: platformLabelOf(p),
+            qrImage: q?.qrImage ?? "",
+            ...(q?.qrLink ? { qrLink: q.qrLink } : {}),
+            ...(q?.qrLinkFallback ? { qrLinkFallback: q.qrLinkFallback } : {}),
+          };
+        });
+        send({
+          ok: true,
+          card: buildMultiLoginCard({
+            platforms: remaining,
+            qrItems,
+            title: `请扫码登录（${remaining.map((p) => platformLabelOf(p)).join("、")}）`,
+            note: `已跳过${target ? platformLabelOf(target) : "这家"}，其余扫码后我一起比给你`,
+            primaryLabel: "我扫好了",
+            secondaryLabel: "先不比了",
+            primaryAction: "shopping.login.check",
+            stage: "login",
+          }),
+        });
+        return true;
+      }
+
+      // 「重新出码」（2026-11-13 P1）：二维码过期了，换一张新的原地换卡。
+      case "shopping.login.refresh": {
+        const compareService = deps.shoppingCompareService;
+        const session = compareService?.getPendingCompare(toolContext) ?? null;
+        const many = Array.isArray(data.platforms)
+          ? (data.platforms as unknown[]).map((p) => str(p)).filter(Boolean)
+          : [];
+        const one = str(data.platform);
+        const targets = many.length > 0 ? many : one ? [one] : [];
+        if (targets.length === 0) {
+          send({ ok: false, error: "缺少平台" });
+          return true;
+        }
+        const query = str(data.query) || session?.query || "";
+        const fresh = await refreshLoginQrs(
+          shoppingService,
+          compareService,
+          toolContext,
+          targets,
+          query,
+        );
+        if (fresh.length === 0) {
+          send({
+            ok: false,
+            error: "没截到新的二维码——这家可能已经登录成功了，点「我扫好了」再试一次",
+          });
+          return true;
+        }
+        // 没重出的那几家沿用旧码（图和点码深链都不变），整张卡一次性换掉
+        const oldMap = new Map((session?.qrItems ?? []).map((q) => [q.platform, q]));
+        const freshMap = new Map(fresh.map((f) => [f.platform, f]));
+        const scope = new Set<string>([...(session?.loginPlatforms ?? []), ...targets]);
+        const qrItems = [...scope].map((p) => {
+          const q = freshMap.get(p) ?? oldMap.get(p);
+          return {
+            platform: p,
+            platformLabel: platformLabelOf(p),
+            qrImage: q?.qrImage ?? "",
+            ...(q?.qrLink ? { qrLink: q.qrLink } : {}),
+            ...(q?.qrLinkFallback ? { qrLinkFallback: q.qrLinkFallback } : {}),
+          };
+        });
+        send({
+          ok: true,
+          card: buildMultiLoginCard({
+            platforms: [...scope],
+            qrItems,
+            title: `请扫码登录（${[...scope].map((p) => platformLabelOf(p)).join("、")}）`,
+            note: "已换新的二维码，扫完点「我扫好了」",
+            primaryLabel: "我扫好了",
+            secondaryLabel: "先不比了",
+            primaryAction: "shopping.login.check",
+            stage: "login",
+          }),
+        });
+        return true;
+      }
+
+      // 「继续比价」（2026-11-13 P1）：登录处理完 → 统一取价、一次性交付。
+      //
+      // 这是整条链路的收口：预检登录态 → 推齐二维码 → 等用户处理 → 同批次
+      // 统一取价 → 事实清单校验 → 横向轮播卡一次性交付，中间不出半成品答案。
+      case "shopping.compare.resume": {
+        const compareService = deps.shoppingCompareService;
+        if (!compareService) {
+          send({ ok: false, error: "比价服务未装配" });
+          return true;
+        }
+        const resumed = await compareService.resumeCompareAfterLogin(toolContext, {
+          skipPending: data.skipPending === true,
+        });
+        if (!resumed.ok) {
+          send({
+            ok: false,
+            error: resumed.error,
+            ...(resumed.stillWaiting ? { stillWaiting: true } : {}),
+          });
+          return true;
+        }
+        const card = buildToolCard("shopping.compare.prices", resumed.result);
+        if (!card) {
+          send({ ok: false, error: "比价没取到结果，再试一次" });
+          return true;
+        }
+        send({ ok: true, card });
+        return true;
       }
 
       // 阶段二：确认提交（带阶段一 token）。
@@ -454,6 +805,38 @@ export async function handleCardActionEvent(
             },
           },
         });
+        return true;
+      }
+
+      // 统一支付卡内继续（2026-11-13）：三个动作都直接调统一支付服务，不经 LLM。
+      //   resume  —— 用户刚在授权页点了同意，重跑授权判定并继续
+      //   confirm —— 用户在卡上明确确认，立即扣款/出收款码（这就是两阶段确认的第二步）
+      //   check   —— 用户说付完了，向渠道核对真实状态（绝不按用户口述判成功）
+      case "payment.intent.resume":
+      case "payment.intent.confirm":
+      case "payment.intent.check": {
+        const unified = getUnifiedPaymentService();
+        if (!unified) {
+          send({ ok: false, error: "统一支付服务未装配" });
+          return true;
+        }
+        const intentId = str(data.intentId);
+        if (!intentId) {
+          send({ ok: false, error: "缺少支付意图 ID" });
+          return true;
+        }
+        const result =
+          payload.actionId === "payment.intent.confirm"
+            ? await unified.confirmIntent({
+                intentId,
+                actorId: ctx.boundActorId,
+                confirmToken: str(data.confirmToken),
+              })
+            : payload.actionId === "payment.intent.resume"
+              ? await unified.resumeIntent(intentId, ctx.boundActorId)
+              : await unified.queryIntent(intentId, ctx.boundActorId);
+        const card = buildToolCard("payment.pay", result as unknown as Record<string, unknown>);
+        send(card ? { ok: true, card } : { ok: false, error: result.message });
         return true;
       }
 

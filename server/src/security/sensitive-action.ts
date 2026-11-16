@@ -42,6 +42,7 @@ const EXTERNAL_TOOL_PREFIXES: string[] = [
 const READ_TOOL_PREFIXES: string[] = [
   "shopping.compare",
   "order.status", // 订单状态查询（只读跨源采集库；probe 判定用）
+  "bill_parcel.", // 账单/快递汇总查询（只读本地台账；2026-11-13）
   "search.",
   "web.",
   "web_search",

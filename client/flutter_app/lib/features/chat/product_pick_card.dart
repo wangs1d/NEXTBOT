@@ -1,3 +1,4 @@
+import "../../core/ui/card_metrics.dart";
 import "package:flutter/material.dart";
 
 import "../../core/utils/agent_result_parser.dart";
@@ -25,7 +26,7 @@ class ProductPickCard extends StatelessWidget {
     if (pick == null) return const SizedBox.shrink();
 
     return Container(
-      constraints: const BoxConstraints(maxWidth: 390),
+      constraints: BoxConstraints(maxWidth: CardMetrics.maxWidth(context)),
       decoration: BoxDecoration(
         color: cs.surfaceContainerHigh,
         borderRadius: BorderRadius.circular(12),

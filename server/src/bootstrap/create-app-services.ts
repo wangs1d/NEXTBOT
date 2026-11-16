@@ -23,9 +23,13 @@ import { createExternalChatProviderFromEnv, MutableExternalChatProvider, ActorMo
 import { applyPersistedServiceConfig, serviceSecretsEncryptedAtRest } from "../config/service-config-store.js";
 import { PictureKitRegistry } from "../services/picture-kit-registry.js";
 import { getChatThreadPersistence } from "../external-model/chat-thread-persist.js";
+import { initThinkingBudget, describeThinkingBudgetForStartup } from "../external-model/thinking-policy.js";
 import { createRecommendationCatalog } from "../recommendation/index.js";
 import { aggregateXiaohongshuUgc } from "../recommendation/ugc-aggregator.js";
 import { pickBestProductImage } from "../services/product-image-scorer.js";
+import { buildCommitmentPrompt } from "../services/commitment-prompt-provider.js";
+import { settleScheduleCommitment, upsertScheduleCommitment } from "../services/commitment-store.js";
+import { ReminderRedeliveryService } from "../services/reminder-redelivery-service.js";
 import { getChatThreadStore } from "../external-model/chat-thread-store.js";
 import { createLlmRollingRecapSummarizer } from "../services/conversation-rolling-summarizer.js";
 import { registerHttpRoutes } from "../routes/http/index.js";
@@ -91,10 +95,12 @@ import { getTaskOutbox } from "../task-plane/task-outbox.js";
 import { scheduleInterruptedTaskRecovery } from "../task-plane/restart-recovery.js";
 import { AutonomySettingsStore } from "../services/autonomy-settings-store.js";
 import { registerGeofenceTools } from "../tools/geofence-tools.js";
+import { registerPlaceTools } from "../tools/place-tools.js";
 import { ActorContextService } from "../services/actor-context-service.js";
 import { AbstractChatProvider } from "../external-model/abstract-chat-provider.js";
-import { GeofenceService, isPublicHttpUrl } from "../services/geofence-service.js";
+import { GeofenceService, inferPlaceKind, isPublicHttpUrl } from "../services/geofence-service.js";
 import { LocationHistoryService } from "../services/location-history-service.js";
+import { PlaceSemanticsService } from "../services/place-semantics-service.js";
 import { LocationIngestPipeline } from "../services/location-ingest-pipeline.js";
 import {
   getLocationDbPath,
@@ -103,6 +109,7 @@ import {
 } from "../config/location-env.js";
 import { LocationSensor } from "../rhythm/sensors/location-sensor.js";
 import { LocationTrigger } from "../proactivity/triggers/location-trigger.js";
+import { PlaceTransitionTrigger } from "../proactivity/triggers/place-transition-trigger.js";
 import { createProactiveOutreachExecutor } from "../proactivity/proactive-outreach-executor.js";
 import { getDailyDigestService } from "../services/daily-digest-service.js";
 import { getShortTermMemoryConfig } from "../services/short-term-memory-config.js";
@@ -200,8 +207,10 @@ import { FileProcessingService } from "../services/file-processing-service.js";
 import { EmailSmsService } from "../services/email-sms-service.js";
 import { EmailOtpService } from "../services/email-otp-service.js";
 import { MediaMusicService } from "../services/media-music-service.js";
-import { createImapflowClient } from "../services/mail-watch-service.js";
+import { createImapflowClient, purgeStoredOtpMailSignals } from "../services/mail-watch-service.js";
 import { MailWatchRegistry } from "../services/mail-watch-registry.js";
+import { BillParcelLedger } from "../services/bill-parcel-ledger.js";
+import { BillParcelIngestService } from "../services/bill-parcel-ingest-service.js";
 import {
   FinanceBillAutoFetchService,
   createPlaywrightAlipayBillFetcher,
@@ -271,6 +280,8 @@ import {
 } from "../services/agent-identity.js";
 import { buildPersonaPrompt } from "../agent/soul-store.js";
 import { registerPaymentTools } from "../tools/payment-tools.js";
+import { registerUnifiedPaymentTools } from "../tools/unified-payment-tools.js";
+import { initUnifiedPaymentService } from "../payments/unified-payment-service.js";
 import { QrAssistService } from "../services/qr-assist-service.js";
 import { registerWechatClawTools } from "../tools/wechat-claw-tools.js";
 import { registerMeituanTools } from "../tools/meituan-tools.js";
@@ -310,6 +321,7 @@ import { AccessAuthService } from "../services/access-auth-service.js";
 import { registerAccessAuthHook } from "../routes/http/auth.js";
 import { ApprovalInboxService, isSpendConfirmation } from "../services/approval-inbox-service.js";
 import { registerWeatherTools } from "../tools/weather-tools.js";
+import { registerGeoTools } from "../tools/geo-tools.js";
 import { registerCareReminderTools } from "../tools/care-reminder-tools.js";
 import { registerLifeSignalTools } from "../tools/life-signal-tools.js";
 import { registerMarketSignalTools } from "../tools/market-signal-tools.js";
@@ -500,6 +512,13 @@ import { ProactivitySuppressionStore } from "../proactivity/suppression-store.js
 import { FrequencyGovernor } from "../proactivity/frequency-governor.js";
 import { PresenceService } from "../proactivity/presence-service.js";
 import { ProactiveDeliveryService } from "../proactivity/delivery-service.js";
+// ─── 「通知即界面」（2026-11-13）：通知栏按钮 = 聊天卡按钮的第二个渲染面 ───
+import { ActionIntentStore } from "../proactivity/action-intent-store.js";
+import {
+  ActionIntentService,
+  loadActionIntentSecret,
+} from "../proactivity/action-intent-service.js";
+import { registerNotificationActionExecutors } from "../proactivity/notification-action-executors.js";
 import { AgentActivityStore } from "../proactivity/activity-store.js";
 import { AttentionStore } from "../proactivity/attention-store.js";
 import { ReachRouter, type ReachChannelDeps } from "../proactivity/reach-router.js";
@@ -519,7 +538,7 @@ import { ScheduleSensor } from "../proactivity/sensors/schedule-sensor.js";
 import { MailSensor } from "../proactivity/sensors/mail-sensor.js";
 import { IcsSensor } from "../proactivity/sensors/ics-sensor.js";
 import { FinanceSensor } from "../proactivity/sensors/finance-sensor.js";
-import { SourceStore } from "../proactivity/source-store.js";
+import { SourceStore, sourceStoreRoot } from "../proactivity/source-store.js";
 import { ArbiterV2 } from "../proactivity/arbiter-v2.js";
 import {
   appendEventAudit,
@@ -530,6 +549,7 @@ import { buildBoardRules } from "../proactivity/mapping-rules.js";
 import { WorldBoard, bridgeSensorKernelToBoard } from "../proactivity/world-board.js";
 import { deriveOrderSignal } from "../proactivity/shopping-signal.js";
 import { registerOrderStatusTools } from "../tools/shopping-tools.js";
+import { registerBillParcelTools } from "../tools/bill-parcel-tools.js";
 import { TurnAsideQueue } from "../proactivity/turn-aside-queue.js";
 import { formatCurrentStatePrompt } from "../agent/current-state-prompt.js";
 import { resolveAutoMailAccounts } from "../proactivity/auto-mail-account.js";
@@ -765,15 +785,48 @@ export async function createAppServices(
   const desktopPresenceSignalService = new DesktopPresenceSignalService(lifeSignalHubService);
   const messageHubService = new MessageHubService(join(getDataDir(), "message-hub.json"));
   bootLoads.push(messageHubService.load());
-  // 订单信号派生（2026-10-19 handoff 数据源半边）：手机通知捕捉里命中订单词的
-  // （美团/饿了么/骑手/已送达…），派生成 shopping 流信号喂进 SensorKernel →
-  // 跨源采集库。emit 闭包晚绑定（sensorKernel 在下方才创建）；查询面是
-  // order.status 工具（tools/shopping-tools.ts）。
+  // 订单信号派生的 emit 闭包（2026-10-19 handoff 数据源半边）：晚绑定——
+  // sensorKernel 在下方才创建。
   let emitShoppingOrder:
     | ((signal: Omit<import("../proactivity/sensors/types.js").Signal, "stream">) => void)
     | null = null;
-  // （包裹聚合已下线，2026-10-28 用户拍板：查快递直接走平台订单页实时状态）
+  // 账单/快递流的信号出口（晚绑定：sensorKernel 在下方才创建）。
+  // 声明提前是因为汇入服务的 emit 闭包会在装配早期就被创建——
+  // 若等到后面才声明，闭包早于声明执行会踩 TDZ。
+  let emitBillParcel:
+    | ((signal: Omit<import("../proactivity/sensors/types.js").Signal, "stream">) => void)
+    | null = null;
+  // 账单/快递主动汇报的同类冷却：快递 10min（快递公司常连发多条：已发货→在途→已到站），
+  // 账单 6h（同一笔扣款常在短信+邮件+银行 App 三处各来一遍）。两类各计。
+  const BILL_PARCEL_COOLDOWN_MS = 10 * 60 * 1000;
+  const BILL_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+  const billParcelCooldown = new Map<string, number>();
+  // 入站消息**分发器**（2026-11-13 修 bug：此前此处与装配层下方各赋一次
+  // messageHubService.onInbound，后者整体覆盖前者 → 订单信号派生（deriveOrderSignal /
+  // emitShoppingOrder）永远不执行，shopping 流恒空、订单查询工具永远查不到东西）。
+  //
+  // 改成「注册 handler」而非「整体覆盖」：任何后续装配都只能追加链路，不能顶掉
+  // 已装好的链路。分发器在消息中心创建后立刻装上，因此不存在"消息先到、handler
+  // 还没装"的窗口期（此前正是这个窗口期让第一次赋值形同虚设）。
+  const inboundHandlers: Array<
+    (input: import("../services/message-hub-service.js").MessageHubInboundInput, message: import("../services/message-hub-service.js").MessageHubMessage) => void
+  > = [];
   messageHubService.onInbound = (input, message) => {
+    for (const handler of inboundHandlers) {
+      try {
+        handler(input, message);
+      } catch (e) {
+        console.warn(
+          `[MessageHub] 入站 handler 异常（忽略，不影响其他链路）: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
+    }
+  };
+  // 订单信号派生（2026-10-19 handoff 数据源半边）：手机通知捕捉里命中订单词的
+  // （美团/饿了么/骑手/已送达…），派生成 shopping 流信号喂进 SensorKernel →
+  // 跨源采集库。查询面是 order.status 工具（tools/shopping-tools.ts）。
+  // （包裹聚合已下线，2026-10-28 用户拍板：查快递直接走平台订单页实时状态）
+  inboundHandlers.push((input, message) => {
     const inboundText = message.text ?? input.text ?? "";
     if (emitShoppingOrder) {
       const signal = deriveOrderSignal({
@@ -784,7 +837,7 @@ export async function createAppServices(
       });
       if (signal) emitShoppingOrder(signal);
     }
-  };
+  });
   const messagePlatformGateway = new MessagePlatformGateway();
 
   const skillManager = new SkillManager();
@@ -840,6 +893,11 @@ export async function createAppServices(
   registerBrowserTools(toolRegistry, browserSessionService);
   registerClockTools(toolRegistry);
   registerWeatherTools(toolRegistry, weatherService);
+  registerGeoTools(toolRegistry, {
+    // 最近已知位置按调用者 actor 取（工具上下文里解析），不能绑死某个 actorId
+    getKnownLocation: (actorId?: string) =>
+      actorId ? locationCoordinator.getLastKnown(actorId) : null,
+  });
   registerMarketQuoteTools(toolRegistry);
   registerCareReminderTools(toolRegistry, {
     agentMemorySyncService,
@@ -1211,6 +1269,12 @@ export async function createAppServices(
     app.log.info(`[reminder] 已从磁盘恢复 ${restoredReminders} 条提醒实例（含升级计时）`);
   }
 
+  // 提醒结果 → 对话面的晚绑定记录器（chat thread 的 [后台任务记录] system 通道）。
+  // taskChangeHandler 在 externalChat 装配（本文件更后段）之前注册，闭包走晚绑定。
+  let recordReminderResultToThread:
+    | ((sessionId: string, goal: string, resultText: string) => void)
+    | undefined;
+
   scheduleTaskService.setTaskChangeHandler(async (action, task) => {
     notifyScheduleTasksChanged(
       wsConnectionRegistry,
@@ -1218,13 +1282,61 @@ export async function createAppServices(
         ? scheduleWsPayloadDeleted(task.sessionId, task.taskId)
         : scheduleWsPayloadFromTask(task, action),
     );
+    // 待办权威源写路径（2026-11-12 根修）：此前 commitments 表只读不写，
+    // 【待办与承诺】块恒空——提醒在对话面只有 scheduleSnapshot 一条命。
+    // created/active → upsert；completed → fulfilled；cancelled/failed/deleted → cancelled。
+    if (task.kind === "reminder") {
+      try {
+        if (action === "created" || (action === "updated" && task.status === "active")) {
+          upsertScheduleCommitment({
+            actorId: task.sessionId,
+            taskId: task.taskId,
+            text: `提醒：${task.shortTitle || task.title || task.description}`,
+            deadline: task.nextRunAt ?? task.runAt,
+            category: task.category,
+          });
+        } else if (action === "updated" && task.status === "completed") {
+          settleScheduleCommitment(task.sessionId, task.taskId, "fulfilled");
+        } else if (
+          action === "deleted" ||
+          (action === "updated" && (task.status === "cancelled" || task.status === "failed"))
+        ) {
+          settleScheduleCommitment(task.sessionId, task.taskId, "cancelled");
+        }
+      } catch {
+        /* 待办同步失败不影响提醒主链路（commitment-store 内部已兜底告警） */
+      }
+      // 提醒结果写回对话线程（2026-11-12 根修「一分钟后就会提醒你」复读事故）：
+      // 任务完成/失败时落一条 [后台任务记录] system 帧，下一轮对话天然携带
+      // 「这条提醒已触发/没触发」的权威状态，模型不再只能复读历史轮原话。
+      if (action === "updated" && (task.status === "completed" || task.status === "failed")) {
+        const when = task.lastRunAt ?? task.runAt;
+        const localTime = Number.isFinite(Date.parse(when))
+          ? new Intl.DateTimeFormat("zh-CN", {
+              timeZone: task.timezone || "Asia/Shanghai",
+              hour: "2-digit",
+              minute: "2-digit",
+              hourCycle: "h23",
+            }).format(new Date(when))
+          : when;
+        const resultText =
+          task.status === "completed"
+            ? `已于本地 ${localTime} 触发完成。`
+            : `到点未成功执行（本地 ${localTime} 前后），已按失败收口。`;
+        recordReminderResultToThread?.(
+          task.sessionId,
+          `到点提醒：${task.shortTitle || task.title || task.description}`,
+          resultText,
+        );
+      }
+    }
   });
 
-  // 统一主动性管道（docs/proactivity-architecture.md）：到点提醒的离线必达晚绑定回调。
-  // 管道在下方装配段创建后注入；在线时 ScheduleReminderFired 原生弹窗 + 手机端
-  // 对话气泡（agent.proactive_message 定向手机，见下方 handler）双触达
-  // （不再叠加 LLM 话术第二条消息——省一次 LLM 调用且不重复打扰）。
-  let onReminderOfflineToPipeline:
+  // 到点提醒的离线补投晚绑定回调（2026-11-12 起走专用 ReminderRedeliveryService，
+  // 不再借道主动消息管线；服务在下方装配段创建后注入）。在线时 ScheduleReminderFired
+  // 原生弹窗 + 手机端对话气泡（agent.proactive_message 定向手机，见下方 handler）
+  // 双触达（不再叠加 LLM 话术第二条消息——省一次 LLM 调用且不重复打扰）。
+  let onReminderOfflineRedeliver:
     | ((
         taskId: string,
         sessionId: string,
@@ -1300,7 +1412,7 @@ export async function createAppServices(
     // 管道提案（定向投递）：手机重连即直推，或升级手机系统推送——桌面
     // 已收到的 reminder_fired 不抵扣手机，也不会吃重复通知。
     if (!wsConnectionRegistry.hasDeviceClass(task.sessionId, "mobile")) {
-      onReminderOfflineToPipeline?.(
+      onReminderOfflineRedeliver?.(
         task.taskId,
         task.sessionId,
         task.title ?? "",
@@ -1311,7 +1423,7 @@ export async function createAppServices(
     } else {
       if (!wsDelivered) {
         // 手机在线但 fan-out 竞态失败：维持原离线管道兜底
-        onReminderOfflineToPipeline?.(
+        onReminderOfflineRedeliver?.(
           task.taskId,
           task.sessionId,
           task.title ?? "",
@@ -1384,6 +1496,13 @@ export async function createAppServices(
   });
   
   registerPaymentTools(toolRegistry, paymentService, new QrAssistService({ imageStore: imageGenerationService }));
+  // 统一支付模块（2026-11-13）：授权 → 额度/护栏 → 确认 → 渠道下单/收款码 → 查单/退款。
+  // 与上面的 payment.create_order 并存：老工具保持不变，新链路统一走 payment.pay。
+  registerUnifiedPaymentTools(
+    toolRegistry,
+    initUnifiedPaymentService({ alipayBotService, paymentService }),
+    new QrAssistService({ imageStore: imageGenerationService }),
+  );
   registerMeituanTools(toolRegistry, meituanService);
   // 版本闸（NEXTBOT_EDITION=oss 开源版剔除）：中继/虚拟电话工具族
   // （好友联络工具族 registerAgentLinkTools 在 worldService 创建后注册——加好友门禁用世界身份）
@@ -1739,12 +1858,12 @@ export async function createAppServices(
           const report = agg
             ? await agg.reconcileProfileFieldAuthority(actorId, agentMemorySyncService)
             : await reconcileProfileFactsRuntime(actorId, agentMemorySyncService);
-          if (report.profileChanged || report.profileKvSynced || report.kvRemoved > 0) {
+          if (report.profileChanged || report.profileKvSynced || report.legacyProfileKvCleared) {
             console.info(
               `[profile-fact-authority] 收敛 ${actorId}: ` +
                 `画像${report.profileChanged ? "已投影" : "不变"}` +
                 `${report.profileKvSynced ? "，KV画像副本已同步" : ""}` +
-                `${report.kvRemoved > 0 ? `，清 KV 副本 ${report.kvRemoved} 行` : ""}`,
+                `${report.legacyProfileKvCleared ? "，清 KV 画像全文副本" : ""}`,
             );
           }
         } catch {
@@ -1829,7 +1948,7 @@ export async function createAppServices(
           value: referent.name,
           sourceRef: event.sourceId,
           confidence: referent.confidence ?? null,
-        });
+        }, "UnifiedExtractionHook");
         if (result?.changed) {
           console.info(
             `[structured-facts] 指代映射登记 actor=${event.actorId} 指代·${referent.role}=${referent.name}`,
@@ -1886,7 +2005,7 @@ export async function createAppServices(
           eventTime: fact.eventTime ?? null,
           validFrom: fact.validFrom ?? null,
           validTo: fact.validTo ?? null,
-        });
+        }, "UnifiedExtractionHook");
         if (result?.changed) {
           console.info(
             `[structured-facts] 字段${result.previous.length > 0 ? "变更" : "新增"} ` +
@@ -2175,6 +2294,7 @@ export async function createAppServices(
         ev.actorSessionId,
         `世界入账 +${ev.amount}（${ev.reason}），余额 ${ev.balanceAfter}`,
         "world",
+        "WorldEvolutionHooks",
       );
       void narrativeMemory
         ?.ingest(
@@ -2190,6 +2310,7 @@ export async function createAppServices(
         ev.actorSessionId,
         `购买技能「${m?.displayName ?? ev.skillId}」（${ev.skillId}）花费 ${ev.pricePaid} 点，余额 ${ev.balanceAfter}`,
         "world",
+        "WorldEvolutionHooks",
       );
       void narrativeMemory
         ?.ingest(
@@ -2235,6 +2356,15 @@ export async function createAppServices(
   }
   const externalChatHost = new MutableExternalChatProvider(platformChatProvider);
   const externalChat = externalChatHost;
+  // 提醒结果 → 对话线程记录器接线（晚绑定，见 taskChangeHandler 注册处）：
+  // 走 chat thread 的 [后台任务记录] system 通道——给模型看的事实，不是 assistant 气泡。
+  recordReminderResultToThread = (sessionId, goal, resultText) => {
+    try {
+      externalChat.appendTaskRecord?.(sessionId, goal, resultText);
+    } catch {
+      /* thread 并入失败不影响提醒主链路 */
+    }
+  };
   // 按 actor 的用户自有模型绑定（云端连接版 BYOK）：session.init 上送时由 ws 层写入，
   // 加密落盘一份（离线期间的主动轮次要用用户自己的 key），agent-core 经 chatProviderFor 取用。
   const actorModelBindings = new ActorModelBindingStore();
@@ -2286,8 +2416,10 @@ export async function createAppServices(
       tier: "light",
       importance: "high",
     });
-  // 画像 v2 统一输出（ProfileRouter）：query/snapshot/brief 三视图 + 意图→类
-  // 动态路由（PROFILE_ROUTER_ENABLED 灰度闸在消费侧）。画像聚合器晚绑定回填。
+  // 画像 v2 统一输出（ProfileRouter）：query/brief 视图 + profile.query 工具取数口。
+  // 主对话按需注入（2026-11-12 根修）：意图词表路由与 identity 恒带层已退役，
+  // 注入走 T2 字面命中 + T3 语义召回（brain/profile-semantic-recall.ts），Agent
+  // 需要更多画像时用 profile.query 自查（Letta 型兜底）。画像聚合器晚绑定回填。
   const profileRouter = new ProfileRouter({
     factStore: {
       getActiveFactsByCategory: (actorId, categories, entity, limit) =>
@@ -2818,12 +2950,8 @@ export async function createAppServices(
         } catch {
           /* 画像缺失不阻断推荐 */
         }
-        try {
-          const { entries } = agentMemorySyncService.getSnapshot(actorId, ["user_profile"]);
-          if (typeof entries.user_profile === "string") parts.push(entries.user_profile);
-        } catch {
-          /* 同上 */
-        }
+        // 2026-11-12：不再读 KV user_profile 副本。画像唯一权威是 USER_PROFILE.md，
+        // 上面的 getPromptSlice 已经从该文件投影，重复拼一份只会放大陈旧副本。
         const digest = parts.join("\n").trim();
         return digest.length > 0 ? digest.slice(0, 1800) : null;
       },
@@ -3761,6 +3889,64 @@ export async function createAppServices(
   });
   // 常去地点/移动信号注入 AgentCore：对话 prompt 的位置背景（实时位置 + 常去地点）。
   agentCore.setLocationHistory(locationHistoryService);
+
+  // ── 地点语义（方案 E）：POI 先验 + 停留时间分布 → 家/公司/常去地点 ──
+  // 与位置历史共用 location.db；历史关闭时只读已持久化的旧结果（不再重算）。
+  const placeSemanticsService = new PlaceSemanticsService({
+    history: locationHistoryService,
+    // 行政区回填/重算落库后立即失效常去地点 prompt 缓存，避免 10 分钟窗口里
+    // 仍拿着「九华苑（无城市）」的旧文本回答家在哪个城市。
+    onPlacesUpdated: (actorId) => agentCore.invalidatePlacePrompt(actorId),
+  });
+  agentCore.setPlaceSemantics(placeSemanticsService);
+  // 启动回填：首次上报会按保留期 prune 老样本，必须先用手里的历史把「家/公司」
+  // 算出来并持久化；否则用户已有的数据来不及参与语义推断就被清掉了。
+  for (const actorId of locationHistoryService?.listActors() ?? []) {
+    void placeSemanticsService.getPlaces(actorId).catch(() => {});
+  }
+  // 用户「忘掉地点」或清位置历史时，必须把为语义注册的 observe 围栏一起删掉：
+  // 否则语义删了、系统定位服务里还留着家庭坐标，隐私口径不一致。
+  const removeAutoPlaceFences = (actorId: string, placeId?: string): void => {
+    try {
+      for (const fence of locationGeofenceService.list(actorId)) {
+        if (String(fence.actionConfig.source ?? "") !== "place_semantics") continue;
+        if (placeId && String(fence.actionConfig.placeId ?? "") !== placeId) continue;
+        locationGeofenceService.delete(actorId, fence.id);
+      }
+    } catch (err) {
+      console.log(`[Location] 自动围栏清理失败（忽略）: ${err}`);
+    }
+  };
+  registerPlaceTools(toolRegistry, {
+    service: placeSemanticsService,
+    audit: auditService,
+    onChanged: (actorId) => agentCore.invalidatePlacePrompt(actorId),
+    // 用户确认「家/公司」后注册一个 observe 系统围栏（只观察进出、不执行动作）：
+    // App 被杀时服务端也能收到 enter/leave，主动行为才能真正闭环。
+    // 只对用户确认过的地点做，推断结果不自动写进系统定位服务（隐私边界）。
+    onConfirmed: (actorId, record) => {
+      if (record.kind !== "home" && record.kind !== "work") return;
+      const exists = locationGeofenceService
+        .list(actorId)
+        .some(
+          (fence) =>
+            fence.enabled &&
+            String(fence.actionConfig.source ?? "") === "place_semantics" &&
+            String(fence.actionConfig.placeId ?? "") === record.id,
+        );
+      if (exists) return;
+      locationGeofenceService.create(actorId, {
+        name: record.kind === "home" ? "家（自动）" : "公司（自动）",
+        latitude: record.latitude,
+        longitude: record.longitude,
+        radiusMeters: Math.min(300, Math.max(80, Math.round(record.radiusMeters))),
+        event: "both",
+        actionType: "observe",
+        actionConfig: { source: "place_semantics", placeId: record.id },
+      });
+    },
+    onForgotten: (actorId, placeId) => removeAutoPlaceFences(actorId, placeId),
+  });
   // 方案 D 节律联动：位置历史（若有）作为 receptivity 的移动负信号喂入节律引擎
   if (locationHistoryService && rhythmEngine) {
     rhythmEngine.registerSensor(new LocationSensor(locationHistoryService));
@@ -5038,9 +5224,83 @@ export async function createAppServices(
     history: locationHistoryService,
     submitIntent: (intent) => proactivityHub.submitIntent(intent),
   });
-  // 用户清除位置历史时同步失效到达触发器的缓存：已删数据不再驱动主动行为
+  // ── 地点语义转换（方案 E）：回家/离家/到公司/到外地 → 交给 hub，由模型决定是否开口 ──
+  // 只把「高置信或用户已确认」的地点当成语义事实；推断中的地点不当铁定事实用。
+  const placeTransitionTrigger = new PlaceTransitionTrigger({
+    resolvePlace: (actorId, loc) => {
+      // 用户显式建的「家/公司」围栏优先级最高：它是用户亲口说的，不需要推断
+      const fence = locationGeofenceService.matchPlace(actorId, loc);
+      if (fence) {
+        return {
+          placeId: fence.fence.id,
+          kind: fence.kind,
+          latitude: fence.fence.latitude,
+          longitude: fence.fence.longitude,
+          label: fence.fence.name,
+          radiusMeters: fence.fence.radiusMeters,
+          confirmed: true,
+        };
+      }
+      const hit = placeSemanticsService.matchCached(actorId, loc);
+      if (!hit) return null;
+      // 主动转换比 prompt 展示更严格：未确认的地点至少要有 3 天证据，
+      // 否则「在朋友小区住了两晚」会被误判成「到家了」。
+      if (
+        !hit.record.confirmed &&
+        (hit.record.confidence < 0.6 || hit.record.distinctDays < 3)
+      ) {
+        return null;
+      }
+      return {
+        placeId: hit.record.id,
+        kind: hit.record.kind,
+        latitude: hit.record.latitude,
+        longitude: hit.record.longitude,
+        ...(hit.record.label ? { label: hit.record.label } : {}),
+        radiusMeters: hit.record.radiusMeters,
+        confirmed: hit.record.confirmed,
+      };
+    },
+    resolveHome: (actorId) => {
+      const fence = locationGeofenceService
+        .list(actorId)
+        .find((item) => item.enabled && inferPlaceKind(item.name) === "home");
+      if (fence) {
+        return {
+          placeId: fence.id,
+          kind: "home" as const,
+          latitude: fence.latitude,
+          longitude: fence.longitude,
+          label: fence.name,
+          radiusMeters: fence.radiusMeters,
+          confirmed: true,
+        };
+      }
+      const home = placeSemanticsService.findPlace(actorId, "home");
+      if (
+        !home ||
+        (!home.confirmed && (home.confidence < 0.55 || home.distinctDays < 3))
+      ) {
+        return null;
+      }
+      return {
+        placeId: home.id,
+        kind: "home" as const,
+        latitude: home.latitude,
+        longitude: home.longitude,
+        ...(home.label ? { label: home.label } : {}),
+        radiusMeters: home.radiusMeters,
+        confirmed: home.confirmed,
+      };
+    },
+    submitIntent: (intent) => proactivityHub.submitIntent(intent),
+  });
+  // 用户清除位置历史时同步失效到达触发器/语义触发器的缓存：已删数据不再驱动主动行为
   locationHistoryService?.setOnCleared((actorId) => {
     locationTrigger.invalidate(actorId);
+    placeTransitionTrigger.invalidate(actorId);
+    removeAutoPlaceFences(actorId);
+    placeSemanticsService.forget(actorId);
     // 快照里的位置也必须同步消失：否则「已删除」的坐标仍会经 prompt 注入泄漏。
     // 时钟保留——用户清的是位置，不是时区。
     actorContext.clearLocation(actorId);
@@ -5149,9 +5409,24 @@ export async function createAppServices(
   const locationIngest = new LocationIngestPipeline({
     history: locationHistoryService,
     geofence: locationGeofenceService,
+    places: placeSemanticsService,
     // 快照与事件流同源：每次上报（含被历史频控丢弃的）都刷新 Actor 当前状态
     context: actorContext,
     onLocationReported: (actorId, loc) => locationTrigger.handleLocationReport(actorId, loc),
+    // 语义转换同样不受频控影响：geofence 触发的那一条 fix 必须能看到
+    onLocationObserved: (actorId, loc) => {
+      // 后台预热地点语义（TTL 内零成本）：否则用户不聊天时永远没有语义，
+      // 转换触发器只能读空库——主动行为必须先有「家/公司」这个前提。
+      void placeSemanticsService.getPlaces(actorId).catch(() => {});
+      placeTransitionTrigger.handleLocationReport(actorId, {
+        latitude: loc.latitude,
+        longitude: loc.longitude,
+        ...(loc.accuracyMeters != null ? { accuracyMeters: loc.accuracyMeters } : {}),
+        ...(loc.trigger ? { trigger: loc.trigger } : {}),
+        ...(loc.city ? { city: loc.city } : {}),
+        ...(loc.district ? { district: loc.district } : {}),
+      });
+    },
   });
   // 接线 2：session-epitome 待办闭环（完成检测 → hub.onUserLoopCompleted 恭喜）
   memoryCortex?.setEpitomeLoopClosedListener((actorId, loopText) => {
@@ -6003,12 +6278,97 @@ export async function createAppServices(
       );
     },
   });
+  // 账单/快递汇总台账（2026-11-13）：邮件与短信识别出的条目汇到一处，
+  // 提供"这个月账单多少钱""快递单号/取件码是多少"的查询面。
+  // emit 闭包晚绑定（sensorKernel 在下方才创建）——台账先可用，信号出口后接。
+  const billParcelLedger = new BillParcelLedger({ dataPath: getDataDir() });
+  billParcelLedger.load();
+  const billParcelIngest = new BillParcelIngestService({
+    ledger: billParcelLedger,
+    emit: (signal) => emitBillParcel?.(signal),
+    // 主动汇报（2026-11-13）：识别到新的账单/快递 → 走主动提案链路直接告知。
+    // 这是「自动识别并汇总」闭环的最后一环：识别只进台账，用户是不知道的。
+    //
+    // 两类的节奏**故意不同**：
+    //   - 快递 = 时效刚需。「取件码 8-2-3010」晚一小时就没意义了 → high + 10min 冷却。
+    //   - 账单 = 汇总型。逐条弹窗只会刷屏，而且邮件侧的账单另有 IntelService
+    //     情报链路做跨封综述（"你本月话费扣了多少"）—— 两条路都报就是重复打扰。
+    //     故账单走 medium + 6h 冷却：即时知道有这笔扣款，但不打断；真正的
+    //     汇总口径交给台账与 bill_parcel.summary 工具，问一句就有。
+    onMatched: (info) => {
+      // 晚绑定取管道：proactivePipeline 在本服务之后才创建（此处直接引用会踩 TDZ）
+      const pipeline = proactivePipelineRef.current;
+      if (!pipeline) return;
+      const bill = info.entries.find((e) => e.category === "bill");
+      const parcel = info.entries.find((e) => e.category === "parcel");
+      const primary = bill ?? parcel;
+      if (!primary) return;
+      const actorId = info.actorId;
+      const now = Date.now();
+      const fingerprint = primary.id;
+      const isParcel = primary.category === "parcel";
+      // 同一账号同类冷却：快递 10min（快递公司常连发多条：已发货→在途→已到站）、
+      // 账单 6h（同一笔扣款常在短信+邮件+银行 App 三处各来一遍）
+      const cooldown = isParcel ? BILL_PARCEL_COOLDOWN_MS : BILL_COOLDOWN_MS;
+      const cooldownKey = `${actorId}:${primary.category}`;
+      const last = billParcelCooldown.get(cooldownKey);
+      if (last != null && now - last < cooldown) return;
+      billParcelCooldown.set(cooldownKey, now);
+
+      const sourceLabel =
+        info.source === "email" ? "邮件" : info.source === "sms" ? "短信" : "手机通知";
+      const title = isParcel ? "收到快递通知" : "收到账单通知";
+      const detailLines: string[] = [`来源: ${sourceLabel}`];
+      if (parcel) {
+        detailLines.push(
+          parcel.trackingNo ? `运单号: ${parcel.trackingNo}` : "运单号: 未在原文给出",
+        );
+        if (parcel.pickupCode) detailLines.push(`取件码: ${parcel.pickupCode}`);
+        if (parcel.carrier) detailLines.push(`承运商: ${parcel.carrier}`);
+      }
+      if (bill) {
+        detailLines.push(`账单类型: ${bill.billType ?? "未分类"}`);
+        detailLines.push(`金额: ${bill.amount != null ? `¥${bill.amount}` : "原文未给出"}`);
+      }
+
+      pipeline.submitProposal({
+        proposalId: `bp_${fingerprint}`,
+        actorId,
+        kind: "action.bill_parcel",
+        tier: "must",
+        importance: isParcel ? "high" : "medium",
+        dedupKey: `bill_parcel:${fingerprint}`,
+        title,
+        summary: primary.title,
+        evidence: [
+          "bill_parcel",
+          `source:${info.source}`,
+          `category:${primary.category}`,
+          ...(parcel?.trackingNo ? [`tracking:${parcel.trackingNo}`] : []),
+          ...(bill?.amount != null ? [`amount:${bill.amount}`] : []),
+        ],
+        directText:
+          isParcel
+            ? `刚收到一条快递通知——${parcel?.title ?? "包裹已到"}。` +
+              (parcel?.pickupCode ? `取件码 ${parcel.pickupCode}。` : "") +
+              `要我帮你记着，或者提醒你什么时候去取吗？`
+            : `刚收到一条账单通知——${bill?.title ?? "账单已出"}。` +
+              `要我帮你记进账本吗？`,
+        createdAt: now,
+        source: "bill_parcel",
+        subject: isParcel ? "快递" : "账单",
+        detail: Object.fromEntries(detailLines.map((l) => l.split(": "))),
+      });
+    },
+  });
   const mailWatch = new MailWatchRegistry({
     env: process.env,
     // 单机装机（未开周界鉴权）允许"没带身份"的授权码提交认给本机唯一账号；
     // 云端多租户必须带身份，否则凭据不知道绑给谁
     allowAnonymousFallback: !isAccessAuthRequired(),
     messageHub: messageHubService,
+    // 账单/快递识别：邮件侧与短信侧共用同一套规则与台账（2026-11-13）
+    billParcel: billParcelIngest,
     // 生产 IMAP 客户端（imapflow，每轮 poll 新建连接用完即弃）。此前从未注入——
     // 邮件链即使填了授权码也会「running=true 但空转」（2026-10-01 补接线）。
     // cfg 由 service 每轮传入（含运行时 applyPass 设置的授权码）。
@@ -6226,6 +6586,18 @@ export async function createAppServices(
   // 整库回退：SENSOR_SOURCE_STORE=0。适配器只做形状转换，业务逻辑仍留在原服务。
   const sourceStore = new SourceStore({ dataPath: proactivityFabricPath });
 
+  // 启动即清除采集库里已落库的验证码历史信号（2026-11-14 用户定稿「全部删除」：
+  // 11-13 旧策略降级落库的验证码漏进了动态页 mail 区块）。须在 loadRecent 之前
+  // 执行，重建的内存窗口才是干净的。
+  try {
+    const purged = purgeStoredOtpMailSignals(sourceStoreRoot(proactivityFabricPath));
+    if (purged.removed > 0) {
+      console.log(`[Bootstrap] 已清除跨源库中验证码历史信号 ${purged.removed} 条（${purged.files} 个分区文件）`);
+    }
+  } catch (e) {
+    console.warn(`[Bootstrap] 验证码历史信号清理失败（忽略）：${e instanceof Error ? e.message : String(e)}`);
+  }
+
   // ─── 共享发现层（2026-10-19，架构收口）───
   // 一条总线（SourceStore 的 finding 条目）+ 一个共同键（subject）+ 一个单开口闸
   // （composeBeforeOpen）。此前 GoalRunner / 夜间内省 / 感知规则桥 / 邮件 / 日历 /
@@ -6269,13 +6641,37 @@ export async function createAppServices(
   // 订单流 feeder（2026-10-19）：MessageHubService.onInbound 里派生的 shopping
   // 信号从这里进内核。此刻起 onInbound 的派生开始生效（晚绑定闭环）。
   emitShoppingOrder = registerFeeder(sensorKernel, "shopping_orders", "shopping");
+  // 账单/快递流 feeder（2026-11-13）：邮件与短信识别出的条目从这里进内核，
+  // 汇入跨源采集库（SourceStore），"提到某单号/某笔金额的所有来源"可一次命中。
+  emitBillParcel = registerFeeder(sensorKernel, "bill_parcel", "bill_parcel");
   // order.status：只读跨源库的订单状态查询（probe 判定 / 模型按需查）。
   // 只读工具，handoff 等待期不被 act_external 收缩拦下。
   registerOrderStatusTools(toolRegistry, { sourceStore });
+  // bill_parcel.list / bill_parcel.summary：账单与快递汇总查询（2026-11-13）。
+  // 查询面是台账（邮件+短信两条链路汇入的识别结果），不现打外部接口。
+  registerBillParcelTools(toolRegistry, { ledger: billParcelLedger });
   console.log(
     `[Bootstrap] 跨源统一采集库 ${sourceStore.enabled() ? "已启用" : "已关闭（SENSOR_SOURCE_STORE=0）"}；` +
       `外部信源收编 mail=${!sensorFabricDisabled("MAIL")} ics=${!sensorFabricDisabled("ICS")} finance=${!sensorFabricDisabled("FINANCE")}`,
   );
+  // 思考档位学习（2026-11-12）：启动即加载历史延迟曲线，决定每个模型下发哪一档。
+  // 换模型后「莫名变慢」的第一现场就在这里——隐性陷阱（不下发档位反而更慢）用
+  // warn 级别打出来，别等用户抱怨才人肉排查。统计文件缺失/损坏都只降级为空表。
+  try {
+    initThinkingBudget();
+    const budget = describeThinkingBudgetForStartup();
+    console.log(budget.line);
+    for (const trap of budget.traps) {
+      console.warn(
+        `[thinking-budget] 隐性档位陷阱：${trap.model} 不下发档位时首字 ${trap.noneP50}ms，` +
+          `显式档位仅 ${trap.explicitP50}ms（${trap.ratio}x）。已强制显式下发，勿回退为「不传」。`,
+      );
+    }
+  } catch (e) {
+    console.warn(
+      `[thinking-budget] 启动加载失败（忽略，按默认档运行）：${e instanceof Error ? e.message : String(e)}`,
+    );
+  }
   // 启动分段加载：把最近 N 天日分区重建进内存窗口 + 实体索引（对齐 Muse「扫进自己的库、
   // 随时可查」——重启后历史仍可跨源检索，不再"重启即失忆"）。延迟到启动完成后执行，
   // 避免同步读盘阻塞引导；只读不写。SENSOR_SOURCE_LOAD_DAYS=0 关闭。
@@ -6462,6 +6858,27 @@ export async function createAppServices(
   const proactivePushService = new MobilePushService({
     registryPath: join(getDataDir(), "proactivity", "push-tokens.json"),
   });
+  // ─── 动作意图服务（2026-11-13「通知即界面」）───
+  // 通知栏按钮的唯一真相源：签发一次性 HMAC token、验签、幂等执行、落审计。
+  // 聊天卡按钮与通知栏按钮共用**同一个 intent**——两个渲染面，同一套语义与审计。
+  // 签名密钥落 data/secret/action-intent.key（跨重启稳定：通知可能几小时后才被点开，
+  // 服务重启不该让用户手里的按钮失效）。
+  const actionIntentService = new ActionIntentService({
+    store: new ActionIntentStore(join(getDataDir(), "proactivity", "action-intents.json")),
+    secret: loadActionIntentSecret(join(getDataDir(), "secret", "action-intent.key")),
+  });
+  // 错过提醒专用补投通道（2026-11-12 架构定稿，用户拍板「提醒不走主动消息管线」）：
+  // 到点手机不在线 → 记账（missed-reminders.json，taskId+runAt 幂等、封顶、全带 firedAt）；
+  // 手机 WS 重连（onConnectionChange 钩子）→ 立即直投 agent.proactive_message（原时间落屏）。
+  // 零频控零退避零仲裁；管线从此只承载 AI 主动提案。系统推送通道可用时直接升级推送。
+  const reminderRedelivery = new ReminderRedeliveryService({
+    storePath: join(getDataDir(), "schedule", "missed-reminders.json"),
+    isMobileOnline: (actorId) => wsConnectionRegistry.hasDeviceClass(actorId, "mobile"),
+    trySendToDeviceClasses: (actorId, json, classes) =>
+      wsConnectionRegistry.trySendToDeviceClasses(actorId, json, classes as never),
+    mobilePush: proactivePushService,
+  });
+  reminderRedelivery.flush();
   // 助手动态台账：action.* 代办提案投递成功后落一条记录，右侧面板「助手动态」卡读取
   const agentActivityStore = new AgentActivityStore(
     join(getDataDir(), "proactivity", "activities.json"),
@@ -6530,6 +6947,11 @@ export async function createAppServices(
   agentCore.setActiveGoalsProvider((actorId) =>
     buildActiveGoalsPromptBlock({ goalBoard, goalPlanner, actorId }),
   );
+
+  // ─── 待办的权威读取（2026-11-12 写入收敛配套）───
+  // 待办权威源是 agentic_memory.db#commitments（状态机 + 截止时间）；
+  // 原先读的 KV memory_open_loops / memory_commitments 已停写，这里换掉读路径。
+  agentCore.setCommitmentsProvider((actorId) => buildCommitmentPrompt(actorId) ?? null);
 
   // ─── 会话级任务计划（2026-10-19 三层尺度架构 · P0-B）───
   // TaskPlan 是三层尺度里的中间层：单次多步任务、会话内可续跑、完成即归档。
@@ -6888,6 +7310,8 @@ export async function createAppServices(
     },
     delivery: new ProactiveDeliveryService({
       trySend: (actorId, json) => wsConnectionRegistry.trySend(actorId, json),
+      // 「通知即界面」：投递时为可决策提案签发带按钮的动作（聊天卡与通知栏共用同一 intent）
+      actionIntents: actionIntentService,
       // 定向投递（targetDeviceClass 提案用）：按设备类别投递（手机离线补达场景，
       // 桌面在线不构成对手机的送达也不吃重复通知）
       trySendToDeviceClasses: (actorId, json, deviceClasses) =>
@@ -6930,10 +7354,16 @@ export async function createAppServices(
     // 移动端推送通道（离线必达升级）：两端都不在线时，必达/critical 提案改走手机系统推送
     // （JPUSH_APP_KEY/JPUSH_MASTER_SECRET 或 BARK_URL / MOBILE_PUSH_WEBHOOK_URL 任一配置即启用）
     mobilePush: proactivePushService,
+    // 「通知即界面」：离线推送路径同样签发动作意图（厂商通知带不了按钮，
+    // 但点开通知能进 App 处理这个决策——降级路径共用同一套语义）
+    actionIntents: actionIntentService,
     // 升级链已斩断（2026-11-05 定调）：不再给 critical 提案挂 escalate 钩子——
     // 送达 ≠ 被看到 的兜底改由送达确认与重连补投承担，电话仅保留为显式触达级别。
   });
   proactivePipeline.start();
+  // 通知栏动作执行器（2026-11-13）：把 actionId 接到真实管道能力上——
+  // 每个按钮按下去都必须真的改变某个状态，否则就是骗人的按钮。
+  registerNotificationActionExecutors(actionIntentService, { pipeline: proactivePipeline });
   // 晚绑定回填（降价监控命中在管道构造前装配）：到价提案经此进统一管道
   proactivePipelineRef.current = proactivePipeline;
   // 管道级确认回流：hub 的确认解析入口对 origin=pipeline 条目委托管道（批准回调 + 回执）
@@ -7148,6 +7578,8 @@ export async function createAppServices(
     if (connected) {
       proactivityPresence.markConnected(actorId);
       proactivePipeline.flushDue();
+      // 错过提醒专用补投：手机一连上立即直投滞留的提醒（零退避，不走管线仲裁）
+      void reminderRedelivery.flushForActor(actorId);
     } else {
       proactivityPresence.markDisconnected(actorId);
     }
@@ -7252,7 +7684,7 @@ export async function createAppServices(
         ? "critical"
         : undefined,
   });
-  messageHubService.onInbound = (input) => {
+  inboundHandlers.push((input) => {
     // 消息前端陈列已撤（2026-10-14 定调）：不再每条入站直推 hub.message_arrived
     // 上岛展示——多数为垃圾消息，打扰体验。消息统一在后台扫描消化：
     // messageWatchTrigger 识别高价值信号（日程变动等）→ 主动提案链路按价值
@@ -7279,40 +7711,46 @@ export async function createAppServices(
     });
     // 微信支付服务通知 → 零 LLM 解析 → 静默自动入账（只落库不推送，查询走 finance.* 工具）
     void financeIngestService.handleInboundMessage(input).catch(() => {});
-  };
+  });
+  // 账单/快递识别（2026-11-13）：短信与邮件两条链路共用同一套规则与汇总台账。
+  //
+  // 此前短信链路**根本没有分类**——所有入站消息一律按 salience=low 的 message 流
+  // 丢进总线，于是「短信里的账单/快递自动识别并汇总」从未成立。这里对短信
+  // （platform=sms）与手机通知捕捉（platform=generic 等，物流通知多走这条）
+  // 统一跑一遍零 LLM 规则；命中则落台账并发 high 信号。
+  //
+  // 注意排除「验证码」：用户明确「只是验证码不需要」——验证码不占汇报通道，
+  // 但仍会被 classifyBillParcel 标成 otpOnly，不落台账。
+  inboundHandlers.push((input) => {
+    try {
+      billParcelIngest.ingest({
+        actorId: input.actorId,
+        source: input.platform === "sms" ? "sms" : "notification",
+        title: input.title,
+        text: input.text,
+        externalId: input.externalMessageId,
+      });
+    } catch (e) {
+      console.warn(
+        `[BillParcel] 消息链路识别失败（忽略）: ${e instanceof Error ? e.message : String(e)}`,
+      );
+    }
+  });
   // 到点提醒手机端不在场 → 定向手机端的管道提案（directText 零 LLM）：手机重连
   // 即直推（targetDeviceClass 定向，桌面不吃重复），或升级手机系统推送（proactivePushService 已配置时）。
   // 补推语义（2026-11-12 定稿，用户拍板）：不设保质期——用户打开 App 就要立即收到
   // 错过的提醒（这条不是可丢的打扰，是没送达的承诺）；但提案必须带 firedAt=原定
   // 触发时刻，客户端气泡按原时间落屏，补推不冒充"刚刚发的"。
-  onReminderOfflineToPipeline = (taskId, sessionId, title, message, runAt, preReminder) => {
-    const submittedAt = Date.now();
-    // runAt 是 ISO 字符串（task.nextRunAt ?? task.runAt）；解析失败兜底为提交时刻
-    const firedAt = Number.isFinite(Date.parse(runAt)) ? Date.parse(runAt) : submittedAt;
-    proactivePipeline.submitProposal({
-      proposalId: `p_${submittedAt.toString(36)}_rm${taskId.slice(-6)}`,
-      actorId: sessionId,
-      kind: "schedule_reminder",
-      tier: "must",
-      importance: "high",
-      // 预告段与到点触发各自一条（同 taskId 同 runAt，必须用后缀区分，否则预告提案
-      // 会把到点提案 dedup 吞掉）
-      dedupKey: `schedule_reminder:${taskId}:${runAt}${preReminder ? ":pre" : ""}`,
-      title,
-      summary: message,
-      evidence: [
-        `taskId=${taskId}`,
-        `runAt=${runAt}`,
-        preReminder ? "pre_reminder" : "due_reminder",
-        "mobile_not_reachable",
-      ],
-      directText: message,
-      createdAt: submittedAt,
-      firedAt,
-      source: "schedule",
-      // 定向手机端（2026-10-13）：桌面在线不构成对手机的送达；投递/挂起/推送兜底均只面向手机
-      targetDeviceClass: "mobile",
-    });
+  // 到点提醒手机端不在场 → 专用补投通道（2026-11-12 架构定稿：不再借道主动消息
+  // 管线）。手机 WS 重连即直投（零退避）；系统推送通道可用时直接升级系统推送
+  // （proactivePushService）。补投事件带 firedAt=原定触发时刻，客户端气泡按原时间
+  // 落屏，不冒充"刚刚发的"。记账幂等（taskId+runAt）、队列封顶，误发结构性不可能。
+  onReminderOfflineRedeliver = (taskId, sessionId, title, message, runAt, preReminder) => {
+    void reminderRedelivery
+      .enqueue({ actorId: sessionId, taskId, runAt, title, message, preReminder })
+      .catch((err) =>
+        console.warn(`[ReminderRedelivery] 记账失败（提醒主链路不受影响）taskId=${taskId}: ${err}`),
+      );
   };
   console.log(
     "[Bootstrap] 统一主动性管道已装配（提案→仲裁→投递→反馈 + known actor 持久化；临会提醒由 meeting_soon 评估器统一承担）",
@@ -7467,6 +7905,8 @@ export async function createAppServices(
     // 简报用户称呼第一事实源（与调度推送路径同源）
     factStore: structuredFactStore ?? undefined,
     proactivePushService,
+    // 「通知即界面」：通知栏按钮的执行入口（未装配则该路由不挂载）
+    actionIntentService,
     proactivityFabric: {
       sensorHealth: () => sensorKernel.health(),
       // 树枝配置面（2026-10-22 树状架构 Phase 3）：信息源树枝清单/启停/精简预算。
@@ -7719,6 +8159,9 @@ export async function createAppServices(
     approvalInboxService,
     attentionStore,
     reachRouter,
+    // 「动态」tab 聚合区块（账单快递台账 + 跨源 mail 要事）
+    billParcelLedger,
+    sourceStore,
     brainCenter,
     bodyCenter,
     reflexArc,
@@ -7780,6 +8223,8 @@ export async function createAppServices(
     phoneCallCoordinator,
     // 卡片内动作通道（card.action）：卡内下单/支付/物流直接执行，不发消息
     shoppingOrderService,
+    // 卡内比价续跑（shopping.login.skip / refresh / shopping.compare.resume）
+    shoppingCompareService,
     // 卡内收款确认（payment.pay.check）：queryOrder 原地换卡
     paymentService,
     agentAccountService,
@@ -7822,6 +8267,7 @@ export async function createAppServices(
     voiceDuplexService.stopAll();
     // 位置子系统：停围栏判定 + 关本地 SQLite（WAL 落盘）
     locationGeofenceService.close();
+    placeSemanticsService.close();
     locationHistoryService?.close();
     try {
       await moodInferenceService.flush();

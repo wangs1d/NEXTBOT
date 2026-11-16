@@ -50,7 +50,7 @@ export async function reconcileProfileFactsForActors(
     try {
       const report = await reconcileProfileFactsRuntime(actorId, memorySync);
       reports.push(report);
-      if (report.profileChanged || report.profileKvSynced || report.kvRemoved > 0) changed += 1;
+      if (report.profileChanged || report.profileKvSynced || report.legacyProfileKvCleared) changed += 1;
     } catch {
       /* 单 actor 失败跳过 */
     }

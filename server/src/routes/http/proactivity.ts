@@ -629,6 +629,41 @@ export function registerProactivityPipelineRoutes(
     });
     return { ok: result.ok, provider: result.provider, reason: result.reason };
   });
+
+  // ─── 「通知即界面」自检（2026-11-13）───
+  // POST /api/proactivity/notify/test {actorId}
+  //   走**真实**管道投递一条带按钮的提案：手机在后台应当收到一条带 3 个按钮的
+  //   系统通知；点按钮 → 客户端后台 isolate 直连 /api/action-intents/execute →
+  //   服务端执行 → 回执。这是 P0 全链路的验收入口。
+  //   若设备不在线，仲裁会改判 deferred——如实返回 verdict，不假装已送达。
+  app.post("/api/proactivity/notify/test", async (request, reply) => {
+    if (!pipeline) return reply.code(503).send({ ok: false, error: "pipeline not wired" });
+    const body = (request.body ?? {}) as { actorId?: string };
+    const actorId = String(body.actorId ?? "").trim();
+    if (!actorId) return reply.code(400).send({ ok: false, error: "actorId required" });
+    const now = Date.now();
+    const decision = pipeline.submitProposal({
+      proposalId: `notify_test_${now.toString(36)}`,
+      actorId,
+      kind: "action.notify_test",
+      tier: "must",
+      importance: "high",
+      dedupKey: `notify_test:${actorId}:${now.toString(36)}`,
+      title: "通知即界面 · 自检",
+      summary: "带按钮的通知自检",
+      evidence: [],
+      directText:
+        "自检：这条通知带三个按钮。点任意一个，服务端应该立刻收到执行请求并回一条回执。",
+      createdAt: now,
+      source: "notify_test",
+    });
+    return {
+      ok: decision.verdict === "delivered",
+      verdict: decision.verdict,
+      reasonChain: decision.reasonChain,
+      actorId,
+    };
+  });
 }
 
 /**

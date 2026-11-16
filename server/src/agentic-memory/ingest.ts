@@ -1,9 +1,9 @@
 import type { Memory } from "mem0ai/oss";
 
 import { decideMemoryWrite } from "../services/memory-decision-engine.js";
-import { isProfileWriteBatchMode } from "../services/profile-write-scheduler.js";
 import { factValueInText } from "../services/memory-record-utils.js";
 import { classifyMemorySourceRole } from "../services/memory-source-role.js";
+import { assertMemoryWriter } from "../memory/memory-authority.js";
 import { isEphemeralActorId, warnEphemeralActorMemoryBlocked } from "../agent/actor-id.js";
 import { gateLtmWrite } from "./ltm-write-gate.js";
 import {
@@ -71,6 +71,8 @@ export class AgenticMemoryIngestService {
   private extractionClient: UnifiedLlmClient | null = null;
   /** 当前画像快照读取口（统一抽取捎带画像任务用；未注入则不带画像） */
   private profileSnapshot: ((actorId: string) => Promise<string | null>) | null = null;
+  /** 统一写入者缺位告警的节流计数（避免每轮刷屏） */
+  private missingWriterWarned = 0;
 
   constructor(private readonly memory: Memory) {}
 
@@ -172,71 +174,29 @@ export class AgenticMemoryIngestService {
       return;
     }
 
-    // 低信号轮捎带抽取——只属于 PROFILE_WRITE_SCHEDULING=legacy 这条回滚档：
-    // batch 模式下候选已在 WAL 全文标记、由统一写入者/夜间批覆盖，这里再跑一次
-    // extractUnified 是纯双轨（残片上抽画像，token 浪费 + 噪音来源）。回滚开关
-    // 既然还在文档里，行为就得真能回得去，所以按模式收在这一个闸里。
-    if (
-      context === "main" &&
-      isMemoryUnifiedExtractEnabled() &&
-      !isProfileWriteBatchMode()
-    ) {
-      void this.resolveProfileContext(actorId, t, false)
-        .then((profileContext) =>
-          extractUnified(t, {
-            client: this.extractionClient ?? undefined,
-            actorId,
-            ...(profileContext ? { profileContext } : {}),
-          }),
-        )
-        .then((orphan) => {
-          if (!orphan) return;
-          const orphanProfileOps =
-            orphan.profileOps && orphan.profileOps.length > 0 ? orphan.profileOps : undefined;
-          if (
-            orphan.corrections.length === 0 &&
-            orphan.understandings.length === 0 &&
-            orphan.facts.length === 0 &&
-            orphan.forget.length === 0 &&
-            !orphanProfileOps
-          ) {
-            return;
-          }
-          this.fireWriteHooks({
-            actorId,
-            sourceId,
-            context,
-            highSignal: false,
-            results: [],
-            corrections: orphan.corrections.length > 0 ? orphan.corrections : undefined,
-            understandings:
-              orphan.understandings.length > 0 ? orphan.understandings : undefined,
-            facts: orphan.facts.length > 0 ? orphan.facts : undefined,
-            forget: orphan.forget.length > 0 ? orphan.forget : undefined,
-            referents: orphan.referents.length > 0 ? orphan.referents : undefined,
-            profileOps: orphanProfileOps,
-          });
-        })
-        .catch((err) =>
-          console.warn(
-            "[agentic-memory] 低信号捎带抽取失败（忽略）:",
-            err instanceof Error ? err.message : String(err),
-          ),
-        );
-    }
+    // 低信号轮不自行抽取：画像/理解/事实的抽取由夜间批（profile-write-scheduler
+    // 的 T2，读 turn-wal 全文）统一承担，低信号内容先进整合队列由统一写入者裁决。
+    // 2026-11-13 移除旧 PROFILE_WRITE_SCHEDULING=legacy 档——那一档让低信号轮
+    // 再跑一次 extractUnified，与夜间批构成两套并行的画像写入实现（残片上抽
+    // 画像是 token 浪费与噪音的主要来源）。
 
     if (this.lowSignalSink) {
       this.lowSignalSink({ actorId, sourceId, text: t, context });
       return;
     }
 
-    // 统一写入者未接管（AGENT_MEMORY_CONSOLIDATION_ENABLED=0 / 测试）：
-    // 原内置内存缓冲（10 条/8000 字/30s 定时摘要）已删除——与
-    // memory-consolidation-service 逐字重复的双轨遗留。降级为直写 Mem0
-    // （infer:true，decay 语义），由生命周期遗忘机制回收。
-    await this.writeDecidedDetailed(actorId, sourceId, t, context, false).catch((err) => {
-      console.error("[agentic-memory] 低信号直写失败（忽略）:", err);
-    });
+    // 统一写入者未接管（AGENT_MEMORY_CONSOLIDATION_ENABLED=0 / 测试）：低信号
+    // 内容没有写者。旧实现在此直写 Mem0（infer:true），那是**第二套抽取语义**
+    // ——Mem0 内置蒸馏器与 extractUnified 的决策/评分口径不一致，同一段话在
+    // 两条链路上会产出不同的记忆条目。单一写者原则下宁可丢：显式关掉统一
+    // 写入者意味着「这一路不写记忆」，不是「换一套语义照写」。
+    this.missingWriterWarned += 1;
+    if (this.missingWriterWarned <= 3 || this.missingWriterWarned % 100 === 0) {
+      console.warn(
+        `[agentic-memory] 统一写入者未接管，低信号内容丢弃 ` +
+          `（累计 ${this.missingWriterWarned} 条，source=${sourceId}）`,
+      );
+    }
   }
 
   private async ingestHighSignal(
@@ -386,6 +346,7 @@ export class AgenticMemoryIngestService {
         if (factFields.length >= 4) break;
       }
       try {
+        assertMemoryWriter("mem0", "AgenticMemoryIngestService");
         const addResult = (await this.memory.add([{ role: "user", content: trimmed }], {
           userId: actorId,
           metadata: {
@@ -472,10 +433,16 @@ export class AgenticMemoryIngestService {
 
   /**
    * Mem0 落库核心（所有持久写入共用）：
-   *   - infer:true 由 Mem0 LLM 抽取结构化记忆条目，返回结果（含 id）
+   *   - **infer:false**（2026-11-13 统一）：Mem0 只做存储与 embedding 索引，
+   *     不参与记忆抽取。抽取语义全局只有一套——统一抽取 extractUnified
+   *     （生产主路 persistUnifiedExtraction 本来就是 infer:false）。
+   *     此前本方法对非 assistant 内容用 infer:true，等于在统一抽取之外
+   *     并行跑 Mem0 内置蒸馏器：两套蒸馏器的决策/评分口径不同，同一段话
+   *     走两条路会产出不同的记忆条目（此前只在 unified 抽取失败时触发，
+   *     属"第二套抽取语义"）。
    *   - 落库成功后触发 writeHooks（方案 B 账本 / 方案 D 溯源）
    *   - extraMetadata 供 memory-bridge 注入 graphNodeId 等跨层关联字段
-   * 返回抽取结果；Mem0 未返回明细时 results 为空数组（hooks 不触发）。
+   * 返回写入结果；Mem0 未返回明细时 results 为空数组（hooks 不触发）。
    */
   async writeDecidedDetailed(
     actorId: string,
@@ -499,11 +466,10 @@ export class AgenticMemoryIngestService {
     }
 
     const trimmed = t.length > 12_000 ? `${t.slice(0, 12_000)}...` : t;
-    // 来源角色治理（2026-11-12 称呼事故）：整段都是助手发言时不做 infer——Mem0 内置
-    // 抽取器会从 assistant 消息里蒸馏「用户事实」，把「喊你大哥」反写成「用户把助手
-    // 称作大哥」。助手发言只保留原文时间线（infer:false），供「你上次说过什么」按
-    // 来源角色过滤后召回，绝不参与用户事实抽取。
+    // 来源角色治理（2026-11-12 称呼事故）：整段都是助手发言时只保留原文时间线，
+    // 供「你上次说过什么」按来源角色过滤后召回，绝不参与用户事实抽取。
     const assistantOnly = classifyMemorySourceRole(trimmed) === "assistant";
+    assertMemoryWriter("mem0", "AgenticMemoryIngestService");
     const addResult = (await this.memory.add([{ role: "user", content: trimmed }], {
       userId: actorId,
       metadata: {
@@ -520,7 +486,11 @@ export class AgenticMemoryIngestService {
         ...(topicTagsFor(trimmed) ? { topicTags: topicTagsFor(trimmed) } : {}),
         ...extraMetadata,
       },
-      infer: !assistantOnly,
+      // Mem0 只做存储与索引，不做抽取（2026-11-13 统一抽取语义）：
+      // 统一抽取 extractUnified 已产出决策/评分/改写文本，这里直存即可。
+      // 助手发言同样直存——它的语义由 sourceRole 标记在检索侧过滤，
+      // 不需要（也不允许）Mem0 的内置蒸馏器再"理解"一遍。
+      infer: false,
     })) as unknown as { results?: Mem0WrittenItem[] };
 
     const results = addResult?.results ?? [];

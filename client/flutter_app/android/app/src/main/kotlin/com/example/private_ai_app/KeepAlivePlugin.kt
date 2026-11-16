@@ -23,12 +23,6 @@ class KeepAlivePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     private var channel: MethodChannel? = null
     private var context: Context? = null
 
-    companion object {
-        @Volatile
-        var running: Boolean = false
-            private set
-    }
-
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         context = binding.applicationContext
         channel = MethodChannel(binding.binaryMessenger, "nextbot/keep_alive")
@@ -53,7 +47,8 @@ class KeepAlivePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     ctx.startForegroundService(
                         Intent(ctx, MessageBridgeForegroundService::class.java),
                     )
-                    running = true
+                    // 不在这里置 running：startForegroundService 只代表「已请求启动」，
+                    // 服务真正进入前台态由 MessageBridgeForegroundService 自己记账。
                     result.success(true)
                 } catch (e: Exception) {
                     android.util.Log.w("KeepAlive", "start keep-alive FGS failed", e)
@@ -68,10 +63,11 @@ class KeepAlivePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                         // 服务未在运行时 stopService 是无害 no-op
                     }
                 }
-                running = false
                 result.success(true)
             }
-            "isRunning" -> result.success(running)
+            // 真实运行态（服务 onDestroy 会置假）：诊断信标与 60s 自愈都靠它，
+            // 不能再把「请求过启动」当成「正在运行」。
+            "isRunning" -> result.success(MessageBridgeForegroundService.running)
             /**
              * 电池优化豁免（2026-11-12）：部分 ROM 即使进程挂着前台服务，
              * 仍会按「电池优化白名单」之外的标准把 App 冻结/回收——保活服务

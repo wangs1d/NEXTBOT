@@ -188,3 +188,163 @@ test("getLastKnown：未注入历史读取器 → 只认内存缓存", () => {
   const coordinator = new LocationCoordinator();
   assert.equal(coordinator.getLastKnown("actor-11"), null);
 });
+
+// ─── 多设备并发绑定（2026-11-13 修 socket 模型冲突） ──────────────────────
+//
+// 病根：此前协调器内部是 actor → **单 socket**。手机聊天 WS 与桌面根 WS 对同一
+// actorId 竞绑时后连者覆盖先连者；先连者断开时按 socket 匹配摘除——但 map 里
+// 已经没有它，于是手机端被桌面端"带下线"，位置通道静默失效。
+// 现在每个 actor 保留全部连接：逐条摘除、fan-out 发送、任一端在线即算在线。
+
+test("多设备：桌面端断开后手机端仍在线 → 位置请求仍能送达手机", async () => {
+  const coordinator = new LocationCoordinator();
+  const mobile = new FakeSocket();
+  const desktop = new FakeSocket();
+  coordinator.bindSocket("actor-x", mobile);
+  coordinator.bindSocket("actor-x", desktop);
+
+  // 桌面端断开：只摘它自己，手机端不受影响
+  coordinator.unbindSocket(desktop);
+  assert.equal(coordinator.hasSocket("actor-x"), true, "手机端仍在线");
+
+  const pending = coordinator.requestLocation("actor-x", "test");
+  const jobId = mobile.lastLocationRequestJobId();
+  assert.ok(jobId, "位置请求应送达手机端");
+
+  coordinator.completeFromSocket(mobile, "actor-x", {
+    jobId,
+    latitude: COORDS.latitude,
+    longitude: COORDS.longitude,
+  });
+  const loc = await pending;
+  assert.equal(loc?.latitude, COORDS.latitude);
+});
+
+test("多设备：位置请求 fan-out 到全部在线端（桌面无 GPS 时手机才能应答）", async () => {
+  const coordinator = new LocationCoordinator();
+  const mobile = new FakeSocket();
+  const desktop = new FakeSocket();
+  coordinator.bindSocket("actor-y", mobile);
+  coordinator.bindSocket("actor-y", desktop);
+
+  const pending = coordinator.requestLocation("actor-y", "test");
+  assert.ok(mobile.lastLocationRequestJobId(), "手机端应收到请求");
+  assert.ok(desktop.lastLocationRequestJobId(), "桌面端也应收到（谁先回包用谁的）");
+
+  const jobId = mobile.lastLocationRequestJobId();
+  coordinator.completeFromSocket(mobile, "actor-y", {
+    jobId,
+    latitude: COORDS.latitude,
+    longitude: COORDS.longitude,
+  });
+  assert.equal((await pending)?.latitude, COORDS.latitude);
+});
+
+test("多设备：围栏同步事件 fan-out 到全部在线端", () => {
+  const coordinator = new LocationCoordinator();
+  const mobile = new FakeSocket();
+  const desktop = new FakeSocket();
+  coordinator.bindSocket("actor-z", mobile);
+  coordinator.bindSocket("actor-z", desktop);
+
+  assert.equal(coordinator.sendEventToActor("actor-z", "agent.geofence_sync", { fences: [] }), true);
+  assert.equal(mobile.sent.length, 1);
+  assert.equal(desktop.sent.length, 1, "围栏同步必须两端都收到（手机端要注册系统围栏）");
+});
+
+test("多设备：非本 actor 的连接回包带 jobId → 不 resolve（归属校验仍生效）", async () => {
+  const coordinator = new LocationCoordinator();
+  const mine = new FakeSocket();
+  const stranger = new FakeSocket();
+  coordinator.bindSocket("actor-m", mine);
+  coordinator.bindSocket("actor-n", stranger);
+
+  const pending = coordinator.requestLocation("actor-m", "test");
+  const jobId = mine.lastLocationRequestJobId();
+  // 外人拿别人的 jobId 回包 → 必须被拒
+  const accepted = coordinator.completeFromSocket(stranger, "actor-n", {
+    jobId,
+    latitude: 1,
+    longitude: 2,
+  });
+  assert.equal(accepted, false);
+});
+
+// ─── 精确定位（2026-11-14）：定位源优选 + 旧缓存/粗 fix 绕过 ─────────────
+
+test("定位源优选：手机端在线时只问手机，不同时打扰桌面端", async () => {
+  const coordinator = new LocationCoordinator({ requestTimeoutMs: 200 });
+  const mobile = new FakeSocket();
+  const desktop = new FakeSocket();
+  coordinator.bindSocket("actor-p", mobile, "mobile");
+  coordinator.bindSocket("actor-p", desktop, "desktop");
+
+  const pending = coordinator.requestLocation("actor-p", "clock.get_user_location");
+  assert.ok(mobile.lastLocationRequestJobId(), "应优先请求手机端 GPS");
+  assert.equal(desktop.lastLocationRequestJobId(), "", "有手机端时不再问桌面端（PC 定位常是网络推断）");
+
+  coordinator.completeFromSocket(mobile, "actor-p", {
+    jobId: mobile.lastLocationRequestJobId(),
+    ...COORDS,
+    accuracyMeters: 8,
+  });
+  assert.equal((await pending)?.accuracyMeters, 8);
+});
+
+test("精度要求：缓存来自桌面端且手机在线时，绕过缓存改问手机 GPS", async () => {
+  const coordinator = new LocationCoordinator({ requestTimeoutMs: 200 });
+  const mobile = new FakeSocket();
+  const desktop = new FakeSocket();
+  coordinator.bindSocket("actor-r", mobile, "mobile");
+  coordinator.bindSocket("actor-r", desktop, "desktop");
+
+  // 桌面端主动上报写缓存（PC 定位常来自 WiFi 推断，精度 20m 看着不错也不如手机）
+  coordinator.completeFromSocket(desktop, "actor-r", { ...COORDS, accuracyMeters: 20 });
+  assert.equal((await coordinator.requestLocation("actor-r", "weather"))?.accuracyMeters, 20);
+
+  const sentBefore = mobile.sent.length;
+  const pending = coordinator.requestLocation("actor-r", "clock.get_user_location", {
+    maxAgeMs: 60_000,
+    maxAccuracyMeters: 50,
+  });
+  assert.equal(mobile.sent.length, sentBefore + 1, "精度敏感场景不复用桌面端来源的 fix");
+  coordinator.completeFromSocket(mobile, "actor-r", {
+    jobId: mobile.lastLocationRequestJobId(),
+    ...COORDS,
+    accuracyMeters: 6,
+  });
+  assert.equal((await pending)?.accuracyMeters, 6);
+});
+
+test("精度要求：缓存 fix 精度不达标时绕过缓存，现场重新拉 GPS", async () => {
+  const coordinator = new LocationCoordinator({ requestTimeoutMs: 200 });
+  const socket = new FakeSocket();
+  coordinator.bindSocket("actor-q", socket);
+
+  // 先灌入一条 ±500m 的粗 fix（模拟后台常驻定位/PC 网络推断）
+  const first = coordinator.requestLocation("actor-q", "report");
+  coordinator.completeFromSocket(socket, "actor-q", {
+    jobId: socket.lastLocationRequestJobId(),
+    ...COORDS,
+    accuracyMeters: 500,
+  });
+  await first;
+
+  // 普通场景（天气）复用缓存：不新增请求
+  const cached = await coordinator.requestLocation("actor-q", "weather");
+  assert.equal(cached?.accuracyMeters, 500, "无精度要求时沿用缓存");
+
+  // 问「我在哪」：500m 的 fix 不可接受 → 必须重新下发定位请求
+  const sentBefore = socket.sent.length;
+  const pending = coordinator.requestLocation("actor-q", "clock.get_user_location", {
+    maxAgeMs: 60_000,
+    maxAccuracyMeters: 50,
+  });
+  assert.equal(socket.sent.length, sentBefore + 1, "精度不达标应重新请求客户端");
+  coordinator.completeFromSocket(socket, "actor-q", {
+    jobId: socket.lastLocationRequestJobId(),
+    ...COORDS,
+    accuracyMeters: 9,
+  });
+  assert.equal((await pending)?.accuracyMeters, 9);
+});

@@ -1,9 +1,33 @@
 import "package:flutter/material.dart";
+import "package:flutter/services.dart";
 import "package:flutter_test/flutter_test.dart";
 import "package:nextbot/features/chat/travel_plan_archive.dart";
 
 // 出票动画复现:idle 点罗盘(临时调试入口)→ 出票覆盖层应完整打印出票面。
 void main() {
+  setUp(() {
+    // 归档页里带自绘标题栏，会调 window_manager 的 isMaximized；
+    // 测试环境没有这个原生插件 → MissingPluginException 被当成测试异常。
+    // 用桩回应即可（本用例不关心窗口状态）。
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+      const MethodChannel("window_manager"),
+      (MethodCall call) async {
+        if (call.method == "isMaximized" ||
+            call.method == "isFullScreen" ||
+            call.method == "isPreventClose") {
+          return false;
+        }
+        return null;
+      },
+    );
+  });
+
+  tearDown(() {
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(const MethodChannel("window_manager"), null);
+  });
+
   testWidgets("出票动画:票应完整打印出来", (WidgetTester tester) async {
     await tester.pumpWidget(
       const MaterialApp(home: TravelPlanArchivePage()),

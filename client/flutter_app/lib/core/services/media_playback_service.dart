@@ -3,11 +3,9 @@ import "dart:io";
 
 import "package:audioplayers/audioplayers.dart";
 import "package:flutter/foundation.dart";
-import "package:path_provider/path_provider.dart";
 
 import "../config/media_url.dart";
-import "access_auth_api.dart";
-import "nb_http.dart";
+import "../../features/chat/media_disk_cache.dart";
 import "ws_event_router.dart"
     show WsEventRouter, WsSubscribeScope, WsEventCatalog, wsEventPayload;
 
@@ -18,11 +16,14 @@ import "ws_event_router.dart"
 /// 2026-09-12 的"信令发了但没人消费"假成功事故。
 const bool kMediaPlaybackCapability = true;
 
-/// Windows 上 audioplayers_windows_plugin 播网络 URL（UrlSource 直连）在
-/// 防盗链/重定向场景下不稳定，且 BytesSource 有 native crash 前科（见
-/// tts_player.dart）。与 TtsPlayer 同一套规避：先把音频整体下载到临时文件，
-/// 再用 DeviceFileSource 播本地文件。其余平台直接 UrlSource 流式播放。
-const bool _kWindowsDownloadToTempFile = true;
+/// 外部 CDN（如音乐平台）对非浏览器 UA 直接 403，取字节时补一个浏览器 UA。
+const Map<String, String> _kBrowserUaHeader = <String, String>{
+  "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+};
+
+/// 音频字节下载上限（长音频比图片宽限）。
+const Duration _kAudioFetchTimeout = Duration(seconds: 60);
 
 /// 当前播放状态快照（供 UI 悬浮条/迷你播放器消费；UI 接入不在本任务范围）。
 class MediaNowPlaying {
@@ -89,13 +90,14 @@ class MediaPlaybackAdapter {
   void dispose() {}
 }
 
-/// 默认实现：内部只持有一个 AudioPlayer（懒创建、跨曲目复用），
-/// Windows 先下载到临时文件再 DeviceFileSource 播放。
+/// 默认实现：内部只持有一个 AudioPlayer（懒创建、跨曲目复用）。
+///
+/// 播放路径（2026-11-12 统一）：先经 [MediaDiskCache] 落到本地，再
+/// `DeviceFileSource` 播本地文件——播放器发不出 `Authorization` 头的问题从
+/// 根上绕开，URL 里不再需要 `?token=`；顺带拿到「重播秒开 + 离线可回放」。
 class AudioPlayersAdapter extends MediaPlaybackAdapter {
   AudioPlayer? _player;
   StreamSubscription<void>? _completeSub;
-  File? _tempFile;
-  HttpClient? _downloadClient;
 
   AudioPlayer _ensurePlayer() {
     if (_player != null) return _player!;
@@ -108,85 +110,31 @@ class AudioPlayersAdapter extends MediaPlaybackAdapter {
     return player;
   }
 
-  void _cleanupTempFile() {
-    final File? f = _tempFile;
-    _tempFile = null;
-    if (f == null) return;
-    // 删除失败不影响播放主流程（临时目录系统会回收）
-    unawaited(_deleteQuietly(f));
-  }
-
-  Future<void> _deleteQuietly(File f) async {
-    try {
-      if (await f.exists()) await f.delete();
-    } catch (_) {}
-  }
-
   Future<void> _disposeQuietly(AudioPlayer p) async {
     try {
       await p.dispose();
     } catch (_) {}
   }
 
-  /// Windows 规避路径：网络音频整体下载到临时文件后本地播放。
-  /// 下载失败返回 null（调用方如实上报错误，不假成功）。
-  Future<String?> _downloadToTempFile(String url) async {
-    HttpClient? client;
-    try {
-      // 临期先续期：这段是 Windows 桌面专用下载路径，401 后会如实报错，
-      // 提前换新凭据能避免「刚好卡在过期窗口」的静默失败。
-      if (AccessCredentialStore.instance.needsRefresh) {
-        await NbHttp.ensureRefreshed();
-      }
-      client = HttpClient();
-      client.connectionTimeout = const Duration(seconds: 10);
-      // 网易云 CDN 对非浏览器 UA 会 403
-      client.userAgent =
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
-      final HttpClientRequest request = await client.getUrl(Uri.parse(url));
-      // 本服务地址要带设备凭证（周界鉴权开启后无 token 的音频拿不到）
-      MediaUrl.headersFor(url).forEach(
-        (String k, String v) => request.headers.set(k, v),
-      );
-      final HttpClientResponse response = await request.close();
-      if (response.statusCode != 200) {
-        debugPrint(
-          "[MediaPlayback] 下载音频失败：HTTP ${response.statusCode}（可回退 /api/media/stream-proxy）",
-        );
-        return null;
-      }
-      final Directory dir = await getTemporaryDirectory();
-      final File f = File(
-        "${dir.path}/agent_media_${DateTime.now().millisecondsSinceEpoch}.mp3",
-      );
-      await response.pipe(f.openWrite());
-      _tempFile = f;
-      return f.path;
-    } catch (e) {
-      debugPrint("[MediaPlayback] 下载音频异常：$e");
-      return null;
-    } finally {
-      client?.close(force: true);
-    }
-  }
-
   @override
   Future<void> play(String url) async {
     final AudioPlayer player = _ensurePlayer();
-    _cleanupTempFile();
-    // UrlSource 发不出请求头，本服务地址只能靠 query 带凭证
-    final String signed = MediaUrl.resolve(url);
-    final bool useTempFile = _kWindowsDownloadToTempFile && Platform.isWindows;
-    if (useTempFile) {
-      final String? path = await _downloadToTempFile(signed);
-      if (path == null) {
-        throw StateError("音频下载失败（Windows 临时文件路径不可用）");
-      }
-      await player.play(DeviceFileSource(path));
+    // UrlSource 发不出 Authorization 头，过去只能靠 URL 里带 ?token=（凭证进
+    // URL → 磁盘缓存键随续期漂移、token 进访问日志）。现在统一先经磁盘缓存层
+    // 取字节（NbHttp 带凭证头 + 401 静默续期 + LRU 落盘），播放器只播本地文件：
+    // 全平台同一条路径，重播直接命中本地，没网也能回放。
+    final String resolved = MediaUrl.resolve(url);
+    final File? local = await MediaDiskCache.instance.fileFor(
+      resolved,
+      extraHeaders: _kBrowserUaHeader,
+      timeout: _kAudioFetchTimeout,
+    );
+    if (local != null) {
+      await player.play(DeviceFileSource(local.path));
       return;
     }
-    // 非 Windows：直接流式播放网络 URL
-    await player.play(UrlSource(signed));
+    // 磁盘层不可用（缓存目录写不进去等）→ 兜底直连流播，至少还能出声。
+    await player.play(UrlSource(resolved));
   }
 
   @override
@@ -202,7 +150,6 @@ class AudioPlayersAdapter extends MediaPlaybackAdapter {
   @override
   Future<void> stop() async {
     await _player?.stop();
-    _cleanupTempFile();
   }
 
   @override
@@ -214,9 +161,6 @@ class AudioPlayersAdapter extends MediaPlaybackAdapter {
     if (p != null) {
       unawaited(_disposeQuietly(p));
     }
-    _cleanupTempFile();
-    _downloadClient?.close(force: true);
-    _downloadClient = null;
   }
 }
 

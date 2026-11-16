@@ -45,12 +45,19 @@ if (-not $SkipPackage) {
   if (Test-Path -LiteralPath $Tarball) { [System.IO.File]::Delete($Tarball) }
   Push-Location $Repo
   # 相对路径：GNU tar 会把 "E:\x" 里的冒号解析成 远程主机:path
-  & tar -czf windows_dist/ecs-deploy/nextbot-ecs.tar.gz package.json package-lock.json `
-    server/dist server/package.json server/config server/.env server/public `
-    server/scripts/admin-set-password.mjs `
-    agent-world/package.json agent-world/dist agent-world/config agent-world/deps agent-world/data `
-    packages/agent-protocol/package.json packages/agent-protocol/dist `
-    packages/picture/package.json packages/picture/dist
+  # .env.local（个人密钥层）一并打包（2026-11-13 事故修复）：SEARCH_API_PROVIDER/
+  # SEARCH_API_KEY/ANYSEARCH_ZONE/LANG 只存在于 .env.local，此前从不随部署上服务器，
+  # ECS 搜索恒空（web_search 每轮 4ms 返回 0 条）。文件不存在时跳过（新 clone）。
+  $packList = @(
+    'package.json', 'package-lock.json',
+    'server/dist', 'server/package.json', 'server/config', 'server/.env', 'server/public',
+    'server/scripts/admin-set-password.mjs',
+    'agent-world/package.json', 'agent-world/dist', 'agent-world/config', 'agent-world/deps', 'agent-world/data',
+    'packages/agent-protocol/package.json', 'packages/agent-protocol/dist',
+    'packages/picture/package.json', 'packages/picture/dist'
+  )
+  if (Test-Path -LiteralPath (Join-Path $Repo 'server\.env.local')) { $packList += 'server/.env.local' }
+  & tar -czf windows_dist/ecs-deploy/nextbot-ecs.tar.gz @packList
   Pop-Location
   if ($LASTEXITCODE -ne 0) { throw 'tar 打包失败' }
   Write-Host ("tarball: {0} ({1:N1} MB)" -f $Tarball, ((Get-Item $Tarball).Length / 1MB))
@@ -97,14 +104,27 @@ tar -xzf /tmp/nextbot-ecs.tar.gz -C /tmp/nb-extract
 rm -f /tmp/nextbot-ecs.tar.gz /tmp/node.tar.xz
 if [ -f /tmp/nb-extract/server/.env ]; then
   cp /opt/nextbot/server/.env /opt/nextbot/server/.env.bak-deploy-`$(date +%Y%m%d-%H%M%S) 2>/dev/null
-  # 逐键合并：以现网 .env 为底，tar 内 .env 只补现网没有的键（键名精确匹配行首）
+  # 逐键合并：以现网 .env 为底，tar 内 .env 只补现网没有的键（键名精确匹配行首）。
+  # 2026-11-13 修复：`$line/`$key 此前未转义，被 PowerShell 展开成空串，合并整体
+  # 静默空转（上线以来从未真正追加过任何键，缺键只能靠人肉发现——搜索配置事故）。
   while IFS= read -r line; do
-    key=`$(printf '%s' "$line" | sed -n 's/^\([A-Za-z0-9_]\+\)=.*$/\1/p')
-    if [ -n "$key" ] && ! grep -qE "^`$key=" /opt/nextbot/server/.env; then
-      echo "$line" >> /opt/nextbot/server/.env
+    key=`$(printf '%s' "`$line" | sed -n 's/^\([A-Za-z0-9_]\+\)=.*`$/\1/p')
+    if [ -n "`$key" ] && ! grep -qE "^`$key=" /opt/nextbot/server/.env; then
+      echo "`$line" >> /opt/nextbot/server/.env
     fi
   done < /tmp/nb-extract/server/.env
   rm -f /tmp/nb-extract/server/.env
+fi
+# .env.local（个人密钥层，含 SEARCH_API_PROVIDER/SEARCH_API_KEY/ANYSEARCH_*）同样逐键合并：
+# 现网已有键保留现网值，只补缺失键；合并后从解包目录移除，不随 rsync 落进部署目录。
+if [ -f /tmp/nb-extract/server/.env.local ]; then
+  while IFS= read -r line; do
+    key=`$(printf '%s' "`$line" | sed -n 's/^\([A-Za-z0-9_]\+\)=.*`$/\1/p')
+    if [ -n "`$key" ] && ! grep -qE "^`$key=" /opt/nextbot/server/.env; then
+      echo "`$line" >> /opt/nextbot/server/.env
+    fi
+  done < /tmp/nb-extract/server/.env.local
+  rm -f /tmp/nb-extract/server/.env.local
 fi
 rsync -a /tmp/nb-extract/ $DeployDir/ 2>/dev/null || cp -a /tmp/nb-extract/. $DeployDir/
 rm -rf /tmp/nb-extract
@@ -220,10 +240,12 @@ fi
 echo '[ecs] deploy verify FAILED: browser health not ok (chromium missing or launch failed; see journalctl -u nextbot)' >&2
 exit 1
 "@
-# ssh 管道要求 LF：PS here-string 是 CRLF，直接管道会把行尾 \r 塞进 bash
-# （真实报错："set: -: invalid option"）。与 deploy-tencent.ps1 同一修法。
-$remoteScriptLf = ($remoteScript -replace "`r`n", "`n").TrimStart([char]0xFEFF)
-$remoteScriptLf | & ssh $Remote "bash -s"
+# 不走字符串管道：PS 5.1 管道给原生进程时会按控制台编码输出，流开头会被塞进
+# BOM（TrimStart 剥的是字符串内的 BOM，剥不掉编码层加的），bash 第一行的 set -e
+# 变成 "\ufeffset: command not found" 被静默吞掉，出错即中止的保护整体失效
+# （2026-11-14 实测）。改用 base64 传输：CRLF/BOM/引号问题全部免疫。
+$remoteScriptB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($remoteScript -replace "`r`n", "`n")))
+& ssh $Remote "echo $remoteScriptB64 | base64 -d | bash -s"
 if ($LASTEXITCODE -ne 0) { throw '服务器端部署失败' }
 
 # ── 4. 外网验证（安全组 3000 是否放行） ──

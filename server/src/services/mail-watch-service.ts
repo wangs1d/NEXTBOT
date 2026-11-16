@@ -39,6 +39,7 @@
  */
 import { getDataDir } from "../config/data-dir.js";
 import { createHash } from "node:crypto";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import iconv from "iconv-lite";
@@ -50,8 +51,8 @@ import type { MessageHubService } from "./message-hub-service.js";
 // 类型
 // ---------------------------------------------------------------------- //
 
-/** 邮件重要性：critical（VIP 直接置顶提醒）/ high（命中确定性重要场景）/ normal / promotional（营销邮件，过滤不推送）/ noise（系统通知，过滤不推送）。 */
-export type MailImportance = "critical" | "high" | "normal" | "promotional" | "noise";
+/** 邮件重要性：critical（VIP 直接置顶提醒）/ high（命中确定性重要场景）/ normal / promotional（营销邮件，过滤不推送）/ noise（系统通知，过滤不推送）/ otp（验证码，2026-11-14 用户定稿：整封丢弃，不推送不落库）。 */
+export type MailImportance = "critical" | "high" | "normal" | "promotional" | "noise" | "otp";
 
 export interface MailWatchClassification {
   importance: MailImportance;
@@ -119,6 +120,23 @@ export interface MailWatchDeps {
   onNewMessage?: (mail: IncomingMail, classification: MailWatchClassification) => void | Promise<void>;
   /** 可选：邮件同步 ingest 进消息聚合中心（bootstrap 传 messageHubService） */
   messageHub?: Pick<MessageHubService, "ingestInbound"> | null;
+  /**
+   * 可选：账单/快递识别汇入（2026-11-13）。
+   *
+   * 邮件侧的账单（信用卡对账单、水电费）与快递通知此前只停在 importance 分级，
+   * 没有落到可汇总的台账里——"这个月账单多少钱""快递单号是多少"都答不出来。
+   * 这里把分级后的邮件交给统一汇入服务，与短信侧共用同一套规则与台账。
+   */
+  billParcel?: {
+    ingest(input: {
+      actorId: string;
+      source: "email";
+      title?: string;
+      text: string;
+      at?: number;
+      externalId?: string;
+    }): unknown;
+  } | null;
   logger?: MailWatchLogger;
   /** 配置来源 env（默认 process.env；测试注入） */
   env?: NodeJS.ProcessEnv;
@@ -201,6 +219,8 @@ export interface MailWatchStatus {
   filterNoise: boolean;
   /** 已累计过滤的系统通知邮件数（观测过滤是否生效） */
   noiseFiltered: number;
+  /** 已累计过滤的验证码邮件数（2026-11-14 用户定稿：验证码整封丢弃，不落库） */
+  otpFiltered: number;
   windowSize: number;
   lastPollAt: string | null;
   lastSuccessAt: string | null;
@@ -265,13 +285,11 @@ function resolveMailWatchActor(env: NodeJS.ProcessEnv): string {
   const explicit =
     env.MAIL_WATCH_ACTOR_ID?.trim() || env.MESSAGE_BRIDGE_DEFAULT_ACTOR_ID?.trim();
   if (explicit) return explicit;
-  if (!warnedDefaultMailActor) {
-    warnedDefaultMailActor = true;
-    console.warn(
-      "[mail-watch] 未配置 MAIL_WATCH_ACTOR_ID：新邮件/日程/账单会落到 default_user 共享桶，" +
-        "按账号查询的设置页与提醒都看不到。请把它配成你的账号邮箱。",
-    );
-  }
+  // 不在这里告警：配置读取发生在账号接入之前，此时还不知道最终归属。
+  // 真正需要提醒的是「最终仍落到 default_user」——那由 applyAccount 之后的
+  // 状态检查来报（见 start() 里的归属确认）。此前这条告警在每次启动都刷屏，
+  // 而实际账号接入后 actorId 已被改成真实邮箱（accounts.json 里的 actorId），
+  // 归属本来是对的 —— 告警指向了一个不存在的问题。
   return "default_user";
 }
 
@@ -320,20 +338,31 @@ export function readMailWatchConfig(env: NodeJS.ProcessEnv = process.env): MailW
 
 /**
  * 确定性重要邮件关键词规则表：按序匹配，命中第一条即返回 high。
- * 覆盖国内高频重要场景（验证码/账单/逾期/传票/面试/机票/火车票/登机牌/快递驿站等），
+ * 覆盖国内高频重要场景（账单/逾期/传票/面试/机票/火车票/登机牌/快递驿站等），
  * 中英文都收。新增场景直接在数组里加一行即可，无需改逻辑。
  * fields 控制该规则看哪些字段（默认主题 + 正文摘要都看）。
+ *
+ * 2026-11-13 用户定稿：**验证码不算「需要汇报的事」**。此前验证码规则排在最前，
+ * 命中即 high —— 实测 35 条邮件信号里 29 条是自家系统的登录验证码，把真正的
+ * 账单/快递信号全挤出了高优先级通道。
+ * 2026-11-14 用户加码：**验证码连落库都不要**——不允许验证码进入动态页等任何
+ * 消费面，从来源就避免。现在验证码命中即判 otp，整封丢弃（与营销/系统通知同
+ * 一处置：不回调、不进消息中心、不进传感链路、不落库）。
+ *
+ * 与之配套：账单/还款、话费/流量扣费、快递/物流/取件码全部升为 high 且**排在
+ * 验证码之前** —— 用户明确要求「快递|物流|取件码|话费|账单|快递单号允许进入，
+ * 只是验证码不需要」。
  */
 const IMPORTANCE_RULES: ReadonlyArray<{
   label: string;
   pattern: RegExp;
   fields?: ReadonlyArray<"subject" | "text">;
 }> = [
-  // —— 账户安全类（时效最强，过期即作废）——
-  { label: "验证码/安全码", pattern: /(验证码|校验码|动态码|确认码|安全码|verification\s*code|security\s*code|one[-\s]?time\s*(?:code|password)|\botp\b)/i },
-  // —— 财务类 ——
-  { label: "账单/还款", pattern: /(账单|扣款|还款|付款提醒|代扣|对账单|invoice|payment\s*(?:due|reminder)|billing)/i },
+  // —— 财务类（用户明确要求进入汇报：账单/还款/扣款/话费）——
+  { label: "账单/还款", pattern: /(账单|扣款|还款|付款提醒|代扣|对账单|话费|流量费|套餐费|通信费|invoice|payment\s*(?:due|reminder)|billing)/i },
   { label: "逾期/欠费", pattern: /(逾期|欠费|滞纳|违约金|overdue|past\s*due)/i },
+  // —— 生活服务类（用户明确要求进入汇报：快递/物流/取件码/快递单号）——
+  { label: "快递/驿站取件", pattern: /(快递|包裹|取件码|取件码|驿站|物流|运单|快递单号|发货|收货|签收|parcel|pickup\s*code|tracking\s*(?:no|number))/i },
   // —— 法律类（传票/法院文书，绝不许漏看）——
   { label: "传票/法院文书", pattern: /(传票|开庭|应诉|起诉|立案通知|法院|法律文书|subpoena|court\s*(?:summons|notice))/i },
   // —— 求职/职业类 ——
@@ -344,13 +373,106 @@ const IMPORTANCE_RULES: ReadonlyArray<{
   // —— 票务/预订类（2026-11-02 用户定稿：预订出票是"关于用户的"核心场景；
   //     出票通知多由 no-reply 机器发件人发出，必须先于 noise 判定命中，防误拦）——
   { label: "预订/出票确认", pattern: /(预订(?:成功|确认)|酒店订单|酒店确认|电影票|门票|演出票|景区票|票面信息|booking\s*(?:confirmed|confirmation)|reservation\s*(?:confirmed|confirmation)|e-?ticket)/i },
-  // —— 生活服务类（国内快递驿站取件是高频重要事项）——
-  { label: "快递/驿站取件", pattern: /(快递|包裹|取件码|驿站|parcel|pickup\s*code)/i },
   // —— 日程/预约类 ——
   { label: "预约/日程变动", pattern: /(预约(?:成功|确认|变动)|改期|改签|日程调整|appointment\s*(?:confirmed|changed)|reschedul)/i },
   // —— 教育/升学类 ——
   { label: "成绩/录取/考试", pattern: /(成绩单?|录取|准考证|admission|exam\s*result)/i },
 ];
+
+/**
+ * 验证码/一次性密码：**整封丢弃**（2026-11-14 用户定稿，加码自 11-13 的「降级不丢弃」）。
+ * 不允许验证码进入动态页等任何消费面，从来源就避免——命中即判 otp，
+ * handleIncoming 处与营销/系统通知同一短路：不回调、不进消息中心、不进传感
+ * 链路、不落库。
+ * 注意：取件码不属于验证码（「取件码 8-2-3010」是快递通知），
+ * 故此处用独立正则，不复用 IMPORTANCE_RULES 的「取件码」那条。
+ */
+const OTP_RULES: ReadonlyArray<{
+  label: string;
+  pattern: RegExp;
+  fields?: ReadonlyArray<"subject" | "text">;
+}> = [
+  { label: "验证码/安全码", pattern: /(验证码|校验码|动态码|确认码|安全码|verification\s*code|security\s*code|one[-\s]?time\s*(?:code|password)|\botp\b)/i },
+];
+
+/**
+ * 验证码文本兜底匹配（动态页读取过滤 / 历史数据清理共用）：
+ * 对任意文本（主题/摘要/信号 delta）判是否验证码类内容。
+ * 与 OTP_RULES 同一正则，独立导出避免重复定义。
+ */
+const OTP_TEXT_PATTERN = OTP_RULES[0]!.pattern;
+
+/** 判一段文本是否验证码类内容（动态页读取兜底 + 历史信号清理共用）。 */
+export function looksLikeOtpText(text: string): boolean {
+  return OTP_TEXT_PATTERN.test(text ?? "");
+}
+
+/**
+ * 清除跨源采集库里**已落库**的验证码历史信号（2026-11-14 用户定稿「全部删除」）。
+ *
+ * 背景：11-13 的旧策略把验证码降级为 normal 仍落库，salience=medium，于是漏进
+ * 了 /api/dynamics 的 mail 区块。源头短路只管新邮件，历史分区里已存的验证码信号
+ * 在这里一次性清掉：扫描 `<streamsRoot>/mail/*.ndjson`，凡命中
+ * （payload.importance==="otp" 或 主题/摘要/描述像验证码）的行剔除后重写文件。
+ *
+ * 启动时调用一次（须在 SourceStore.loadRecent 之前，重建的内存窗口才是干净的）。
+ * 返回 { removed, files } 供启动日志观测。
+ */
+export function purgeStoredOtpMailSignals(streamsRoot: string): { removed: number; files: number } {
+  const dir = join(streamsRoot, "mail");
+  if (!existsSync(dir)) return { removed: 0, files: 0 };
+  let removed = 0;
+  let files = 0;
+  try {
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith(".ndjson")) continue;
+      const path = join(dir, name);
+      let lines: string[];
+      try {
+        lines = readFileSync(path, "utf8").split("\n");
+      } catch {
+        continue;
+      }
+      const kept: string[] = [];
+      let fileRemoved = 0;
+      for (const line of lines) {
+        if (!line.trim()) {
+          if (line) kept.push(line);
+          continue;
+        }
+        let otp = false;
+        try {
+          const sig = JSON.parse(line) as {
+            delta?: string;
+            payload?: { importance?: string; subject?: string; text?: string };
+          };
+          const p = sig.payload ?? {};
+          otp =
+            p.importance === "otp" ||
+            looksLikeOtpText(sig.delta ?? "") ||
+            looksLikeOtpText(p.subject ?? "") ||
+            looksLikeOtpText(p.text ?? "");
+        } catch {
+          /* 损坏行原样保留，不当验证码删 */
+        }
+        if (otp) fileRemoved += 1;
+        else kept.push(line);
+      }
+      if (fileRemoved > 0) {
+        try {
+          writeFileSync(path, kept.join("\n"));
+          removed += fileRemoved;
+          files += 1;
+        } catch {
+          /* 重写失败不影响其余文件 */
+        }
+      }
+    }
+  } catch {
+    /* 目录读失败按无历史处理 */
+  }
+  return { removed, files };
+}
 
 /** 从 "Name <a@b>" / "a@b" 形态提取纯邮箱地址。 */
 export function extractEmailAddress(from: string): string {
@@ -477,10 +599,14 @@ export function detectNoiseMail(
  *   a) VIP 白名单命中 → "critical"（用户钦点的发件人，永远最高优先级，
  *      即便发的是营销邮件也照常提醒——白名单是用户的显式意志）；
  *   b) 营销/广告邮件识别命中且过滤开关开启 → "promotional"（不推送不落库）；
- *   c) 确定性关键词规则命中 → "high"（按 IMPORTANCE_RULES 顺序，命中第一条即返回）；
- *   d) 系统通知发件人（no-reply/notifications 等机器身份）且过滤开关开启 →
+ *   c) 确定性关键词规则命中 → "high"（按 IMPORTANCE_RULES 顺序，命中第一条即返回）——
+ *      账单/快递/取件码/话费/物流都在这条线上（2026-11-13 用户定稿）；
+ *   d) 验证码/一次性密码命中 → "otp"（**整封丢弃**：不推送、不落库、不进传感
+ *      链路——2026-11-14 用户定稿「不允许验证码进入，从来源就避免」。判定放在
+ *      high 之后，这样「账单验证码」这类复合邮件仍按账单走 high）；
+ *   e) 系统通知发件人（no-reply/notifications 等机器身份）且过滤开关开启 →
  *      "noise"（不推送不落库）。放在 high 之后：出票/账单类机器通知先被规则救回；
- *   e) 其余（即真人来信）→ "normal"。
+ *   f) 其余（即真人来信）→ "normal"。
  * 返回 { importance, reasons[] }，reasons 记录命中来源便于解释与排障。
  */
 export function classifyMailImportance(
@@ -507,6 +633,16 @@ export function classifyMailImportance(
     }
     if (fields.includes("text") && rule.pattern.test(text)) {
       return { importance: "high", reasons: [`rule:${rule.label}`, "field:text"] };
+    }
+  }
+  // 验证码整封丢弃（2026-11-14）：命中即 otp，handleIncoming 处短路不落库。
+  for (const rule of OTP_RULES) {
+    const fields = rule.fields ?? (["subject", "text"] as const);
+    if (fields.includes("subject") && rule.pattern.test(subject)) {
+      return { importance: "otp", reasons: [`otp:${rule.label}`, "field:subject"] };
+    }
+    if (fields.includes("text") && rule.pattern.test(text)) {
+      return { importance: "otp", reasons: [`otp:${rule.label}`, "field:text"] };
     }
   }
   if (opts.filterNoise !== false) {
@@ -924,6 +1060,7 @@ export class MailWatchService {
   private newMessagesHandled = 0;
   private promotionalFiltered = 0;
   private noiseFiltered = 0;
+  private otpFiltered = 0;
   /**
    * 最近处理过的邮件环形缓冲（2026-10-10，供 SensorKernel 收编读取）：
    * `fetchNewSince(since)` 从这里取，不重连 IMAP。内核轮询内核水位，
@@ -1023,6 +1160,17 @@ export class MailWatchService {
     this.cfg.pass = acct.pass?.trim() ?? "";
     this.cfg.actorId = acct.actorId.trim();
     if (!this.cfg.hardStop) this.cfg.enabled = true;
+    // 归属确认（2026-11-13）：只有真正落到 default_user 才告警。
+    // 账号接入时 actorId 会被改成真实账号（accounts.json 的 actorId），
+    // 此前在配置读取阶段就告警 —— 那时账号还没接入，告警指向了一个
+    // 并不存在的问题（实际启动的账号归属是对的）。
+    if (this.cfg.actorId === "default_user" && !warnedDefaultMailActor) {
+      warnedDefaultMailActor = true;
+      console.warn(
+        "[mail-watch] 该邮箱账号未绑定 actorId：新邮件/日程/账单会落到 default_user 共享桶，" +
+          "按账号查询的设置页与提醒都看不到。请在设置页把账号绑定到你的账号邮箱。",
+      );
+    }
   }
 
   /** 当前快照（管理面/工具查询用；含诚实失败信息）。 */
@@ -1048,6 +1196,7 @@ export class MailWatchService {
       promotionalFiltered: this.promotionalFiltered,
       filterNoise: this.cfg.filterNoise,
       noiseFiltered: this.noiseFiltered,
+      otpFiltered: this.otpFiltered,
       windowSize: this.windowSize,
       lastPollAt: this.lastPollAt,
       lastSuccessAt: this.lastSuccessAt,
@@ -1175,10 +1324,10 @@ export class MailWatchService {
    * 可选 ingest 进 message-hub。回调/落库异常均吞掉记日志（监控链路故障不能
    * 反过来打断轮询主循环）；返回分级结果供调用方与测试断言。
    *
-   * 营销（promotional）与系统通知（noise）在此短路：不回调、不进消息中心、
-   * 不进传感环形缓冲——两者都与用户无关，不制造未读、不触发主动链路
-   * （UID 照常记入已处理集合，不会反复重判）。VIP 白名单发的邮件不受影响
-   * （classify 里 VIP 先于一切判定）。
+   * 营销（promotional）、系统通知（noise）与验证码（otp）在此短路：不回调、
+   * 不进消息中心、不进传感环形缓冲——三者都与用户无关或用户明确不要，不制造
+   * 未读、不触发主动链路（UID 照常记入已处理集合，不会反复重判）。VIP 白名单
+   * 发的邮件不受影响（classify 里 VIP 先于一切判定）。
    */
   async handleIncoming(mail: IncomingMail): Promise<MailWatchClassification> {
     const classification = classifyMailImportance(mail, this.cfg.vipSenders, {
@@ -1187,13 +1336,19 @@ export class MailWatchService {
     });
     this.newMessagesHandled += 1;
 
-    if (classification.importance === "promotional" || classification.importance === "noise") {
+    if (
+      classification.importance === "promotional" ||
+      classification.importance === "noise" ||
+      classification.importance === "otp"
+    ) {
       const isPromo = classification.importance === "promotional";
+      const isOtp = classification.importance === "otp";
       if (isPromo) this.promotionalFiltered += 1;
+      else if (isOtp) this.otpFiltered += 1;
       else this.noiseFiltered += 1;
       this.log(
         "info",
-        `${isPromo ? "营销邮件" : "系统通知"}已过滤（${classification.reasons[0] ?? "unknown"}，不推送不落库）：${extractEmailAddress(mail.from)}「${mail.subject}」`,
+        `${isPromo ? "营销邮件" : isOtp ? "验证码邮件" : "系统通知"}已过滤（${classification.reasons[0] ?? "unknown"}，不推送不落库）：${extractEmailAddress(mail.from)}「${mail.subject}」`,
       );
       return classification;
     }
@@ -1210,6 +1365,22 @@ export class MailWatchService {
         await this.ingestToHub(mail, classification);
       } catch (e) {
         this.log("warn", `邮件 ingest 进消息中心失败（忽略）：${errorMessage(e)}`);
+      }
+    }
+    // 账单/快递识别汇入（2026-11-13）：与短信侧共用同一套规则与台账。
+    // 放在 messageHub 之后 —— 汇入失败不该影响消息中心落库。
+    if (this.deps.billParcel) {
+      try {
+        this.deps.billParcel.ingest({
+          actorId: mail.actorId,
+          source: "email",
+          title: mail.subject,
+          text: mail.textSnippet ?? "",
+          at: mail.date ? Date.parse(mail.date) : undefined,
+          externalId: mail.messageId,
+        });
+      } catch (e) {
+        this.log("warn", `账单/快递识别失败（忽略）：${errorMessage(e)}`);
       }
     }
     // 收编读取口：把处理结果留在环形缓冲，供 SensorKernel 的 MailSensor 拉取

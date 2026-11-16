@@ -11,6 +11,7 @@ import "../config/api_config.dart";
 import "phone_capture_service.dart";
 import "phone_dial_invoker.dart";
 import "phone_sms_invoker.dart";
+import "sms_access_service.dart";
 import "ws_connection_runner.dart";
 
 /// 手机桥接连接状态（供设置页开关旁的状态展示）。
@@ -395,6 +396,24 @@ class PhoneBridgeService {
 
   Future<Map<String, dynamic>> _invokeSmsList(Map<String, dynamic> p) async {
     try {
+      // 运行时权限闸（2026-11-13）：AndroidManifest 声明了 READ_SMS，但系统默认不授予
+      // dangerous 权限 —— 原生会直接返回 permission_denied:READ_SMS。缺了这一步，
+      // 「看我的短信」永远失败，且看不出是授权问题。
+      // request=false：这是服务端下发指令触发的路径，可能在后台，此时弹窗用户看不见，
+      // 不做无效弹窗；未授权时如实报 permission_denied，由上层引导去设置页授权。
+      final bool granted = await SmsAccessService.instance.ensureGranted(
+        request: false,
+      );
+      if (!granted) {
+        final bool forever = await SmsAccessService.instance.isPermanentlyDenied();
+        return <String, dynamic>{
+          "ok": false,
+          "error": forever ? "sms_permission_denied_forever" : "sms_permission_denied",
+          "message": forever
+              ? "手机未授予读取短信权限（已设为不再询问）。请在系统设置里为本应用开启「短信」权限。"
+              : "手机未授予读取短信权限。请在系统设置里为本应用开启「短信」权限。",
+        };
+      }
       final int limit = int.tryParse(p["limit"]?.toString() ?? "") ?? 20;
       final dynamic raw = await _nativeChannel
           .invokeMethod<dynamic>("smsList", <String, dynamic>{"limit": limit})

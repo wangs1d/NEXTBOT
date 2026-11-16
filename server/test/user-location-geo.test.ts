@@ -50,6 +50,10 @@ test("payload 带结构化地址 → 不触发任何逆地理网络请求", asyn
         region: "贵州省",
         country: "中国",
         timezone: "Asia/Shanghai",
+        // 新客户端会带上逆地理产物；带了就不再反查（旧客户端只带省市区，
+        // 缓存未命中时会做一次短预算补查，见文件末尾的精确地址用例）。
+        address: "贵州省黔西南布依族苗族自治州兴义市下五屯街道永康路007号九华苑",
+        poi: "九华苑",
       },
     });
     assert.equal(stub.calls(), 0, "结构化字段齐备时禁止调用逆地理");
@@ -57,6 +61,7 @@ test("payload 带结构化地址 → 不触发任何逆地理网络请求", asyn
     assert.equal(info?.district, "兴义市");
     assert.equal(info?.timezone, "Asia/Shanghai");
     assert.equal(info?.source, "client-gps");
+    assert.match(String(info?.address), /九华苑/);
   } finally {
     stub.restore();
   }
@@ -88,13 +93,79 @@ test("仅坐标 payload → 回退服务端逆地理，且同坐标二次命中�
     const callsAfterFirst = stub.calls();
     assert.ok(callsAfterFirst >= 1, "首次应发生网络请求");
 
-    // 取整到 3 位小数的同一坐标 → 命中缓存，不再产生网络请求
+    // 取整到 4 位小数（≈11m）的同一坐标 → 命中缓存，不再产生网络请求
     const second = await resolveUserGeo({
-      clientLocation: { latitude: 25.0912, longitude: 104.9012 },
+      clientLocation: { latitude: 25.09114, longitude: 104.90114 },
     });
     assert.equal(second?.city, "黔西南布依族苗族自治州");
     assert.equal(stub.calls(), callsAfterFirst, "同坐标第二次必须命中缓存");
   } finally {
     stub.restore();
+  }
+});
+
+/**
+ * 2026-11-14 精确定位回归：只返回到省市区时用户只能听到「你在某某市」。
+ * 高德 regeo 必须走 extensions=all 并解析门牌/街道/最近 AOI，且这些字段
+ * 要在「客户端回传结构化省市区」的快路径上从逆地理缓存补回来（零网络）。
+ */
+test("高德 regeo 精确到门牌与最近地标，结构化 payload 从缓存补回精确字段", async () => {
+  resetReverseGeocodeCacheForTest();
+  const prevKey = process.env.AMAP_WEB_KEY;
+  process.env.AMAP_WEB_KEY = "test-amap-key";
+  const stub = withStubbedFetch((url) => {
+    if (url.includes("/v3/geocode/regeo")) {
+      assert.match(url, /extensions=all/, "必须请求 extensions=all 才能拿到门牌/地标");
+      return {
+        ok: true,
+        json: async () => ({
+          status: "1",
+          regeocode: {
+            formatted_address: "贵州省黔西南布依族苗族自治州兴义市下五屯街道永康路007号九华苑",
+            addressComponent: {
+              province: "贵州省",
+              city: "黔西南布依族苗族自治州",
+              district: "兴义市",
+              township: "下五屯街道",
+              country: "中国",
+              streetNumber: { street: "永康路", number: "007号" },
+            },
+            aois: [{ name: "九华苑", distance: "0" }],
+            pois: [{ name: "九华苑", distance: "0" }],
+          },
+        }),
+      };
+    }
+    return { ok: true, json: async () => ({ timezone: "Asia/Shanghai" }) };
+  });
+  try {
+    const precise = await resolveUserGeo({
+      clientLocation: { latitude: 25.0627, longitude: 104.8924 },
+    });
+    assert.ok(precise, "纯坐标应能反查出精确地址");
+    assert.match(String(precise?.address), /永康路007号九华苑/);
+    assert.equal(precise?.township, "下五屯街道");
+    assert.equal(precise?.poi, "九华苑");
+    assert.equal(precise?.poiDistanceMeters, 0);
+
+    const callsAfterFirst = stub.calls();
+    // 客户端回传省市区（结构化）时不再打外网，但仍要从缓存补回门牌/地标
+    const structured = await resolveUserGeo({
+      clientLocation: {
+        latitude: 25.0627,
+        longitude: 104.8924,
+        city: "黔西南布依族苗族自治州",
+        district: "兴义市",
+        region: "贵州省",
+        country: "中国",
+      },
+    });
+    assert.equal(stub.calls(), callsAfterFirst, "结构化 payload 不得新增网络请求");
+    assert.match(String(structured?.address), /永康路007号九华苑/);
+    assert.equal(structured?.poi, "九华苑");
+  } finally {
+    stub.restore();
+    if (prevKey === undefined) delete process.env.AMAP_WEB_KEY;
+    else process.env.AMAP_WEB_KEY = prevKey;
   }
 });

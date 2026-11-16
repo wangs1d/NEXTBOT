@@ -36,11 +36,13 @@ export interface MemoryInventoryReport {
 
 const INVENTORY_KEYS = [
   "memory_summary",
-  "memory_preferences",
-  "memory_facts",
   "memory_commitments",
   "memory_open_loops",
   "memory_current_mission",
+  // 2026-11-13：memory_preferences / memory_facts 移出盘点范围。这两个槽的
+  // 写入侧 2026-11-12 起已停写、13 日读路径一并下线；继续盘点等于在
+  // 【记忆目录】里报两个永远为空的存储（或从旧备份复活时虚报条目数），
+  // 让目录的 gap 判定失真。
 ];
 
 const STOP_WORDS = new Set([
@@ -166,8 +168,15 @@ export class MemoryInventory {
       /* 记忆系统未装配 */
     }
     const gaps: string[] = [];
-    if (!entries["memory_preferences"]) gaps.push("偏好");
-    if (!entries["memory_facts"] && !hasStructuredFacts) gaps.push("基本事实");
+    // 2026-11-13：memory_preferences / memory_facts 已移出盘点范围（写入侧
+    // 2026-11-12 起停写、读路径一并下线），entries 里永远不会有这两个键。
+    // 若还用它们判缺口，「偏好」会被**永久误报**成缺失（entries 取不到 →
+    // 恒为 undefined）。偏好与基本事实现在都由结构化事实库权威持有，判定
+    // 一律走 hasStructuredFacts。
+    if (!hasStructuredFacts) {
+      gaps.push("偏好");
+      gaps.push("基本事实");
+    }
     if (!entries["memory_commitments"] && !entries["memory_open_loops"]) gaps.push("待办与承诺");
 
     const stats: MemoryInventoryStats = { totalLines, byKey, timeDistribution, topTopics, gaps };

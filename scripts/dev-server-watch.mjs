@@ -86,7 +86,12 @@ function spawnWatchChild() {
     env: {
       ...process.env,
       ...(isRemoteEntry ? { RUNTIME_MODE: "remote" } : {}),
-      NODE_OPTIONS: [process.env.NODE_OPTIONS, "--max-old-space-size=512"].filter(Boolean).join(" "),
+      // 2026-11-12 根修：512MB 堆上限会让启动期 GC 压力剧增——实测仅 MCP 发现
+      // 就 32s、整轮 boot 超过 120s，而下方看门狗 120s 没监听即杀进程重拉，
+      // 两者相乘 = 「启动→超时→重拉」死循环，端口永远不监听（表象是服务拉
+      // 不起来）。本机 16GB 内存，提到 2048MB：boot 回到 ~10s 级，看门狗才有
+      // 意义。生产/autostart 链不受本脚本影响。
+      NODE_OPTIONS: [process.env.NODE_OPTIONS, "--max-old-space-size=2048"].filter(Boolean).join(" "),
       AGENT_WORLD_PLACEHOLDER_REGISTER: "1",
       ALLOW_WORLD_HTTP_MUTATIONS: "1",
       AGENT_PROMPT_WORLD_CAPS: "1",

@@ -426,10 +426,10 @@ test("persistUnifiedExtraction: forget 字段遗忘经钩子携带（钩子走�
   assert.deepEqual(hookForget, ["居住地"]);
 });
 
-// 低信号轮的捎带抽取已收进 PROFILE_WRITE_SCHEDULING=legacy 这一条回滚档
-// （batch 默认档由统一写入者/夜间批覆盖，不再在压缩残片上二次抽取），本文件
-// 跑在默认 batch 档，"orphan 路径 facts 进钩子" 不再成立；legacy 档的行为由
-// test/memory-unified-profile-merge.test.ts 显式设 PROFILE_WRITE_SCHEDULING=legacy 守住。
+// 低信号轮不再有第二条抽取路径（2026-11-13）：PROFILE_WRITE_SCHEDULING=legacy
+// 回滚档已删除，画像/理解/事实的抽取统一由夜间批（profile-write-scheduler 的 T2）
+// 承担，低信号内容先进整合队列由统一写入者裁决。因此本文件跑在默认路径时，
+// "orphan 路径 facts 进钩子" 不再成立——低信号轮根本不自行抽取。
 
 // ============================================================
 // 5. 端到端闭环：抽取 facts → 钩子落库 → 换值覆盖旧档

@@ -33,6 +33,32 @@ const JOURNAL_SEARCH_CHAR_BUDGET = 700;
 const JOURNAL_RETENTION_DAYS = 45;
 /** appendTurn 幂等防抖窗口：同一 actor+session+同一全文在窗口内重复写入视为同一轮（防多路径双写） */
 const APPEND_DEDUP_WINDOW_MS = 30_000;
+/** 同日同轮指纹保留天数（只防重投递，不防用户隔天真重复） */
+const TURN_FINGERPRINT_RETENTION_KEYS = 14;
+
+/**
+ * 渲染协议 / 卡片 JSON 残留（2026-11-12 journal 卫生）：
+ * 卡片是给 UI 的，不是给人说的话；写进 journal 会被夜间固化当成"用户记忆"。
+ */
+const CARD_BLOCK_RE = /\[AGENT_RESULT_CARD_START\][\s\S]*?\[AGENT_RESULT_CARD_END\]/g;
+const RENDER_HINT_RE = /\[RENDER_HINT:[^\]]*\]/g;
+/** 系统侧英文滚动摘要（曾整段被当作助手发言入档） */
+const SESSION_RECAP_LINE_RE = /^\s*(?:\[session-recap\]|Earlier conversation recap)/i;
+
+/**
+ * journal 文本净化：只保留"人说的话"。
+ * 处理三类实测残留：卡片 JSON、RENDER_HINT 标记、英文 session-recap 行。
+ */
+export function sanitizeJournalText(text: string): string {
+  if (!text) return "";
+  const withoutCards = text.replace(CARD_BLOCK_RE, " ").replace(RENDER_HINT_RE, " ");
+  return withoutCards
+    .split("\n")
+    .filter((line) => !SESSION_RECAP_LINE_RE.test(line))
+    .join("\n")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
 
 export type JournalHit = {
@@ -76,7 +102,7 @@ function normalizeLine(text: string): string {
 
 /** 全文归一 + 上限保护（turns 保留原始全文，md 视图按此上限展示） */
 function journalText(text: string): string {
-  const normalized = normalizeLine(text);
+  const normalized = sanitizeJournalText(normalizeLine(text));
   return normalized.length > JOURNAL_MAX_LINE_CHARS
     ? `${normalized.slice(0, JOURNAL_MAX_LINE_CHARS - 3).trimEnd()}...`
     : normalized;
@@ -178,6 +204,12 @@ export class DailyJournalService {
     string,
     { session: string; user: string; assistant: string; ts: number }
   >();
+  /**
+   * 同日同轮指纹（2026-11-12 journal 去重）：`actor|dateKey` → Set<userText\0assistantText>。
+   * 30s 防抖只能拦"紧接着重复"，拦不住隔几分钟/重启后的重投递——实测同一句加班吃饭
+   * 在 00:10/00:11/00:13 落了三次，进夜间固化后被当三条事实。
+   */
+  private seenTurnFingerprints = new Map<string, Set<string>>();
   /** 历史 md 一次性迁入 turns（只跑一次） */
   private legacyMigration: Promise<void> | null = null;
 
@@ -234,6 +266,25 @@ export class DailyJournalService {
       assistant: assistantFull,
       ts: Date.now(),
     });
+
+    // 同日同轮去重：完全相同的一问一答在一天内只落一次（重投递 / 多路径 / 客户端重发）。
+    // 阈值是"整轮完全一致"，不是相似——用户隔天重复说同一句话仍会被记录。
+    const fingerprintKey = `${actorId}|${dateKey}`;
+    let seen = this.seenTurnFingerprints.get(fingerprintKey);
+    if (!seen) {
+      seen = new Set<string>();
+      this.seenTurnFingerprints.set(fingerprintKey, seen);
+      if (this.seenTurnFingerprints.size > TURN_FINGERPRINT_RETENTION_KEYS) {
+        const oldest = this.seenTurnFingerprints.keys().next().value;
+        if (oldest !== undefined) this.seenTurnFingerprints.delete(oldest);
+      }
+    }
+    const turnFp = `${userFull}\u0000${assistantFull}`;
+    if (seen.has(turnFp)) {
+      console.log(`[DailyJournal] 跳过同日重复轮次: actor=${actorId} date=${dateKey}`);
+      return;
+    }
+    seen.add(turnFp);
 
     // 真相源先落库：同步写（better-sqlite3），失败会抛出而不是静默丢轮
     this.ledger.appendTurn({

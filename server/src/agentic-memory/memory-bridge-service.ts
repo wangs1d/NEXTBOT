@@ -65,6 +65,8 @@ export interface BridgeGraphLike {
     opts?: {
       context?: string;
       metadata?: Record<string, unknown>;
+      /** 写入契约的调用方身份（memory.cognition 的 producer） */
+      writer?: string;
     },
   ): Promise<string | null>;
   getAllNodes(actorId: string): Array<{
@@ -269,6 +271,9 @@ export class MemoryBridgeService {
       graphNodeId = await this.graph.ingest(actorId, text, sourceId, {
         context,
         metadata: baseMetadata,
+        // 认知图有两个合法写者：本服务直接写（海马体路径）与桥接写入
+        // （统一抽取产物一次落图+Mem0）。显式声明身份，契约才抓得到第三个。
+        writer: "MemoryBridgeService",
       });
     } catch (err) {
       graphFailed = true;

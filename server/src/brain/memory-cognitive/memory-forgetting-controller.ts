@@ -20,6 +20,13 @@
 import type { MemoryDeletionStage } from "../../services/human-like-memory-service.js";
 import { memoryDecayFactor } from "../../services/memory-record-utils.js";
 import {
+  forgettingVerdict,
+  retentionThresholds,
+  lowerTier,
+  HM_STAGE_BY_TIER,
+  TIER_BY_HM_STAGE,
+} from "../../memory/retention-policy.js";
+import {
   emotionalSalience as computeEmotionalSalience,
   emotionFromMetadata,
 } from "../../services/emotion-memory.js";
@@ -69,13 +76,9 @@ export interface SynapseBusLike {
 
 // deletionStage 推进顺序：active → downranked → cold → soft_deleted → hard_deleted
 // 再唤醒回退方向相反。
-const STAGE_ORDER: readonly MemoryDeletionStage[] = [
-  "active",
-  "downranked",
-  "cold",
-  "soft_deleted",
-  "hard_deleted",
-];
+// 2026-11-13：阶梯本身已迁到 memory/retention-policy.ts（RETENTION_TIER_ORDER
+// + HM_STAGE_BY_TIER），本模块不再另存一份顺序表——此前这里一份 STAGE_ORDER、
+// human-like-memory-service 里一份 STAGE_REGRESS，三处各写各的。
 
 // ─── 控制器 ───────────────────────────────────────────────────────
 
@@ -113,14 +116,15 @@ export class MemoryForgettingController {
 
   /** 剪枝阈值（score < 此值时清除节点 edge），缺省 0.1 */
   private getPruneThreshold(): number {
-    const v = Number(process.env.BRAIN_MEMORY_FORGET_PRUNE_THRESHOLD);
-    return Number.isFinite(v) && v > 0 ? v : 0.1;
+    // 2026-11-13：阈值改由统一 retention policy 提供（与 KV 摘要共用同一组
+    // 旋钮）。旧变量名 BRAIN_MEMORY_FORGET_PRUNE_THRESHOLD 保留可用，但含义
+    // 从「认知图专用」升级为「全局档位边界」——两边不会再各调各的。
+    return retentionThresholds().archived;
   }
 
   /** 衰减阈值（score < 此值时推进 deletionStage 一级），缺省 0.2 */
   private getDecayThreshold(): number {
-    const v = Number(process.env.BRAIN_MEMORY_FORGET_DECAY_THRESHOLD);
-    return Number.isFinite(v) && v > 0 ? v : 0.2;
+    return retentionThresholds().cold;
   }
 
   /** 再唤醒加成（frequencyScore 增量），缺省 0.3 */
@@ -211,14 +215,15 @@ export class MemoryForgettingController {
     if (!nodes || nodes.length === 0) return stats;
     stats.scanned = nodes.length;
 
-    const decayThreshold = this.getDecayThreshold();
-    const pruneThreshold = this.getPruneThreshold();
-
     for (const node of nodes) {
       const score = this.scoreNode(node);
+      // 档位判定统一走 retention policy（2026-11-13）：KV 摘要与认知图从此
+      // 用同一组阈值、同一套档位阶梯，本模块只保留「档位 ↔ deletionStage」
+      // 这一层映射（策略里的 cold / archived 边界即此前的 decay / prune 阈值）。
+      const verdict = forgettingVerdict(score);
 
-      // 1) score < decayThreshold → 推进 deletionStage 一级
-      if (score < decayThreshold) {
+      // 1) 掉到 archive 及以下 → 推进 deletionStage 一级
+      if (verdict === "archive" || verdict === "purge") {
         const nextStage = this.nextStage(node.deletionStage);
         if (nextStage && nextStage !== node.deletionStage) {
           this.humanLike.updateDeletionStage(actorId, node.id, nextStage);
@@ -226,8 +231,8 @@ export class MemoryForgettingController {
         }
       }
 
-      // 2) score < pruneThreshold → 清除该节点所有 edge
-      if (score < pruneThreshold) {
+      // 2) 掉到 purge → 清除该节点所有 edge
+      if (verdict === "purge") {
         this.humanLike.pruneNodeEdges(actorId, node.id);
         stats.pruned += 1;
       }
@@ -328,8 +333,9 @@ export class MemoryForgettingController {
    * 已是 hard_deleted 时返回 null（不再推进）。
    */
   private nextStage(stage: MemoryDeletionStage): MemoryDeletionStage | null {
-    const idx = STAGE_ORDER.indexOf(stage);
-    if (idx < 0 || idx >= STAGE_ORDER.length - 1) return null;
-    return STAGE_ORDER[idx + 1];
+    const tier = TIER_BY_HM_STAGE[stage];
+    if (!tier) return null;
+    const next = lowerTier(tier);
+    return next ? (HM_STAGE_BY_TIER[next] as MemoryDeletionStage) : null;
   }
 }

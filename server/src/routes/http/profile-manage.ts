@@ -159,7 +159,10 @@ export function registerProfileManageRoutes(app: FastifyInstance): void {
     if (!factStore) {
       return reply.code(503).send({ ok: false, error: "事实库未装配（记忆系统未启用）" });
     }
-    const result = factStore.applyFact({ actorId, entity: "user", field, value, confidence: 1.0 });
+    const result = factStore.applyFact(
+      { actorId, entity: "user", field, value, confidence: 1.0 },
+      "ProfileManageRoute",
+    );
     if (!result) {
       return reply.code(400).send({ ok: false, error: "字段或值不合法（值过长/字段未识别）" });
     }

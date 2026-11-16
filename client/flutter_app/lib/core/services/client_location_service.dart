@@ -312,11 +312,18 @@ class ClientLocationService {
       return null;
     }
     // 快速窗口契约：服务端只等 12s，本方法外层封顶 8s。引擎预算 6s：
-    // last-known 快路毫秒级；高精度流拿到 ≤150m 的 fix 即刻返回，预算耗尽
+    // last-known 快路毫秒级；高精度流拿到 ≤30m 的 fix 即刻返回，预算耗尽
     // 给最佳 fix；GPS 零 fix 时降级中精度 4s（在 6s 预算内）。
+    //
+    // 2026-11-13 精度门槛 150m → 30m：用户要求「百分百精确」。
+    // 150m 的 fix 在室内/城市街区尺度下毫无意义（半径 150m ≈ 半个街区），
+    // 「我在哪」「离某地多远」这类问题会答出偏差数百米的结果。
+    // 30m 是 GPS 在开阔环境下的可达精度，仍在 6s 预算内可获取；
+    // 达不到时按「预算耗尽给最佳 fix」处理，如实带上 accuracyMeters 上报，
+    // 由服务端按精度裁决（低精度降级）而不是把低精度当高精度用。
     final Position? position = await _fetchPrecisePosition(
       budget: const Duration(seconds: 6),
-      maxAccuracyMeters: 150,
+      maxAccuracyMeters: 30,
     );
     if (position == null) return null;
     return _payloadFrom(position);
@@ -451,7 +458,10 @@ class ClientLocationService {
 
       final Position? position = await _fetchPrecisePosition(
         budget: const Duration(seconds: 7),
-        maxAccuracyMeters: 100,
+        // 精确化（2026-11-14）：100m 会让逆地理落到隔壁街区/小区，用户问
+        // 「我现在在哪」就答错门牌。目标 50m；达不到仍返回最佳 fix 并如实
+        // 携带 accuracyMeters，由服务端决定是否降级展示。
+        maxAccuracyMeters: 50,
       );
       if (position == null) {
         debugPrint("[ClientLocationService] 预算内未取到任何 fix，回缓存兜底");

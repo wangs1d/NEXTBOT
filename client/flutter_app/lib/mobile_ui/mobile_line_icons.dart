@@ -4,7 +4,7 @@ import "package:flutter/material.dart";
 ///
 /// 用在玻璃底栏的 4 个 tab 与旁聊列表行图标；Material 自带的
 /// chat_bubble / book 轮廓与参考图不一致（圆气泡 vs 方气泡），故自绘。
-enum MobileLineIconKind { chat, book, tasks, library }
+enum MobileLineIconKind { chat, book, pulse, library }
 
 class MobileLineIcon extends StatelessWidget {
   const MobileLineIcon({
@@ -86,19 +86,17 @@ class _MobileLineIconPainter extends CustomPainter {
         );
         canvas.drawLine(const Offset(9, 4), const Offset(9, 21), stroke);
         break;
-      case MobileLineIconKind.tasks:
-        canvas.drawRRect(
-          RRect.fromRectAndRadius(
-            const Rect.fromLTWH(4, 4, 16, 16),
-            const Radius.circular(4),
-          ),
-          stroke,
-        );
-        final Path check = Path()
-          ..moveTo(8.2, 12)
-          ..lineTo(10.8, 14.6)
-          ..lineTo(16, 9.4);
-        canvas.drawPath(check, stroke);
+      case MobileLineIconKind.pulse:
+        // 「动态」tab 图标：心电脉冲线——持续的动静/生命体征，
+        // 对应 Agent 主动性聚合（快递到、账单出、日程变的扫描感）。
+        final Path pulse = Path()
+          ..moveTo(3, 12)
+          ..lineTo(7.5, 12)
+          ..lineTo(10, 6.5)
+          ..lineTo(14, 17.5)
+          ..lineTo(16.5, 12)
+          ..lineTo(21, 12);
+        canvas.drawPath(pulse, stroke);
         break;
       case MobileLineIconKind.library:
         final Path folder = Path()

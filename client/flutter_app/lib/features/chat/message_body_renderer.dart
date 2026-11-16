@@ -5,6 +5,7 @@ import "package:flutter/material.dart";
 import "../../core/theme/app_typography.dart";
 
 import "../../core/models/chat_models.dart";
+import "../../core/models/notify_action.dart";
 import "../../core/services/content_summary_launcher.dart";
 import "../../core/utils/agent_result_parser.dart";
 import "../../core/utils/content_summary_parser.dart";
@@ -42,6 +43,11 @@ Widget buildMessageBody(
   /// null 时不渲染建议行（未接线方/纯展示场景）。
   void Function(String prompt)? onFollowupTap,
 
+  /// 「需要你拍板」动作点击回调（2026-11-13「通知即界面」）。
+  /// 与通知栏按钮共用同一个 actionId 与同一枚 token——两个渲染面，一套语义。
+  /// null 时不渲染动作行（未接线方/纯展示场景）。
+  void Function(NotifyAction action)? onNotifyAction,
+
   /// travel_itinerary 卡不进 body（2026-09-25 用户定稿：卡片作为气泡外的
   /// 独立第二条消息形态渲染，见 chat_page 消息行拆分）；调用方自行在气泡外
   /// 渲染卡片。缺省 false=卡片照旧在 body 内（手机端/其他调用方行为不变）。
@@ -62,18 +68,114 @@ Widget buildMessageBody(
     excludeTravelCard: excludeTravelCard,
     excludeCardTypes: excludeCardTypes,
   );
-  if (isUser || onFollowupTap == null) return body;
+  if (isUser) return body;
+  final List<NotifyAction> notifyActions =
+      message.notifyActions ?? const <NotifyAction>[];
+  final bool hasActions = notifyActions.isNotEmpty && onNotifyAction != null;
   final List<String> followUps = message.followUpPrompts ?? const <String>[];
-  if (followUps.isEmpty) return body;
+  final bool hasFollowUps = followUps.isNotEmpty && onFollowupTap != null;
+  if (!hasActions && !hasFollowUps) return body;
   return Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     mainAxisSize: MainAxisSize.min,
     children: <Widget>[
       body,
-      const SizedBox(height: AppTypography.space3),
-      _buildFollowUpRow(context, cs, followUps, onFollowupTap),
+      if (hasActions) ...<Widget>[
+        const SizedBox(height: AppTypography.space3),
+        _buildNotifyActionRow(context, cs, notifyActions, onNotifyAction),
+      ],
+      if (hasFollowUps) ...<Widget>[
+        const SizedBox(height: AppTypography.space3),
+        _buildFollowUpRow(context, cs, followUps, onFollowupTap),
+      ],
     ],
   );
+}
+
+/// 「需要你拍板」动作行（2026-11-13「通知即界面」）。
+///
+/// 样式沿用「接下来你可以」的胶囊行（黑白极简），但第 1 个动作是**主按钮**
+/// （实心），其余是描边——一眼能看出「推荐哪个」，与通知栏的按钮排序同一口径。
+Widget _buildNotifyActionRow(
+  BuildContext context,
+  ColorScheme cs,
+  List<NotifyAction> actions,
+  void Function(NotifyAction action) onTap,
+) {
+  final TextStyle labelStyle =
+      (Theme.of(context).textTheme.labelMedium ?? const TextStyle()).copyWith(
+    fontSize: AppTypography.secondary,
+    height: AppTypography.uiLineHeight,
+    color: cs.onSurfaceVariant,
+  );
+  final TextStyle actionStyle =
+      (Theme.of(context).textTheme.bodyMedium ?? const TextStyle()).copyWith(
+    fontSize: AppTypography.body,
+    height: AppTypography.uiLineHeight,
+    color: cs.onSurface.withValues(alpha: 0.85),
+  );
+  return Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    mainAxisSize: MainAxisSize.min,
+    children: <Widget>[
+      Text("需要你拍板", style: labelStyle),
+      const SizedBox(height: AppTypography.space2),
+      Wrap(
+        spacing: AppTypography.space2,
+        runSpacing: AppTypography.space2,
+        children: <Widget>[
+          for (int i = 0; i < actions.length; i++)
+            _NotifyActionPill(
+              action: actions[i],
+              style: actionStyle,
+              borderColor: cs.outlineVariant,
+              primary: i == 0,
+              onTap: () => onTap(actions[i]),
+            ),
+        ],
+      ),
+    ],
+  );
+}
+
+class _NotifyActionPill extends StatelessWidget {
+  const _NotifyActionPill({
+    required this.action,
+    required this.style,
+    required this.borderColor,
+    required this.primary,
+    required this.onTap,
+  });
+
+  final NotifyAction action;
+  final TextStyle style;
+  final Color borderColor;
+  final bool primary;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    final TextStyle textStyle = primary
+        ? style.copyWith(color: cs.onPrimaryContainer)
+        : style;
+    return Material(
+      color: primary ? cs.primaryContainer : Colors.transparent,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(20),
+        side: BorderSide(color: primary ? cs.primaryContainer : borderColor),
+      ),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(20),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+              horizontal: AppTypography.space4, vertical: AppTypography.space2),
+          child: Text(action.label, style: textStyle),
+        ),
+      ),
+    );
+  }
 }
 
 /// 「接下来你可以」接续建议行：灰色小标题 + 换行平铺胶囊，黑白极简。
@@ -568,16 +670,23 @@ Widget? _buildEnvelopeBlocksBody(
   for (final Map<String, dynamic> block in renderableBlocks) {
     appendBlock(block);
   }
-  // 无 text 块的分泡轮：正文（气泡文本）在最前，卡/媒体块随后
-  if (!hasTextBlock && message.text.trim().isNotEmpty) {
-    blockWidgets.insert(
-      0,
-      StructuredAssistantMessageBody(
-        text: message.text,
-        cs: cs,
-        textTheme: Theme.of(context).textTheme,
-      ),
-    );
+  // 无 text 块的分泡轮：正文（气泡文本）在最前，卡/媒体块随后。
+  // text 是「可能带结构卡标记」的承载面（服务端 finalText / 历史遗留数据），
+  // 必须走既有解析器拆块后只取散文——不能把原文当正文直读，否则标记 + JSON
+  // 会整块漏进气泡。卡本身由调用方的 card 块渲染，这里只消费文字。
+  if (!hasTextBlock) {
+    final String bubbleText =
+        AgentResultParser.parse(message.text).cleanedText.trim();
+    if (bubbleText.isNotEmpty) {
+      blockWidgets.insert(
+        0,
+        StructuredAssistantMessageBody(
+          text: bubbleText,
+          cs: cs,
+          textTheme: Theme.of(context).textTheme,
+        ),
+      );
+    }
   }
   if (blockWidgets.isEmpty) return null;
   return Column(
