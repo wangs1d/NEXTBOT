@@ -16,7 +16,7 @@ export const SHARED_BROWSER_INTENT_RULES: ToolIntentRule[] = [
         "shared browser", "my browser", "user browser", "visible browser",
         "共用浏览器", "我的浏览器", "当前浏览器", "浏览器里", "帮我看网页",
         "打开网页", "打开网址", "打开链接", "去这个网站", "在浏览器里操作",
-        "导航", "导航到", "浏览器导航", "跳到网页", "前往网页",
+        "浏览器导航", "跳到网页", "前往网页",
       ],
       negativeAliases: [
         "virtual browser", "headless", "session id",
@@ -43,7 +43,7 @@ export const SHARED_BROWSER_INTENT_RULES: ToolIntentRule[] = [
     metadata: {
       aliases: [
         "open in my browser", "navigate", "navigate to", "open url", "打开网页", "打开网址",
-        "打开链接", "去网站", "访问网页", "导航", "导航到", "浏览器导航", "跳到这个网站",
+        "打开链接", "去网站", "访问网页", "浏览器导航", "跳到这个网站",
         "前往这个页面",
       ],
       examples: [
@@ -122,6 +122,6 @@ export const SHARED_BROWSER_CATEGORY_MAPPING: { name: string; keywords: string[]
     "shared browser", "my browser", "current page", "visible browser",
     "共用浏览器", "我的浏览器", "当前浏览器", "浏览器里", "帮我看网页",
     "打开网页", "打开网址", "页面内容", "读页面",
-    "导航", "导航到", "浏览器导航", "后退", "前进", "刷新页面",
+    "浏览器导航", "后退", "前进", "刷新页面",
   ],
 };

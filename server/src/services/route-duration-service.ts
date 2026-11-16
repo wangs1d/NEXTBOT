@@ -105,8 +105,20 @@ export async function amapGeocode(address: string, city?: string): Promise<strin
   if (city) params.set("city", city);
   try {
     const res = await fetch(`${AMAP_GEO_BASE}?${params}`, { signal: AbortSignal.timeout(AMAP_TIMEOUT_MS) });
-    const json = (await res.json()) as { status?: string; geocodes?: Array<{ location?: string }> };
+    const json = (await res.json()) as {
+      status?: string;
+      info?: string;
+      infocode?: string;
+      geocodes?: Array<{ location?: string }>;
+    };
     if (json.status === "1" && json.geocodes?.[0]?.location) return json.geocodes[0].location!;
+    if (json.status !== "1") {
+      // 高德失败原因（INVALID_USER_KEY / USERKEY_PLAT_NOMATCH 等）必须可诊断：
+      // 之前静默降级为纯名称导航，用户只看到「导航不准」却查不到 key 配错。
+      console.warn(
+        `[amap] geocode failed (${json.info ?? "unknown"}${json.infocode ? `/${json.infocode}` : ""}): ${address}`,
+      );
+    }
   } catch {
     // 降级
   }
@@ -254,12 +266,16 @@ export async function estimateTravelTime(input: TravelTimeInput): Promise<Travel
       const from: GeoPoint | string = originPoint ?? originText!;
       const r = await input.osrmFallback(from, destText);
       if (r && typeof r.durationMin === "number" && r.durationMin > 0 && r.durationMin <= MAX_ROUTE_MINUTES) {
+        const fromPoint = originGeo ? (parseAmapLocation(originGeo) ?? originPoint) : originPoint;
         return {
           durationMin: Math.round(r.durationMin),
           distanceKm: Math.round((Number(r.distanceKm) || 0) * 10) / 10,
           // OSRM 公开节点只有驾车 profile：入参没指定步行时如实标驾车
           mode: hint === "walking" ? "walking" : "driving",
           source: "osrm",
+          // 高德路径规划失败但地理编码成功时，坐标仍可复用（如生成导航链接）
+          ...(fromPoint ? { originPoint: fromPoint } : {}),
+          ...(destPoint ? { destinationPoint: destPoint } : {}),
         };
       }
     }

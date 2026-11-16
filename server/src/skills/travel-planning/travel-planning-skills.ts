@@ -25,6 +25,10 @@ import { resolveActorId } from "../../agent/actor-id.js";
 import { resolveOriginFromContext, resolveOriginPointFromContext } from "./travel-origin.js";
 import { estimateTravelTime, type TravelModeHint } from "../../services/route-duration-service.js";
 import {
+  buildAmapNavigationUrl,
+  type NavTravelMode,
+} from "../../services/navigation/nav-provider.js";
+import {
   pricingService,
   formatQuotePriceInfo,
   type PriceQuote,
@@ -899,7 +903,135 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
     },
   };
 
-  /** 5. 行程明细回查（冷层按需读取，替代把明细常驻上下文） */
+  /** 5. 真实路径导航（2026-11-16）：高德 Web 导航 URI，用户点开即逐向导航 */
+  const navigate: SkillDefinition = {
+    metadata: {
+      name: "travel.navigate",
+      version: "1.0.0",
+      displayName: "真实路径导航（高德）",
+      description:
+        "给用户真实路网的逐向导航链接（高德 Web 导航），不是网页搜索、不是只算距离。" +
+        "配了 AMAP_WEB_KEY 时先用高德把目的地/起点解析成精确坐标（GCJ-02），失败自动降级为地名导航，链接始终可用。" +
+        "适用表达：「导航去XX」「带我去XX」「开车/走路/坐公交怎么去XX」「从A导航到B」「给我开个导航」。" +
+        "起点可省略=按用户实时定位；用户没说从哪出发时别反问，直接调用。" +
+        "边界：只问距离/耗时（不要求点开导航）用 travel.compute-route；叫车报价用 ride_hailing.quote；" +
+        "浏览器里打开网页用 agent_browser/shared_browser，不要拿本工具当网页导航。",
+      kind: "builtin",
+      tags: ["travel", "导航", "路线", "驾车", "步行", "公交", "骑行", "地图", "高德", "amap"],
+      icon: "🧭",
+      parameters: [
+        {
+          name: "to",
+          type: "string",
+          required: true,
+          description: "导航目的地：地名（尽量带城市/地标，如「首都机场T3」「杭州西湖」）或坐标串「经度,纬度」",
+        },
+        {
+          name: "from",
+          type: "string",
+          required: false,
+          description: "起点：地名或坐标串「经度,纬度」。省略=按用户实时定位（拿不到定位时由高德按用户当前位置导航）",
+        },
+        {
+          name: "mode",
+          type: "string",
+          required: false,
+          enum: ["driving", "walking", "transit", "cycling"],
+          description: "交通方式：driving=驾车（默认）/ walking=步行 / transit=公交 / cycling=骑行",
+        },
+      ],
+      outputSchema: {
+        ok: "是否成功",
+        url: "高德导航链接（真实逐向导航）",
+        from: "起点名称（省略时为「当前位置」）",
+        to: "目的地名称",
+        mode: "交通方式",
+        durationMin: "预计耗时（分钟；高德实时成功时给出）",
+        distanceKm: "距离（公里；高德实时成功时给出）",
+        displayNote: "展示提示",
+        error: "失败原因（ok=false 时）",
+      },
+      permissions: ["network:external"],
+      timeoutMs: 20_000,
+    },
+    handler: async (input, execContext) => {
+      const toRaw = typeof input.to === "string" ? input.to.trim() : "";
+      if (!toRaw) return { ok: false, error: "缺少必填参数 to（目的地）" };
+      const fromRaw = typeof input.from === "string" ? input.from.trim() : "";
+      const mode = (
+        ["driving", "walking", "transit", "cycling"].includes(String(input.mode))
+          ? String(input.mode)
+          : "driving"
+      ) as NavTravelMode;
+
+      // 坐标串不进用户可见文案（经纬度禁令）；坐标只出现在导航 URI 参数里。
+      const isCoordText = (s: string) => /^\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?\s*$/.test(s);
+      const toLabel = isCoordText(toRaw) ? "目的地" : toRaw;
+
+      // 起点：给定优先；省略取实时定位；都拿不到 → 起点留空交给高德按当前位置导航。
+      let origin: string | { latitude: number; longitude: number } | null = null;
+      let fromLabel = "当前位置";
+      if (fromRaw) {
+        origin = fromRaw;
+        fromLabel = isCoordText(fromRaw) ? "指定起点" : fromRaw;
+      } else {
+        const point = await resolveOriginPointFromContext(execContext).catch(() => null);
+        if (point) {
+          origin = { latitude: point.latitude, longitude: point.longitude };
+          fromLabel = point.label || point.city || "当前位置";
+        }
+      }
+
+      let fromPoint: { latitude: number; longitude: number } | null = null;
+      let toPoint: { latitude: number; longitude: number } | null = null;
+      let durationMin: number | undefined;
+      let distanceKm: number | undefined;
+      if (origin) {
+        const est = await estimateTravelTime({
+          origin,
+          destination: toRaw,
+          mode: mode === "walking" ? "walking" : "driving",
+          osrmFallback: (from, dest) => travelPlanningService.computeRoute(from, dest),
+        });
+        if (est) {
+          fromPoint = est.originPoint ?? null;
+          toPoint = est.destinationPoint ?? null;
+          durationMin = est.durationMin;
+          distanceKm = est.distanceKm;
+        }
+      }
+
+      const url = buildAmapNavigationUrl({
+        from: fromPoint
+          ? { name: fromLabel, lat: fromPoint.latitude, lng: fromPoint.longitude }
+          : null,
+        to: toPoint
+          ? { name: toLabel, lat: toPoint.latitude, lng: toPoint.longitude }
+          : { name: toLabel },
+        mode,
+      });
+
+      // 公交/骑行没有对应估时（estimateTravelTime 只支持步行/驾车），
+      // 不能把驾车时长当成公交时长返回；这两种方式让高德页面自己算。
+      const reportEstimate = mode === "driving" || mode === "walking";
+      return {
+        ok: true,
+        url,
+        from: fromLabel,
+        to: toLabel,
+        mode,
+        ...(reportEstimate && durationMin != null ? { durationMin } : {}),
+        ...(reportEstimate && distanceKm != null ? { distanceKm } : {}),
+        displayNote:
+          "把 url 作为 Markdown 链接「开始导航」呈现（如 [开始导航](url)），不要直接铺开长链接、不要展示经纬度；" +
+          "导航由用户点击后在高德网页开始，不要声称已替用户开始导航。" +
+          (fromPoint ? "" : "（未取到精确起点，已交给高德按用户当前位置导航）") +
+          (toPoint ? "" : "（目的地未解析到精确坐标，已按地名导航）"),
+      };
+    },
+  };
+
+  /** 6. 行程明细回查（冷层按需读取，替代把明细常驻上下文） */
   const get_itinerary: SkillDefinition = {
     metadata: {
       name: "travel.get-itinerary",
@@ -1339,7 +1471,7 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
     },
   };
 
-  return [plan_itinerary, search_poi, destination_guide, destination_info, compute_route, get_itinerary, pickup_answer, edit_itinerary, approve_plan];
+  return [plan_itinerary, search_poi, destination_guide, destination_info, compute_route, navigate, get_itinerary, pickup_answer, edit_itinerary, approve_plan];
 }
 
 /**

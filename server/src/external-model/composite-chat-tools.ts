@@ -187,7 +187,7 @@ const COMPOSITE_SPECS: CompositeSpec[] = [
       navigate: {
         tool: "info.navigate_site",
         desc: "在目标站内按任务继续点选浏览",
-        keywords: ["站内", "网站里", "这个站", "导航", "点开", "找一下", "翻一下", "浏览"],
+        keywords: ["站内", "网站里", "这个站", "站内导航", "点开", "找一下", "翻一下", "浏览"],
         params: ["goal"],
       },
       raw: {

@@ -81,6 +81,48 @@ export class AmapWebNavProvider implements NavigationProvider {
   }
 }
 
+/** 导航点（坐标可选：缺省时走名称模式，由高德自行匹配地名） */
+export interface NavUrlStop {
+  name: string;
+  /** GCJ-02 纬度；与 lng 必须同时给出才按坐标导航 */
+  lat?: number;
+  lng?: number;
+}
+
+function hasCoord(p: NavUrlStop): p is NavUrlStop & { lat: number; lng: number } {
+  return Number.isFinite(p.lat) && Number.isFinite(p.lng);
+}
+
+/**
+ * 构建高德 Web 导航 URI（真实路网逐向导航）。
+ *
+ * 坐标可用时用 `lng,lat,名称` 三元组（定位最准）；坐标缺失时降级为
+ * `to=名称` 名称模式——链接仍是真实导航，不会因地理编码失败而不可用。
+ * 起点缺省 = 由高德按用户当前位置导航。
+ */
+export function buildAmapNavigationUrl(input: {
+  from?: NavUrlStop | null;
+  to: NavUrlStop;
+  mode?: NavTravelMode;
+}): string {
+  const mode = AMAP_MODE[input.mode ?? "driving"] ?? "car";
+  const parts: string[] = [];
+  if (input.from) {
+    const fromName = encodeURIComponent(safeName(input.from.name));
+    if (hasCoord(input.from)) {
+      parts.push(`from=${fmtCoord(input.from.lng)},${fmtCoord(input.from.lat)},${fromName}`);
+    }
+  }
+  const toName = encodeURIComponent(safeName(input.to.name));
+  parts.push(
+    hasCoord(input.to)
+      ? `to=${fmtCoord(input.to.lng)},${fmtCoord(input.to.lat)},${toName}`
+      : `to=${toName}`,
+  );
+  parts.push(`mode=${mode}`, "policy=", "src=Nextbot", "coordinate=gaode", "callnative=0");
+  return `https://uri.amap.com/navigation?${parts.join("&")}`;
+}
+
 const PROVIDERS: Record<string, NavigationProvider> = {
   [AMAP_WEB_NAV_ID]: new AmapWebNavProvider(),
 };
