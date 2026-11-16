@@ -7,6 +7,8 @@
 // 零 LLM：全部走 classifyBillParcel 的确定性规则。
 import {
   classifyBillParcel,
+  looksLikeGroupChat,
+  looksLikeMarketing,
   shouldReportBillParcel,
   summarizeBillParcel,
   type BillParcelCategory,
@@ -17,6 +19,11 @@ import type {
   BillParcelLedger,
   BillParcelSource,
 } from "./bill-parcel-ledger.js";
+import type {
+  BlockedReason,
+  DynamicsSettingsStore,
+  SourceRuleId,
+} from "./dynamics-settings-store.js";
 import type { Signal } from "../proactivity/sensors/types.js";
 
 export type BillParcelIngestInput = {
@@ -37,6 +44,8 @@ export type BillParcelIngestResult = {
   matched: boolean;
   /** 是否为纯验证码（用户明确这类不进汇总） */
   otpOnly: boolean;
+  /** 是否被入口规则拦截（拦截后不落台账、不发信号） */
+  blockedReason?: BlockedReason;
   match: BillParcelMatch;
   /** 实际新增的台账条目（重复内容为空） */
   entries: BillParcelEntry[];
@@ -44,6 +53,8 @@ export type BillParcelIngestResult = {
 
 export type BillParcelIngestDeps = {
   ledger: BillParcelLedger;
+  /** 来源规则与拦截计数（未接时保持旧行为：只按验证码降级） */
+  settings?: DynamicsSettingsStore;
   /** 信号出口（SensorKernel feeder 闭包；为空则只落台账） */
   emit?: (signal: Omit<Signal, "stream">) => void;
   /**
@@ -81,17 +92,64 @@ export class BillParcelIngestService {
    * 是否另行提示（验证码虽不进汇总，但可检索）。
    */
   ingest(input: BillParcelIngestInput): BillParcelIngestResult {
+    const at = input.at ?? (this.deps.now ?? Date.now)();
+    const haystack = `${input.title ? `${input.title}\n` : ""}${input.text}`;
+    const settings = this.deps.settings;
+
+    // 群聊通知：默认不进入动态页（来源规则可开）。
+    if (
+      input.source === "notification" &&
+      looksLikeGroupChat(haystack) &&
+      settings &&
+      !settings.allows("groupChat")
+    ) {
+      settings.recordBlocked("groupChat", input.source, at);
+      return {
+        matched: false,
+        otpOnly: false,
+        blockedReason: "groupChat",
+        match: emptyMatch(),
+        entries: [],
+      };
+    }
+
     const match = classifyBillParcel({
       title: input.title,
       text: input.text,
     });
 
+    // 营销推广：命中明确的促销动作词时直接不进动态页（只在拦截计数里回一条）。
+    // 带「优惠券」的正常支付回执仍保留：有金额且无「退订/促销/秒杀」等强促销词。
+    if (settings && looksLikeMarketing(haystack)) {
+      const strongPromo = /(退订|拒收|促销|大促|秒杀|抢购|领券|限时活动)/.test(haystack);
+      const valuable = match.amount != null && match.categories.length > 0 && !strongPromo;
+      if (!valuable && !settings.allows("ecommerceMarketing")) {
+        settings.recordBlocked("marketing", input.source, at);
+        return {
+          matched: false,
+          otpOnly: false,
+          blockedReason: "marketing",
+          match,
+          entries: [],
+        };
+      }
+    }
+
     if (!shouldReportBillParcel(match)) {
+      if (match.isOtpOnly && settings) {
+        settings.recordBlocked("otp", input.source, at);
+      }
       return { matched: false, otpOnly: match.isOtpOnly, match, entries: [] };
     }
 
-    const at = input.at ?? (this.deps.now ?? Date.now)();
-    const excerpt = `${input.title ? `${input.title}\n` : ""}${input.text}`.slice(0, EXCERPT_LIMIT);
+    // 来源规则（银行短信 / 快递通知）——关闭后入口层直接丢弃。
+    const ruleId = sourceRuleFor(match);
+    if (settings && ruleId && !settings.allows(ruleId)) {
+      settings.recordBlocked("sourceRule", input.source, at);
+      return { matched: false, otpOnly: false, blockedReason: "sourceRule", match, entries: [] };
+    }
+
+    const excerpt = haystack.slice(0, EXCERPT_LIMIT);
     const title = summarizeBillParcel(match, excerpt.replace(/\s+/g, " ").trim());
 
     const entries: BillParcelEntry[] = [];
@@ -113,6 +171,11 @@ export class BillParcelIngestService {
         externalId: input.externalId,
       });
       entries.push(...added);
+    }
+
+    if (entries.length === 0 && settings && match.categories.includes("parcel")) {
+      // 物流轨迹重复更新：同单号多次推送只保留一条，计入「重复物流」拦截计数
+      settings.recordBlocked("duplicateParcel", input.source, at);
     }
 
     if (entries.length > 0 && this.deps.emit) {
@@ -160,6 +223,28 @@ export class BillParcelIngestService {
 
     return { matched: true, otpOnly: false, match, entries };
   }
+}
+
+/** 命中的来源规则（账单类只对银行/还款生效，避免把生活缴费也归到银行短信） */
+function sourceRuleFor(match: BillParcelMatch): SourceRuleId | null {
+  if (match.categories.includes("parcel")) return "parcelNotice";
+  if (match.categories.includes("bill")) {
+    if (match.billType === "银行卡" || match.billType === "还款扣款") return "bankSms";
+  }
+  return null;
+}
+
+function emptyMatch(): BillParcelMatch {
+  return {
+    categories: [],
+    labels: [],
+    isOtpOnly: false,
+    amount: null,
+    billType: null,
+    trackingNo: null,
+    pickupCode: null,
+    carrier: null,
+  };
 }
 
 /** 跨源实体候选：单号/取件码/承运商/账单子类——高置信、可被"某单号"检索命中 */

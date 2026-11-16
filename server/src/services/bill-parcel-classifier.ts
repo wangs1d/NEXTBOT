@@ -98,6 +98,29 @@ const PARCEL_RULES: readonly Rule[] = [
 const OTP_PATTERN =
   /(验证码|校验码|动态码|确认码|安全码|verification\s*code|security\s*code|one[-\s]?time\s*(?:code|password)|\botp\b)/i;
 
+/**
+ * 营销推广语义（2026-11-16 用户定稿：低价值消息不折叠，直接在入口拦截）。
+ *
+ * 命中即不落台账、不进动态页；只在「已拦截」里回计数。
+ * 判据刻意保守：必须出现明确的促销动作词（退订/促销/优惠券/活动…），
+ * 避免把「账单活动日」「套餐优惠后 35 元」这类正常账单误杀。
+ */
+const MARKETING_PATTERN =
+  /(退订|拒收|促销|大促|秒杀|抢购|优惠券|领券|满减|折扣|特惠|活动价|限时活动|点击.*(?:参与|领取|购买)|unsubscribe|promotion|coupon)/i;
+
+/** 群聊消息语义（来源规则里「群聊通知」默认不生成动态） */
+const GROUP_CHAT_PATTERN = /(群聊|群消息|群通知|群助手|有人@我|@所有人)/;
+
+/** 是否营销推广内容 */
+export function looksLikeMarketing(text: string): boolean {
+  return MARKETING_PATTERN.test(text);
+}
+
+/** 是否群聊通知内容 */
+export function looksLikeGroupChat(text: string): boolean {
+  return GROUP_CHAT_PATTERN.test(text);
+}
+
 // ---------------------------------------------------------------------- //
 // 字段抽取
 // ---------------------------------------------------------------------- //

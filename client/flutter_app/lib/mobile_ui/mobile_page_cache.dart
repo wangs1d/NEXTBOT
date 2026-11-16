@@ -65,6 +65,10 @@ class MobilePageCache {
     }
   }
 
+  /// 会话内同步读取（仅内存；未命中返回 null）。
+  /// 用于「上次查看时间」这类进入首帧就要用的轻量偏好。
+  Map<String, dynamic>? peek(String key) => _mem[_safeKey(key)];
+
   Future<Map<String, dynamic>?> _readDisk(String k) async {
     final Directory? dir = await _ensureDir();
     if (dir == null) return null;

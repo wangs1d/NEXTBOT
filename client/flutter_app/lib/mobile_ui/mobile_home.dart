@@ -21,6 +21,7 @@ import "mobile_browser_preview_overlay.dart";
 import "mobile_chat_controller.dart";
 import "mobile_chat_page.dart";
 import "mobile_dynamics_page.dart";
+import "mobile_dynamics_shared.dart";
 import "mobile_library_page.dart";
 import "mobile_line_icons.dart";
 import "mobile_profile_page.dart";
@@ -613,6 +614,10 @@ class MobileHomePageState extends State<MobileHomePage>
       case 2:
         return MobileDynamicsPage(
           key: _dynamicsKey,
+          onAskAgent: (String prompt) {
+            goToTab(0);
+            unawaited(_chatController.send(prompt));
+          },
         );
       case 3:
         return MobileLibraryPage(key: _libraryKey);
@@ -724,14 +729,28 @@ class MobileHomePageState extends State<MobileHomePage>
                   children: <Widget>[
                     for (int i = 0; i < 4; i++)
                       Expanded(
-                        child: _TabItem(
-                          kind: MobileLineIconKind.values[i],
-                          selected: _tabIndex == i,
-                          showLiveBadge:
-                              i == 0 && _chatController.isSideChatActive,
-                          p: p,
-                          onTap: () => _switchTab(i),
-                        ),
+                        child: i == 2
+                            ? ValueListenableBuilder<int>(
+                                valueListenable: DynamicsBadge.count,
+                                builder:
+                                    (BuildContext context, int value, Widget? _) {
+                                  return _TabItem(
+                                    kind: MobileLineIconKind.values[i],
+                                    selected: _tabIndex == i,
+                                    badgeCount: value,
+                                    p: p,
+                                    onTap: () => _switchTab(i),
+                                  );
+                                },
+                              )
+                            : _TabItem(
+                                kind: MobileLineIconKind.values[i],
+                                selected: _tabIndex == i,
+                                showLiveBadge:
+                                    i == 0 && _chatController.isSideChatActive,
+                                p: p,
+                                onTap: () => _switchTab(i),
+                              ),
                       ),
                   ],
                 ),
@@ -787,11 +806,13 @@ class _TabItem extends StatelessWidget {
     required this.p,
     required this.onTap,
     this.showLiveBadge = false,
+    this.badgeCount = 0,
   });
 
   final MobileLineIconKind kind;
   final bool selected;
   final bool showLiveBadge;
+  final int badgeCount;
   final MobilePalette p;
   final VoidCallback onTap;
 
@@ -845,6 +866,32 @@ class _TabItem extends StatelessWidget {
                               blurRadius: 5,
                             ),
                           ],
+                        ),
+                      ),
+                    ),
+                  if (badgeCount > 0)
+                    Positioned(
+                      top: 0,
+                      right: 0,
+                      child: Container(
+                        constraints: const BoxConstraints(minWidth: 14),
+                        height: 14,
+                        padding: const EdgeInsets.symmetric(horizontal: 3.5),
+                        decoration: BoxDecoration(
+                          color: dark
+                              ? const Color(0xFFE5484D)
+                              : const Color(0xFFD93036),
+                          borderRadius: BorderRadius.circular(7),
+                        ),
+                        alignment: Alignment.center,
+                        child: Text(
+                          badgeCount > 99 ? "99+" : "$badgeCount",
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 8.5,
+                            height: 1,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
                       ),
                     ),

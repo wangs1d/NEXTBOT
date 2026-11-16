@@ -13,6 +13,7 @@ class MobilePalette {
   const MobilePalette({
     required this.background,
     required this.surface,
+    required this.surface2,
     required this.textPrimary,
     required this.textSecondary,
     required this.textMuted,
@@ -33,6 +34,9 @@ class MobilePalette {
 
   /// 卡片 / 输入栏底
   final Color surface;
+
+  /// 卡片内浮层 / 图标底 / 未选中胶囊底(比 surface 深一级)
+  final Color surface2;
 
   /// 主文字(近黑)
   final Color textPrimary;
@@ -76,6 +80,7 @@ class MobilePalette {
   static const MobilePalette light = MobilePalette(
     background: Color(0xFFF7F7F8),
     surface: Color(0xFFFFFFFF),
+    surface2: Color(0xFFF2F2F4),
     textPrimary: Color(0xFF111112),
     textSecondary: Color(0xFF70707A),
     textMuted: Color(0xFFA6A6AF),
@@ -94,6 +99,7 @@ class MobilePalette {
   static const MobilePalette dark = MobilePalette(
     background: Color(0xFF121214),
     surface: Color(0xFF1B1B1E),
+    surface2: Color(0xFF26262B),
     textPrimary: Color(0xFFF2F2F4),
     textSecondary: Color(0xFF9A9AA2),
     textMuted: Color(0xFF6C6C75),

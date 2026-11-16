@@ -184,6 +184,8 @@ export type HttpRouteDeps = {
   agentActivityStore: import("../../proactivity/activity-store.js").AgentActivityStore;
   /** 账单/快递汇总台账（「动态」tab bills/parcels 区块数据源；未注入时区块为空） */
   billParcelLedger?: import("../../services/bill-parcel-ledger.js").BillParcelLedger | null;
+  /** 动态页消息设置（来源规则/拦截计数/订阅忽略；未注入时设置页用默认值） */
+  dynamicsSettings?: import("../../services/dynamics-settings-store.js").DynamicsSettingsStore | null;
   /** 跨源统一采集库（「动态」tab mail 要事区块数据源；未注入时区块为空） */
   sourceStore?: import("../../proactivity/source-store.js").SourceStore | null;
   /** 行为审计时间线（GET /agent/audit-timeline；可选，未注入时该端点 503） */

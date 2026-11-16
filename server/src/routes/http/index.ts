@@ -448,6 +448,8 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     attentionStore: deps.attentionStore ?? null,
     activityStore: deps.agentActivityStore,
     sourceStore: deps.sourceStore ?? null,
+    settings: deps.dynamicsSettings ?? null,
+    mailWatchStatus: deps.proactivityFabric?.mailWatchStatus,
   });
   // Brain Center 路由（brainCenter 为 null 时端点返回 503 not enabled）
   registerBrainRoutes(app, deps);

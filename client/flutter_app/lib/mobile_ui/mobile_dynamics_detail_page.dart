@@ -1,551 +1,234 @@
+// 账单 / 快递详情（设计稿 SCREEN 05）。
+//
+// 详情页承担「确认与纠错」：
+//   · 账单：已报销 / 记错了（均可撤销）、问 Agent、自动续费提示、原始凭证、同期同类；
+//   · 快递：取件码、标记已取件 / 撤销、稍后提醒、原始凭证。
+// 动作全部调服务端，成功后本地更新并通过 Navigator.pop 把最新条目带回列表。
 import "dart:async";
 
 import "package:flutter/material.dart";
-import "package:flutter/services.dart";
 
+import "mobile_dynamics_api.dart";
 import "mobile_dynamics_shared.dart";
 import "mobile_theme.dart";
 
-/// 快递详情（设计稿 03）：取件码是第一信息，整页只有一个主操作「复制取件码」。
-///
-/// 数据直接复用列表项（/api/dynamics 的 parcels.recent[]），不额外请求。
-class ParcelDetailPage extends StatelessWidget {
-  const ParcelDetailPage({super.key, required this.item});
-
-  final Map<String, dynamic> item;
-
-  @override
-  Widget build(BuildContext context) {
-    final MobilePalette p = MobileTheme.of(context);
-    final String? code = dynamicsText(item, "pickupCode");
-    final String title = dynamicsText(item, "title") ?? "包裹动态";
-    final String? carrier = dynamicsText(item, "carrier");
-    final String? trackingNo = dynamicsText(item, "trackingNo");
-    final String? excerpt = dynamicsText(item, "excerpt");
-    final num occurredAt = dynamicsNum(item, "occurredAt");
-    final String time = dynamicsFmtTime(occurredAt);
-
-    return Scaffold(
-      backgroundColor: p.background,
-      appBar: AppBar(title: const Text("快递详情")),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(14, 10, 14, 28),
-        children: [
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: p.surface,
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: p.divider),
-            ),
-            child: Column(
-              children: [
-                Text(
-                  "取件码",
-                  style: TextStyle(
-                    color: p.textMuted,
-                    fontSize: 10.5,
-                    letterSpacing: 3,
-                  ),
-                ),
-                const SizedBox(height: 7),
-                Text(
-                  code ?? "—",
-                  style: TextStyle(
-                    color: p.textPrimary,
-                    fontSize: 34,
-                    height: 1.18,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: 2,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  title,
-                  textAlign: TextAlign.center,
-                  style: TextStyle(color: p.textSecondary, fontSize: 12),
-                ),
-                if (code != null) ...[
-                  const SizedBox(height: 9),
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
-                    decoration: BoxDecoration(
-                      color: Theme.of(context).brightness == Brightness.dark
-                          ? const Color(0x242C8C3C)
-                          : const Color(0xFFFFF5E5),
-                      borderRadius: BorderRadius.circular(999),
-                    ),
-                    child: Text(
-                      "请尽快取件",
-                      style: TextStyle(
-                        fontSize: 10.5,
-                        color: Theme.of(context).brightness == Brightness.dark
-                            ? const Color(0xFFE8A94A)
-                            : const Color(0xFFB26A00),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 13),
-                  SizedBox(
-                    height: 34,
-                    width: double.infinity,
-                    child: Material(
-                      color: p.accent,
-                      borderRadius: BorderRadius.circular(10),
-                      child: InkWell(
-                        borderRadius: BorderRadius.circular(10),
-                        onTap: () {
-                          unawaited(Clipboard.setData(
-                              ClipboardData(text: code)));
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text("取件码已复制"),
-                              duration: Duration(seconds: 2),
-                            ),
-                          );
-                        },
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(Icons.copy_rounded,
-                                size: 13, color: p.onAccent),
-                            const SizedBox(width: 6),
-                            Text(
-                              "复制取件码",
-                              style: TextStyle(
-                                color: p.onAccent,
-                                fontSize: 12,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ),
-          const SizedBox(height: 10),
-          _InfoCard(
-            p: p,
-            rows: [
-              _InfoRow(p: p, label: "承运商", value: carrier ?? "未知"),
-              _InfoRow(
-                p: p,
-                label: "运单号",
-                value: trackingNo ?? "—",
-                mono: true,
-                onCopy: trackingNo == null
-                    ? null
-                    : () {
-                        unawaited(
-                            Clipboard.setData(ClipboardData(text: trackingNo)));
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            content: Text("运单号已复制"),
-                            duration: Duration(seconds: 2),
-                          ),
-                        );
-                      },
-              ),
-              _InfoRow(
-                  p: p, label: "到达时间", value: time.isEmpty ? "—" : time),
-              _InfoRow(
-                p: p,
-                label: "识别来源",
-                value: dynamicsSourceLabel(item["source"]),
-              ),
-            ],
-          ),
-          const SizedBox(height: 14),
-          _SectionLabel(p: p, text: "物流进度"),
-          Container(
-            padding: const EdgeInsets.fromLTRB(14, 13, 14, 5),
-            decoration: BoxDecoration(
-              color: p.surface,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: p.divider),
-            ),
-            child: Column(
-              children: [
-                _TimelineNode(
-                  p: p,
-                  active: true,
-                  title: code != null ? "已到站 · 待取件" : "物流更新",
-                  desc: <String>[
-                    if (time.isNotEmpty) time,
-                    if (carrier != null) carrier,
-                  ].join(" · "),
-                ),
-                _TimelineNode(
-                  p: p,
-                  active: false,
-                  title: "派送中",
-                  desc: "等待承运商轨迹同步",
-                ),
-                _TimelineNode(
-                  p: p,
-                  active: false,
-                  title: "已揽收",
-                  desc: "等待承运商轨迹同步",
-                ),
-              ],
-            ),
-          ),
-          if (excerpt != null) ...[
-            const SizedBox(height: 14),
-            _SectionLabel(p: p, text: "原始通知"),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 12),
-              decoration: BoxDecoration(
-                color: p.surface,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: p.divider),
-              ),
-              child: Text(
-                excerpt,
-                style: TextStyle(
-                  color: p.textSecondary,
-                  fontSize: 11.5,
-                  height: 19 / 11.5,
-                ),
-              ),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-/// 账单详情（设计稿 04）：金额 + 识别原文 + 同期同类。
 class BillDetailPage extends StatefulWidget {
   const BillDetailPage({
     super.key,
     required this.item,
     this.byType = const <Map<String, dynamic>>[],
+    this.client,
+    this.onAskAgent,
   });
 
   final Map<String, dynamic> item;
-
-  /// bills.byType：同期同类分布（type / count / amount）。
   final List<Map<String, dynamic>> byType;
+  final dynamic client;
+  final void Function(String prompt)? onAskAgent;
 
   @override
   State<BillDetailPage> createState() => _BillDetailPageState();
 }
 
 class _BillDetailPageState extends State<BillDetailPage> {
+  late Map<String, dynamic> _item = Map<String, dynamic>.from(widget.item);
+  late final DynamicsApi _api = DynamicsApi(client: widget.client as dynamic);
+  bool _busy = false;
   bool _expanded = false;
+
+  num get _amount => dynamicsNum(_item, "amount");
+  String? get _status => dynamicsBillStatus(_item);
+
+  bool get _looksSubscription {
+    final String text = "${_item["title"] ?? ""}\n${_item["excerpt"] ?? ""}";
+    return RegExp(r"(连续包月|自动续费|包月|订阅|会员|VIP|iCloud|网盘)").hasMatch(text);
+  }
 
   @override
   Widget build(BuildContext context) {
     final MobilePalette p = MobileTheme.of(context);
-    final Map<String, dynamic> item = widget.item;
-    final String title = dynamicsText(item, "title") ?? "账单";
-    final String? billType = dynamicsText(item, "billType");
-    final num amount = dynamicsNum(item, "amount");
-    final String occurred = dynamicsFmtTime(dynamicsNum(item, "occurredAt"));
-    final String? excerpt = dynamicsText(item, "excerpt");
-
+    final bool wrong = _status == "wrong";
+    final String type = dynamicsText(_item, "billType") ?? "其他";
     return Scaffold(
       backgroundColor: p.background,
       appBar: AppBar(title: const Text("账单详情")),
       body: ListView(
-        padding: const EdgeInsets.fromLTRB(14, 10, 14, 28),
-        children: [
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: p.surface,
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: p.divider),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    _Pill(p: p, text: "支出", solid: true),
-                    if (billType != null) ...[
-                      const SizedBox(width: 7),
-                      _Pill(p: p, text: billType),
-                    ],
-                  ],
-                ),
-                const SizedBox(height: 12),
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Expanded(
-                      child: Text.rich(
-                        TextSpan(
-                          text: "¥",
-                          style: TextStyle(
-                            color: p.textPrimary,
-                            fontSize: 15,
-                            fontWeight: FontWeight.w500,
-                          ),
-                          children: [
-                            TextSpan(
-                              text: dynamicsFmtAmount(amount),
-                              style: const TextStyle(
-                                fontSize: 32,
-                                height: 1.12,
-                                fontWeight: FontWeight.w600,
-                                letterSpacing: -0.5,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 4),
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 9, vertical: 3),
-                        decoration: BoxDecoration(
-                          color: Theme.of(context).brightness ==
-                                  Brightness.dark
-                              ? const Color(0x2432965A)
-                              : const Color(0xFFEAF7EF),
-                          borderRadius: BorderRadius.circular(999),
-                        ),
-                        child: Text(
-                          "已自动入账",
-                          style: TextStyle(
-                            fontSize: 10,
-                            color: Theme.of(context).brightness ==
-                                    Brightness.dark
-                                ? const Color(0xFF6BD39A)
-                                : const Color(0xFF1F9D55),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  title,
-                  style: TextStyle(color: p.textSecondary, fontSize: 12.5),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(height: 10),
-          _InfoCard(
-            p: p,
-            rows: [
-              _InfoRow(
-                  p: p, label: "发生时间", value: occurred.isEmpty ? "—" : occurred),
-              _InfoRow(
-                p: p,
-                label: "识别来源",
-                value: dynamicsSourceLabel(item["source"]),
-              ),
-              _InfoRow(p: p, label: "账单类型", value: billType ?? "未分类"),
-              _InfoRow(p: p, label: "入账状态", value: "已计入近 30 天汇总"),
-            ],
-          ),
-          if (excerpt != null) ...[
-            const SizedBox(height: 14),
-            _SectionLabel(p: p, text: "原始凭证"),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 12),
-              decoration: BoxDecoration(
-                color: p.surface,
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: p.divider),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    excerpt,
-                    maxLines: _expanded ? null : 4,
-                    overflow: _expanded ? null : TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: p.textSecondary,
-                      fontSize: 11.5,
-                      height: 19 / 11.5,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  GestureDetector(
-                    onTap: () => setState(() => _expanded = !_expanded),
-                    child: Text(
-                      _expanded ? "收起原文" : "查看完整原文",
-                      style: TextStyle(color: p.link, fontSize: 10.5),
-                    ),
-                  ),
-                ],
-              ),
-            ),
+        padding: const EdgeInsets.fromLTRB(14, 6, 14, 28),
+        children: <Widget>[
+          _hero(p, wrong, type),
+          const SizedBox(height: 12),
+          _actions(p),
+          const SizedBox(height: 14),
+          _infoCard(p),
+          if (_looksSubscription) ...<Widget>[
+            const SizedBox(height: 11),
+            _subscriptionHint(p),
           ],
-          if (widget.byType.isNotEmpty) ...[
-            const SizedBox(height: 14),
-            _SectionLabel(p: p, text: "同期同类"),
-            _TypeBreakdown(p: p, byType: widget.byType),
+          _label(p, "原始凭证"),
+          _receiptCard(p),
+          if (widget.byType.isNotEmpty) ...<Widget>[
+            _label(p, "同期同类", trailing: "近 30 天"),
+            _typeBreakdown(p),
           ],
         ],
       ),
     );
   }
-}
 
-/// 同期同类：名称 + 比例条 + 笔数 + 金额（按金额降序，最大额拉满）。
-class _TypeBreakdown extends StatelessWidget {
-  const _TypeBreakdown({required this.p, required this.byType});
-
-  final MobilePalette p;
-  final List<Map<String, dynamic>> byType;
-
-  @override
-  Widget build(BuildContext context) {
-    final num maxAmount = byType.fold<num>(
-        0, (num m, Map<String, dynamic> e) => amountOf(e) > m ? amountOf(e) : m);
+  Widget _hero(MobilePalette p, bool wrong, String type) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      padding: const EdgeInsets.fromLTRB(15, 14, 15, 14),
       decoration: BoxDecoration(
         color: p.surface,
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(14),
         border: Border.all(color: p.divider),
       ),
       child: Column(
-        children: [
-          for (final Map<String, dynamic> e in byType)
-            Padding(
-              padding: const EdgeInsets.symmetric(vertical: 7),
-              child: Row(
-                children: [
-                  SizedBox(
-                    width: 64,
-                    child: Text(
-                      dynamicsText(e, "type") ?? "未分类",
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(color: p.textPrimary, fontSize: 12),
-                    ),
-                  ),
-                  Expanded(
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(3),
-                      child: Container(
-                        height: 3,
-                        color: p.innerFieldBackground,
-                        alignment: Alignment.centerLeft,
-                        child: FractionallySizedBox(
-                          widthFactor: maxAmount <= 0
-                              ? 0.0
-                              : (amountOf(e) / maxAmount)
-                                  .clamp(0.06, 1.0)
-                                  .toDouble(),
-                          child: Container(color: p.textPrimary),
-                        ),
-                      ),
-                    ),
-                  ),
-                  SizedBox(
-                    width: 40,
-                    child: Text(
-                      "${dynamicsNum(e, "count").toInt()} 笔",
-                      textAlign: TextAlign.right,
-                      style: TextStyle(color: p.textMuted, fontSize: 10.5),
-                    ),
-                  ),
-                  SizedBox(
-                    width: 66,
-                    child: Text(
-                      "¥${dynamicsFmtAmount(amountOf(e))}",
-                      textAlign: TextAlign.right,
-                      style: TextStyle(
-                        color: p.textPrimary,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  static num amountOf(Map<String, dynamic> e) => dynamicsNum(e, "amount");
-}
-
-class _TimelineNode extends StatelessWidget {
-  const _TimelineNode({
-    required this.p,
-    required this.active,
-    required this.title,
-    required this.desc,
-  });
-
-  final MobilePalette p;
-  final bool active;
-  final String title;
-  final String desc;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            margin: const EdgeInsets.only(top: 3),
-            width: 7,
-            height: 7,
-            decoration: BoxDecoration(
-              color: active ? p.textPrimary : null,
-              shape: BoxShape.circle,
-              border: active ? null : Border.all(color: p.textMuted),
-            ),
-          ),
-          const SizedBox(width: 11),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: TextStyle(
-                    color: active ? p.textPrimary : p.textSecondary,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-                const SizedBox(height: 1),
-                Text(
-                  desc,
-                  style: TextStyle(color: p.textMuted, fontSize: 10.5),
-                ),
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              _pill("支出", solid: true),
+              const SizedBox(width: 6),
+              _pill(type),
+              if (_looksSubscription) ...<Widget>[
+                const SizedBox(width: 6),
+                _pill("连续包月",
+                    fg: const Color(0xFF3B82F6),
+                    bg: DynamicsTone.blueBg(context)),
               ],
-            ),
+            ],
+          ),
+          const SizedBox(height: 11),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: <Widget>[
+              Text("¥",
+                  style: TextStyle(
+                      color: p.textPrimary,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600)),
+              const SizedBox(width: 3),
+              Text(
+                dynamicsFmtAmount(_amount.abs()),
+                style: TextStyle(
+                  color: wrong ? p.textMuted : p.textPrimary,
+                  fontSize: 30,
+                  height: 1,
+                  letterSpacing: -0.6,
+                  fontWeight: FontWeight.w600,
+                  decoration: wrong ? TextDecoration.lineThrough : null,
+                ),
+              ),
+              const Spacer(),
+              if (_status != null) _statusChip(context, _status!),
+            ],
+          ),
+          const SizedBox(height: 9),
+          Text(
+            dynamicsText(_item, "title") ?? "账单",
+            style: TextStyle(color: p.textPrimary, fontSize: 13.5),
           ),
         ],
       ),
     );
   }
-}
 
-class _InfoCard extends StatelessWidget {
-  const _InfoCard({required this.p, required this.rows});
+  Widget _actions(MobilePalette p) {
+    return Row(
+      children: <Widget>[
+        Expanded(
+          child: _actionButton(
+            p,
+            icon: Icons.check_rounded,
+            label: _status == "reimbursed" ? "取消已报销" : "已报销",
+            active: _status == "reimbursed",
+            onTap: _busy ? null : () => _setStatus("reimbursed"),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: _actionButton(
+            p,
+            icon: Icons.close_rounded,
+            label: "记错了",
+            danger: true,
+            active: _status == "wrong",
+            onTap: _busy ? null : () => _setStatus("wrong"),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: _actionButton(
+            p,
+            icon: Icons.auto_awesome_outlined,
+            label: "问 Agent",
+            solid: true,
+            onTap: () => _askAgent(),
+          ),
+        ),
+      ],
+    );
+  }
 
-  final MobilePalette p;
-  final List<Widget> rows;
+  Widget _actionButton(
+    MobilePalette p, {
+    required IconData icon,
+    required String label,
+    required VoidCallback? onTap,
+    bool solid = false,
+    bool danger = false,
+    bool active = false,
+  }) {
+    final Color bg = solid
+        ? p.textPrimary
+        : active
+            ? (danger ? DynamicsTone.redBg(context) : DynamicsTone.greenBg(context))
+            : Colors.transparent;
+    final Color fg = solid
+        ? p.background
+        : danger
+            ? DynamicsTone.redFg(context)
+            : active
+                ? DynamicsTone.greenFg(context)
+                : p.textPrimary;
+    return Material(
+      color: bg,
+      borderRadius: BorderRadius.circular(9),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(9),
+        onTap: onTap,
+        child: Container(
+          height: 36,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(9),
+            border: Border.all(
+                color: solid
+                    ? Colors.transparent
+                    : active
+                        ? (danger
+                            ? DynamicsTone.redFg(context)
+                            : DynamicsTone.greenFg(context))
+                        : p.divider),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: <Widget>[
+              Icon(icon, size: 14, color: fg),
+              const SizedBox(width: 4),
+              Text(label,
+                  style: TextStyle(
+                      color: fg, fontSize: 11, fontWeight: FontWeight.w500)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 
-  @override
-  Widget build(BuildContext context) {
+  Widget _infoCard(MobilePalette p) {
+    final bool counted = _status != "wrong";
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12),
       decoration: BoxDecoration(
@@ -554,130 +237,627 @@ class _InfoCard extends StatelessWidget {
         border: Border.all(color: p.divider),
       ),
       child: Column(
-        children: [
-          for (int i = 0; i < rows.length; i++)
-            Container(
-              decoration: BoxDecoration(
-                border: i == rows.length - 1
-                    ? null
-                    : Border(bottom: BorderSide(color: p.divider)),
-              ),
-              child: rows[i],
-            ),
+        children: <Widget>[
+          _infoRow(p, "发生时间", dynamicsFmtTime(dynamicsNum(_item, "occurredAt"))),
+          _infoRow(p, "识别来源", dynamicsSourceLabel(_item["source"])),
+          _infoRow(p, "账单类型", dynamicsText(_item, "billType") ?? "其他"),
+          _infoRow(
+            p,
+            "入账状态",
+            counted ? "已计入近 30 天汇总" : "已从近 30 天合计中扣除",
+            last: true,
+          ),
         ],
       ),
     );
   }
-}
 
-class _InfoRow extends StatelessWidget {
-  const _InfoRow({
-    required this.p,
-    required this.label,
-    required this.value,
-    this.mono = false,
-    this.onCopy,
-  });
-
-  final MobilePalette p;
-  final String label;
-  final String value;
-  final bool mono;
-  final VoidCallback? onCopy;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 9),
+  Widget _infoRow(MobilePalette p, String k, String v, {bool last = false}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      decoration: BoxDecoration(
+        border: last
+            ? null
+            : Border(bottom: BorderSide(color: p.divider, width: 0.6)),
+      ),
       child: Row(
-        children: [
-          Text(
-            label,
-            style: TextStyle(color: p.textSecondary, fontSize: 11.5),
-          ),
+        children: <Widget>[
+          Text(k, style: TextStyle(color: p.textSecondary, fontSize: 12)),
           const Spacer(),
           Flexible(
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Flexible(
-                  child: Text(
-                    value,
-                    textAlign: TextAlign.right,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: p.textPrimary,
-                      fontSize: 12,
-                      fontFeatures: mono
-                          ? const <FontFeature>[
-                              FontFeature.tabularFigures()
-                            ]
-                          : null,
-                    ),
-                  ),
-                ),
-                if (onCopy != null) ...[
-                  const SizedBox(width: 5),
-                  GestureDetector(
-                    onTap: onCopy,
-                    child: Icon(Icons.copy_rounded,
-                        size: 12, color: p.textMuted),
-                  ),
-                ],
-              ],
+            child: Text(
+              v,
+              textAlign: TextAlign.right,
+              style: TextStyle(color: p.textPrimary, fontSize: 12),
             ),
           ),
         ],
       ),
     );
   }
-}
 
-class _SectionLabel extends StatelessWidget {
-  const _SectionLabel({required this.p, required this.text});
+  Widget _subscriptionHint(MobilePalette p) {
+    final int occurredAt = dynamicsNum(_item, "occurredAt").toInt();
+    final DateTime next =
+        DateTime.fromMillisecondsSinceEpoch(occurredAt).add(const Duration(days: 30));
+    final DateTime remindAt = next.subtract(const Duration(days: 3));
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 11, 12, 11),
+      decoration: BoxDecoration(
+        color: DynamicsTone.blueBg(context),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFF3B82F6).withValues(alpha: 0.45)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              const Icon(Icons.autorenew_rounded, size: 14, color: Color(0xFF3B82F6)),
+              const SizedBox(width: 5),
+              Text("识别为自动续费",
+                  style: TextStyle(
+                      color: const Color(0xFF3B82F6),
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w600)),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text.rich(
+            TextSpan(
+              children: <InlineSpan>[
+                TextSpan(text: "本笔可能为连续包月，下次扣款约 "),
+                TextSpan(
+                  text: "${dynamicsFmtDate(next.millisecondsSinceEpoch)} ¥${dynamicsFmtAmount(_amount.abs())}",
+                  style: TextStyle(
+                      color: p.textPrimary, fontWeight: FontWeight.w600),
+                ),
+                TextSpan(text: "。可提前 3 天提醒我。"),
+              ],
+            ),
+            style: TextStyle(color: p.textSecondary, fontSize: 11.5, height: 1.7),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: <Widget>[
+              _smallGhost(
+                "续费前提醒",
+                onTap: _busy
+                    ? null
+                    : () async {
+                        await _snooze(remindAt);
+                      },
+              ),
+              const SizedBox(width: 7),
+              _smallGhost(
+                "查看订阅",
+                onTap: () {
+                  Navigator.of(context).pop();
+                },
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
 
-  final MobilePalette p;
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(left: 4, bottom: 7),
-      child: Text(
-        text,
-        style: TextStyle(
-          color: p.textSecondary,
-          fontSize: 11.5,
-          fontWeight: FontWeight.w600,
+  Widget _smallGhost(String label, {VoidCallback? onTap}) {
+    const Color blue = Color(0xFF3B82F6);
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(7),
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(7),
+            border: Border.all(color: blue.withValues(alpha: 0.6)),
+          ),
+          child: Text(label, style: const TextStyle(color: blue, fontSize: 10)),
         ),
       ),
     );
   }
-}
 
-class _Pill extends StatelessWidget {
-  const _Pill({required this.p, required this.text, this.solid = false});
+  Widget _receiptCard(MobilePalette p) {
+    final String excerpt = dynamicsText(_item, "excerpt") ?? "暂无原文";
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: p.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: p.divider),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(
+            excerpt,
+            maxLines: _expanded ? null : 3,
+            overflow: _expanded ? TextOverflow.visible : TextOverflow.ellipsis,
+            style: TextStyle(color: p.textSecondary, fontSize: 11.5, height: 1.75),
+          ),
+          if (excerpt.length > 40)
+            GestureDetector(
+              onTap: () => setState(() => _expanded = !_expanded),
+              child: Padding(
+                padding: const EdgeInsets.only(top: 7),
+                child: Text(
+                  _expanded ? "收起原文" : "查看完整原文",
+                  style: const TextStyle(color: Color(0xFF3B82F6), fontSize: 10.5),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
 
-  final MobilePalette p;
-  final String text;
-  final bool solid;
+  Widget _typeBreakdown(MobilePalette p) {
+    final List<Map<String, dynamic>> rows = widget.byType.take(4).toList();
+    final num max = rows.isEmpty
+        ? 1
+        : rows
+            .map((Map<String, dynamic> e) => dynamicsNum(e, "amount"))
+            .fold<num>(0, (num a, num b) => a > b ? a : b);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      decoration: BoxDecoration(
+        color: p.surface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: p.divider),
+      ),
+      child: Column(
+        children: <Widget>[
+          for (final Map<String, dynamic> row in rows)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              child: Row(
+                children: <Widget>[
+                  SizedBox(
+                    width: 62,
+                    child: Text(
+                      dynamicsText(row, "type") ?? "其他",
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(color: p.textSecondary, fontSize: 11),
+                    ),
+                  ),
+                  Expanded(
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(3),
+                      child: LinearProgressIndicator(
+                        value: max <= 0
+                            ? 0
+                            : dynamicsNum(row, "amount") / max,
+                        minHeight: 5,
+                        backgroundColor: p.surface2,
+                        valueColor:
+                            AlwaysStoppedAnimation<Color>(p.textPrimary),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    "¥${dynamicsFmtAmount(dynamicsNum(row, "amount"))}",
+                    style: TextStyle(color: p.textPrimary, fontSize: 11),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
 
-  @override
-  Widget build(BuildContext context) {
+  Widget _label(MobilePalette p, String text, {String? trailing}) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 16, 4, 7),
+      child: Row(
+        children: <Widget>[
+          Text(text,
+              style: TextStyle(
+                  color: p.textSecondary,
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w600)),
+          if (trailing != null) ...<Widget>[
+            const SizedBox(width: 6),
+            Text(trailing,
+                style: TextStyle(color: p.textMuted, fontSize: 10.5)),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _pill(String text,
+      {bool solid = false, Color? fg, Color? bg}) {
+    final MobilePalette p = MobileTheme.of(context);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
       decoration: BoxDecoration(
-        color: solid ? p.accent : p.innerFieldBackground,
+        color: solid ? p.textPrimary : (bg ?? p.surface2),
         borderRadius: BorderRadius.circular(999),
       ),
       child: Text(
         text,
         style: TextStyle(
-          color: solid ? p.onAccent : p.textSecondary,
-          fontSize: 10,
+          color: solid ? p.background : (fg ?? p.textSecondary),
+          fontSize: 9.5,
+          height: 1.4,
         ),
       ),
     );
+  }
+
+  Widget _statusChip(BuildContext context, String status) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+      decoration: BoxDecoration(
+        color: status == "reimbursed"
+            ? DynamicsTone.greenBg(context)
+            : DynamicsTone.redBg(context),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        status == "reimbursed" ? "已报销" : "记错了",
+        style: TextStyle(
+          color: status == "reimbursed"
+              ? DynamicsTone.greenFg(context)
+              : DynamicsTone.redFg(context),
+          fontSize: 9.5,
+          fontWeight: FontWeight.w500,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _setStatus(String status) async {
+    final String? current = _status;
+    final String? next = current == status ? null : status;
+    setState(() => _busy = true);
+    try {
+      final Map<String, dynamic> res = await _api.reviewBill(
+        dynamicsText(_item, "id") ?? "",
+        next,
+      );
+      final Map<String, dynamic>? updated =
+          res["item"] as Map<String, dynamic>?;
+      if (!mounted) return;
+      setState(() {
+        if (updated != null) _item = updated;
+        _busy = false;
+      });
+      _snack(next == "reimbursed"
+          ? "已标记为已报销"
+          : next == "wrong"
+              ? "已标记记错了，已从合计扣除"
+              : "已撤销复核标记");
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _busy = false);
+      _snack("操作失败：$e");
+    }
+  }
+
+  Future<void> _snooze(DateTime until) async {
+    setState(() => _busy = true);
+    try {
+      await _api.snooze(dynamicsText(_item, "id") ?? "", until);
+      if (!mounted) return;
+      setState(() => _busy = false);
+      _snack("已设置提醒：${dynamicsFmtDay(until.millisecondsSinceEpoch)}");
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _busy = false);
+      _snack("设置失败：$e");
+    }
+  }
+
+  void _askAgent() {
+    final String prompt =
+        "这笔 ¥${dynamicsFmtAmount(_amount.abs())} 的「${dynamicsText(_item, "title") ?? "账单"}」花在哪？来源 ${dynamicsSourceLabel(_item["source"])}，时间 ${dynamicsFmtTime(dynamicsNum(_item, "occurredAt"))}。";
+    if (widget.onAskAgent != null) {
+      widget.onAskAgent!(prompt);
+      Navigator.of(context).pop();
+      return;
+    }
+    _snack("已生成问题，可回到对话页询问 Agent");
+  }
+
+  void _snack(String text) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(text), duration: const Duration(seconds: 2)));
+  }
+}
+
+// ================================================================ //
+// 快递详情
+// ================================================================ //
+
+class ParcelDetailPage extends StatefulWidget {
+  const ParcelDetailPage({super.key, required this.item, this.client});
+
+  final Map<String, dynamic> item;
+  final dynamic client;
+
+  @override
+  State<ParcelDetailPage> createState() => _ParcelDetailPageState();
+}
+
+class _ParcelDetailPageState extends State<ParcelDetailPage> {
+  late Map<String, dynamic> _item = Map<String, dynamic>.from(widget.item);
+  late final DynamicsApi _api = DynamicsApi(client: widget.client as dynamic);
+  bool _busy = false;
+
+  bool get _pickedUp => dynamicsPickedUp(_item);
+
+  @override
+  Widget build(BuildContext context) {
+    final MobilePalette p = MobileTheme.of(context);
+    final String? code = dynamicsText(_item, "pickupCode");
+    return Scaffold(
+      backgroundColor: p.background,
+      appBar: AppBar(title: const Text("快递详情")),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(14, 6, 14, 28),
+        children: <Widget>[
+          Container(
+            padding: const EdgeInsets.all(15),
+            decoration: BoxDecoration(
+              color: p.surface,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(
+                color: !_pickedUp && code != null
+                    ? p.textPrimary.withValues(alpha: 0.55)
+                    : p.divider,
+              ),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Row(
+                  children: <Widget>[
+                    _pill(dynamicsText(_item, "carrier") ?? "快递"),
+                    const SizedBox(width: 6),
+                    _pill(_pickedUp ? "已取件" : (code != null ? "待取件" : "运输中"),
+                        solid: !_pickedUp && code != null),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  dynamicsText(_item, "title") ?? "快递",
+                  style: TextStyle(
+                      color: p.textPrimary,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600),
+                ),
+                if (!_pickedUp && code != null) ...<Widget>[
+                  const SizedBox(height: 14),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    decoration: BoxDecoration(
+                      color: p.textPrimary,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Column(
+                      children: <Widget>[
+                        Text("取件码",
+                            style: TextStyle(
+                                color: p.background.withValues(alpha: 0.65),
+                                fontSize: 9,
+                                letterSpacing: 1.2)),
+                        const SizedBox(height: 2),
+                        Text(code,
+                            style: TextStyle(
+                                color: p.background,
+                                fontSize: 22,
+                                fontWeight: FontWeight.w600,
+                                letterSpacing: 0.4)),
+                      ],
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: _actionButton(
+                  p,
+                  _pickedUp ? "撤销已取件" : "标记已取件",
+                  _pickedUp ? Icons.undo_rounded : Icons.check_rounded,
+                  onTap: _busy ? null : _togglePickedUp,
+                  solid: !_pickedUp,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: _actionButton(
+                  p,
+                  "稍后提醒",
+                  Icons.schedule_rounded,
+                  onTap: _busy ? null : _snoozeTomorrow,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            decoration: BoxDecoration(
+              color: p.surface,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: p.divider),
+            ),
+            child: Column(
+              children: <Widget>[
+                _infoRow(p, "承运商", dynamicsText(_item, "carrier") ?? "未知"),
+                _infoRow(p, "运单号", dynamicsText(_item, "trackingNo") ?? "—"),
+                _infoRow(p, "到件时间", dynamicsFmtTime(dynamicsNum(_item, "occurredAt"))),
+                _infoRow(
+                  p,
+                  "取件状态",
+                  _pickedUp
+                      ? "已取件 ${dynamicsFmtTime(dynamicsNum(_item, "pickedUpAt"))}"
+                      : (code != null ? "待取件" : "无需取件码"),
+                  last: true,
+                ),
+              ],
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 16, 4, 7),
+            child: Text("原始通知",
+                style: TextStyle(
+                    color: p.textSecondary,
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600)),
+          ),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: p.surface,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: p.divider),
+            ),
+            child: Text(
+              dynamicsText(_item, "excerpt") ?? "暂无原文",
+              style: TextStyle(
+                  color: p.textSecondary, fontSize: 11.5, height: 1.75),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _actionButton(
+    MobilePalette p,
+    String label,
+    IconData icon, {
+    VoidCallback? onTap,
+    bool solid = false,
+  }) {
+    return Material(
+      color: solid ? p.textPrimary : p.surface,
+      borderRadius: BorderRadius.circular(9),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(9),
+        onTap: onTap,
+        child: Container(
+          height: 36,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(9),
+            border: Border.all(color: solid ? Colors.transparent : p.divider),
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: <Widget>[
+              Icon(icon, size: 14, color: solid ? p.background : p.textPrimary),
+              const SizedBox(width: 4),
+              Text(label,
+                  style: TextStyle(
+                      color: solid ? p.background : p.textPrimary,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w500)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _infoRow(MobilePalette p, String k, String v, {bool last = false}) {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      decoration: BoxDecoration(
+        border: last
+            ? null
+            : Border(bottom: BorderSide(color: p.divider, width: 0.6)),
+      ),
+      child: Row(
+        children: <Widget>[
+          Text(k, style: TextStyle(color: p.textSecondary, fontSize: 12)),
+          const Spacer(),
+          Flexible(
+            child: Text(v,
+                textAlign: TextAlign.right,
+                style: TextStyle(color: p.textPrimary, fontSize: 12)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _pill(String text, {bool solid = false}) {
+    final MobilePalette p = MobileTheme.of(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+      decoration: BoxDecoration(
+        color: solid ? p.textPrimary : p.surface2,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(text,
+          style: TextStyle(
+              color: solid ? p.background : p.textSecondary,
+              fontSize: 9.5,
+              height: 1.4)),
+    );
+  }
+
+  Future<void> _togglePickedUp() async {
+    setState(() => _busy = true);
+    try {
+      final Map<String, dynamic> res = await _api.setPickedUp(
+        dynamicsText(_item, "id") ?? "",
+        !_pickedUp,
+      );
+      final Map<String, dynamic>? updated =
+          res["item"] as Map<String, dynamic>?;
+      if (!mounted) return;
+      setState(() {
+        if (updated != null) _item = updated;
+        _busy = false;
+      });
+      _snack(_pickedUp ? "已标记取件" : "已撤销取件");
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _busy = false);
+      _snack("操作失败：$e");
+    }
+  }
+
+  Future<void> _snoozeTomorrow() async {
+    final DateTime now = DateTime.now();
+    final DateTime until = DateTime(now.year, now.month, now.day + 1, 9);
+    setState(() => _busy = true);
+    try {
+      await _api.snooze(dynamicsText(_item, "id") ?? "", until);
+      if (!mounted) return;
+      setState(() => _busy = false);
+      _snack("已设为明天 9:00 提醒");
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _busy = false);
+      _snack("设置失败：$e");
+    }
+  }
+
+  void _snack(String text) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(text), duration: const Duration(seconds: 2)));
   }
 }

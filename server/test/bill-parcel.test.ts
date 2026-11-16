@@ -26,6 +26,8 @@ import {
 } from "../src/services/bill-parcel-classifier.js";
 import { BillParcelLedger } from "../src/services/bill-parcel-ledger.js";
 import { BillParcelIngestService } from "../src/services/bill-parcel-ingest-service.js";
+import { DynamicsSettingsStore } from "../src/services/dynamics-settings-store.js";
+import { scanSubscriptions } from "../src/services/bill-subscription-scan.js";
 
 const BASE_AT = Date.parse("2026-11-13T10:00:00Z");
 
@@ -250,6 +252,194 @@ test("汇入服务：命中则发 high 信号，payload 带结构化字段", () 
     assert.equal(payload.pickupCode, "8-2-3010");
     assert.equal(payload.trackingNo, "SF1234567890");
     assert.equal(payload.carrier, "顺丰");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ------------------------------------------------------------------ //
+// 2026-11-16 改版：状态动作 + 汇总口径 + 订阅扫描 + 入口拦截
+// ------------------------------------------------------------------ //
+
+test("台账：已取件不计入待取，仍保留在明细里", () => {
+  const { ledger, dir } = tempLedger();
+  try {
+    const svc = new BillParcelIngestService({ ledger, now: () => BASE_AT });
+    const r = svc.ingest({ actorId: "u1", source: "sms", text: "快递已到，取件码 8-2-3010" });
+    const id = r.entries[0]?.id as string;
+    assert.equal(ledger.summary({ actorId: "u1", days: 30 }).parcels.awaitingPickup, 1);
+
+    ledger.setPickedUp(id, true, BASE_AT + 1000);
+    const s = ledger.summary({ actorId: "u1", days: 30 });
+    assert.equal(s.parcels.awaitingPickup, 0);
+    assert.equal(s.parcels.pickedUp, 1);
+    assert.equal(s.parcels.count, 1, "已取件不删除明细");
+    assert.equal(ledger.list({ category: "parcel" }).length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("台账：记错了从合计扣除，已报销只计数不改金额", () => {
+  const { ledger, dir } = tempLedger();
+  try {
+    const svc = new BillParcelIngestService({ ledger, now: () => BASE_AT });
+    const a = svc.ingest({ actorId: "u1", source: "sms", text: "话费扣款 35.50 元" });
+    const b = svc.ingest({ actorId: "u1", source: "sms", text: "信用卡还款 1280 元" });
+    svc.ingest({ actorId: "u1", source: "sms", text: "水电费 88 元" });
+
+    ledger.setBillStatus(a.entries[0]?.id as string, "reimbursed");
+    ledger.setBillStatus(b.entries[0]?.id as string, "wrong");
+
+    const s = ledger.summary({ actorId: "u1", days: 30 });
+    assert.equal(s.bills.count, 3);
+    assert.equal(s.bills.reimbursedCount, 1);
+    assert.equal(s.bills.wrongCount, 1);
+    assert.equal(s.bills.totalAmount, 123.5, "记错了的 1280 必须从合计扣除");
+    assert.ok(!s.bills.byType.some((t) => t.type === "还款扣款"), "分类占比也要剔除");
+    assert.ok(s.bills.duplicateIds.length === 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("台账：同类型同金额 48 小时内两笔 → 标记疑似重复", () => {
+  const { ledger, dir } = tempLedger();
+  try {
+    const svc = new BillParcelIngestService({ ledger, now: () => BASE_AT });
+    svc.ingest({ actorId: "u1", source: "sms", text: "信用卡还款 1280 元", at: BASE_AT });
+    svc.ingest({
+      actorId: "u1",
+      source: "email",
+      title: "还款成功通知",
+      text: "您的信用卡已还款 1280 元",
+      at: BASE_AT - 3 * 60 * 60 * 1000,
+    });
+    const s = ledger.summary({ actorId: "u1", days: 30 });
+    assert.equal(s.bills.count, 2);
+    assert.equal(s.bills.duplicateIds.length, 2, "窗口内两笔都标记（提示即可，不自动删）");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("订阅扫描：识别续费 + 同类重叠 → 给出可省金额与官方取消路径", () => {
+  const { ledger, dir } = tempLedger();
+  try {
+    const day = 24 * 60 * 60 * 1000;
+    const add = (text: string, amountOffset: number) =>
+      ledger.add({
+        category: "bill",
+        source: "sms",
+        actorId: "u1",
+        title: "账单·订阅续费",
+        amount: 25,
+        billType: "订阅续费",
+        trackingNo: null,
+        pickupCode: null,
+        carrier: null,
+        occurredAt: BASE_AT - amountOffset * day,
+        excerpt: text,
+      });
+    add("【爱奇艺】您已开通连续包月，本期扣款 25 元", 60);
+    add("【爱奇艺】连续包月续费成功，扣款 25 元", 30);
+    add("【爱奇艺】连续包月续费成功，扣款 25 元", 1);
+
+    // 另一个视频会员（金额不同 → 独立订阅），形成重叠
+    for (const offset of [50, 20]) {
+      ledger.add({
+        category: "bill",
+        source: "sms",
+        actorId: "u1",
+        title: "账单·订阅续费",
+        amount: 15,
+        billType: "订阅续费",
+        trackingNo: null,
+        pickupCode: null,
+        carrier: null,
+        occurredAt: BASE_AT - offset * day,
+        excerpt: "【腾讯视频】会员连续包月自动续费 15 元",
+      });
+    }
+
+    const result = scanSubscriptions(ledger.list({ category: "bill", limit: 100 }), {
+      now: BASE_AT,
+    });
+    assert.equal(result.count, 2);
+    assert.equal(result.monthlyTotal, 40);
+    assert.equal(result.savingsPerMonth, 25, "保留便宜的腾讯视频，建议取消 25 元爱奇艺");
+    assert.ok(result.alerts.some((a) => a.kind === "overlap"));
+    const cancel = result.items.find((i) => i.suggestion === "cancel");
+    assert.equal(cancel?.name, "爱奇艺");
+    assert.match(cancel?.cancelPath ?? "", /会员中心/);
+    assert.ok(result.items.every((i) => i.chargedCount >= 2));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("订阅扫描：忽略的订阅不再出现", () => {
+  const { ledger, dir } = tempLedger();
+  try {
+    for (const offset of [40, 10]) {
+      ledger.add({
+        category: "bill",
+        source: "sms",
+        actorId: "u1",
+        title: "账单·订阅续费",
+        amount: 25,
+        billType: "订阅续费",
+        trackingNo: null,
+        pickupCode: null,
+        carrier: null,
+        occurredAt: BASE_AT - offset * 24 * 60 * 60 * 1000,
+        excerpt: "【爱奇艺】连续包月自动续费 25 元",
+      });
+    }
+    const all = scanSubscriptions(ledger.list({ category: "bill", limit: 100 }), { now: BASE_AT });
+    assert.equal(all.count, 1);
+    const hidden = scanSubscriptions(ledger.list({ category: "bill", limit: 100 }), {
+      now: BASE_AT,
+      filter: (item) => item.id !== all.items[0]?.id,
+    });
+    assert.equal(hidden.count, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("入口拦截：营销短信 / 纯验证码 / 重复物流只计数不落台账", () => {
+  const dir = mkdtempSync(join(tmpdir(), "bill-parcel-"));
+  try {
+    const ledger = new BillParcelLedger({ dataPath: dir, now: () => BASE_AT });
+    const settings = new DynamicsSettingsStore({ dataPath: dir, now: () => BASE_AT });
+    const svc = new BillParcelIngestService({ ledger, settings, now: () => BASE_AT });
+
+    const promo = svc.ingest({
+      actorId: "u1",
+      source: "sms",
+      text: "【某电商】限时活动，领券立减 50 元，退订回T",
+    });
+    assert.equal(promo.matched, false);
+    assert.equal(promo.blockedReason, "marketing");
+
+    const otp = svc.ingest({ actorId: "u1", source: "sms", text: "您的验证码是 837261" });
+    assert.equal(otp.otpOnly, true);
+
+    svc.ingest({ actorId: "u1", source: "sms", text: "快递已到，取件码 8-2-3010，运单号 SF1234567890" });
+    svc.ingest({
+      actorId: "u1",
+      source: "sms",
+      text: "快递已到，取件码 8-2-3010，运单号 SF1234567890",
+      at: BASE_AT + 60_000,
+    });
+
+    assert.equal(ledger.size(), 1, "只有第一条快递入台账");
+    const b = settings.blockedThisWeek(BASE_AT);
+    assert.equal(b.byReason.marketing, 1);
+    assert.equal(b.byReason.otp, 1);
+    assert.equal(b.byReason.duplicateParcel, 1);
+    assert.equal(b.total, 3);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

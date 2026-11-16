@@ -211,6 +211,7 @@ import { createImapflowClient, purgeStoredOtpMailSignals } from "../services/mai
 import { MailWatchRegistry } from "../services/mail-watch-registry.js";
 import { BillParcelLedger } from "../services/bill-parcel-ledger.js";
 import { BillParcelIngestService } from "../services/bill-parcel-ingest-service.js";
+import { DynamicsSettingsStore } from "../services/dynamics-settings-store.js";
 import {
   FinanceBillAutoFetchService,
   createPlaywrightAlipayBillFetcher,
@@ -6283,8 +6284,11 @@ export async function createAppServices(
   // emit 闭包晚绑定（sensorKernel 在下方才创建）——台账先可用，信号出口后接。
   const billParcelLedger = new BillParcelLedger({ dataPath: getDataDir() });
   billParcelLedger.load();
+  // 动态页消息设置（来源规则/拦截计数/订阅动作）：入口层与聚合页共用同一份状态。
+  const dynamicsSettings = new DynamicsSettingsStore({ dataPath: getDataDir() });
   const billParcelIngest = new BillParcelIngestService({
     ledger: billParcelLedger,
+    settings: dynamicsSettings,
     emit: (signal) => emitBillParcel?.(signal),
     // 主动汇报（2026-11-13）：识别到新的账单/快递 → 走主动提案链路直接告知。
     // 这是「自动识别并汇总」闭环的最后一环：识别只进台账，用户是不知道的。
@@ -8161,6 +8165,7 @@ export async function createAppServices(
     reachRouter,
     // 「动态」tab 聚合区块（账单快递台账 + 跨源 mail 要事）
     billParcelLedger,
+    dynamicsSettings,
     sourceStore,
     brainCenter,
     bodyCenter,
