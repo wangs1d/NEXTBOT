@@ -23,13 +23,6 @@ class DynamicsApi {
     });
   }
 
-  /// 消息设置页：来源规则 + 拦截计数 + 邮件真实状态。
-  Future<Map<String, dynamic>> fetchSources() {
-    return _get("/api/dynamics/sources", <String, String>{
-      "userId": ApiConfig.effectiveActorId,
-    });
-  }
-
   Future<Map<String, dynamic>> setPickedUp(String id, bool pickedUp) {
     return _post("/api/dynamics/parcels/${Uri.encodeComponent(id)}/pickup",
         <String, dynamic>{"pickedUp": pickedUp});
@@ -68,13 +61,6 @@ class DynamicsApi {
         const <String, dynamic>{});
   }
 
-  Future<Map<String, dynamic>> setSourceRule(String id, bool enter) {
-    return _put(
-      "/api/dynamics/sources/rules/${Uri.encodeComponent(id)}",
-      <String, dynamic>{"action": enter ? "enter" : "block"},
-    );
-  }
-
   Future<Map<String, dynamic>> _get(
     String path,
     Map<String, String> query,
@@ -93,21 +79,6 @@ class DynamicsApi {
     final Uri uri = Uri.parse("${ApiConfig.httpBase}$path");
     final http.Response res = await _client
         .post(
-          uri,
-          headers: const <String, String>{"content-type": "application/json"},
-          body: jsonEncode(body),
-        )
-        .timeout(const Duration(seconds: 20));
-    return _decode(res);
-  }
-
-  Future<Map<String, dynamic>> _put(
-    String path,
-    Map<String, dynamic> body,
-  ) async {
-    final Uri uri = Uri.parse("${ApiConfig.httpBase}$path");
-    final http.Response res = await _client
-        .put(
           uri,
           headers: const <String, String>{"content-type": "application/json"},
           body: jsonEncode(body),

@@ -8,7 +8,6 @@ import "mobile_dynamics_bill_list_page.dart";
 import "mobile_dynamics_detail_page.dart";
 import "mobile_dynamics_list_page.dart";
 import "mobile_dynamics_parcel_list_page.dart";
-import "mobile_dynamics_settings_page.dart";
 import "mobile_dynamics_shared.dart";
 import "mobile_dynamics_subscriptions_page.dart";
 import "mobile_page_cache.dart";
@@ -216,11 +215,6 @@ class MobileDynamicsPageState extends State<MobileDynamicsPage> {
       appBar: AppBar(
         title: const Text("动态"),
         actions: <Widget>[
-          IconButton(
-            tooltip: "消息设置",
-            icon: const Icon(Icons.tune_rounded, size: 21),
-            onPressed: _openSettings,
-          ),
           IconButton(
             tooltip: "刷新",
             icon: const Icon(Icons.refresh_rounded, size: 22),
@@ -1070,21 +1064,6 @@ class MobileDynamicsPageState extends State<MobileDynamicsPage> {
         },
       ),
     ));
-  }
-
-  void _openSettings() {
-    Navigator.of(context).push(MaterialPageRoute<void>(
-      builder: (_) => DynamicsSettingsPage(
-        initial: <String, dynamic>{
-          "mail": (_data["sources"] as Map<String, dynamic>?)?["mail"],
-          "blockedThisWeek": _data["blockedThisWeek"],
-        },
-        client: widget.client,
-      ),
-    )).then((_) {
-      if (!mounted) return;
-      unawaited(_load(silent: true));
-    });
   }
 
   void _openAlerts() {
