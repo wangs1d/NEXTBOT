@@ -14,7 +14,7 @@
 
 import type { ClientLocationWire } from "../../types/client-location.js";
 import type { ToolContext } from "../../tools/tool-registry.js";
-import { resolveUserGeo } from "../../services/user-location-service.js";
+import { resolveUserGeo, resolveCurrentGeoPoint } from "../../services/user-location-service.js";
 
 /** 可作为出发地的定位结果（region 为省级行政区全名，供转机枢纽映射） */
 export type LocatedOrigin = { city: string; region: string };
@@ -134,20 +134,8 @@ export type LocatedPoint = {
 export async function resolveOriginPointFromContext(
   ctx?: Pick<ToolContext, "clientLocation" | "requestLocation">,
 ): Promise<LocatedPoint | null> {
-  if (!ctx) return null;
-  let loc = ctx.clientLocation;
-  if (!loc && ctx.requestLocation) {
-    loc = (await ctx.requestLocation("travel.origin").catch(() => null)) ?? undefined;
-  }
-  if (!loc) return null;
-  const { latitude, longitude } = loc;
-  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
-  return {
-    latitude,
-    longitude,
-    ...(loc.label ? { label: loc.label } : {}),
-    ...(loc.city ? { city: loc.city } : {}),
-  };
+  // 定位逻辑已收敛到通用定位口（导航等非旅游能力共用），这里只保留旅游语义的 reason
+  return resolveCurrentGeoPoint(ctx, "travel.origin");
 }
 
 /** 转机枢纽候选：省会优先，再补通用枢纽；去 origin 本身，截前 max 个 */

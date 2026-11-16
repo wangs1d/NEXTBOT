@@ -483,10 +483,11 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
     },
   },
   // 真实路径导航（2026-11-16）：用户要的是「点开就能逐向导航」的高德链接，
-  // 与 compute-route（只算距离/耗时）区分。浏览器工具的 navigate 已移除
-  // 「导航」泛词，避免「导航去机场」被网页导航抢走。
+  // 与 compute-route（只算距离/耗时）区分。导航是通用能力（不属于 travel.*），
+  // 开源版/旅游规划都复用同一工具；浏览器工具的 navigate 已移除「导航」泛词，
+  // 避免「导航去机场」被网页导航抢走。
   {
-    exact: "travel.navigate",
+    exact: "navigation.navigate",
     metadata: {
       aliases: [
         "导航",

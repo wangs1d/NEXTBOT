@@ -261,6 +261,7 @@ import { registerArrivalConciergeBuiltinSkills } from "../skills/builtin/arrival
 import { registerHabitLoopBuiltinSkills } from "../skills/builtin/habit-loop-skills.js";
 import { registerPictureBuiltinSkills } from "../skills/builtin/picture-skills.js";
 import { registerTravelPlanningBuiltinSkills } from "../skills/travel-planning/travel-planning-skills.js";
+import { createNavigationBuiltinSkills } from "../services/navigation/navigation-skills.js";
 import { registerTravelCommuteBuiltinSkills } from "../skills/travel-planning/travel-commute-skills.js";
 import { PlanningService as TravelPlanningService } from "../skills/travel-planning/travel-planning-service.js";
 import { TravelHeatEnricher } from "../skills/travel-planning/travel-heat-enricher.js";
@@ -1725,6 +1726,13 @@ export async function createAppServices(
       weatherService,
     });
   }
+
+  // 通用导航（2026-11-16）：真实路径导航不属于旅游业务——日常通勤/找店/赴约与
+  // 旅游行程共用同一能力。注册在版本闸之外，开源版与旅游规划都经由全局
+  // SkillManager 复用本工具；定位走通用定位口，OSRM 兜底复用行程服务的算路。
+  createNavigationBuiltinSkills((skill) => skillManager.register(skill), {
+    routeFallback: (from, to) => travelPlanningService.computeRoute(from, to),
+  });
 
   const worldPartitionWsRegistry = new WorldPartitionWsRegistry();
   worldService.onWorldRevision((ev: WorldRevisionEvent) => {

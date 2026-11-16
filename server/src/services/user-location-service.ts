@@ -3,6 +3,7 @@
  */
 
 import type { ClientGeoContext, ClientLocationWire } from "../types/client-location.js";
+import type { ToolContext } from "../tools/tool-registry.js";
 import {
   peekReverseGeocodeCache,
   reverseGeocodeCoordinates,
@@ -163,6 +164,40 @@ async function geoFromClientLocation(loc: ClientLocationWire): Promise<UserGeoIn
 export async function resolveUserGeo(ctx?: ClientGeoContext): Promise<UserGeoInfo | null> {
   if (!ctx?.clientLocation) return null;
   return geoFromClientLocation(ctx.clientLocation);
+}
+
+/** 可作为路线起点的当前坐标（label/city 仅用于回执文案） */
+export type CurrentGeoPoint = {
+  latitude: number;
+  longitude: number;
+  label?: string;
+  city?: string;
+};
+
+/**
+ * 工具上下文 → 当前精确坐标（通用定位口：导航/路线类能力共用，不绑定业务）。
+ * 消息/上报自带定位优先；缺失时按需向客户端要一次实时 GPS
+ * （超时由 LocationCoordinator 承担，拿不到返回 null，由上层降级，绝不编造）。
+ */
+export async function resolveCurrentGeoPoint(
+  ctx?: Pick<ToolContext, "clientLocation" | "requestLocation">,
+  reason = "navigation.origin",
+): Promise<CurrentGeoPoint | null> {
+  if (!ctx) return null;
+  let loc = ctx.clientLocation;
+  if (!loc && ctx.requestLocation) {
+    // requestLocation 语义是 null（超时/离线），clientLocation 是 undefined，归一成 undefined
+    loc = (await ctx.requestLocation(reason).catch(() => null)) ?? undefined;
+  }
+  if (!loc) return null;
+  const { latitude, longitude } = loc;
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+  return {
+    latitude,
+    longitude,
+    ...(loc.label ? { label: loc.label } : {}),
+    ...(loc.city ? { city: loc.city } : {}),
+  };
 }
 
 export function formatUserLocationLabel(info: UserGeoInfo): string {
