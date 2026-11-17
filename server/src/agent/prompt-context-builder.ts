@@ -34,6 +34,7 @@ import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
 import { getMemoryManagerService } from "../services/memory-manager-service.js";
 import { stripProfileFactDuplicateLines } from "../services/user-personalization/profile-fact-authority.js";
 import { getGlobalMemoryInventory } from "../brain/memory-inventory.js";
+import { outboundContextLedger } from "../services/outbound-context-ledger.js";
 import type { TurnUnderstanding } from "./task-router.js";
 import type {
   AgentPromptMemoryContext,
@@ -754,6 +755,13 @@ export class PromptContextBuilder {
       scheduleSnapshot,
       turnUnderstanding?.scheduleQuery === true ? 700 : 400,
     );
+    // 最近已发送（2026-11-17）：主动/提醒通道当天发出的消息，短 TTL 注入动态层。
+    // 目的只有一个——让模型「知道自己刚发过」，不重复发；过期即零注入，
+    // 绝不落 thread，所以隔天不会再提旧提醒。
+    const compactRecentOutbound = compactPromptBlock(
+      outboundContextLedger.buildPromptBlock(input.actorId),
+      320,
+    );
     const compactTravelState = compactPromptBlock(travelState, 300);
     const userProfileFromManagerCompact = userProfileFromManager;
     // 2026-09-29 互斥改合并：文件画像（LLM 抽取的当前事实）升稳定层【用户长期画像】主位，
@@ -986,6 +994,7 @@ export class PromptContextBuilder {
       ...(interruptedContext ? { interruptedContext: interruptedContext } : {}),
       ...(compactFollowUpAnchor ? { followUpAnchor: compactFollowUpAnchor } : {}),
       ...(compactScheduleSnapshot ? { scheduleSnapshot: compactScheduleSnapshot } : {}),
+      ...(compactRecentOutbound ? { recentOutbound: compactRecentOutbound } : {}),
       // 在办目标 / 会话步骤（2026-10-19）：只进动态层。goal 进度随步骤变、
       // plan 随执行变，放稳定层会逐轮打断前缀缓存（实测代价 3-4K/轮）。
       ...(activeGoalsBlock ? { activeGoals: activeGoalsBlock } : {}),
@@ -1339,6 +1348,7 @@ export class PromptContextBuilder {
       Boolean(memory.memoryInventory) ||
       Boolean(memory.followUpAnchor) ||
       Boolean(memory.scheduleSnapshot) ||
+      Boolean(memory.recentOutbound) ||
       Boolean(memory.travelState) ||
       Boolean(memory.toolPlan) ||
       Boolean(memory.skillIndex) ||

@@ -95,6 +95,7 @@ const MINIMAL_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
   // 事件回忆（L0）：仅在时间回溯意图且真实命中时有值，剥离即丢掉「上次那事」的事实依据
   "eventRecall",
   "scheduleSnapshot",
+  "recentOutbound",
   "travelState",
   "webEvidence",
   "interruptedContext",
@@ -131,6 +132,7 @@ const MINIMAL_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
 const DYNAMIC_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
   "followUpAnchor",
   "scheduleSnapshot",
+  "recentOutbound",
   "travelState",
   "webEvidence",
   "taskContext",

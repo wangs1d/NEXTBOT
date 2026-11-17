@@ -22,6 +22,7 @@ import {
 import { createExternalChatProviderFromEnv, MutableExternalChatProvider, ActorModelBindingStore } from "../external-model/index.js";
 import { applyPersistedServiceConfig, serviceSecretsEncryptedAtRest } from "../config/service-config-store.js";
 import { PictureKitRegistry } from "../services/picture-kit-registry.js";
+import { outboundContextLedger } from "../services/outbound-context-ledger.js";
 import { getChatThreadPersistence } from "../external-model/chat-thread-persist.js";
 import { initThinkingBudget, describeThinkingBudgetForStartup } from "../external-model/thinking-policy.js";
 import { createRecommendationCatalog } from "../recommendation/index.js";
@@ -1269,12 +1270,6 @@ export async function createAppServices(
     app.log.info(`[reminder] 已从磁盘恢复 ${restoredReminders} 条提醒实例（含升级计时）`);
   }
 
-  // 提醒结果 → 对话面的晚绑定记录器（chat thread 的 [后台任务记录] system 通道）。
-  // taskChangeHandler 在 externalChat 装配（本文件更后段）之前注册，闭包走晚绑定。
-  let recordReminderResultToThread:
-    | ((sessionId: string, goal: string, resultText: string) => void)
-    | undefined;
-
   scheduleTaskService.setTaskChangeHandler(async (action, task) => {
     notifyScheduleTasksChanged(
       wsConnectionRegistry,
@@ -1306,29 +1301,9 @@ export async function createAppServices(
       } catch {
         /* 待办同步失败不影响提醒主链路（commitment-store 内部已兜底告警） */
       }
-      // 提醒结果写回对话线程（2026-11-12 根修「一分钟后就会提醒你」复读事故）：
-      // 任务完成/失败时落一条 [后台任务记录] system 帧，下一轮对话天然携带
-      // 「这条提醒已触发/没触发」的权威状态，模型不再只能复读历史轮原话。
-      if (action === "updated" && (task.status === "completed" || task.status === "failed")) {
-        const when = task.lastRunAt ?? task.runAt;
-        const localTime = Number.isFinite(Date.parse(when))
-          ? new Intl.DateTimeFormat("zh-CN", {
-              timeZone: task.timezone || "Asia/Shanghai",
-              hour: "2-digit",
-              minute: "2-digit",
-              hourCycle: "h23",
-            }).format(new Date(when))
-          : when;
-        const resultText =
-          task.status === "completed"
-            ? `已于本地 ${localTime} 触发完成。`
-            : `到点未成功执行（本地 ${localTime} 前后），已按失败收口。`;
-        recordReminderResultToThread?.(
-          task.sessionId,
-          `到点提醒：${task.shortTitle || task.title || task.description}`,
-          resultText,
-        );
-      }
+      // 提醒结果不再写 chat thread（2026-11-17）：原来的 [后台任务记录] system 帧
+      // 会永久留在模型上下文，隔天仍被读到并复读旧提醒。改为在下方
+      // setReminderHandler 实际发送时写短期台账（当天 TTL，不落 thread）。
     }
   });
 
@@ -1454,6 +1429,14 @@ export async function createAppServices(
         );
       }
     }
+    // 上下文自知（2026-11-17）：提醒消息实际发出后只写短期台账（当天 TTL），
+    // 让下一轮模型知道「这条提醒我已经发过」，同时不落 chat thread——
+    // 隔天条目自动失效，不会再把旧提醒读进上下文复读。
+    outboundContextLedger.record(task.sessionId, {
+      id: `ctx-reminder:${task.taskId}:${task.nextRunAt ?? task.runAt}`,
+      kind: "reminder",
+      text: outboundMessage,
+    });
     // 不再根据"起床/叫醒"等关键词自动拨打电话
     // 日程提醒应仅通过 WebSocket 推送 + embodimentAlert 通知用户
     // 如需电话提醒，用户应显式使用 phone.call_user 工具
@@ -2356,15 +2339,9 @@ export async function createAppServices(
   }
   const externalChatHost = new MutableExternalChatProvider(platformChatProvider);
   const externalChat = externalChatHost;
-  // 提醒结果 → 对话线程记录器接线（晚绑定，见 taskChangeHandler 注册处）：
-  // 走 chat thread 的 [后台任务记录] system 通道——给模型看的事实，不是 assistant 气泡。
-  recordReminderResultToThread = (sessionId, goal, resultText) => {
-    try {
-      externalChat.appendTaskRecord?.(sessionId, goal, resultText);
-    } catch {
-      /* thread 并入失败不影响提醒主链路 */
-    }
-  };
+  // 提醒结果不再落到 chat thread 的 [后台任务记录] 通道（2026-11-17）：
+  // 改为 outboundContextLedger（当天 TTL，不落 thread），Agent 仍知道「发过了」，
+  // 但隔天上下文里没有它，不会再复读旧提醒。
   // 按 actor 的用户自有模型绑定（云端连接版 BYOK）：session.init 上送时由 ws 层写入，
   // 加密落盘一份（离线期间的主动轮次要用用户自己的 key），agent-core 经 chatProviderFor 取用。
   const actorModelBindings = new ActorModelBindingStore();

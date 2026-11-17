@@ -122,6 +122,11 @@ export type AgentPromptMemoryContext = {
   /** 服务端 ScheduleTaskService 实时日程快照（每轮刷新） */
   scheduleSnapshot?: string;
   /**
+   * 最近已发送（2026-11-17）：主动发送 / 提醒通道刚发出的消息，带当天 TTL。
+   * 只进动态层、绝不写入 thread——让 agent「知道自己发过」但不污染隔天上下文。
+   */
+  recentOutbound?: string;
+  /**
    * 在办目标摘要（2026-10-19 三层尺度架构）：GoalBoard 活跃目标的前 3 条，
    * 一行一个（标题 · 进度 · 下一步是否等确认）。让对话面知道「我正在替用户
    * 办这件事」——用户问「那事怎么样了」时不必靠记忆模糊召回。

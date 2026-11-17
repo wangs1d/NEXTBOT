@@ -26,6 +26,7 @@ import {
   type ProactiveOutboundChannel,
 } from "../services/proactive-outbound-message-service.js";
 import { stripProtocolMarkersForDirectOut } from "../services/reply-envelope.js";
+import { outboundContextLedger } from "../services/outbound-context-ledger.js";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -265,11 +266,11 @@ export function createProactiveOutreachExecutor(
           },
           toolExecCtx,
           {
-            // C2: 关闭 ephemeralTurn，让主动话术写入 provider thread
-            // 下次 buildProactivePrompt 的 recall 能召回"我之前主动说过什么"
-            ephemeralTurn: false,
+            // 2026-11-17：主动话术不再写入 provider thread（原 ephemeralTurn:false）。
+            // 落 thread 会让「已发送」永久留在模型上下文，隔天仍被读到并复读旧话术。
+            // 「我说过什么」改由 outboundContextLedger 以当天 TTL 注入动态层。
+            ephemeralTurn: true,
             disableThinking: true,
-            maxThreadMessages: 4,
             systemPromptOverride: await deps.speech.buildSystemPrompt({
               sessionId: signal.actorId,
               kind: signal.kind,
@@ -384,11 +385,20 @@ export function createProactiveOutreachExecutor(
       console.log(`[ProactiveOutreach] 主动消息已通过 outbound 发送给 ${signal.actorId}`);
     }
 
-    // 4. 出行建议已合并到 function calling 阶段：
+    // 4. 上下文自知（防污染）：已发出的主动话术只进短期台账（当天有效），
+    //    不写 thread。下一轮模型能看到「我刚发过这条」从而不重复开口，
+    //    但隔天条目自动失效，不会复读旧话术。
+    outboundContextLedger.record(signal.actorId, {
+      id: `ctx-proactive:${signal.id}:${Date.now()}`,
+      kind: "proactive",
+      text: message.trim(),
+    });
+
+    // 5. 出行建议已合并到 function calling 阶段：
     //    LLM 可自主调 weather.get_local 等工具查信息并融入话术，
     //    不再需要单独的"出行建议"消息块，避免双消息打断用户。
 
-    // 5. C2: 主动话术写入记忆——下次 buildProactivePrompt 的 recall 能召回
+    // 6. C2: 主动话术写入记忆——下次 buildProactivePrompt 的 recall 能召回
     //    让 LLM 能说"刚才那个我又看了一下"，产生连续感而非每次孤立开口
     if (brainCenter && message.trim()) {
       try {

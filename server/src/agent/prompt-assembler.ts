@@ -77,6 +77,7 @@ const RENDERED_MEMORY_FIELDS: ReadonlyArray<keyof AgentPromptMemoryContext> = [
   "activeGoals",
   "taskPlan",
   "scheduleSnapshot",
+  "recentOutbound",
   "travelState",
   "webEvidence",
   "taskContext",
@@ -235,6 +236,8 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
   // 会话级任务步骤（TaskPlanStore）：本会话的执行路径，完成即归档。
   if (m.taskPlan) dynamicContext.push(m.taskPlan);
   if (m.scheduleSnapshot) dynamicContext.push(m.scheduleSnapshot);
+  // 最近已发送（主动/提醒通道）：仅当天有效，过期后本块自动消失
+  if (m.recentOutbound) dynamicContext.push(m.recentOutbound);
   if (m.travelState) dynamicContext.push(m.travelState);
   // 前置检索证据：realtime_lookup 轮的程序化搜索结果，块内自带以证据为准的强约束
   if (m.webEvidence) dynamicContext.push(m.webEvidence);
