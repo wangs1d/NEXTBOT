@@ -119,3 +119,36 @@ test("零命中零注入：memorySummary 缺省时两层都不出现【持久记
   assert.doesNotMatch(dynamicSystemPrompt ?? "", /【持久记忆】/);
   assert.doesNotMatch(fullSystemPrompt, /【持久记忆】/);
 });
+
+test("【最近已发送】只追加动态层：当天条目变化不打断稳定前缀", () => {
+  const t1 = assembleSystemPrompt(
+    "你是助理。",
+    buildFullMemory({ recentOutbound: "【最近已发送】\n- 10:32 提醒：吃药" }),
+  );
+  const t2 = assembleSystemPrompt(
+    "你是助理。",
+    buildFullMemory({ recentOutbound: "【最近已发送】\n- 21:05 主动消息：早点休息" }),
+  );
+  assert.notEqual(t1.dynamicSystemPrompt, t2.dynamicSystemPrompt, "当天台账确实不同（断言有效性）");
+  assert.doesNotMatch(t1.stableSystemPrompt, /【最近已发送】/, "动态信息不得坐进稳定层");
+  assert.equal(
+    t1.stableSystemPrompt,
+    t2.stableSystemPrompt,
+    "台账变化只影响动态层，稳定前缀必须逐字节不变（前缀缓存不被打断）",
+  );
+  assert.ok(
+    t1.fullSystemPrompt.indexOf("【最近已发送】") >
+      t1.fullSystemPrompt.indexOf("【用户长期画像】"),
+    "【最近已发送】必须排在稳定层之后（沉底动态层）",
+  );
+});
+
+test("零条目零注入：recentOutbound 缺省时两层都不出现【最近已发送】", () => {
+  const { stableSystemPrompt, dynamicSystemPrompt, fullSystemPrompt } = assembleSystemPrompt(
+    "你是助理。",
+    buildFullMemory({ recentOutbound: undefined }),
+  );
+  assert.doesNotMatch(stableSystemPrompt, /【最近已发送】/);
+  assert.doesNotMatch(dynamicSystemPrompt ?? "", /【最近已发送】/);
+  assert.doesNotMatch(fullSystemPrompt, /【最近已发送】/);
+});
