@@ -214,6 +214,7 @@ export function createProactiveOutreachExecutor(
     // 顺嘴搭车（2026-10-01 P1）：low 级主动消息挂起等下一轮对话织入回复末尾，
     // 比单推一条气泡打扰更低（rhythm 关怀候选即此形态）。队列拒绝（同 kind
     // 挂起中/间隔不足）或通道关闭时回退原即时推送路径——不静默吞消息。
+    const metaEventAt = signal.metadata?.nextRunAt;
     if (
       signal.importance === "low" &&
       isTurnAsideEnabled() &&
@@ -222,6 +223,8 @@ export function createProactiveOutreachExecutor(
         kind: signal.kind,
         title: signal.title,
         summary: signal.summary,
+        // 日程类信号带事件绝对时刻时，织入侧按当时时钟现算「还剩/已过」
+        eventAt: typeof metaEventAt === "number" ? metaEventAt : undefined,
       })
     ) {
       console.log(

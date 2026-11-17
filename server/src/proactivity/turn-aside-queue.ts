@@ -50,6 +50,11 @@ export type TurnAsideItem = {
   hint: string;
   /** 挂起前的重要度（medium 过期升级回正常通道；low 过期直接作废） */
   importance: "low" | "medium";
+  /**
+   * 所指向事件的绝对时刻（ms）。织入时按当前时钟现算"还剩/已过"，
+   * 不在条目里缓存任何相对措辞（缓存就会在隔轮重放时失真）。
+   */
+  eventAt?: number;
   /** 共享发现层共同键（2026-10-19 二期）：取货织入时据此合并同主题发现 */
   subject?: string;
   createdAt: number;
@@ -84,14 +89,32 @@ function stripStaleCountdown(text: string): string {
     .trim();
 }
 
+/**
+ * 事件剩余/已过时长：用**织入这一刻**的 now 现算，是旁注里唯一可信的相对时间。
+ * 无 eventAt 则零输出（不猜、不拿 createdAt 冒充事件时刻）。
+ */
+function eventDistanceLabel(eventAt: number | undefined, now: number): string {
+  if (typeof eventAt !== "number" || !Number.isFinite(eventAt)) return "";
+  const diff = eventAt - now;
+  if (Math.abs(diff) < 60_000) return "（该事件就在此刻）";
+  const totalMin = Math.round(Math.abs(diff) / 60_000);
+  const hours = Math.floor(totalMin / 60);
+  const mins = totalMin % 60;
+  const span =
+    hours > 0 ? `${hours} 小时${mins > 0 ? `${mins} 分钟` : ""}` : `${totalMin} 分钟`;
+  return diff > 0 ? `（该事件还有约 ${span}）` : `（该事件已过约 ${span}）`;
+}
+
 /** 旁注形态定稿（P2）：块正文给主模型的织入指令与事实 */
 export function formatTurnAsidePrompt(item: TurnAsideItem, now: number = Date.now()): string {
   const age = timerAgeLabel(item.createdAt, now);
   const body = stripStaleCountdown(item.hint) || stripStaleCountdown(item.title);
+  const distance = eventDistanceLabel(item.eventAt, now);
   return [
     `【顺嘴机会】`,
     `（后台攒下的一件小事，发生于${age}。值得提就在回复末尾顺嘴一句，形态=括号旁注，如「（顺嘴一句：…）」，一句话即可；与本轮话题不搭就别提，绝不硬塞；若已时隔较久，须按当时的语境说、不要用「刚才/刚刚」；块内若有「N 分钟后/还有多久」这类倒计时，都是写下这条时的旧值，不得当作此刻，要提就按【当前时间】重新核对。）`,
     body,
+    ...(distance ? [distance] : []),
   ].join("\n");
 }
 
@@ -138,6 +161,8 @@ export class TurnAsideQueue {
     importance?: "low" | "medium" | "high" | "critical";
     /** 共享发现层共同键（ProactiveIntent 直接透传；取货织入时合并同主题发现） */
     subject?: string;
+    /** 所指向事件的绝对时刻（有则织入时现算剩余/已过；无则不输出相对时间） */
+    eventAt?: number;
   }): boolean {
     const now = this.nowFn();
     const list = this.queue.get(intent.actorId) ?? [];
@@ -152,6 +177,9 @@ export class TurnAsideQueue {
       hint: (intent.summary ?? "").slice(0, 160),
       importance: intent.importance === "medium" ? "medium" : "low",
       ...(intent.subject ? { subject: intent.subject } : {}),
+      ...(typeof intent.eventAt === "number" && Number.isFinite(intent.eventAt)
+        ? { eventAt: intent.eventAt }
+        : {}),
       createdAt: now,
       expiresAt: now + ASIDE_TTL_MS,
     });

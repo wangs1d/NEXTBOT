@@ -711,7 +711,20 @@ export class ProactivityHub {
     if (intent.importance === "medium" ? !isTurnAsideMediumEnabled() : intent.importance !== "low") {
       return false;
     }
-    if (!this.deps.turnAsideQueue?.tryEnqueue(intent)) return false;
+    if (
+      !this.deps.turnAsideQueue?.tryEnqueue({
+        actorId: intent.actorId,
+        kind: intent.kind,
+        title: intent.title,
+        summary: intent.summary,
+        importance: intent.importance,
+        subject: intent.subject,
+        // originAt 是意图指向的事件真实时刻（缺省不填 → 织入时不输出相对时间）
+        eventAt: intent.originAt,
+      })
+    ) {
+      return false;
+    }
     this.silenceLog.record({
       at: Date.now(),
       actorId: intent.actorId,

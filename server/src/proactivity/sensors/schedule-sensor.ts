@@ -106,7 +106,7 @@ export class ScheduleSensor implements ProactiveSensor {
           ? { title: t.title, runAt, timezone: t.timezone }
           : null;
       })
-      .filter((v): v is { title: string; runAt: number; timezone?: string } => v !== null)
+      .filter((v): v is { title: string; runAt: number; timezone: string } => v !== null)
       .filter((v) => v.runAt > now)
       .sort((a, b) => a.runAt - b.runAt);
 
