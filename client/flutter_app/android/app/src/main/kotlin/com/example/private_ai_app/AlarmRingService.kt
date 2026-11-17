@@ -77,6 +77,16 @@ class AlarmRingService : Service() {
             }
         }
 
+        /** 当前正在响铃的闹钟（Dart 启动/回前台补挂应用内关闭横幅用），无则 null */
+        fun currentRing(): Map<String, Any?>? {
+            val svc = ringing.values.firstOrNull() ?: return null
+            return mapOf(
+                "alarmId" to svc.alarmId,
+                "label" to svc.ringLabel,
+                "voiceText" to (svc.ringVoiceText ?: ""),
+            )
+        }
+
         /** 前台服务启动失败时的降级：仍发一条 bypassDnd 高优先级通知（Heads-up 展示） */
         fun notifyFallback(context: Context, alarmId: String, label: String) {
             val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -176,6 +186,8 @@ class AlarmRingService : Service() {
     }
 
     private var alarmId: String = ""
+    private var ringLabel: String = ""
+    private var ringVoiceText: String? = null
     private var player: MediaPlayer? = null
     private var vibrator: Vibrator? = null
     private var wakeLock: PowerManager.WakeLock? = null
@@ -219,6 +231,8 @@ class AlarmRingService : Service() {
         val tts = intent?.getStringExtra(AlarmClockPlugin.EXTRA_TTS_BASE64)
         val ttsFile = intent?.getStringExtra(AlarmClockPlugin.EXTRA_TTS_FILE)
         val voiceText = intent?.getStringExtra(AlarmClockPlugin.EXTRA_VOICE_TEXT)
+        ringLabel = label
+        ringVoiceText = voiceText
         ringing[alarmId] = this
 
         acquireWakeLock()
@@ -234,6 +248,9 @@ class AlarmRingService : Service() {
         } else {
             startForeground((NOTIFICATION_ID_BASE + alarmId.hashCode()).coerceAtMost(Int.MAX_VALUE - 1), notification)
         }
+
+        // 应用内关闭通道：通知栏「关闭」之外，Dart 侧据此弹顶部横幅（可点关闭）
+        AlarmClockPlugin.notifyRingState(alarmId, label, voiceText, true)
 
         startPlaying(tts, ttsFile, voiceText)
         startVibration()
@@ -498,7 +515,11 @@ class AlarmRingService : Service() {
         } catch (_: Exception) {
         }
         wakeLock = null
-        if (alarmId.isNotEmpty()) ringing.remove(alarmId)
+        if (alarmId.isNotEmpty()) {
+            ringing.remove(alarmId)
+            // 响铃结束（关闭 / 贪睡 / 60s 响完）→ 撤下应用内横幅
+            AlarmClockPlugin.notifyRingState(alarmId, ringLabel, ringVoiceText, false)
+        }
     }
 
     override fun onDestroy() {

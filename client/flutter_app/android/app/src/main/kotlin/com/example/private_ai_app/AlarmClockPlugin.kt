@@ -61,6 +61,24 @@ class AlarmClockPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         var instance: AlarmClockPlugin? = null
             private set
 
+        /** 响铃状态 → Dart：应用内顶部横幅的开关（通知栏「关闭」之外的第二条关闭通道） */
+        fun notifyRingState(alarmId: String, label: String, voiceText: String?, ringing: Boolean) {
+            // 引擎可能未挂载（纯后台响铃 / 进程被回收后拉起），静默跳过即可
+            try {
+                instance?.channel?.invokeMethod(
+                    "alarmRingState",
+                    mapOf(
+                        "alarmId" to alarmId,
+                        "label" to label,
+                        "voiceText" to (voiceText ?: ""),
+                        "ringing" to ringing,
+                    ),
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "notify ring state failed: $e")
+            }
+        }
+
         /** 云端按动态话术实时合成的 mp3 落盘：过音质门禁后才写盘，是默认主音源 */
         fun storeVoiceClip(ctx: Context, alarmId: String, ttsBase64: String?): String? {
             if (ttsBase64.isNullOrEmpty()) return null
@@ -358,6 +376,8 @@ class AlarmClockPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 AlarmRingService.stopAll(ctx)
                 result.success(true)
             }
+            // 响铃中冷启动 / 回前台：补挂应用内横幅（全屏意图拉起时 Dart 可能晚于响铃）
+            "currentRing" -> result.success(AlarmRingService.currentRing())
             else -> result.notImplemented()
         }
     }

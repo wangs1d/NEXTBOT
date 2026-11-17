@@ -4,12 +4,37 @@
 /// （30s 提示音承诺上限，见 docs/mobile-agent-reminder-alarm-design.md §6）。
 library;
 
+import "package:flutter/foundation.dart";
 import "package:flutter/services.dart";
+
+/// 当前正在响铃的闹钟（原生上报）。
+class AlarmRingInfo {
+  const AlarmRingInfo({
+    required this.alarmId,
+    this.label = "",
+    this.voiceText = "",
+  });
+
+  final String alarmId;
+  final String label;
+  final String voiceText;
+
+  /// 横幅主文案：优先 agent 叫醒话术，缺省用日程名，再兜底「时间到了」。
+  String get message {
+    if (voiceText.trim().isNotEmpty) return voiceText.trim();
+    if (label.trim().isNotEmpty) return label.trim();
+    return "时间到了";
+  }
+}
 
 class AlarmPlatform {
   static const MethodChannel _channel = MethodChannel("nextbot/alarm_clock");
 
   static bool _unavailable = false; // 桌面端/桥未注册时置位，避免反复抛异常
+
+  /// 响铃中/结束的应用内状态（顶部横幅据此显隐）。
+  static final ValueNotifier<AlarmRingInfo?> activeRing =
+      ValueNotifier<AlarmRingInfo?>(null);
 
   /// 原生通知动作回调（贪睡/关闭）：由 [attachActionHandler] 注册，AlarmEngine 消费。
   static void Function(String action, String alarmId)? onNativeAction;
@@ -26,9 +51,43 @@ class AlarmPlatform {
             onNativeAction?.call(action, alarmId);
           }
         }
+      } else if (call.method == "alarmRingState") {
+        final args = call.arguments;
+        if (args is Map) {
+          final bool ringing = args["ringing"] == true;
+          final String alarmId = args["alarmId"]?.toString() ?? "";
+          activeRing.value = (!ringing || alarmId.isEmpty)
+              ? null
+              : AlarmRingInfo(
+                  alarmId: alarmId,
+                  label: args["label"]?.toString() ?? "",
+                  voiceText: args["voiceText"]?.toString() ?? "",
+                );
+        }
       }
       return null;
     });
+  }
+
+  /// 查询当前是否正在响铃：全屏意图冷启动/回前台时，响铃可能早于 Dart 桥就绪。
+  static Future<AlarmRingInfo?> currentRing() async {
+    if (_unavailable) return null;
+    try {
+      final raw = await _channel.invokeMethod<Map<dynamic, dynamic>>("currentRing");
+      if (raw == null) return null;
+      final String alarmId = raw["alarmId"]?.toString() ?? "";
+      if (alarmId.isEmpty) return null;
+      return AlarmRingInfo(
+        alarmId: alarmId,
+        label: raw["label"]?.toString() ?? "",
+        voiceText: raw["voiceText"]?.toString() ?? "",
+      );
+    } on MissingPluginException {
+      _unavailable = true;
+      return null;
+    } on PlatformException {
+      return null;
+    }
   }
 
   /// 初始化配置：下发网关基址（Dart 不在场时，通知动作经原生 REST 兜底）

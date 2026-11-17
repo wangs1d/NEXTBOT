@@ -147,6 +147,7 @@ import "features/schedule/schedule_page.dart";
 // 触发主路 = 客户端本地精确闹钟；alarm.sync/trigger/deliver 服务端事件在此收口
 import "features/alarm/alarm_engine.dart";
 import "features/alarm/alarm_platform.dart";
+import "features/alarm/alarm_ring_banner.dart";
 import "features/chat/image_preview_panel.dart";
 import "features/chat/video_preview_panel.dart";
 import "features/auth/register_page.dart";
@@ -5698,6 +5699,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           theme: MobileTheme.light,
           darkTheme: MobileTheme.dark,
           themeMode: mode,
+          // 闹钟响铃的应用内关闭入口：顶部横幅（通知栏「关闭」之外的通道）。
+          builder: (BuildContext context, Widget? child) => AlarmRingBannerHost(
+            child: child ?? const SizedBox.shrink(),
+          ),
           // 系统栏装配单源见 app/mobile_bootstrap.dart（与调试入口共用）
           home: MobileSystemBars(
             themeMode: mode,
