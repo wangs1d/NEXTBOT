@@ -29,7 +29,8 @@ import "structured_assistant_message_body.dart";
 /// - `[RENDER_AS:xxx]` 显式展示形式路由（brief / structured / image_result /
 ///   video；data_brief 已退役 2026-11-06）
 /// - 内容摘要卡与 markdown 内联文本
-/// - `followUpPrompts`「接下来你可以」接续建议胶囊（仅回调接线方展示）
+/// - 接续建议不在此渲染：由气泡外的 [buildFollowUpRow] 独立承载（2026-11-17
+///   用户定稿，手机端/电脑端一致），正文气泡内不再混入建议行。
 Widget buildMessageBody(
   BuildContext context,
   ColorScheme cs,
@@ -38,10 +39,6 @@ Widget buildMessageBody(
   ContentSummaryParseResult? contentSummary,
   void Function(AgentResultAction action, {required AgentResultData cardData})?
       onUserAction,
-
-  /// 「接下来你可以」接续建议点击回调（传入即作为新消息发送）。
-  /// null 时不渲染建议行（未接线方/纯展示场景）。
-  void Function(String prompt)? onFollowupTap,
 
   /// 「需要你拍板」动作点击回调（2026-11-13「通知即界面」）。
   /// 与通知栏按钮共用同一个 actionId 与同一枚 token——两个渲染面，一套语义。
@@ -72,22 +69,14 @@ Widget buildMessageBody(
   final List<NotifyAction> notifyActions =
       message.notifyActions ?? const <NotifyAction>[];
   final bool hasActions = notifyActions.isNotEmpty && onNotifyAction != null;
-  final List<String> followUps = message.followUpPrompts ?? const <String>[];
-  final bool hasFollowUps = followUps.isNotEmpty && onFollowupTap != null;
-  if (!hasActions && !hasFollowUps) return body;
+  if (!hasActions) return body;
   return Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     mainAxisSize: MainAxisSize.min,
     children: <Widget>[
       body,
-      if (hasActions) ...<Widget>[
-        const SizedBox(height: AppTypography.space3),
-        _buildNotifyActionRow(context, cs, notifyActions, onNotifyAction),
-      ],
-      if (hasFollowUps) ...<Widget>[
-        const SizedBox(height: AppTypography.space3),
-        _buildFollowUpRow(context, cs, followUps, onFollowupTap),
-      ],
+      const SizedBox(height: AppTypography.space3),
+      _buildNotifyActionRow(context, cs, notifyActions, onNotifyAction!),
     ],
   );
 }
@@ -179,13 +168,17 @@ class _NotifyActionPill extends StatelessWidget {
 }
 
 /// 「接下来你可以」接续建议行：灰色小标题 + 换行平铺胶囊，黑白极简。
+///
+/// 2026-11-17 用户定稿：**必须渲染在助手气泡外**，每条建议是独立胶囊组件，
+/// 不再和正文共用一个气泡/容器；手机端与电脑端共用本组件，保证形态一致。
 /// 时机性内容（不持久化），仅当轮回复下发的 followups 非空时出现。
-Widget _buildFollowUpRow(
+Widget buildFollowUpRow(
   BuildContext context,
   ColorScheme cs,
   List<String> prompts,
   void Function(String prompt) onFollowupTap,
 ) {
+  if (prompts.isEmpty) return const SizedBox.shrink();
   final TextStyle labelStyle =
       (Theme.of(context).textTheme.labelMedium ?? const TextStyle()).copyWith(
     fontSize: AppTypography.secondary,
@@ -237,8 +230,10 @@ class _FollowUpPill extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final ColorScheme cs = Theme.of(context).colorScheme;
     return Material(
-      color: Colors.transparent,
+      // 独立胶囊要有可识别的按钮底座：气泡外也能看出是可点组件。
+      color: cs.surfaceContainerHighest.withValues(alpha: 0.7),
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(20),
         side: BorderSide(color: borderColor),
@@ -652,7 +647,7 @@ Widget? _buildEnvelopeBlocksBody(
           block["card"] as Map<String, dynamic>? ?? const <String, dynamic>{};
       appendStructured(card);
     } else if (type == "followups") {
-      // 接续建议由 buildMessageBody 的 followUpPrompts 行承担，块里跳过
+      // 接续建议由气泡外的 buildFollowUpRow 独立渲染（2026-11-17 定稿），块里跳过
     } else {
       hasTextBlock = true;
       final String text = block["text"]?.toString() ?? "";

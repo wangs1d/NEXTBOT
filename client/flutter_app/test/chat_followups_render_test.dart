@@ -4,10 +4,11 @@ import "package:flutter_test/flutter_test.dart";
 import "package:nextbot/core/models/chat_models.dart";
 import "package:nextbot/features/chat/message_body_renderer.dart";
 
-/// 「接下来你可以」接续建议渲染测试（NEXT_UP 协议客户端半边）：
-/// - followUpPrompts 非空且接线 onFollowupTap → 渲染「接下来你可以」行 + 胶囊；
-/// - 点击胶囊触发回调并携带原文案（点击即作为新消息发送的链路入口）；
-/// - 无回调（移动端未接线）或字段为空 → 不渲染建议行。
+/// 「接下来你可以」接续建议渲染测试（2026-11-17 用户定稿）：
+/// - 建议不再内联渲染在助手气泡里，`buildMessageBody` 完全不消费 followUpPrompts；
+/// - 建议由气泡外的 [buildFollowUpRow] 独立承载：灰色标题 + 每条一个胶囊；
+/// - 点击胶囊回传原文案（点击即作为新消息发送的链路入口）；
+/// - 空列表不渲染任何东西。
 
 ChatMessage messageWithFollowUps(List<String>? prompts) => ChatMessage(
       messageId: "m1",
@@ -20,9 +21,8 @@ ChatMessage messageWithFollowUps(List<String>? prompts) => ChatMessage(
 
 Future<void> pumpBody(
   WidgetTester tester,
-  ChatMessage message, {
-  void Function(String prompt)? onFollowupTap,
-}) async {
+  ChatMessage message,
+) async {
   await tester.pumpWidget(
     MaterialApp(
       home: Builder(
@@ -32,7 +32,27 @@ Future<void> pumpBody(
             Theme.of(context).colorScheme,
             message,
             isUser: false,
-            onFollowupTap: onFollowupTap,
+          ),
+        ),
+      ),
+    ),
+  );
+}
+
+Future<void> pumpFollowUpRow(
+  WidgetTester tester,
+  List<String> prompts, {
+  void Function(String prompt)? onFollowupTap,
+}) async {
+  await tester.pumpWidget(
+    MaterialApp(
+      home: Builder(
+        builder: (BuildContext context) => Scaffold(
+          body: buildFollowUpRow(
+            context,
+            Theme.of(context).colorScheme,
+            prompts,
+            onFollowupTap ?? (_) {},
           ),
         ),
       ),
@@ -41,11 +61,20 @@ Future<void> pumpBody(
 }
 
 void main() {
-  testWidgets("followups: 渲染标题行与胶囊，点击回传原文案", (tester) async {
-    String? tapped;
+  testWidgets("气泡内不再渲染接续建议（即使 followUpPrompts 非空）", (tester) async {
     await pumpBody(
       tester,
       messageWithFollowUps(<String>["把提醒改成提前半小时", "那天出门前帮我看下天气"]),
+    );
+    expect(find.text("接下来你可以"), findsNothing);
+    expect(find.text("把提醒改成提前半小时"), findsNothing);
+  });
+
+  testWidgets("气泡外独立组件：渲染标题行与胶囊，点击回传原文案", (tester) async {
+    String? tapped;
+    await pumpFollowUpRow(
+      tester,
+      <String>["把提醒改成提前半小时", "那天出门前帮我看下天气"],
       onFollowupTap: (String prompt) => tapped = prompt,
     );
 
@@ -57,20 +86,8 @@ void main() {
     expect(tapped, "那天出门前帮我看下天气");
   });
 
-  testWidgets("followups: 未接线回调时不渲染建议行", (tester) async {
-    await pumpBody(
-      tester,
-      messageWithFollowUps(<String>["把提醒改成提前半小时"]),
-    );
-    expect(find.text("接下来你可以"), findsNothing);
-    expect(find.text("把提醒改成提前半小时"), findsNothing);
-  });
-
-  testWidgets("followups: 字段为空/null 时不渲染建议行", (tester) async {
-    await pumpBody(tester, messageWithFollowUps(null), onFollowupTap: (_) {});
-    expect(find.text("接下来你可以"), findsNothing);
-
-    await pumpBody(tester, messageWithFollowUps(<String>[]), onFollowupTap: (_) {});
+  testWidgets("空列表不渲染建议行", (tester) async {
+    await pumpFollowUpRow(tester, <String>[]);
     expect(find.text("接下来你可以"), findsNothing);
   });
 }

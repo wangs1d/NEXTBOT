@@ -739,7 +739,8 @@ class _MobileChatPageState extends State<MobileChatPage> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
             if (hasBubbleText)
-              _buildBubble(context, m, isUser, p, excludeCardTypes: cardTypes),
+              _buildBubble(context, m, isUser, p,
+                  excludeCardTypes: cardTypes, includeFollowUps: false),
             for (int i = 0; i < standaloneCards.length; i++)
               Padding(
                 padding: EdgeInsets.only(
@@ -749,6 +750,16 @@ class _MobileChatPageState extends State<MobileChatPage> {
                   child: AgentResultCard(data: standaloneCards[i]),
                 ),
               ),
+            // 接续建议固定排在卡片之后，作为气泡外最后一组独立组件。
+            if (m.followUpPrompts?.isNotEmpty ?? false) ...<Widget>[
+              const SizedBox(height: AppTypography.space2),
+              buildFollowUpRow(
+                context,
+                Theme.of(context).colorScheme,
+                m.followUpPrompts!,
+                (String prompt) => unawaited(_controller.send(prompt)),
+              ),
+            ],
           ],
         );
       }
@@ -1161,12 +1172,11 @@ class _MobileChatPageState extends State<MobileChatPage> {
 
   Widget _buildBubble(
       BuildContext context, ChatMessage m, bool isUser, MobilePalette p,
-      {List<String> excludeCardTypes = const <String>[]}) {
-    final Color bubble = isUser ? p.userBubble : p.assistantBubble;
+      {List<String> excludeCardTypes = const <String>[],
+      bool includeFollowUps = true}) {
+    final Color bubbleColor = isUser ? p.userBubble : p.assistantBubble;
     final Color text = isUser ? p.userBubbleText : p.assistantBubbleText;
-    return Align(
-      alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
+    final Widget bubble = Container(
         constraints: BoxConstraints(
           // 设计稿气泡最大宽 236 / 320 ≈ 73.8%，按屏宽等比。
           maxWidth: MediaQuery.sizeOf(context).width * 0.738,
@@ -1174,7 +1184,7 @@ class _MobileChatPageState extends State<MobileChatPage> {
         margin: const EdgeInsets.symmetric(vertical: 5),
         padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 11),
         decoration: BoxDecoration(
-          color: bubble,
+          color: bubbleColor,
           borderRadius: BorderRadius.only(
             topLeft: Radius.circular(isUser ? MobileTheme.bubbleRadius : 6),
             topRight: Radius.circular(isUser ? 6 : MobileTheme.bubbleRadius),
@@ -1270,15 +1280,38 @@ class _MobileChatPageState extends State<MobileChatPage> {
                   cardData: cardData,
                   messageId: m.messageId,
                 ),
-                // 「接下来你可以」接续建议：点击即作为新消息发送（与桌面端同链路）。
-                onFollowupTap: (String prompt) =>
-                    unawaited(_controller.send(prompt)),
+                // 「接下来你可以」接续建议改到气泡外独立渲染（2026-11-17 定稿），
+                // body 不再接收该回调。
                 // 「需要你拍板」动作（2026-11-13「通知即界面」）：与通知栏按钮
                 // 共用同一个 actionId + 同一枚 token——两个渲染面，一套语义。
                 onNotifyAction: (NotifyAction action) =>
                     unawaited(_controller.runNotifyAction(action)),
                 excludeCardTypes: excludeCardTypes,
               ),
+    );
+    if (isUser) {
+      return Align(alignment: Alignment.centerRight, child: bubble);
+    }
+    final List<String> followUps = m.followUpPrompts ?? const <String>[];
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          bubble,
+          // 「接下来你可以」接续建议（2026-11-17 用户定稿）：独立组件渲染在
+          // 气泡外，每条建议各自是一个胶囊，不再和正文共用一个气泡。
+          if (includeFollowUps && followUps.isNotEmpty) ...<Widget>[
+            const SizedBox(height: AppTypography.space2),
+            buildFollowUpRow(
+              context,
+              Theme.of(context).colorScheme,
+              followUps,
+              (String prompt) => unawaited(_controller.send(prompt)),
+            ),
+          ],
+        ],
       ),
     );
   }
@@ -1731,7 +1764,6 @@ class _AssistantBody extends StatelessWidget {
     required this.message,
     required this.cs,
     this.onUserAction,
-    this.onFollowupTap,
     this.onNotifyAction,
     this.excludeCardTypes = const <String>[],
   });
@@ -1747,9 +1779,6 @@ class _AssistantBody extends StatelessWidget {
   /// 效果卡点击经它回传控制器，走 `chat.user_action` 协议。
   final void Function(AgentResultAction action,
       {required AgentResultData cardData})? onUserAction;
-
-  /// 「接下来你可以」接续建议点击回调（null 不渲染建议行）。
-  final void Function(String prompt)? onFollowupTap;
 
   /// 「需要你拍板」动作点击回调（2026-11-13「通知即界面」，null 不渲染动作行）。
   final void Function(NotifyAction action)? onNotifyAction;
@@ -1768,8 +1797,6 @@ class _AssistantBody extends StatelessWidget {
           isUser: false,
           // 卡片动作（选择型卡/chips）：与桌面端同协议回传 chat.user_action。
           onUserAction: onUserAction,
-          // 「接下来你可以」接续建议胶囊：与桌面端同渲染、同点击发送链路。
-          onFollowupTap: onFollowupTap,
           onNotifyAction: onNotifyAction,
           // 行程卡等外移卡由消息行在气泡外全宽渲染，body 内不再重复。
           excludeTravelCard: true,

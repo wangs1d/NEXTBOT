@@ -2832,6 +2832,19 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
           _buildTravelCardMessageHeader(),
           AgentResultCard(data: travelCard),
         ],
+        // 「接下来你可以」接续建议（2026-11-17 用户定稿）：独立组件固定排在
+        // 气泡与卡片之后，每条建议各是一个胶囊；正文气泡里不再混入建议行。
+        if (!widget.isUser &&
+            (widget.mainMessage.followUpPrompts?.isNotEmpty ?? false) &&
+            widget.onFollowupTap != null) ...<Widget>[
+          const SizedBox(height: AppTypography.space2),
+          buildFollowUpRow(
+            context,
+            Theme.of(context).colorScheme,
+            widget.mainMessage.followUpPrompts!,
+            widget.onFollowupTap!,
+          ),
+        ],
       ],
     );
   }
@@ -3194,7 +3207,6 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
                 isUser: widget.isUser,
                 contentSummary: widget.contentSummary,
                 onUserAction: widget.onUserAction,
-                onFollowupTap: widget.onFollowupTap,
               ),
               // 边说边出图：流式阶段 `chat.media_ready` 推送的临时照片，
               // 插在正在打字的正文下方实时展示；`chat.assistant_done` 到达后
@@ -3237,9 +3249,6 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
     void Function(AgentResultAction action,
             {required AgentResultData cardData})?
         onUserAction,
-
-    /// 「接下来你可以」接续建议点击回调（null 不渲染建议行）
-    void Function(String prompt)? onFollowupTap,
   }) {
     return buildMessageBody(
       context,
@@ -3248,7 +3257,6 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
       isUser: isUser,
       contentSummary: contentSummary,
       onUserAction: onUserAction,
-      onFollowupTap: onFollowupTap,
       // 行程卡由消息行在气泡外独立渲染（第二条消息形态），body 内不再重复。
       excludeTravelCard: true,
     );
