@@ -82,6 +82,9 @@ export const CHAT_LANE_CORE_NAMES: readonly string[] = [
   "task.dispatch",
   "task.status",
   "task.cancel",
+  // 接续建议结构化出口（2026-11-17 根修）：取代正文里手写 NEXT_UP 文本协议，
+  // 常驻才能保证每轮都能提交；不进延迟目录（BM25 召回不稳）。
+  "suggest_next_steps",
 ];
 
 /**
@@ -121,6 +124,8 @@ export const TASK_LANE_CORE_NAMES: readonly string[] = [
   "task.dispatch",
   "task.status",
   "task.cancel",
+  // 接续建议（2026-11-17 根修，理由同 chat 常驻）
+  "suggest_next_steps",
 ];
 
 /**
@@ -406,6 +411,9 @@ export const TASK_LANE_ROUTER_FIRST_LIGHT_NAMES: readonly string[] = [
   "calendar",
   "world.link",
   "profile.update",
+  // 接续建议：router-first 下其余业务工具走检索，唯独这条必须常驻，
+  // 否则任务面（如行程规划）无法产出可点击的下一步。
+  "suggest_next_steps",
 ];
 
 /**

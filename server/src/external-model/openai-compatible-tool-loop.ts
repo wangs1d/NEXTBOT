@@ -52,6 +52,7 @@ import {
 import { INTEREST_WATCH_CHAT_TOOLS } from "../tools/interest-watch-tools.js";
 import { LIFE_MANAGE_CHAT_TOOLS } from "../tools/life-manage-tools.js";
 import { AGENT_TASKS_CHAT_TOOLS } from "../tools/agent-tasks-tools.js";
+import { SUGGEST_NEXT_STEPS_TOOL_DEFINITION } from "../tools/next-steps-tools.js";
 import {
   PROACTIVITY_CONFIRM_CHAT_TOOLS,
   PROACTIVITY_FEEDBACK_CHAT_TOOLS,
@@ -1180,6 +1181,7 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
       ...INTEREST_WATCH_CHAT_TOOLS,
       ...LIFE_MANAGE_CHAT_TOOLS,
       ...AGENT_TASKS_CHAT_TOOLS,
+      SUGGEST_NEXT_STEPS_TOOL_DEFINITION,
       ...PROACTIVITY_FEEDBACK_CHAT_TOOLS,
       ...AGENT_UPDATE_IDENTITY_CHAT_TOOL,
       ...AGENT_UPDATE_HOMEPAGE_CHAT_TOOL,

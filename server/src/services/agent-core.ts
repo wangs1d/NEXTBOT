@@ -214,6 +214,10 @@ import {
   TASK_STATUS_TOOL_DEFINITION,
 } from "../tools/task-plane-tools.js";
 import { PERCEPTION_OVERVIEW_TOOL_DEFINITION } from "../tools/perception-tools.js";
+import {
+  SUGGEST_NEXT_STEPS_TOOL_NAME,
+  readSuggestedNextSteps,
+} from "../tools/next-steps-tools.js";
 import { extractContentSummaryCard } from "./content-summary-service.js";
 import {
   allImageCardsHaveCaption,
@@ -2074,6 +2078,11 @@ if (route.plane === "task") {
      * 工具真正执行前触发，含工具名 + 模型填写的参数；截断参数防长输入刷屏。
      */
     const attemptedToolCalls: string[] = [];
+    /**
+     * 本轮接续建议（2026-11-17 根修）：由 suggest_next_steps 工具的结构化参数
+     * 收集，取代正文末尾的 NEXT_UP 文本协议。跨工具波次累积。
+     */
+    const suggestedNextSteps: string[] = [];
     /** 本轮工具轨迹（事件记忆 L0 的 kind/status/payload 原料；只留最近 16 条）。 */
     const toolTraces: ToolExecutedInfo[] = [];
     const toolCtx: ChatToolExecutionContext = this.toolContextFactory.create(
@@ -2128,6 +2137,11 @@ if (route.plane === "task") {
         // media/行程回执的数据源——二者职责不同，不能互相短路。
         onToolExecuted: (info: ToolExecutedInfo) => {
           if (toolTraces.length < 16) toolTraces.push(info);
+          if (info.ok && info.toolName === SUGGEST_NEXT_STEPS_TOOL_NAME) {
+            for (const item of readSuggestedNextSteps(info.result)) {
+              if (!suggestedNextSteps.includes(item)) suggestedNextSteps.push(item);
+            }
+          }
           // 答案留存记账（2026-10-13 根修；2026-11-10 判据收窄为「回执出卡」）：
           // holdAnswer="after_tool_use" 时，回执会确定性出卡 = 工具循环已对
           // 本轮答案关闸（与循环内 answerHeld() 同一判定函数 receiptProducesCard，
@@ -2879,6 +2893,9 @@ if (route.plane === "task") {
     if (attemptedToolCalls.length > 0) {
       reply.attemptedToolCalls = attemptedToolCalls;
     }
+    if (suggestedNextSteps.length > 0) {
+      reply.followups = suggestedNextSteps.slice(0, 3);
+    }
     // 答案留存（2026-10-13 根修）：如实告知 WS 层「答案没走流式通道」，
     // done 裁据此走整段替换（卡片+正文同帧）而非说话算话丢弃裁决。
     if (answerStreamHeld) {
@@ -3278,6 +3295,9 @@ if (route.plane === "task") {
           },
         );
         let finalText = (result.text ?? "").trim();
+        // 接续建议（2026-11-17）：结构化工具通道收集，升级段追加；正文文本
+        // 协议只作兜底（见下方 extractNextUpSuggestions）。
+        let accumulatedFollowups: string[] = [...(result.followups ?? [])];
         const firstAttemptedTools = result.attemptedToolCalls ?? [];
         const firstAttemptMs = Date.now() - firstAttemptStart;
         if (!finalText || isApologyStyleFallback(finalText)) {
@@ -3328,6 +3348,9 @@ if (route.plane === "task") {
             },
           );
           finalText = (result.text ?? "").trim();
+          for (const item of result.followups ?? []) {
+            if (!accumulatedFollowups.includes(item)) accumulatedFollowups.push(item);
+          }
           recordBackgroundOutcome(
             finalText ? "upgraded_ok" : "failed",
             firstAttemptMs,
@@ -3447,7 +3470,14 @@ if (route.plane === "task") {
           } catch {
             /* thread 并入失败不影响结果投递 */
           }
-          pushDone(finalText, mediaCards, nextUp.followups);
+          // 结构化建议优先（2026-11-17）；文本协议兜底防历史模型沿用时漏出。
+          pushDone(
+            finalText,
+            mediaCards,
+            accumulatedFollowups.length > 0
+              ? accumulatedFollowups.slice(0, 3)
+              : nextUp.followups,
+          );
         } else {
           // 结构化失败回执（2026-09-19 P0-2）：执行跑完但没产出有效结果——
           // 带目标回显 + 下一步指引，且与成功路径同样并入对话 thread，

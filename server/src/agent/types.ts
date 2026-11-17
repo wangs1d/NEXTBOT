@@ -17,6 +17,11 @@ export type AgentReply = {
    */
   attemptedToolCalls?: string[];
   /**
+   * 本轮接续建议（2026-11-17）：由 suggest_next_steps 工具的结构化参数收集，
+   * 直接作为 done.followups 下发；正文里不应再出现 NEXT_UP 文本标记。
+   */
+  followups?: string[];
+  /**
    * 任务面异步收尾（2026-09-08）：本轮已把任务派发到后台并立即结束（text 为空，
    * 无正文产出）。WS 层据此以 source=task_plane 发送 assistant_done，客户端据此
    * 结清前台处理状态且不落正文气泡（任务回执/结果由任务面事件独立承载）。

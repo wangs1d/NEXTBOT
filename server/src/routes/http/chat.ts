@@ -319,6 +319,11 @@ export function registerChatRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
           ),
         );
         const replyFinalText = nextUp.text;
+        // 接续建议：结构化工具通道优先（2026-11-17），文本协议兜底。
+        const editFollowups =
+          (reply0.followups ?? []).length > 0
+            ? (reply0.followups ?? []).slice(0, 3)
+            : nextUp.followups;
         // 语音流式收口：final 帧恒在 done 之前，无增量帧时用定稿全文兜底播报。
         sendEditSpeechFrame("", true, replyFinalText);
         wsConnectionRegistry.trySend(
@@ -333,7 +338,7 @@ export function registerChatRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
               toolCalls: reply0.toolName ? [reply0.toolName] : [],
               source: "chat.message_edit",
               // 接续建议随 done 下发（此前只取 .text，编辑重答永远没有胶囊）。
-              ...(nextUp.followups.length > 0 ? { followups: nextUp.followups } : {}),
+              ...(editFollowups.length > 0 ? { followups: editFollowups } : {}),
             },
           }),
         );

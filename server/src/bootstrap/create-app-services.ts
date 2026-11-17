@@ -533,6 +533,7 @@ import { ScreenSensor } from "../proactivity/sensors/screen-sensor.js";
 import { FileWatcherSensor } from "../proactivity/sensors/file-watcher.js";
 import { ClipboardSensor, isClipboardSensorEnabled } from "../proactivity/sensors/clipboard-sensor.js";
 import { registerPerceptionOverviewTool } from "../tools/perception-tools.js";
+import { registerSuggestNextStepsTool } from "../tools/next-steps-tools.js";
 import { ScheduleSensor } from "../proactivity/sensors/schedule-sensor.js";
 // 外部信源收编（2026-10-10）：邮件/日历/财务 → ProactiveSensor 适配器
 import { MailSensor } from "../proactivity/sensors/mail-sensor.js";
@@ -5566,6 +5567,8 @@ export async function createAppServices(
     kernel: sensorKernel,
     screenFocus: () => screenSensor.latest(),
   });
+  // 接续建议结构化出口（2026-11-17）：纯记账工具，无外部依赖。
+  registerSuggestNextStepsTool(toolRegistry);
   const goalFeeder = registerFeeder(sensorKernel, "goal_board", "goal");
   /** 入站消息 feeder（unread_burst 评估器的数据源；MessageHub onInbound 推送） */
   const messageFeeder = registerFeeder(sensorKernel, "message_hub", "message");

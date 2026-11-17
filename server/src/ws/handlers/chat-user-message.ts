@@ -81,6 +81,7 @@ import {
   type ExecutedToolReceipt,
 } from "../../services/deterministic-card-chain.js";
 import { domainsForTool } from "../../tools/tool-search/tool-category.js";
+import { SUGGEST_NEXT_STEPS_TOOL_NAME } from "../../tools/next-steps-tools.js";
 import { captionMediaCards, isImageCaptionEnabled } from "../../services/image-caption-service.js";
 import { stripDsmlToolCallMarkup } from "../../external-model/stream-chat-helpers.js";
 import {
@@ -1376,6 +1377,9 @@ async function processBatchedMessage(
       },
       onExternalToolExecuteStart: (info) => {
         if (isStale()) return;
+        // 接续建议是内部记账工具（2026-11-17）：不产生工具卡/过程话/心跳，
+        // 由 agent-core 收进 reply.followups 后随 done 下发。
+        if (info.toolName === SUGGEST_NEXT_STEPS_TOOL_NAME) return;
         // 分泡裁决（2026-11-06 深夜用户定稿，收窄版）：
         // - 信息展示类工具（search/weather/market/clock 域）开始执行 →
         //   关泡模式，剩余正文并回一个绿泡（结果当「一份资料」读，不拆碎）；
@@ -1422,6 +1426,12 @@ async function processBatchedMessage(
         // 复合工具语义归一：下游媒体卡/搜索卡/状态/效果表全部按真实执行器名匹配
         // （web_search + action=images → search_images）；非复合工具原样。
         const effectiveTool = info.effectiveTool ?? info.toolName;
+        // 接续建议内部工具：只清心跳，不广播 tool_result / 不参与分泡与卡账
+        // （2026-11-17；建议本体已由 reply.followups 承载）。
+        if (effectiveTool === SUGGEST_NEXT_STEPS_TOOL_NAME) {
+          stopToolHeartbeat(info.toolName);
+          return;
+        }
         // 发言模型：登记工具名（直跑路径可能只有完成回调、没有 start 回调）
         utterance.noteToolExecuted(info.toolName);
         wireToolExecuted(
@@ -2009,7 +2019,16 @@ async function processBatchedMessage(
     // 一并吃掉。
     const nextUp = extractNextUpSuggestions(finalText);
     finalText = nextUp.text;
-    const followups = nextUp.followups;
+    // 结构化通道优先（2026-11-17 根修）：模型经 suggest_next_steps 工具提交的
+    // 建议已由 agent-core 收进 reply.followups；正文文本协议只保留作历史兼容
+    // 和模型自发沿用的兜底，避免标记再次漏进气泡。
+    const structuredFollowups = (reply.followups ?? [])
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    const followups =
+      structuredFollowups.length > 0
+        ? structuredFollowups.slice(0, 3)
+        : nextUp.followups;
     // 行程回执在这里才最终裁决（直跑 / loop 捕获 / 冷层近窗回捞），所以行程卡
     // 在正文处理之后补附；其余卡已在 processAssistantText 里由决策层一并产出。
     // 返回值同时带出本轮全部结构化卡载荷（与文本块同一份，供 cards 通道下发）。

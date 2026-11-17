@@ -120,6 +120,8 @@ export const BOOKKEEPING_TOOL_NAMES = new Set<string>([
   "memory.forget",
   "memory.invalidate",
   "interest.manage",
+  // 接续建议（2026-11-17）：内部记账工具，不产出可引用的事实。
+  "suggest_next_steps",
 ]);
 
 /**
