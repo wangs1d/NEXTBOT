@@ -16,6 +16,35 @@ export type ScheduleSensorOptions = {
 
 type NextEvent = { min: number; title: string };
 
+/**
+ * 事件时刻的「月日 HH:MM」（优先任务时区，非法时区回退服务器本地）。
+ *
+ * delta 会被下游原样缓存/重放（状态板、顺嘴队列可挂 2 小时），所以这里只写
+ * **绝对时刻**，不写「N 分钟后」——相对倒计时一旦离开生成时刻就是错的。
+ * 带日期是防跨天歧义：只写 09:00 会被误读成"今天早上"。
+ */
+function formatClockLabel(ms: number, timezone?: string): string {
+  try {
+    const parts = Object.fromEntries(
+      new Intl.DateTimeFormat("en-CA", {
+        timeZone: timezone || undefined,
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      })
+        .formatToParts(new Date(ms))
+        .map((p) => [p.type, p.value]),
+    );
+    const hour = Number(parts.hour) === 24 ? 0 : Number(parts.hour);
+    return `${Number(parts.month)}月${Number(parts.day)}日 ${String(hour).padStart(2, "0")}:${parts.minute}`;
+  } catch {
+    const d = new Date(ms);
+    return `${d.getUTCMonth() + 1}月${d.getUTCDate()}日 ${d.toISOString().slice(11, 16)}`;
+  }
+}
+
 export class ScheduleSensor implements ProactiveSensor {
   readonly id = "schedule_upcoming";
   readonly stream = "schedule" as const;
@@ -73,9 +102,11 @@ export class ScheduleSensor implements ProactiveSensor {
         // 从世界板上彻底消失（meeting_soon 再也不认它）。
         const raw = t.nextRunAt ?? t.runAt;
         const runAt = typeof raw === "number" ? raw : Date.parse(String(raw));
-        return Number.isFinite(runAt) ? { title: t.title, runAt } : null;
+        return Number.isFinite(runAt)
+          ? { title: t.title, runAt, timezone: t.timezone }
+          : null;
       })
-      .filter((v): v is { title: string; runAt: number } => v !== null)
+      .filter((v): v is { title: string; runAt: number; timezone?: string } => v !== null)
       .filter((v) => v.runAt > now)
       .sort((a, b) => a.runAt - b.runAt);
 
@@ -102,8 +133,8 @@ export class ScheduleSensor implements ProactiveSensor {
       salience: changed ? "medium" : "low",
       delta: next
         ? changed
-          ? `日程有变：最近的是「${next.title}」（${min <= 0 ? "马上" : `${min} 分钟后`}）`
-          : `下一个日程：「${next.title}」（${min <= 0 ? "马上" : `${min} 分钟后`}）`
+          ? `日程有变：最近的是「${next.title}」（${formatClockLabel(next.runAt, next.timezone)}）`
+          : `下一个日程：「${next.title}」（${formatClockLabel(next.runAt, next.timezone)}）`
         : "未来 24 小时没有日程",
       payload: { nextEventMin: next ? min : null, nextTitle: next?.title ?? "", nextRunAt: next?.runAt ?? null },
     };

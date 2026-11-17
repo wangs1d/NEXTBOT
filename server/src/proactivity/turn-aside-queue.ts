@@ -68,13 +68,30 @@ export function isTurnAsideMediumEnabled(): boolean {
   return !(raw === "0" || raw === "false" || raw === "off");
 }
 
+/**
+ * 去掉旁注正文里"写下时算的倒计时"（「35 分钟后」「1 小时内开始」「还有半小时」）。
+ *
+ * 队列可挂 2 小时，倒计时离开生成时刻就失真；留着会被主模型当成此刻复述
+ * （实证：18:45 复述 17:40 写入的「35 分钟后」→「现在还有半个多小时」）。
+ * 只清分钟/小时级的相对倒计时，绝对时刻（18:15）与"N 天后"这类日期描述保留。
+ */
+function stripStaleCountdown(text: string): string {
+  return text
+    .replace(/(?:还有|还剩)\s*(?:\d+|半|一|两|几)\s*个?\s*(?:多)?\s*(?:分钟|小时)(?:左右)?/g, "")
+    .replace(/\s*\d+\s*个?\s*(?:分钟|小时)\s*(?:后|内)(?:开始|出发)?/g, "")
+    .replace(/[（(]\s*[）)]/g, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
 /** 旁注形态定稿（P2）：块正文给主模型的织入指令与事实 */
 export function formatTurnAsidePrompt(item: TurnAsideItem, now: number = Date.now()): string {
   const age = timerAgeLabel(item.createdAt, now);
+  const body = stripStaleCountdown(item.hint) || stripStaleCountdown(item.title);
   return [
     `【顺嘴机会】`,
-    `（后台攒下的一件小事，发生于${age}。值得提就在回复末尾顺嘴一句，形态=括号旁注，如「（顺嘴一句：…）」，一句话即可；与本轮话题不搭就别提，绝不硬塞；若已时隔较久，须按当时的语境说、不要用「刚才/刚刚」。）`,
-    item.hint || item.title,
+    `（后台攒下的一件小事，发生于${age}。值得提就在回复末尾顺嘴一句，形态=括号旁注，如「（顺嘴一句：…）」，一句话即可；与本轮话题不搭就别提，绝不硬塞；若已时隔较久，须按当时的语境说、不要用「刚才/刚刚」；块内若有「N 分钟后/还有多久」这类倒计时，都是写下这条时的旧值，不得当作此刻，要提就按【当前时间】重新核对。）`,
+    body,
   ].join("\n");
 }
 
