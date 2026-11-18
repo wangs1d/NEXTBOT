@@ -1782,7 +1782,11 @@ class _AssistantBody extends StatelessWidget {
         if (m.pendingMediaCards != null && m.pendingMediaCards!.isNotEmpty)
           Padding(
             padding: const EdgeInsets.only(top: 8),
-            child: buildPendingMediaCards(m.pendingMediaCards!, cs),
+            child: buildPendingMediaCards(
+              m.pendingMediaCards!,
+              cs,
+              onUserAction: onUserAction,
+            ),
           ),
       ],
     );

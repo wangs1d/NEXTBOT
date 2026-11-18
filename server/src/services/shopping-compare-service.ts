@@ -643,37 +643,70 @@ export class ShoppingCompareService {
     platforms: string[],
     query: string,
     opts: { preferVisible?: boolean } = {},
-  ): Promise<{ needsLogin: string[]; ready: string[] }> {
+  ): Promise<{
+    needsLogin: string[];
+    ready: string[];
+    /** 预检同一页面顺手截下的二维码（避免推码阶段再开一次浏览器）。 */
+    captured: Map<string, Buffer | null>;
+  }> {
+    const service = this.deps.shoppingOrderService;
+    const captured = new Map<string, Buffer | null>();
+    const outcomes = new Array<{ platform: string; login: boolean }>(
+      platforms.length,
+    );
+
+    // 并行探测（上限 3）：旧实现串行开浏览器，三个平台各等一次冷启动 +
+    // 导航 + 落页稳定，启动时间线性叠加。各平台 context 独立，互不影响。
+    let cursor = 0;
+    const workers = Array.from(
+      { length: Math.min(3, platforms.length) },
+      async () => {
+        for (;;) {
+          const index = cursor++;
+          if (index >= platforms.length) return;
+          const platform = platforms[index]!;
+          // 已有授权 Cookie 的平台不必探（登录态确定）。
+          // 注意：这里用 try/catch 而非 .catch()——被替换/裁剪过的 service 实现
+          // 可能**同步**抛（方法不存在时是 TypeError），.catch() 抓不到同步抛出。
+          let hasCookie = false;
+          try {
+            const list = await service.listPlatformsWithCookies(resolveActorId(ctx), [platform]);
+            hasCookie = Array.isArray(list) && list.includes(platform);
+          } catch {
+            hasCookie = false;
+          }
+          if (hasCookie) {
+            outcomes[index] = { platform, login: false };
+            continue;
+          }
+          try {
+            const probe = await service.probeLoginWall(ctx, platform, query, {
+              preferVisible: opts.preferVisible,
+              // 命中登录墙时同页截码，供推卡直接复用（省掉第二轮导航）。
+              captureQr: true,
+            });
+            if (probe?.required) {
+              outcomes[index] = { platform, login: true };
+              if (probe.qrPng) captured.set(platform, probe.qrPng);
+            } else {
+              outcomes[index] = { platform, login: false };
+            }
+          } catch {
+            // 探测失败不当登录墙：交给取价阶段的真实结果判定
+            outcomes[index] = { platform, login: false };
+          }
+        }
+      },
+    );
+    await Promise.all(workers);
+
     const needsLogin: string[] = [];
     const ready: string[] = [];
-    const service = this.deps.shoppingOrderService;
-    for (const platform of platforms) {
-      // 已有授权 Cookie 的平台不必探（登录态确定）。
-      // 注意：这里用 try/catch 而非 .catch()——被替换/裁剪过的 service 实现
-      // 可能**同步**抛（方法不存在时是 TypeError），.catch() 抓不到同步抛出。
-      let hasCookie = false;
-      try {
-        const list = await service.listPlatformsWithCookies(resolveActorId(ctx), [platform]);
-        hasCookie = Array.isArray(list) && list.includes(platform);
-      } catch {
-        hasCookie = false;
-      }
-      if (hasCookie) {
-        ready.push(platform);
-        continue;
-      }
-      try {
-        const probe = await service.probeLoginWall(ctx, platform, query, {
-          preferVisible: opts.preferVisible,
-        });
-        if (probe?.required) needsLogin.push(platform);
-        else ready.push(platform);
-      } catch {
-        // 探测失败不当登录墙：交给取价阶段的真实结果判定
-        ready.push(platform);
-      }
+    for (const outcome of outcomes) {
+      if (!outcome) continue;
+      (outcome.login ? needsLogin : ready).push(outcome.platform);
     }
-    return { needsLogin, ready };
+    return { needsLogin, ready, captured };
   }
 
   /**
@@ -942,7 +975,11 @@ export class ShoppingCompareService {
     // 前置预检让「登录」成为任务的第一阶段而不是中途打断。
     const preflight = this.preflightLoginMode
       ? await this.preflightLogin(ctx, probeQueue, q, { preferVisible: visible })
-      : { needsLogin: [] as string[], ready: probeQueue };
+      : {
+          needsLogin: [] as string[],
+          ready: probeQueue,
+          captured: new Map<string, Buffer | null>(),
+        };
     const preflightBlocked = preflight.needsLogin.length > 0 && !isResume;
 
     // 续跑模式（2026-11-13 P1）：用户已经表过态了（登录过/跳过），这一轮
@@ -970,6 +1007,7 @@ export class ShoppingCompareService {
           ctx,
           preflight.needsLogin,
           q,
+          { preparedPngs: preflight.captured },
         );
         if (result) pushed = result;
       } catch (err) {

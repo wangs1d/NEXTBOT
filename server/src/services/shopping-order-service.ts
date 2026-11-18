@@ -595,8 +595,20 @@ export class ShoppingOrderService {
     ctx: ToolContext,
     platforms: string[],
     query: string,
+    opts: {
+      /**
+       * 登录墙预检时顺手截下的二维码（platform → png）。有码的平台直接推，
+       * 不再二次开浏览器导航——一轮比价只该开一次浏览器。
+       */
+      preparedPngs?: Map<string, Buffer | null>;
+    } = {},
   ): Promise<Map<string, { imageUrl: string; qrLink?: string; qrLinkFallback?: string }>> {
-    const items = await this.captureBatchLoginPngs(ctx, platforms, query);
+    const items = await this.captureBatchLoginPngs(
+      ctx,
+      platforms,
+      query,
+      opts.preparedPngs,
+    );
     if (items.length === 0) return new Map<string, { imageUrl: string; qrLink?: string; qrLinkFallback?: string }>();
     const labels = items.map((i) => i.label);
     return await this.qrAssist.pushBatchQrCards(
@@ -644,18 +656,25 @@ export class ShoppingOrderService {
     ctx: ToolContext,
     platforms: string[],
     query: string,
+    preparedPngs?: Map<string, Buffer | null>,
   ): Promise<Array<{ platform: string; label: string; png: Buffer | null }>> {
-    const items: Array<{ platform: string; label: string; png: Buffer | null }> = [];
-    if (platforms.length === 0) return items;
-    for (const platform of platforms) {
+    type Captured = { platform: string; label: string; png: Buffer | null };
+    if (platforms.length === 0) return [];
+    const actorId = resolveActorId(ctx);
+
+    const captureOne = async (platform: string): Promise<Captured | null> => {
       const adapter = this.requireAdapter(platform);
-      if (!adapter) continue;
+      if (!adapter) return null;
       const label = this.platformLabel(platform);
+      // 预检已经拿到码：直接复用，不再开浏览器重复导航。
+      const prepared = preparedPngs?.get(platform);
+      if (prepared) return { platform, label, png: prepared };
       let lease: BrowserPageLease | null = null;
+      let preview: BrowserPreviewHandle | null = null;
       try {
-        const cookieResult = await this.getCookieAndSiteId(resolveActorId(ctx), platform);
+        const cookieResult = await this.getCookieAndSiteId(actorId, platform);
         lease = await this.browserExecutor.acquirePage(
-          resolveActorId(ctx),
+          actorId,
           adapter.searchUrl(query, {}),
           {
             siteId: platform,
@@ -665,24 +684,49 @@ export class ShoppingOrderService {
             allowAnonymous: true,
           },
         );
+        // 截码这一屏也要推给手机悬浮窗：否则「开浏览器—等跳转—截码」整段
+        // 没有画面，用户只看到转圈（「手机端看不到具体操作」）。
+        if (lease.mode === "headless") {
+          preview = startBrowserPreviewStream(ctx, lease.page, {
+            mode: lease.mode,
+            sessionId: `capture-${platform}-${Date.now()}`,
+          });
+        }
         // 登录跳转常由 JS 延迟触发，落页稳定后再判一次
         await lease.page.waitForTimeout(2_000).catch(() => {});
         const det = await detectLoginPage(platform, lease.page);
-        if (!det.isLogin) {
-          // 没撞登录墙（可能匿名可读或已登录）→ 不需要推码
-          await lease.release().catch(() => {});
-          lease = null;
-          continue;
-        }
+        if (!det.isLogin) return null;
+        preview?.stop();
+        preview = null;
         const png = await this.qrAssist.captureQrPng(lease.page);
-        items.push({ platform, label, png });
+        return { platform, label, png };
       } catch {
         /* 探不到就算了，不阻断其余平台 */
+        return null;
       } finally {
+        preview?.stop();
         if (lease) await lease.release().catch(() => {});
       }
-    }
-    return items;
+    };
+
+    // 各平台并行（上限 3）：串行时三个平台的冷启动/导航等待完全累加，
+    // 是「开浏览器特别慢」的主要来源；独立 context 互不干扰。
+    const results: Array<Captured | null> = new Array<Captured | null>(
+      platforms.length,
+    ).fill(null);
+    let cursor = 0;
+    const workers = Array.from(
+      { length: Math.min(3, platforms.length) },
+      async () => {
+        for (;;) {
+          const index = cursor++;
+          if (index >= platforms.length) return;
+          results[index] = await captureOne(platforms[index]!);
+        }
+      },
+    );
+    await Promise.all(workers);
+    return results.filter((item): item is Captured => item != null);
   }
 
   /**
@@ -749,8 +793,21 @@ export class ShoppingOrderService {
     ctx: ToolContext,
     platform: string,
     query: string,
-    opts: { preferVisible?: boolean } = {},
-  ): Promise<{ required: boolean; reason?: "login" | "captcha"; evidence?: string }> {
+    opts: {
+      preferVisible?: boolean;
+      /**
+       * 命中登录墙时顺手截下二维码（与探测同一页面），供上层直接推卡。
+       * 否则「探测」和「截码」要各开一次浏览器、各导航一次搜索页，冷启动
+       * 与风控等待翻倍——手机端看到的就是「开浏览器特别慢」。
+       */
+      captureQr?: boolean;
+    } = {},
+  ): Promise<{
+    required: boolean;
+    reason?: "login" | "captcha";
+    evidence?: string;
+    qrPng?: Buffer | null;
+  }> {
     const adapter = this.requireAdapter(platform);
     if (!adapter) return { required: false };
     // 匿名可读的平台：不存在登录墙
@@ -788,7 +845,23 @@ export class ShoppingOrderService {
       // 登录跳转常由 JS 延迟触发，落页稳定后再补检一次
       await lease.page.waitForTimeout(1_500).catch(() => {});
       const det = await detectLoginPage(platform, lease.page);
-      if (det.isLogin) return { required: true, reason: "login", evidence: det.reason };
+      if (det.isLogin) {
+        let qrPng: Buffer | null = null;
+        if (opts.captureQr && ctx.pushMediaCards != null) {
+          // 二维码通常在登录组件挂载后才出图：再等一小会儿，避免截到空框。
+          await lease.page.waitForTimeout(600).catch(() => {});
+          // 先停推流再截图，避免两个 CDP 截屏同时跑（部分版本会互斥超时）。
+          preview?.stop();
+          preview = null;
+          qrPng = await this.qrAssist.captureQrPng(lease.page).catch(() => null);
+        }
+        return {
+          required: true,
+          reason: "login",
+          evidence: det.reason,
+          ...(qrPng ? { qrPng } : {}),
+        };
+      }
       return { required: false };
     } catch {
       // 探针失败不当登录墙

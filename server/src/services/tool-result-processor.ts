@@ -1390,6 +1390,25 @@ export function dedupMediaCards(cards: MediaCardItem[]): MediaCardItem[] {
   const seen = new Set<string>();
   const out: MediaCardItem[] = [];
   for (const c of cards) {
+    // 结构化卡（购物登录二维码卡等）不是图：没有 thumbnailUrl/mediaUrl 是正常的，
+    // 按图 URL 去重会把它们整张丢弃（历史事故：服务端推送成功 + done 定稿却
+    // 少一张码，手机端「二维码怎么都不出来」）。按 cardType+标题 单独去重保留。
+    const structured = c as unknown as {
+      cardType?: string;
+      title?: string;
+      cardId?: string;
+    };
+    const cardType = (structured.cardType ?? "").trim();
+    if (cardType) {
+      const identity =
+        (structured.cardId ?? "").toString().trim() ||
+        (structured.title ?? "").toString().trim();
+      const key = `card:${cardType}:${identity}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(c);
+      continue;
+    }
     const key = (c.thumbnailUrl || c.mediaUrl || "").trim();
     if (!key || seen.has(key)) continue;
     seen.add(key);

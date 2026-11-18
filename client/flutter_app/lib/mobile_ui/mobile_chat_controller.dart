@@ -326,6 +326,8 @@ class MobileChatController extends ChangeNotifier {
   void dismissBrowserPreview() {
     if (!_browserPreviewDismissed) {
       _browserPreviewDismissed = true;
+      // 用户主动关闭后本轮不再自动弹回（新浏览器任务才重新点亮）。
+      _cancelBrowserPreviewLinger();
       notifyListeners();
     }
   }
@@ -382,14 +384,50 @@ class MobileChatController extends ChangeNotifier {
     browserPreviewUrl = payload["url"]?.toString();
     final String action = payload["action"]?.toString() ?? "";
     if (action.isNotEmpty && action != "stream") browserPreviewAction = action;
-    _browserTaskActive = true;
-    _browserPreviewDismissed = false;
+    // 用户已手动关掉本轮悬浮窗：画面照常更新但不弹回来，避免每来一帧就
+    // 把用户刚关掉的窗口顶出来（体感像「关不掉/被系统反复开关」）。
+    if (!_browserPreviewDismissed) {
+      _browserTaskActive = true;
+      // 每帧都重置「最后一帧」倒计时：画面持续在推时窗口常显；流一停（含
+      // 回合已收口后仍在路上的残帧）最多再停留 _browserPreviewLinger 就自动
+      // 收起，既不会一闪而过，也不会永久挂着。
+      _scheduleBrowserPreviewLinger();
+    }
     notifyListeners();
   }
 
+  /// 收口后悬浮窗停留时长：让用户有机会看清 Agent 最后一步在做什么。
+  /// 旧实现 done 一到立刻熄灭，预检/截码这种短任务等于「闪一下就没了」，
+  /// 手机端根本看不到操作画面。
+  static const Duration _browserPreviewLinger = Duration(seconds: 15);
+  Timer? _browserPreviewLingerTimer;
+
+  void _cancelBrowserPreviewLinger() {
+    _browserPreviewLingerTimer?.cancel();
+    _browserPreviewLingerTimer = null;
+  }
+
+  void _scheduleBrowserPreviewLinger() {
+    _cancelBrowserPreviewLinger();
+    _browserPreviewLingerTimer = Timer(_browserPreviewLinger, () {
+      _browserPreviewLingerTimer = null;
+      _browserTaskActive = false;
+      _browserPreviewDismissed = false;
+      notifyListeners();
+    });
+  }
+
   /// 熄灭浏览器悬浮窗（任务收口/出错统一走这里）。
-  void _extinguishBrowserPreview() {
+  ///
+  /// [linger] = true 时先保留最后一帧 [_browserPreviewLinger]，期间若来了
+  /// 新画面/新任务会自动重置倒计时；用户手动关闭则立即生效。
+  void _extinguishBrowserPreview({bool linger = false}) {
     if (!_browserTaskActive && !_browserPreviewDismissed) return;
+    if (linger && _browserTaskActive && browserPreviewImage != null) {
+      _scheduleBrowserPreviewLinger();
+      return;
+    }
+    _cancelBrowserPreviewLinger();
     _browserTaskActive = false;
     _browserPreviewDismissed = false;
     notifyListeners();
@@ -546,8 +584,8 @@ class MobileChatController extends ChangeNotifier {
     t.deliveryStallTimer = null;
     t.deliveryStallNotified = false;
     t.resetActivity();
-    // 本轮收口/出错：浏览器悬浮窗一并熄灭（下一个浏览器任务会重新点亮）。
-    _extinguishBrowserPreview();
+    // 本轮收口/出错：浏览器悬浮窗延后熄灭，避免操作画面一闪而过。
+    _extinguishBrowserPreview(linger: true);
   }
 
   /// 离线补发进行中闸（防 ws_connected 风暴期间并发 flush 乱序重复发送）。
@@ -1692,6 +1730,7 @@ class MobileChatController extends ChangeNotifier {
     // 2026-11-12；2026-11-14 扩到购物比价/下单）。
     final Object? input = payload["input"];
     if (_toolUsesCloudBrowser(t.currentToolName ?? "", input)) {
+      _cancelBrowserPreviewLinger();
       _browserTaskActive = true;
       _browserPreviewDismissed = false;
       browserPreviewImage = null;
@@ -2534,6 +2573,14 @@ class MobileChatController extends ChangeNotifier {
         notifyListeners();
         return;
       }
+      // done 的 mediaCards 为空/缺省时退回流式阶段已挂上的卡图：
+      // 服务端曾因按 URL 去重把无缩略图的登录二维码卡整张丢掉。
+      final List<Map<String, dynamic>>? finalMediaCards =
+          (mediaCards == null || mediaCards.isEmpty)
+              ? (prev.mediaCards?.isNotEmpty == true
+                  ? prev.mediaCards
+                  : prev.pendingMediaCards)
+              : mediaCards;
       list[idx] = ChatMessage(
         messageId: messageId ?? prev.messageId,
         sessionId: prev.sessionId,
@@ -2544,7 +2591,7 @@ class MobileChatController extends ChangeNotifier {
             : (finalText.isNotEmpty ? finalText : prev.text),
         timestamp: prev.timestamp,
         streaming: false,
-        mediaCards: mediaCards ?? prev.mediaCards,
+        mediaCards: finalMediaCards,
         summaryCard: summaryCard ?? prev.summaryCard,
         renderBlocks: renderBlocks ?? prev.renderBlocks,
         replyBlocks: replyBlocks ?? prev.replyBlocks,
@@ -2810,6 +2857,7 @@ class MobileChatController extends ChangeNotifier {
     _introQueue.clear();
     _clockWatchTimer?.cancel();
     _revealTimer?.cancel();
+    _cancelBrowserPreviewLinger();
     for (final _ThreadTurnState t in _turnStates.values) {
       t.deliveryStallTimer?.cancel();
       t.deliveryStallTimer = null;

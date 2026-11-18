@@ -151,13 +151,17 @@ void main() {
           .writeAsBytesSync(data!.buffer.asUint8List());
     });
 
-    // 3) 收口：悬浮窗熄灭。
+    // 3) 收口：保留最后一帧停留一会儿（预检/截码这类短任务不能一闪而过），
+    //    停留结束再自动收起。
     controller.debugHandleWsEvent(<String, dynamic>{
       "type": "chat.assistant_done",
       "payload": <String, dynamic>{"messageId": "m1", "finalText": "看完了"},
     });
     await tester.pump(const Duration(milliseconds: 400));
-    expect(controller.browserPreviewVisible, isFalse, reason: "任务收口自动熄灭");
+    expect(controller.browserPreviewVisible, isTrue,
+        reason: "收口后先保留最后一帧，让用户看清 Agent 最后一步");
+    await tester.pump(const Duration(seconds: 16));
+    expect(controller.browserPreviewVisible, isFalse, reason: "停留结束自动熄灭");
 
     // 4) 排干：真实握手完成后连接层可能挂了一次性 timer（心跳/对账），
     //    大步进走完 fake 时间，避免「收尾仍有 pending timer」的偶发 invariant。

@@ -141,6 +141,74 @@ export class BrowserRuntime {
   private anonIdleTimer: ReturnType<typeof setTimeout> | null = null;
   private static readonly ANON_IDLE_MS = 90_000;
 
+  /**
+   * 带登录 Cookie 的无头浏览器池（按用户隔离）。
+   *
+   * 旧实现每次 acquire 都 chromium.launch —— 冷启动约 1s，而比价一轮要经历
+   * 「登录墙预检 → 截二维码 → 取价」三次 acquire，等于冷启动三次；串行三平台
+   * 时用户看到的就是「开浏览器特别慢」。这里按 actorId 复用浏览器实例（不同
+   * 用户绝不共享），每次仍新建独立 context 并注入该用户的 Cookie，隔离语义
+   * 不变；空闲 2 分钟回收。
+   */
+  private readonly userBrowsers = new Map<
+    string,
+    { browser: Browser; refs: number; idle: ReturnType<typeof setTimeout> | null }
+  >();
+  private readonly userLaunching = new Map<string, Promise<Browser>>();
+  private static readonly USER_IDLE_MS = 120_000;
+
+  private async getUserBrowser(
+    pw: typeof import("playwright"),
+    actorId: string,
+  ): Promise<Browser> {
+    const existing = this.userBrowsers.get(actorId);
+    if (existing?.browser.isConnected()) return existing.browser;
+    const launching = this.userLaunching.get(actorId);
+    if (launching) return launching;
+    const p = pw.chromium
+      .launch({ headless: true, args: ["--disable-blink-features=AutomationControlled"] })
+      .then((browser) => {
+        this.userBrowsers.set(actorId, { browser, refs: 0, idle: null });
+        this.userLaunching.delete(actorId);
+        return browser;
+      })
+      .catch((err) => {
+        this.userLaunching.delete(actorId);
+        throw err;
+      });
+    this.userLaunching.set(actorId, p);
+    return p;
+  }
+
+  private acquireUserRef(actorId: string): void {
+    const entry = this.userBrowsers.get(actorId);
+    if (!entry) return;
+    entry.refs += 1;
+    if (entry.idle) {
+      clearTimeout(entry.idle);
+      entry.idle = null;
+    }
+  }
+
+  private releaseUserRef(actorId: string, browser?: Browser): void {
+    const entry = this.userBrowsers.get(actorId);
+    if (!entry) return;
+    // 浏览器实例被替换过（崩溃重连）：旧 context 的释放不能扣新实例的引用。
+    if (browser != null && entry.browser !== browser) return;
+    entry.refs = Math.max(0, entry.refs - 1);
+    if (entry.refs > 0) return;
+    if (entry.idle) clearTimeout(entry.idle);
+    const scheduledBrowser = entry.browser;
+    entry.idle = setTimeout(() => {
+      const latest = this.userBrowsers.get(actorId);
+      // 池里可能已经换成了新实例：别把后来者的浏览器误关掉。
+      if (!latest || latest.refs > 0 || latest.browser !== scheduledBrowser) return;
+      this.userBrowsers.delete(actorId);
+      void latest.browser.close().catch(() => {});
+    }, BrowserRuntime.USER_IDLE_MS);
+    entry.idle.unref?.();
+  }
+
   /** 空闲回收：没有在跑的页面就关掉整个浏览器，别长期占内存。 */
   private touchAnonIdle(): void {
     if (this.anonIdleTimer) clearTimeout(this.anonIdleTimer);
@@ -287,6 +355,7 @@ export class BrowserRuntime {
     if (opts.preferHeadless === true) {
       try {
         return await this.acquireHeadlessPage(
+          actorId,
           opts.siteId,
           targetUrl,
           opts.cookies ?? [],
@@ -306,6 +375,7 @@ export class BrowserRuntime {
 
     // 3) 无头兜底（CDP 连接/开页失败 → 静默降级，客户端可能刚断开/端口失效）
     return this.acquireHeadlessPage(
+      actorId,
       opts.siteId,
       targetUrl,
       opts.cookies ?? [],
@@ -314,8 +384,9 @@ export class BrowserRuntime {
     );
   }
 
-  /** 服务端无头 Chromium + 已授权 Cookie。 */
+  /** 服务端无头 Chromium + 已授权 Cookie（浏览器按用户复用，context 每次新建）。 */
   private async acquireHeadlessPage(
+    actorId: string,
     siteId: string | undefined,
     targetUrl: string,
     cookies: ImportedBrowserCookie[],
@@ -348,13 +419,13 @@ export class BrowserRuntime {
       );
     }
 
-    const { chromium } = pw;
-    const browser = await chromium.launch({
-      headless: true,
-      args: ["--disable-blink-features=AutomationControlled"],
-    });
+    // 复用该用户的浏览器实例（冷启动只付一次），context 仍每次新建并注入
+    // 本次 Cookie —— 页面/存储隔离与旧实现一致。
+    const browser = await this.getUserBrowser(pw, actorId);
+    this.acquireUserRef(actorId);
+    let context: BrowserContext | null = null;
     try {
-      const context = await browser.newContext({ userAgent: USER_AGENT, locale: "zh-CN" });
+      context = await browser.newContext({ userAgent: USER_AGENT, locale: "zh-CN" });
       if (cookies.length > 0) {
         await context.addCookies(toPlaywrightCookies(targetUrl, cookies));
       }
@@ -364,11 +435,19 @@ export class BrowserRuntime {
         page,
         mode: "headless",
         release: async () => {
-          await browser.close().catch(() => {});
+          await context?.close().catch(() => {});
+          this.releaseUserRef(actorId, browser);
         },
       };
     } catch (err) {
-      await browser.close().catch(() => {});
+      await context?.close().catch(() => {});
+      this.releaseUserRef(actorId, browser);
+      // 浏览器已崩溃/断开：清掉池里这只坏实例，别让后续请求继续撞它。
+      if (!browser.isConnected()) {
+        const entry = this.userBrowsers.get(actorId);
+        if (entry?.browser === browser) this.userBrowsers.delete(actorId);
+        await browser.close().catch(() => {});
+      }
       throw err;
     }
   }

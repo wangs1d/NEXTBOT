@@ -387,25 +387,33 @@ Widget _buildAssistantBodyInner(
           : const <String>[];
   if ((mediaCards != null && mediaCards.isNotEmpty) ||
       recoveredImageUrls.isNotEmpty) {
-    final List<AgentResultItem> items = recoveredImageUrls.isNotEmpty
-        ? recoveredImageUrls
-            .map(
-              (String url) => AgentResultItem(
-                type: "image",
-                text: "图片",
-                mediaType: "image",
-                thumbnailUrl: url,
-                mediaUrl: url,
+    final List<AgentResultItem> items = recoveredImageUrls
+        .map(
+          (String url) => AgentResultItem(
+            type: "image",
+            text: "图片",
+            mediaType: "image",
+            thumbnailUrl: url,
+            mediaUrl: url,
+          ),
+        )
+        .toList();
+    // 结构化卡（如购物登录卡 shopping_login）与纯图廊混在 mediaCards 里下发：
+    // 前者不能拍平成图片项（没有缩略图 → 渲染成空白，二维码/按钮全丢），
+    // 必须按 cardType 交回 AgentResultCard 渲染。
+    final List<Widget> mediaWidgets = recoveredImageUrls.isNotEmpty
+        ? <Widget>[
+            AgentResultCard(
+              data: AgentResultData(
+                cardType: "media",
+                title: "",
+                items: items,
+                footer: "",
               ),
-            )
-            .toList()
-        : mediaCards!.map(_cardToItem).toList();
-    final AgentResultData mediaData = AgentResultData(
-      cardType: "media",
-      title: "",
-      items: items,
-      footer: "",
-    );
+            ),
+          ]
+        : _mediaCardsToWidgets(mediaCards!, onUserAction);
+    if (mediaWidgets.isEmpty) return const SizedBox.shrink();
     // 旧数据正文里可能残留图片链接行，展示前剥掉，避免与图廊重复。
     // 渲染层兜底（2026-10-10 搜图轮 CONTENT_SUMMARY 裸 JSON 泄漏）：mediaCards
     // 分支在本方法提前 return，走不到 contentSummary 折叠卡路由，因此展示文本
@@ -421,7 +429,7 @@ Widget _buildAssistantBodyInner(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: <Widget>[
-        AgentResultCard(data: mediaData),
+        ...mediaWidgets,
         if (displayText.trim().isNotEmpty)
           Padding(
             padding: const EdgeInsets.only(top: AppTypography.space2),
@@ -553,6 +561,56 @@ AgentResultItem _cardToItem(Map<String, dynamic> m) {
   );
 }
 
+/// 媒体卡 Map 是否是「结构化卡片」（带 cardType 的完整卡载荷，如购物登录卡）。
+///
+/// `chat.media_ready` / `assistant_done.mediaCards` 既能装纯图廊项，也能装
+/// 服务端卡片（购物登录、比价结果）。纯图廊项没有 cardType；带 cardType 的
+/// 必须交给 AgentResultCard，否则会因无缩略图拍平成空白项（手机端二维码
+/// 不显示、卡内按钮丢失的根因）。
+bool _isStructuredCardEntry(Map<String, dynamic> m) {
+  final String cardType = (m["cardType"] ?? "").toString().trim();
+  return cardType.isNotEmpty && cardType != "media";
+}
+
+/// mediaCards → Widget 序列：结构化卡按原顺序独立成卡，其余项合并成图廊。
+List<Widget> _mediaCardsToWidgets(
+  List<Map<String, dynamic>> cards,
+  _UserActionHandler? onUserAction,
+) {
+  final List<Widget> widgets = <Widget>[];
+  final List<AgentResultItem> pendingMedia = <AgentResultItem>[];
+  void flushMedia() {
+    if (pendingMedia.isEmpty) return;
+    widgets.add(
+      AgentResultCard(
+        data: AgentResultData(
+          cardType: "media",
+          title: "",
+          items: List<AgentResultItem>.of(pendingMedia),
+          footer: "",
+        ),
+      ),
+    );
+    pendingMedia.clear();
+  }
+
+  for (final Map<String, dynamic> card in cards) {
+    if (_isStructuredCardEntry(card)) {
+      flushMedia();
+      widgets.add(
+        AgentResultCard(
+          data: AgentResultData.fromJson(card),
+          onUserAction: onUserAction,
+        ),
+      );
+    } else {
+      pendingMedia.add(_cardToItem(card));
+    }
+  }
+  flushMedia();
+  return widgets;
+}
+
 /// 卡片点击回调签名（与 buildMessageBody 的 onUserAction 参数同型）。
 typedef _UserActionHandler = void Function(
   AgentResultAction action, {
@@ -632,7 +690,8 @@ Widget? _buildEnvelopeBlocksBody(
           excludeTravelCard: excludeTravelCard,
           excludeCardTypes: excludeCardTypes);
     } else if (type == "media") {
-      final Widget? media = _mediaBlockWidget(context, cs, block);
+      final Widget? media =
+          _mediaBlockWidget(context, cs, block, onUserAction: onUserAction);
       if (media != null) blockWidgets.add(media);
     } else if (type == "media_segments") {
       // 交错段：text/media 段按序展开（与 renderBlocks 同构）
@@ -718,7 +777,8 @@ Widget? _buildReplyBlocksBody(
           excludeTravelCard: excludeTravelCard,
           excludeCardTypes: excludeCardTypes);
     } else if (type == "media") {
-      final Widget? media = _mediaBlockWidget(context, cs, block);
+      final Widget? media =
+          _mediaBlockWidget(context, cs, block, onUserAction: onUserAction);
       if (media != null) blockWidgets.add(media);
     } else {
       final String text = block["text"]?.toString() ?? "";
@@ -772,7 +832,8 @@ Widget? _buildUnifiedMediaCardBody(
   for (final Map<String, dynamic> block in base) {
     final String type = block["type"]?.toString() ?? "text";
     if (type == "media") {
-      final Widget? media = _mediaBlockWidget(context, cs, block);
+      final Widget? media =
+          _mediaBlockWidget(context, cs, block, onUserAction: onUserAction);
       if (media != null) blockWidgets.add(media);
       continue;
     }
@@ -822,7 +883,9 @@ Widget? _buildUnifiedMediaCardBody(
   if (!hasRenderBlocks) {
     final List<Map<String, dynamic>>? mediaCards = message.mediaCards;
     if (mediaCards != null && mediaCards.isNotEmpty) {
-      blockWidgets.addAll(_groupedMediaWidgets(context, cs, mediaCards));
+      blockWidgets.addAll(
+        _groupedMediaWidgets(context, cs, mediaCards, onUserAction: onUserAction),
+      );
     }
   }
 
@@ -905,13 +968,25 @@ void _appendCardWidget(
 Widget? _mediaBlockWidget(
   BuildContext context,
   ColorScheme cs,
-  Map<String, dynamic> block,
-) {
+  Map<String, dynamic> block, {
+  _UserActionHandler? onUserAction,
+}) {
   final List<Map<String, dynamic>> cards =
       (block["cards"] as List<dynamic>? ?? const <dynamic>[])
           .whereType<Map<String, dynamic>>()
           .toList();
   if (cards.isEmpty) return null;
+  // 块里混入结构化卡（如购物登录卡）时逐个建卡；纯图廊仍按媒体块编组。
+  if (cards.any(_isStructuredCardEntry)) {
+    return Padding(
+      padding: const EdgeInsets.only(top: AppTypography.space2),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: _mediaCardsToWidgets(cards, onUserAction),
+      ),
+    );
+  }
   final List<AgentResultItem> items = cards.map(_cardToItem).toList();
   final String groupTitle = (block["groupTitle"] ?? "").toString().trim();
   final String sideA = (block["sideA"] ?? "").toString().trim();
@@ -946,8 +1021,9 @@ Widget? _mediaBlockWidget(
 List<Widget> _groupedMediaWidgets(
   BuildContext context,
   ColorScheme cs,
-  List<Map<String, dynamic>> cards,
-) {
+  List<Map<String, dynamic>> cards, {
+  _UserActionHandler? onUserAction,
+}) {
   final List<Widget> widgets = <Widget>[];
   final Map<String, List<Map<String, dynamic>>> groups =
       <String, List<Map<String, dynamic>>>{};
@@ -974,6 +1050,7 @@ List<Widget> _groupedMediaWidgets(
         if (sideB.isNotEmpty) "sideB": sideB,
         "cards": groupCards,
       },
+      onUserAction: onUserAction,
     );
     if (widget != null) widgets.add(widget);
   });
@@ -988,11 +1065,46 @@ List<Widget> _groupedMediaWidgets(
 /// 这里就该是「几行文字 + 几张图紧贴文字」的自然形态，不应套大 card 框。
 Widget buildPendingMediaCards(
   List<Map<String, dynamic>> cards,
-  ColorScheme cs,
-) {
-  return MediaInlineRow(
-    items: cards.map(_cardToItem).toList(),
-    cs: cs,
+  ColorScheme cs, {
+  _UserActionHandler? onUserAction,
+}) {
+  // 纯图廊保持轻量内联行；夹带结构化卡（购物登录卡等）时按顺序混排：
+  // 卡片走 AgentResultCard，照片仍走 MediaInlineRow，不把二维码拍平成空白项。
+  if (!cards.any(_isStructuredCardEntry)) {
+    return MediaInlineRow(
+      items: cards.map(_cardToItem).toList(),
+      cs: cs,
+    );
+  }
+  final List<Widget> widgets = <Widget>[];
+  final List<AgentResultItem> pendingMedia = <AgentResultItem>[];
+  void flushMedia() {
+    if (pendingMedia.isEmpty) return;
+    widgets.add(MediaInlineRow(
+      items: List<AgentResultItem>.of(pendingMedia),
+      cs: cs,
+    ));
+    pendingMedia.clear();
+  }
+
+  for (final Map<String, dynamic> card in cards) {
+    if (_isStructuredCardEntry(card)) {
+      flushMedia();
+      widgets.add(
+        AgentResultCard(
+          data: AgentResultData.fromJson(card),
+          onUserAction: onUserAction,
+        ),
+      );
+    } else {
+      pendingMedia.add(_cardToItem(card));
+    }
+  }
+  flushMedia();
+  return Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    mainAxisSize: MainAxisSize.min,
+    children: widgets,
   );
 }
 

@@ -35,7 +35,9 @@ export const SHOPPING_COMPARE_CHAT_TOOLS: ChatCompletionTool[] = [
         "适用「帮我比价 XX」「XX 哪个平台便宜」「买之前帮我看看价格」。前置：已授权 Cookie 自动注入；未授权可匿名先查，" +
         "遇登录墙/验证码会把二维码推到聊天，用户扫码后继续补价。**交接只在 human-required 时发生**：" +
         "回执带 handoff / loginRequired / humanRequired 表示该平台被登录墙或验证码拦住，用户需自己扫码登录/过验证" +
-        "（桌面端在内置浏览器操作；手机端/无头模式二维码已推到聊天），回复里要明确写出这句交接指引；" +
+        "（桌面端在内置浏览器操作；手机端/无头模式看 loginRequired.pushedLabels）。" +
+        "**只有 pushedLabels 非空才能说「二维码已推到聊天」**；pushedLabels 缺失表示这轮没推出去，" +
+        "必须照实说没能推送并建议稍后重试，绝不能空口承诺已推送；" +
         "unavailablePlatforms 里的普通「无匹配 / 读取失败」如实说明，不要写成需要登录，也不要把「价格未知」当结论收工。" +
         "同款判定基于标题归一化 + 规格匹配，低置信分组标注「疑似同款」，展示时须说明。" +
         "回执带 retryHint 时按其指引改用通用多步浏览器操作自主补齐报价，不要把「没抓到」当结论收工。" +

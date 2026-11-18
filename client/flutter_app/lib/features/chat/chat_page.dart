@@ -3207,6 +3207,7 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
                   child: buildPendingMediaCards(
                     widget.mainMessage.pendingMediaCards!,
                     cs,
+                    onUserAction: widget.onUserAction,
                   ),
                 ),
               if (!widget.isUser &&
