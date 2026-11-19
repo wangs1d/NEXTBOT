@@ -473,6 +473,14 @@ packages:
       url: "https://pub.flutter-io.cn"
     source: hosted
     version: "4.1.2"
+  image:
+    dependency: "direct main"
+    description:
+      name: image
+      sha256: bc13f61f0f5cb77936e78ae5dae3800f442718dac5d2bc4654f03c239230ed0c
+      url: "https://pub.flutter-io.cn"
+    source: hosted
+    version: "4.13.1"
   image_picker:
     dependency: "direct main"
     description:
@@ -822,6 +830,14 @@ packages:
       url: "https://pub.flutter-io.cn"
     source: hosted
     version: "7.0.2"
+  photo_manager:
+    dependency: "direct main"
+    description:
+      name: photo_manager
+      sha256: "2d00a785b501bf1e5f6180bbef772846e767be11d45d11112b63092ef54a419e"
+      url: "https://pub.flutter-io.cn"
+    source: hosted
+    version: "3.12.0"
   platform:
     dependency: transitive
     description:

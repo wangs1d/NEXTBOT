@@ -33,25 +33,14 @@ async function main(): Promise<void> {
   console.log(`[0] query=${QUERY}`);
 
   // ---------- 1. search_videos 真执行：候选 → 并发解析可播流 ----------
-  const { VideoGrabService, setVideoGrabServiceRef, setVideoGrabMcpClientRef } = await import(
+  const { VideoGrabService, setVideoGrabServiceRef } = await import(
     "../src/services/video-grab-service.js"
   );
   const { UpstreamSearchService } = await import("../src/services/upstream-search-service.js");
   const { enrichVideosWithPlayable } = await import("../src/tools/video-tools.js");
-  const { McpClientService } = await import("../src/services/mcp-client-service.js");
 
   const videoGrabService = new VideoGrabService();
   setVideoGrabServiceRef(videoGrabService);
-  let mcpReady = false;
-  try {
-    const mcp = new McpClientService();
-    await mcp.discoverTools();
-    setVideoGrabMcpClientRef(mcp);
-    mcpReady = true;
-  } catch (e) {
-    note(`MCP 装配失败（抖音/小红书候选可能解析不出流）：${e instanceof Error ? e.message : e}`);
-  }
-  note(`MCP(yby6) ${mcpReady ? "已装配" : "未装配"}`);
 
   const search = new UpstreamSearchService(null as never);
   const t0 = Date.now();

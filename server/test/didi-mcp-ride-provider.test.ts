@@ -149,9 +149,13 @@ test("didi-mcp - search：沙箱文本解析出车型选项，optionId 编码报
   assert.equal(options[0].id, "didi:traceECO123:3");
   assert.equal(options[1].id, "didi:traceECO123:5");
   assert.equal(options[2].id, "didi:traceECO123:7");
-  // 预估价/接驾 eta 尽力解析（第一档命中「预估价 ¥58」+「3 分钟内接驾」）
+  // 预估价/接驾 eta 按行解析：三档必须各是各的价（曾把所有车型套成同一个价）
   assert.equal(options[0].amountCny, 58);
+  assert.equal(options[1].amountCny, 76);
+  assert.equal(options[2].amountCny, 105);
   assert.equal(options[0].etaMinutes, 3);
+  assert.equal(options[1].etaMinutes, null);
+  assert.equal(options[2].etaMinutes, null);
   assert.equal((options[0].extra as Record<string, unknown>).estimateTraceId, "traceECO123");
   assert.equal((options[0].extra as Record<string, unknown>).productCategory, "3");
   assert.match(note ?? "", /滴滴官方 MCP/);
@@ -162,6 +166,39 @@ test("didi-mcp - search：沙箱文本解析出车型选项，optionId 编码报
   const estimateCall = fake.calls.find((c) => c.tool === "taxi_estimate");
   assert.ok(estimateCall);
   for (const v of Object.values(estimateCall.args)) assert.equal(typeof v, "string");
+});
+
+test("didi-mcp - search：接驾分钟数不能当价格（每行价格独立解析）", async () => {
+  const fake = new FakeMcp(
+    [{ alias: "didi", url: "https://mcp.didichuxing.com/mcp-servers-sandbox?key=k" }],
+    {
+      maps_textsearch: sandboxResponses().maps_textsearch,
+      taxi_estimate: {
+        ok: true,
+        result: {
+          content: [
+            {
+              type: "text",
+              text: [
+                "为您查询到 3 个车型：",
+                "快车（product_category: 1），预估流程ID：traceA，约 1 分钟内接驾，预估价格 45 元",
+                "专车（product_category: 2），预估流程ID：traceA，约 3 分钟内接驾，预估价格 78 元",
+              ].join("\n"),
+            },
+          ],
+        },
+      },
+    },
+  );
+  const provider = new DidiMcpRideProvider(asMcp(fake));
+  const result = await provider.search(SEARCH_QUERY, PROVIDER_CTX);
+  assert.equal(result.ok, true);
+  const { options } = result as { ok: true; options: Array<Record<string, unknown>> };
+  assert.equal(options.length, 2);
+  assert.equal(options[0].amountCny, 45);
+  assert.equal(options[0].etaMinutes, 1);
+  assert.equal(options[1].amountCny, 78);
+  assert.equal(options[1].etaMinutes, 3);
 });
 
 test("didi-mcp - search 诚实边界：估价文本解析不出车型/流程ID 时不造假", async () => {

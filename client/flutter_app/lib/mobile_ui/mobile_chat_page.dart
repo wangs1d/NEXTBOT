@@ -4,21 +4,25 @@ import "dart:typed_data";
 import "package:flutter/material.dart";
 
 import "../core/config/api_config.dart";
+import "../core/config/media_url.dart";
 import "../core/models/chat_models.dart";
 import "../core/models/notify_action.dart";
 import "../core/services/agent_name_store.dart";
 import "../core/services/side_chat_api.dart";
 import "../core/theme/app_typography.dart";
 import "../core/utils/agent_result_parser.dart";
-import "../core/vision/pick_gallery_vision.dart";
+import "../core/vision/vision_user_limits.dart";
 import "../core/vision/vision_wire_frame.dart";
+import "../features/chat/agent_action_choice_card.dart";
 import "../features/chat/agent_result_card.dart";
 import "../features/chat/evening_digest_card.dart";
 import "../features/chat/image_preview_panel.dart";
+import "../features/chat/media_disk_cache.dart";
 import "../features/chat/message_body_renderer.dart";
 import "../features/chat/travel_plan_archive.dart";
 import "../features/chat/travel_plan_launcher.dart";
 import "mobile_agent_status_orb.dart";
+import "mobile_attach_panel.dart";
 import "mobile_chat_controller.dart";
 import "mobile_theme.dart";
 
@@ -233,14 +237,37 @@ class _MobileChatPageState extends State<MobileChatPage> {
     });
   }
 
-  /// 「+」选照片：多选(上限与桌面端一致 4 张)进待发送区。
-  Future<void> _pickImages() async {
-    final List<VisionWireFrame> frames = await pickGalleryVisionWireFrames();
-    if (frames.isEmpty) return;
+  /// 点输入框左侧「+」：弹底部附件面板（拍照/相册/本地文件/打电话 + 相册网格）。
+  /// 面板返回的照片**不直接发送**（2026-11-19 用户定）：进输入框上方的待发送
+  /// 预览条，用户配完文字再按发送键一起发出；纯图也可直接按发送。
+  Future<void> _showAttachPanel() async {
+    _composerFocus.unfocus();
+    final List<VisionWireFrame>? frames = await MobileAttachPanel.show(
+      context,
+      onCall: _callAgent,
+    );
+    if (frames == null || frames.isEmpty || !mounted) return;
     setState(() {
-      _pendingFrames.addAll(frames);
+      for (final VisionWireFrame f in frames) {
+        if (_pendingFrames.length >= kAgentUserVisionMaxFrames) break;
+        _pendingFrames.add(f);
+      }
       _canSend = _canSendNow();
     });
+    // 选完图聚焦输入框，引导用户接着输入文字。
+    FocusScope.of(context).requestFocus(_composerFocus);
+  }
+
+  /// 附件面板「打电话」：拉起与 Agent 的语音通话。
+  void _callAgent() {
+    // 手机端通话暂未接入（2026-11-19 用户定：先不做）。面板「打电话」保持
+    // 占位反馈；真实接法是发 `phone.call_my_agent`（桌面端 main.dart
+    // `_callMyAgentViaPhone` 同协议），接通后复用全屏通话页，随时可接。
+    final ScaffoldMessengerState? messenger =
+        mounted ? ScaffoldMessenger.maybeOf(context) : null;
+    messenger?.showSnackBar(
+      const SnackBar(content: Text("正在呼叫 Agent…"), duration: Duration(seconds: 2)),
+    );
   }
 
   void _removePendingFrame(int index) {
@@ -746,7 +773,7 @@ class _MobileChatPageState extends State<MobileChatPage> {
                     top: (hasBubbleText || i > 0) ? AppTypography.space2 : 0),
                 child: Align(
                   alignment: Alignment.centerLeft,
-                  child: AgentResultCard(data: standaloneCards[i]),
+                  child: _buildStandaloneCard(standaloneCards[i], m),
                 ),
               ),
           ],
@@ -754,6 +781,26 @@ class _MobileChatPageState extends State<MobileChatPage> {
       }
     }
     return _buildBubble(context, m, isUser, p);
+  }
+
+  /// 气泡外独立卡的渲染：带 actions 的卡必须走选择型卡壳，否则按钮整排丢失
+  /// （手机端此前直接 AgentResultCard，支付授权/确认卡的按钮在真机上从未显示）。
+  /// 购物/叫车等自绘卡（金额、倒计时、卡内动作按钮）仍由卡片本身承载。
+  Widget _buildStandaloneCard(AgentResultData data, ChatMessage m) {
+    void onAction(AgentResultAction action,
+            {required AgentResultData cardData}) =>
+        _controller.sendCardAction(
+          action,
+          cardData: cardData,
+          messageId: m.messageId,
+        );
+    if (data.actions.isNotEmpty && !cardOwnsChrome(data)) {
+      return AgentActionChoiceCard(
+        data: data,
+        onAction: (AgentResultAction a) => onAction(a, cardData: data),
+      );
+    }
+    return AgentResultCard(data: data, onUserAction: onAction);
   }
 
   /// 首启引导·取名卡（2026-11-09 改版，对照参考稿）：问题正文 + 候选名
@@ -1159,9 +1206,173 @@ class _MobileChatPageState extends State<MobileChatPage> {
     );
   }
 
+  /// 用户消息带照片时：照片与文字各自独立成一个气泡（IM 式隔离布局）。
+  /// 照片泡在上、文字泡在下，互不混在同一气泡里；纯图消息只出照片泡，
+  /// 不再渲染「（见图）」占位文字。
+  /// 本会话用内存字节即时显示；历史加载（重启/换设备）走 userImageUrls。
+  Widget _buildUserPhotoBubbles(BuildContext context, ChatMessage m,
+      MobilePalette p, List<Uint8List> images) {
+    final List<Widget> thumbs = <Widget>[];
+    for (int i = 0; i < images.length; i++) {
+      thumbs.add(GestureDetector(
+        onTap: () => showImagePreviewFullScreenFromBytes(
+          context,
+          images: images,
+          index: i,
+          source: "发出的照片",
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: Image.memory(
+            images[i],
+            width: 76,
+            height: 76,
+            fit: BoxFit.cover,
+            gaplessPlayback: true,
+          ),
+        ),
+      ));
+    }
+    return _buildUserPhotoBubblesLayout(context, m, p, thumbs);
+  }
+
+  /// 历史回填：按服务端落盘的 userImageUrls 渲染真实缩略图（走磁盘缓存 +
+  /// 凭证注入的 CachedMediaImage），替换旧的「配图 ×N」文案回退。
+  Widget _buildUserUrlPhotoBubbles(BuildContext context, ChatMessage m,
+      MobilePalette p, List<String> urls) {
+    final List<Widget> thumbs = <Widget>[];
+    for (int i = 0; i < urls.length; i++) {
+      final String url = MediaUrl.resolveForHeaders(urls[i]);
+      thumbs.add(GestureDetector(
+        onTap: () => showImagePreviewFullScreenFromUrls(
+          context,
+          urls: urls,
+          index: i,
+          source: "发出的照片",
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: CachedMediaImage(
+            url: url,
+            width: 76,
+            height: 76,
+            fit: BoxFit.cover,
+            gaplessPlayback: true,
+            cacheWidth: 228,
+          ),
+        ),
+      ));
+    }
+    return _buildUserPhotoBubblesLayout(context, m, p, thumbs);
+  }
+
+  /// 照片泡 + 文字泡的共享布局：[thumbs] 已构建好（内存字节或网络 URL）。
+  Widget _buildUserPhotoBubblesLayout(BuildContext context, ChatMessage m,
+      MobilePalette p, List<Widget> thumbs) {
+    final String bodyText = m.text.trim();
+    final bool isImagePlaceholder = bodyText.isEmpty ||
+        bodyText == "（见图）" ||
+        bodyText.contains("用户发送了摄像头/配图画面");
+    final bool hasText = !isImagePlaceholder;
+
+    Widget pendingBadge() => Padding(
+          padding: const EdgeInsets.only(top: 3),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Icon(Icons.schedule, size: 12, color: p.textMuted),
+              const SizedBox(width: 3),
+              Text("离线待发送",
+                  style: TextStyle(color: p.textMuted, fontSize: 11)),
+            ],
+          ),
+        );
+
+    Widget shell(Widget child, {required bool isTail}) => Align(
+          alignment: Alignment.centerRight,
+          child: Container(
+            constraints: BoxConstraints(
+              maxWidth: MediaQuery.sizeOf(context).width * 0.738,
+            ),
+            margin: const EdgeInsets.symmetric(vertical: 5),
+            padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 11),
+            decoration: BoxDecoration(
+              color: p.userBubble,
+              borderRadius: BorderRadius.only(
+                topLeft: Radius.circular(MobileTheme.bubbleRadius),
+                topRight:
+                    Radius.circular(isTail ? 6 : MobileTheme.bubbleRadius),
+                bottomLeft: Radius.circular(MobileTheme.bubbleRadius),
+                bottomRight: Radius.circular(MobileTheme.bubbleRadius),
+              ),
+            ),
+            child: child,
+          ),
+        );
+
+    // 照片不套泡壳（2026-11-19 用户定）：裸图右对齐，与 IM 惯例一致；
+    // 只有文字仍走气泡。
+    final Widget photoBlock = Padding(
+      padding: const EdgeInsets.symmetric(vertical: 5),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            alignment: WrapAlignment.end,
+            children: thumbs,
+          ),
+          if (!hasText && m.pendingDelivery) pendingBadge(),
+        ],
+      ),
+    );
+
+    // 纯图：只出裸照片。
+    if (!hasText) return photoBlock;
+
+    // 图文同发：裸照片 + 文字泡，两个独立块。
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        photoBlock,
+        shell(
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Text(
+                m.text,
+                style: const TextStyle(
+                  fontSize: AppTypography.bodyLarge,
+                  height: AppTypography.bodyLineHeight,
+                ).copyWith(color: p.userBubbleText),
+              ),
+              if (m.pendingDelivery) pendingBadge(),
+            ],
+          ),
+          isTail: true,
+        ),
+      ],
+    );
+  }
+
   Widget _buildBubble(
       BuildContext context, ChatMessage m, bool isUser, MobilePalette p,
       {List<String> excludeCardTypes = const <String>[]}) {
+    // 用户随消息发出的照片：与文字隔离，各自独立成泡。
+    // 本会话优先用内存字节；重启/换设备后字节不在，走服务端落盘的 URL。
+    if (isUser) {
+      final List<Uint8List>? sentImages = _sentImageBytes[m.messageId];
+      if (sentImages != null && sentImages.isNotEmpty) {
+        return _buildUserPhotoBubbles(context, m, p, sentImages);
+      }
+      if (m.userImageUrls.isNotEmpty) {
+        return _buildUserUrlPhotoBubbles(context, m, p, m.userImageUrls);
+      }
+    }
     final Color bubble = isUser ? p.userBubble : p.assistantBubble;
     final Color text = isUser ? p.userBubbleText : p.assistantBubbleText;
     return Align(
@@ -1397,11 +1608,11 @@ class _MobileChatPageState extends State<MobileChatPage> {
     );
   }
 
-  /// 输入卡左侧「+」按钮：选相册照片随消息发出(与桌面端同 visionFrames 协议)。
+  /// 输入卡左侧「+」按钮：点开底部附件面板(拍照/相册/本地文件/打电话 + 相册网格)。
   Widget _buildAttachButton(MobilePalette p) {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTap: _pickImages,
+      onTap: _showAttachPanel,
       child: Container(
         width: 40,
         height: 40,

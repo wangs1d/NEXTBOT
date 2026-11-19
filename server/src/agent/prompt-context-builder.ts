@@ -32,7 +32,7 @@ import { getConversationTimelineService } from "../services/conversation-timelin
 import { getTaskPlanStore, taskPlanKey } from "./task-plan-store.js";
 import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
 import { getMemoryManagerService } from "../services/memory-manager-service.js";
-import { stripProfileFactDuplicateLines } from "../services/user-personalization/profile-fact-authority.js";
+import { gateProfileMarkdownForPrompt, stripProfileFactDuplicateLines } from "../services/user-personalization/profile-fact-authority.js";
 import { getGlobalMemoryInventory } from "../brain/memory-inventory.js";
 import type { TurnUnderstanding } from "./task-router.js";
 import type {
@@ -218,6 +218,32 @@ function compactSchemaField(text: string, maxChars: number): string {
 }
 
 /**
+ * 自由文本画像摘要按本轮 query 行级门控（2026-11-18 根修）。
+ *
+ * memoryManager 的派生摘要（高频话题/偏好/近期意图）此前整块追加进
+ * 【用户长期画像】——问年龄时它把"喜欢刘浩存/关注旅游"等一起摊出来，
+ * 是「问一个字段、顺带全报」的残余通道。这里只保留与用户原话有 2-gram /
+ * 英文词重叠的行；无重叠行一律不注入。query 为空时保持原样（首轮/程序调用）。
+ */
+function gateFreeTextLinesForQuery(text: string | undefined, query: string): string | undefined {
+  const trimmed = text?.trim();
+  if (!trimmed) return undefined;
+  const q = query.replace(/\s+/g, "").toLowerCase();
+  if (!q) return trimmed;
+  const grams = new Set<string>();
+  for (let i = 0; i + 2 <= q.length; i++) grams.add(q.slice(i, i + 2));
+  for (const term of q.match(/[a-z0-9]{3,}/g) ?? []) grams.add(term);
+  const kept = trimmed.split("\n").filter((line) => {
+    const lower = line.toLowerCase();
+    for (const gram of grams) {
+      if (lower.includes(gram)) return true;
+    }
+    return false;
+  });
+  return kept.length > 0 ? kept.join("\n") : undefined;
+}
+
+/**
  * 文件画像 + memoryManager 派生摘要合并（2026-09-29 互斥改合并）：
  * 文件画像（LLM 抽取的当前事实）为主位；派生摘要与画像不重复的行追加在后。
  * 产物进稳定层【用户长期画像】，吃 prefix cache——画像只在真变更时断一次缓存。
@@ -354,8 +380,6 @@ export type BuildPromptContextInput = {
   narrativeRecall?: string;
   interruptedContext?: string;
   userLocation?: string;
-  /** 常去地点背景块（DBSCAN 纯算法挖掘，agent-core 传入，零 LLM） */
-  frequentPlaces?: string;
   /**
    * 发送消息的设备类别（2026-10-07）：desktop | mobile。WS 连接自报，
    * 注入【运行环境】块让模型感知手机/电脑（手机端短回复、不引导桌面操作）。
@@ -731,7 +755,17 @@ export class PromptContextBuilder {
     // 当日日志检索块已随 agent-core recallGate 管道拆除（2026-10-22）：
     // journal 搜索自 v3 起从未随门控运行（恒空），不再保留装配分支。
     const toneGuidance = compactPromptBlock(input.personalization?.toneGuidance, 480);
-    const rawUserProfile = compactPromptBlock(input.personalization?.userProfile, 700);
+    // 结构化事实块先算（2026-11-18 根修）：画像投影的行级门控需要本轮实际注入的
+    // 字段白名单——画像里的身份字段行只在权威块本轮真的渲染时才保留，否则画像
+    // 又变成「每轮把全部身份字段摊在桌上」的第二权威源。
+    const facts = this.buildUserFactsBlock(input.actorId, userText);
+    const rawUserProfile = compactPromptBlock(
+      gateProfileMarkdownForPrompt(input.personalization?.userProfile, {
+        injectedFactFields: new Set(facts.injectedValues.keys()),
+        query: userText,
+      }),
+      700,
+    );
     // 仿人记忆连续性：提升阈值让更多召回记忆能被 LLM 看到，避免关键上下文被截断
     const narrativeRecall = compactPromptBlock(formatNarrativeRecallPrompt(input.narrativeRecall), 800);
     // 工作记忆摘要 / 最近对话回顾：作为独立块注入，不走 formatNarrativeRecallPrompt。
@@ -755,7 +789,7 @@ export class PromptContextBuilder {
       turnUnderstanding?.scheduleQuery === true ? 700 : 400,
     );
     const compactTravelState = compactPromptBlock(travelState, 300);
-    const userProfileFromManagerCompact = userProfileFromManager;
+    const userProfileFromManagerCompact = gateFreeTextLinesForQuery(userProfileFromManager, userText);
     // 2026-09-29 互斥改合并：文件画像（LLM 抽取的当前事实）升稳定层【用户长期画像】主位，
     // manager 派生摘要非重复行追加；原互斥（manager 存在即弃文件画像）导致画像被挤掉。
     const userProfileSummary = mergeUserProfilePromptSources(
@@ -885,7 +919,7 @@ export class PromptContextBuilder {
 
     // 结构化事实块：用户档案字段的确定性记录（KV 式精确寻址，无条件注入=用户速览）；
     // P0-1 后字节稳定渲染，命中字段进 turnAddressing 动态块。
-    const facts = this.buildUserFactsBlock(input.actorId, userText);
+    // （facts 已在上面提前计算，画像门控依赖它本轮注入的字段集。）
     const userFactsBlock = facts.stableBlock;
 
     // 用户关系一览（2026-10-20 生活模型）：人/宠物/组织的结构化关系，稳定层注入
@@ -1010,7 +1044,6 @@ export class PromptContextBuilder {
       // 注:userIsStatingData 已在 agent-core.ts:846-848 提前过滤「陈述具体数据」
       // 场景,这里不需要再判定。
       ...(input.userLocation ? { userLocation: input.userLocation } : {}),
-      ...(input.frequentPlaces ? { frequentPlaces: input.frequentPlaces } : {}),
       ...(this.buildSkillIndexPrompt(userText) ?? {}),
     };
 
@@ -1099,7 +1132,11 @@ export class PromptContextBuilder {
         .matchTopicsInText(actorId, userText)
         .map((n) => n.topic.trim())
         .filter(Boolean);
-      return { stableBlock: store.renderForPrompt(actorId) ?? undefined, matchedTopics };
+      return {
+        stableBlock:
+          store.renderForPrompt(actorId, new Set(matchedTopics), { onlyMatched: true }) ?? undefined,
+        matchedTopics,
+      };
     } catch (err) {
       console.log(`[PromptContextBuilder] 用户理解块构建失败（忽略）: ${err}`);
       return { stableBlock: undefined, matchedTopics: [] };
@@ -1157,13 +1194,20 @@ export class PromptContextBuilder {
       const groundedFields = new Set<string>(matchedFields);
       if (process.env.PROFILE_ROUTER_ENABLED !== "0") {
         const whitelist = new Set<string>(SNAPSHOT_CONSTANT_FIELDS);
-        // T3 语义召回命中 = 本轮提问相关
-        for (const field of recallProfileFieldsSync(actorId, userText)) {
-          if (!field) continue;
-          whitelist.add(field);
-          groundedFields.add(field);
+        // 按需注入的字段白名单（2026-11-18 二次收紧）：
+        //   - T2 命中（字段名/值/问法）→ 只注入命中的字段；
+        //   - T2 无命中 → 语义兜底只取 top-1，不再把 top3 全塞进来当背景。
+        // 事故：「我几岁」T2=年龄，但语义 top3 仍把姓名/住址一并塞入白名单，
+        // 模型看到就顺带全报。召回必须对应问题，背景不能靠"先摆出来"。
+        if (matchedFields.length > 0) {
+          for (const field of matchedFields) whitelist.add(field);
+        } else {
+          const topSemantic = recallProfileFieldsSync(actorId, userText)[0];
+          if (topSemantic) {
+            whitelist.add(topSemantic);
+            groundedFields.add(topSemantic);
+          }
         }
-        for (const field of matchedFields) whitelist.add(field);
         fields = whitelist;
       }
       const stableBlock =

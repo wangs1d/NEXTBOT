@@ -192,7 +192,7 @@ export async function resolveUserLocationPrompt(ctx?: ClientGeoContext): Promise
   const accuracy = formatAccuracy(info.accuracyMeters);
   const coordNote =
     info.latitude != null && info.longitude != null
-      ? `（GPS ${info.latitude.toFixed(5)}, ${info.longitude.toFixed(5)}${accuracy ? `，精度 ${accuracy}` : ""}）`
+      ? `（GPS ${info.latitude.toFixed(6)}, ${info.longitude.toFixed(6)}${accuracy ? `，精度 ${accuracy}` : ""}）`
       : "";
   // 精确位置块（2026-11-14）：只给省市区等于「大概在哪」，街区/小区/地标必须一起给出，
   // 模型才有材料回答「我现在在哪」而不是「你在某某市」。地标距离也如实标注。

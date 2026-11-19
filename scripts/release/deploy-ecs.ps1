@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+﻿﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   首次/更新部署 server 到阿里云 ECS（manifest 控制面 + 未来 platform 模式的 runtime）。
@@ -109,6 +109,10 @@ if [ -f /tmp/nb-extract/server/.env ]; then
   # 静默空转（上线以来从未真正追加过任何键，缺键只能靠人肉发现——搜索配置事故）。
   while IFS= read -r line; do
     key=`$(printf '%s' "`$line" | sed -n 's/^\([A-Za-z0-9_]\+\)=.*`$/\1/p')
+    # 平台相关键不得跨机合并：NEXTBOT_DATA_DIR 是本机数据根（Windows 值灌进
+    # Linux 会解析成垃圾路径，2026-11-19 实证把 ECS 数据根带偏）。缺键让服务器
+    # 走平台默认值，而不是抄开发机的。
+    case "`$key" in NEXTBOT_DATA_DIR) continue;; esac
     if [ -n "`$key" ] && ! grep -qE "^`$key=" /opt/nextbot/server/.env; then
       echo "`$line" >> /opt/nextbot/server/.env
     fi
@@ -120,6 +124,8 @@ fi
 if [ -f /tmp/nb-extract/server/.env.local ]; then
   while IFS= read -r line; do
     key=`$(printf '%s' "`$line" | sed -n 's/^\([A-Za-z0-9_]\+\)=.*`$/\1/p')
+    # 同上：平台相关键不跨机合并（NEXTBOT_DATA_DIR 本地 Windows 值经此路灌坏过 ECS）
+    case "`$key" in NEXTBOT_DATA_DIR) continue;; esac
     if [ -n "`$key" ] && ! grep -qE "^`$key=" /opt/nextbot/server/.env; then
       echo "`$line" >> /opt/nextbot/server/.env
     fi
@@ -182,6 +188,10 @@ Environment=DOWNLOADS_DIR=$DeployDir/downloads
 # /v1 metered API retail price in cents per 1M tokens (input 1.00 CNY, output 3.50 CNY).
 Environment=RECHARGE_API_PRICE_INPUT_CENTS_PER_MTOK=100
 Environment=RECHARGE_API_PRICE_OUTPUT_CENTS_PER_MTOK=350
+# Webpay/额度充值回跳与异步通知必须用公网域名：未设置时 webpay-config 回落
+# 127.0.0.1:3000，支付宝付款成功后会把用户浏览器带回他自己手机/电脑的 localhost。
+Environment=WEBPAY_BASE_URL=https://login.nextbot.top
+Environment=WEBPAY_NOTIFY_URL=https://login.nextbot.top/api/webpay/notify
 # Pin the data root: this unit is rewritten wholesale on every deploy, and without an
 # explicit value the service silently falls back to platform-default root resolution.
 # Keep this ASCII -- non-ASCII here-string content arrives mojibake on the server.

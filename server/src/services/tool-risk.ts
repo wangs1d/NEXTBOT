@@ -68,6 +68,8 @@ const COMPOSITE_ACTION_RISK: Record<string, Record<string, ToolRiskClass>> = {
     list: "read_only",
     confirm: "write",
     forget: "irreversible",
+    timeline: "read_only",
+    habits: "read_only",
   },
   smart_home: {
     list_devices: "read_only",

@@ -6,7 +6,11 @@ import { test } from "node:test";
 
 import Database from "better-sqlite3";
 
-import { LocationHistoryService, type DwellEpisode } from "../src/services/location-history-service.js";
+import {
+  LocationHistoryService,
+  type DayTimeline,
+  type DwellEpisode,
+} from "../src/services/location-history-service.js";
 import {
   PlaceSemanticsService,
   classifyByTemporal,
@@ -182,6 +186,197 @@ test("PlaceSemanticsService：识别家/公司、落库、匹配、用户确认�
 
     service.close();
     reloaded.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("PlaceSemanticsService.habits：从多天日行程算工作日中位到达/离开", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "nextbot-place-habits-"));
+  const dbPath = join(dir, "location.db");
+  // 2026-09-11 是周五；最近 5 天 = 周一~周五
+  const now = new Date("2026-09-11T12:00:00Z");
+  const dayTimeline = (
+    _actorId: string,
+    opts?: { date?: string; timezone?: string },
+  ): DayTimeline => {
+    const date = opts?.date ?? "2026-09-11";
+    const weekday = new Date(`${date}T00:00:00Z`).getUTCDay();
+    const visits: DayTimeline["visits"] = [];
+    if (weekday >= 1 && weekday <= 5) {
+      visits.push({
+        kind: "stay",
+        startAt: `${date}T01:00:00Z`, // 09:00 CST
+        endAt: `${date}T10:00:00Z`, // 18:00 CST
+        startLocal: "09:00",
+        endLocal: "18:00",
+        durationMinutes: 540,
+        latitude: 39.95,
+        longitude: 116.45,
+        label: "望京科技园",
+        city: "北京市",
+        district: "朝阳区",
+        sampleCount: 8,
+        accuracyMeters: 20,
+      });
+      visits.push({
+        kind: "stay",
+        startAt: `${date}T11:00:00Z`, // 19:00 CST
+        endAt: `${date}T15:00:00Z`, // 23:00 CST
+        startLocal: "19:00",
+        endLocal: "23:00",
+        durationMinutes: 240,
+        latitude: 39.9,
+        longitude: 116.4,
+        label: "九华苑",
+        city: "北京市",
+        district: "朝阳区",
+        sampleCount: 4,
+        accuracyMeters: 20,
+      });
+    }
+    return {
+      date,
+      timezone: "Asia/Shanghai",
+      from: `${date}T00:00:00Z`,
+      to: `${date}T23:59:59Z`,
+      visits,
+      sampleCount: 12,
+      pathMeters: 8000,
+    };
+  };
+  const peekGeocode = (latitude: number): ReverseGeocodeHit | null => {
+    if (Math.abs(latitude - 39.9) < 0.02) {
+      return hit({ poi: "九华苑", poiType: "商务住宅;住宅区;住宅小区" });
+    }
+    if (Math.abs(latitude - 39.95) < 0.02) {
+      return hit({ poi: "望京科技园", poiType: "商务写字楼;商务写字楼" });
+    }
+    return null;
+  };
+
+  try {
+    const service = new PlaceSemanticsService({
+      dbPath,
+      history: {
+        dwellEpisodes: () => [...homeEpisodes(), ...workEpisodes()],
+        dayTimeline,
+      },
+      now: () => now,
+      peekGeocode,
+      warmGeocode: false,
+    });
+    await service.getPlaces("u1");
+
+    const habits = await service.habits("u1", { days: 5, timezone: "Asia/Shanghai" });
+    const work = habits.find((h) => h.kind === "work");
+    assert.ok(work, "应产出公司习惯");
+    assert.equal(work.visitDays, 5);
+    assert.equal(work.weekday.visits, 5);
+    assert.equal(work.weekday.arrival, "09:00");
+    assert.equal(work.weekday.departure, "18:00");
+    assert.equal(work.weekday.medianDurationMinutes, 540);
+
+    const home = habits.find((h) => h.kind === "home");
+    assert.ok(home, "应产出家习惯");
+    assert.equal(home.weekday.arrival, "19:00");
+    assert.equal(home.weekday.departure, "23:00");
+    assert.equal(home.weekend.visits, 0);
+
+    service.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("PlaceSemanticsService.habits：同一天多次进出按日合并，不按停留段加权", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "nextbot-place-habits-merge-"));
+  const dbPath = join(dir, "location.db");
+  const now = new Date("2026-09-11T12:00:00Z"); // 周五
+  // 每个工作日两段公司停留（09:00-12:00、14:00-18:00）：
+  // 到达应取当天第一次 09:00，离开取最后一次 18:00，时长是两段之和 420。
+  const dayTimeline = (
+    _actorId: string,
+    opts?: { date?: string; timezone?: string },
+  ): DayTimeline => {
+    const date = opts?.date ?? "2026-09-11";
+    const weekday = new Date(`${date}T00:00:00Z`).getUTCDay();
+    const visits: DayTimeline["visits"] = [];
+    if (weekday >= 1 && weekday <= 5) {
+      visits.push({
+        kind: "stay",
+        startAt: `${date}T01:00:00Z`, // 09:00 CST
+        endAt: `${date}T04:00:00Z`, // 12:00 CST
+        startLocal: "09:00",
+        endLocal: "12:00",
+        durationMinutes: 180,
+        latitude: 39.95,
+        longitude: 116.45,
+        label: "望京科技园",
+        city: "北京市",
+        district: "朝阳区",
+        sampleCount: 6,
+        accuracyMeters: 20,
+      });
+      visits.push({
+        kind: "stay",
+        startAt: `${date}T06:00:00Z`, // 14:00 CST
+        endAt: `${date}T10:00:00Z`, // 18:00 CST
+        startLocal: "14:00",
+        endLocal: "18:00",
+        durationMinutes: 240,
+        latitude: 39.95,
+        longitude: 116.45,
+        label: "望京科技园",
+        city: "北京市",
+        district: "朝阳区",
+        sampleCount: 8,
+        accuracyMeters: 20,
+      });
+    }
+    return {
+      date,
+      timezone: "Asia/Shanghai",
+      from: `${date}T00:00:00Z`,
+      to: `${date}T23:59:59Z`,
+      visits,
+      sampleCount: 14,
+      pathMeters: 6000,
+    };
+  };
+  const peekGeocode = (latitude: number): ReverseGeocodeHit | null => {
+    if (Math.abs(latitude - 39.9) < 0.02) {
+      return hit({ poi: "九华苑", poiType: "商务住宅;住宅区;住宅小区" });
+    }
+    if (Math.abs(latitude - 39.95) < 0.02) {
+      return hit({ poi: "望京科技园", poiType: "商务写字楼;商务写字楼" });
+    }
+    return null;
+  };
+
+  try {
+    const service = new PlaceSemanticsService({
+      dbPath,
+      history: {
+        dwellEpisodes: () => [...homeEpisodes(), ...workEpisodes()],
+        dayTimeline,
+      },
+      now: () => now,
+      peekGeocode,
+      warmGeocode: false,
+    });
+    await service.getPlaces("u1");
+
+    const habits = await service.habits("u1", { days: 5, timezone: "Asia/Shanghai" });
+    const work = habits.find((h) => h.kind === "work");
+    assert.ok(work, "应产出公司习惯");
+    assert.equal(work.visitDays, 5, "同一天两段停留只算 1 天");
+    assert.equal(work.weekday.visits, 5, "visits 是天数，不是停留段数");
+    assert.equal(work.weekday.arrival, "09:00", "到达取当天第一次");
+    assert.equal(work.weekday.departure, "18:00", "离开取当天最后一次");
+    assert.equal(work.weekday.medianDurationMinutes, 420, "时长取当天两段之和");
+
+    service.close();
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

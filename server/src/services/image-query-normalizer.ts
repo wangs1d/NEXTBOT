@@ -48,6 +48,11 @@ const IMAGE_QUERY_NOISE: ReadonlySet<string> = new Set([
 
 const IMAGE_QUERY_NOISE_SORTED = [...IMAGE_QUERY_NOISE].sort((a, b) => b.length - a.length);
 
+/** 年份 token（模型常把「最新/近照」和年份一起抄进 query）：同样是时间噪声。 */
+const YEAR_TOKEN_RE = /^(?:19|20)\d{2}年?$/;
+/** 粘在主体后的年份（「成龙2026年」）：只剥带「年」的完整年份，避免误伤片名数字。 */
+const TRAILING_YEAR_RE = /(?:19|20)\d{2}年$/;
+
 /** 命令前缀（连续剥离，如「帮我搜索几张」）。 */
 const LEADING_COMMAND_RE =
   /^(?:麻烦|请|帮我|帮忙|给我|搜索|搜一下|搜搜|搜|找一下|找一找|找找|找|来几张|来点|看看|看一下|看下|几张|张|个|点)+\s*/;
@@ -63,6 +68,10 @@ function stripTrailingNoise(query: string): string {
         changed = true;
         break;
       }
+    }
+    if (!changed && TRAILING_YEAR_RE.test(out) && out.length >= 5) {
+      out = out.replace(TRAILING_YEAR_RE, "").trim();
+      changed = true;
     }
   }
   return out;
@@ -87,7 +96,7 @@ export function normalizeImageSearchQuery(raw: string): string {
   if (q.includes(" ")) {
     const kept = q
       .split(" ")
-      .filter((t) => t && !IMAGE_QUERY_NOISE.has(t))
+      .filter((t) => t && !IMAGE_QUERY_NOISE.has(t) && !YEAR_TOKEN_RE.test(t))
       .map((t) => stripTrailingNoise(t))
       .filter((t) => t.length > 0);
     q = kept.length > 0 ? kept.join(" ") : q;

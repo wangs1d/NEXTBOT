@@ -29,7 +29,8 @@ export const GEOFENCE_CHAT_TOOLS: ChatCompletionTool[] = [
       description:
         "地理围栏的统一入口（用 action 分流）。\n" +
         "action=create：创建一个地理围栏，当用户到达（enter）或离开（leave）指定地点时自动触发动作。仅当用户明确提出位置提醒/位置自动化需求时调用（如「到家提醒我…」「每次到公司…」）；必须先向用户复述围栏参数（地点、半径、触发方向、动作）确认后再创建。\n" +
-        "action=list：列出当前用户的地理围栏。用户问「我有哪些位置提醒」时调用。\n" +
+        "坐标必须声明 coordSystem：来自 geo.place_search 的高德 POI 坐标传 gcj02（服务端转 WGS-84 落库），手机 GPS / 用户给出的坐标传 wgs84。\n" +
+        "action=list：列出当前用户的地理围栏，并附带手机端最新注册回执（clientSync，可判断端上是否真的注册成功）。用户问「我有哪些位置提醒」时调用。\n" +
         "action=delete：删除一个地理围栏。用户说「取消到家提醒」「删掉公司围栏」时调用。",
       parameters: {
         type: "object",
@@ -46,6 +47,15 @@ export const GEOFENCE_CHAT_TOOLS: ChatCompletionTool[] = [
           radiusMeters: {
             type: "number",
             description: "action=create：围栏半径（米），20..10000；家/办公定点建议 100-300",
+          },
+          coordSystem: {
+            type: "string",
+            enum: ["wgs84", "gcj02"],
+            description:
+              "action=create（必填）：latitude/longitude 的坐标系。" +
+              "坐标来自 geo.place_search 等高德 POI（工具返回 coordSystem: gcj02）时必须传 gcj02；" +
+              "来自用户手机 GPS、位置类工具或用户直接给出的 WGS-84 坐标传 wgs84。" +
+              "服务端统一转成 WGS-84 落库（全链路同口径），传错会整体偏移 50~500m。",
           },
           event: {
             type: "string",
@@ -82,6 +92,8 @@ function summarize(f: GeofenceDefinition): Record<string, unknown> {
     name: f.name,
     latitude: f.latitude,
     longitude: f.longitude,
+    // 落库/下发一律 WGS-84（与客户端上报同口径）；入参的 gcj02 已在服务层转换
+    coordSystem: "wgs84",
     radiusMeters: f.radiusMeters,
     event: f.event,
     actionType: f.actionType,
@@ -104,6 +116,15 @@ export function registerGeofenceTools(
       input.actionConfig && typeof input.actionConfig === "object"
         ? (input.actionConfig as Record<string, unknown>)
         : {};
+    const coordSystem = String(input.coordSystem ?? "").trim().toLowerCase();
+    if (coordSystem !== "wgs84" && coordSystem !== "gcj02") {
+      return {
+        ok: false,
+        error:
+          "缺少 coordSystem：坐标来自 geo.place_search 等高德 POI 时必须传 gcj02；" +
+          "来自手机 GPS / 位置工具 / 用户直接给出的坐标传 wgs84",
+      };
+    }
 
     const result = service.create(actorId, {
       name: String(input.name ?? ""),
@@ -113,6 +134,7 @@ export function registerGeofenceTools(
       event: String(input.event ?? "") as GeofenceEventKind,
       actionType: String(input.actionType ?? "") as GeofenceActionType,
       actionConfig,
+      coordSystem: coordSystem as "wgs84" | "gcj02",
     });
     if ("error" in result) return { ok: false, error: result.error };
 
@@ -122,6 +144,10 @@ export function registerGeofenceTools(
         actorId,
         fenceId: result.id,
         name: result.name,
+        // 审计同时留「入参坐标系 + 原始坐标」与「落库坐标」：坐标错位时能直接对账
+        inputCoordSystem: coordSystem,
+        inputLatitude: Number(input.latitude),
+        inputLongitude: Number(input.longitude),
         latitude: result.latitude,
         longitude: result.longitude,
         radiusMeters: result.radiusMeters,
@@ -130,13 +156,26 @@ export function registerGeofenceTools(
         at: result.createdAt,
       })
       .catch(() => {});
-    return { ok: true, geofence: summarize(result) };
+    return {
+      ok: true,
+      geofence: summarize(result),
+      // 转换结果如实说明：gcj02 入参已转 WGS-84，避免调用方再转一次
+      convertedFrom: coordSystem === "gcj02" ? "gcj02" : undefined,
+      coordSystem: "wgs84",
+    };
   };
 
   const handleList = async (_input: Record<string, unknown>, context: ToolContext) => {
     const actorId = resolveActorId(context);
     const items = service.list(actorId);
-    return { ok: true, count: items.length, geofences: items.map(summarize) };
+    return {
+      ok: true,
+      count: items.length,
+      geofences: items.map(summarize),
+      // 手机端最新注册回执（可观测性）：端上是否真的注册成功、失败原因、权限状态。
+      // null = 客户端从未回执（老版本客户端 / 从未连接）。
+      clientSync: service.getClientSync(actorId),
+    };
   };
 
   const handleDelete = async (input: Record<string, unknown>, context: ToolContext) => {

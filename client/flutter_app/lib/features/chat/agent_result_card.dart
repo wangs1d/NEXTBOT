@@ -24,6 +24,7 @@ import "display_effects/soft_icon_chip.dart";
 import "media_gallery.dart";
 import "morning_briefing_card.dart";
 import "reminder_confirm_card.dart";
+import "ride_quote_card.dart";
 import "travel_guide_select_card.dart";
 import "media_thumbnail.dart";
 
@@ -155,6 +156,22 @@ class AgentResultCard extends StatelessWidget {
         case "product_compare":
           // 注意：这是 shopping.suggest（开源保留）的二分化对比卡， oss 不闸
           return _ProductCompareCard(data: data, cs: cs);
+        case "ride_quote": {
+          // 叫车报价选择卡：每档车型独立价格 + 「就选这个」卡内动作。
+          // 载荷缺失（旧服务端/历史消息）时由组件自绘空态，不白屏。
+          final Object? rawRide = data.extra?["ride"];
+          return RideQuoteCard(
+            cs: cs,
+            payload: rawRide is Map
+                ? <String, dynamic>{
+                    for (final MapEntry<Object?, Object?> e in rawRide.entries)
+                      e.key.toString(): e.value,
+                  }
+                : const <String, dynamic>{},
+            onUserAction: onUserAction,
+            cardData: data,
+          );
+        }
         case "product_pick":
           // 立场化推荐卡（开源保留，同 product_compare 策略不闸）：
           // 主推大图 +「为什么是它」+ 渠道实时价 CTA + 备选横滑。

@@ -66,9 +66,17 @@ const CASES: Case[] = [
   { text: "最近有什么值得看的新电影上映？", needsTool: true },
   { text: "人民币兑美元现在汇率多少？", needsTool: true },
   { text: "帮我看看今天热搜上有什么大事", needsTool: true },
+  // 实体属性组（2026-11-18 断言-凭证根修）：模型对这类实体有训练记忆（认识它），
+  // 但属性值早已过期——旧领域清单（时事/股价/排片）覆盖不到，是真实漏搜重灾区。
+  { text: "影子刃零什么时候发售？", needsTool: true },
+  { text: "《影之刃零》定档了吗", needsTool: true },
+  { text: "iPhone 18 现在多少钱", needsTool: true },
   { text: "今天有点累，不想干活", needsTool: false },
   { text: "哈哈你说得对", needsTool: false },
   { text: "你觉得周末是宅家好还是出去走走好？", needsTool: false },
+  // 红线对照组：社交问法（求认同，不是打听）应保持零工具直答；
+  // 实体属性由断言归因度量兜住，不靠这轮触发搜索。
+  { text: "影子刃零你知道吗", needsTool: false },
 ];
 
 /* ── 生产噪声组（CASESET=noise）：复现真实症状形态 ──

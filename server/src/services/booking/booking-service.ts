@@ -18,8 +18,8 @@
  *
  * 安全护栏（不依赖访问模式，沙箱下也可用）：
  *   1. 两阶段确认 token（BOOKING_CONFIRMATION_TTL_MS 默认 5 分钟）
- *   2. 单笔上限 BOOKING_MAX_AMOUNT_CNY（默认 1000）
- *   3. 单日累计上限 BOOKING_DAILY_BUDGET_CNY（默认 500；0=不限）
+ *   2. 单笔上限 BOOKING_MAX_AMOUNT_CNY（默认 0 = 不限；显式配置才生效）
+ *   3. 单日累计上限 BOOKING_DAILY_BUDGET_CNY（默认 0 = 不限；显式配置才生效）
  *   4. Provider availability 门禁（缺 key/企业资质直接拒绝）
  *   5. 审计日志（AuditService）
  * 自主任务通道另有 AgentTaskSafety 高危拦截（book 工具名在
@@ -34,6 +34,7 @@ import type { ToolContext } from "../../tools/tool-registry.js";
 import type {
   BookingDomain,
   BookingDraft,
+  BookingOption,
   BookingProvider,
   BookingProviderContext,
   BookingOrderStatus,
@@ -56,6 +57,30 @@ const DOMAIN_LABELS: Record<BookingDomain, string> = {
 
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null;
+}
+
+/**
+ * 阶段一「重新报价定位 option」的稳定匹配。
+ *
+ * 部分平台的 optionId 内含有时效性报价上下文（滴滴 = didi:{estimate_trace_id}:{category}，
+ * 每次估价都会换 trace）。按完整 id 精确匹配会在用户选完车型后必然失配，
+ * 真实表现为「报价正常、一点就报未找到 optionId」。这里在精确匹配失败后，
+ * 只对「同 provider 前缀 + 同末段（车型）」做等价匹配，并继续使用**新报价**
+ * 的 id 下单（新的 trace 才是有效的）。
+ */
+function findEquivalentOption(
+  options: BookingOption[],
+  optionId: string,
+): BookingOption | undefined {
+  const lastColon = optionId.lastIndexOf(":");
+  if (lastColon < 0) return undefined;
+  const family = optionId.slice(0, optionId.indexOf(":"));
+  const suffix = optionId.slice(lastColon + 1);
+  if (!family || !suffix) return undefined;
+  return options.find((o) => {
+    const idx = o.id.lastIndexOf(":");
+    return idx > 0 && o.id.slice(0, o.id.indexOf(":")) === family && o.id.slice(idx + 1) === suffix;
+  });
 }
 
 export interface BookingServiceDeps {
@@ -253,7 +278,9 @@ export class BookingService {
       this.providerContext(ctx),
     );
     if (!searchResult.ok) return searchResult;
-    const option = searchResult.options.find((o) => o.id === input.optionId);
+    const option =
+      searchResult.options.find((o) => o.id === input.optionId) ??
+      findEquivalentOption(searchResult.options, input.optionId);
     if (!option) {
       return {
         ok: false,
@@ -262,9 +289,9 @@ export class BookingService {
       };
     }
 
-    // 限额校验：单笔 + 单日累计
+    // 限额校验：单笔 + 单日累计（0 = 不限，默认关闭——下单本就需用户确认卡同意）
     const amount = option.amountCny;
-    if (amount != null && amount > this.config.maxAmountCny) {
+    if (amount != null && this.config.maxAmountCny > 0 && amount > this.config.maxAmountCny) {
       await this.recordAudit(ctx, "book_blocked_amount", domain, {
         provider: provider.key,
         optionId: option.id,
@@ -365,6 +392,8 @@ export class BookingService {
       provider: provider.key,
       providerLabel: provider.label,
       optionId: option.id,
+      optionTitle: option.title,
+      optionDescription: option.description ?? "",
       amountCny: amount,
       scheduleAt,
       simulated: option.simulated === true,
@@ -392,9 +421,9 @@ export class BookingService {
       const { provider } = resolved;
 
       // 阶段二复查限额：阶段一 mint 之后用户可能又确认了其他订单，
-      // 仅靠阶段一校验会被多笔待确认 token 击穿单日累计
+      // 仅靠阶段一校验会被多笔待确认 token 击穿单日累计（0 = 不限，默认关闭）
       const amount = draft.amountCny;
-      if (amount != null && amount > this.config.maxAmountCny) {
+      if (amount != null && this.config.maxAmountCny > 0 && amount > this.config.maxAmountCny) {
         await this.recordAudit(ctx, "book_blocked_amount_stage2", draft.domain, {
           provider: provider.key,
           optionId: draft.optionId,

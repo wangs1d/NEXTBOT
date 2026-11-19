@@ -29,6 +29,15 @@ export type TurnWalEntry = {
    */
   mediaCards?: unknown[];
   /**
+   * 用户随消息发出的照片 URL 列表（2026-11-18）：本会话由客户端内存字节即时
+   * 渲染，但重启/换设备后字节不在了——WAL 落这份 URL 后，history 接口透传，
+   * 两端据此按真实缩略图重建用户泡，替换旧的「配图 ×N」文案。
+   * URL 指向服务端转存资产（/agent/images/*.png），由 WS 出口在 done 阶段
+   * 连同 assistantText 一并补写（同 mediaCards/bubbles 模式）。
+   * 旧行/无图轮缺省——客户端按无 URL 降级文案，完全兼容。
+   */
+  userImageUrls?: string[];
+  /**
    * 真·分绿泡对账数组（2026-11-13）：本轮分泡的 {id, text} 快照，来源
    * BubbleTracker.snapshot，仅在 bubbleSplitLive（真实分泡且未塌缩/撤回/
    * 单泡接管）的轮次由出口 replaceAssistantText 补写。
@@ -96,6 +105,8 @@ export class TurnWalService {
     assistantText: string;
     /** 本轮最终媒体卡（done 阶段构建）；有值时一并补写进 WAL 行。 */
     mediaCards?: unknown[];
+    /** 用户随消息发出的照片 URL（done 阶段补写，供历史回填真实缩略图）。 */
+    userImageUrls?: string[];
     /**
      * 真·分绿泡对账数组（2026-11-13）：bubbleSplitLive 轮携带
      * BubbleTracker.snapshot 一并补写进 WAL 行，供跨端历史回填逐泡重建。
@@ -120,6 +131,9 @@ export class TurnWalService {
         messageId: target,
         assistantText: redactSensitiveText(entry.assistantText),
         ...(entry.mediaCards ? { mediaCards: entry.mediaCards } : {}),
+        ...(entry.userImageUrls && entry.userImageUrls.length > 0
+          ? { userImageUrls: entry.userImageUrls }
+          : {}),
         ...(entry.bubbles && entry.bubbles.length > 0 ? { bubbles: entry.bubbles } : {}),
       });
       if (replaced == null) return false;
@@ -145,6 +159,7 @@ export function replaceAssistantTextInJsonl(
     assistantText: string;
     mediaCards?: unknown[];
     bubbles?: Array<{ id: string; text: string }>;
+    userImageUrls?: string[];
   },
 ): string | null {
   let hit = false;
@@ -165,6 +180,9 @@ export function replaceAssistantTextInJsonl(
       assistantText: entry.assistantText,
       ...(entry.mediaCards && entry.mediaCards.length > 0
         ? { mediaCards: entry.mediaCards }
+        : {}),
+      ...(entry.userImageUrls && entry.userImageUrls.length > 0
+        ? { userImageUrls: entry.userImageUrls }
         : {}),
       ...(entry.bubbles && entry.bubbles.length > 0 ? { bubbles: entry.bubbles } : {}),
     });

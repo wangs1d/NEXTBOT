@@ -21,6 +21,7 @@ import Database from "better-sqlite3";
 import type { Database as SqliteDatabase } from "better-sqlite3";
 
 import { getLocationDbPath } from "../config/location-env.js";
+import { gcj02ToWgs84 } from "../skills/travel-planning/coord-transform.js";
 import { haversineMeters } from "./geo-utils.js";
 
 export type GeofenceEventKind = "enter" | "leave" | "both";
@@ -60,6 +61,27 @@ export type GeofenceInput = {
   actionType: GeofenceActionType;
   actionConfig: Record<string, unknown>;
   enabled?: boolean;
+  /**
+   * 入参坐标系（2026-11-18 归一）：
+   *   - wgs84：手机 GPS / 用户给的 WGS-84 坐标（缺省）；
+   *   - gcj02：高德 POI（geo.place_search）等 GCJ-02「火星坐标」。
+   *
+   * 全链路只存 WGS-84：客户端上报、系统围栏、位置样本都是 WGS-84，围栏中心
+   * 若直接存 GCJ-02，国内会整体偏移 50~500m，到达/离开判定必然错位。
+   * 因此 gcj02 入参在**落库前**统一转成 WGS-84。
+   */
+  coordSystem?: GeofenceCoordSystem;
+};
+
+export type GeofenceCoordSystem = "wgs84" | "gcj02";
+
+/** 客户端最新一次围栏注册回执（`client.geofence_report`）的落库形态。 */
+export type GeofenceClientSyncStatus = {
+  ok: boolean;
+  requested: number;
+  registered: number;
+  updatedAt: string;
+  report: Record<string, unknown>;
 };
 
 export type GeofenceOptions = {
@@ -104,6 +126,15 @@ CREATE TABLE IF NOT EXISTS geofence_states (
   inside INTEGER NOT NULL DEFAULT 0,
   last_event TEXT,
   last_event_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS geofence_client_status (
+  actor_id TEXT PRIMARY KEY,
+  updated_at TEXT NOT NULL,
+  ok INTEGER NOT NULL DEFAULT 0,
+  requested INTEGER NOT NULL DEFAULT 0,
+  registered INTEGER NOT NULL DEFAULT 0,
+  report TEXT
 );
 `;
 
@@ -244,6 +275,10 @@ export function inferPlaceKind(name: string | undefined | null): "home" | "work"
   if (!GEOFENCE_ACTION_TYPES.includes(input.actionType as GeofenceActionType)) {
     return `actionType 须为 ${GEOFENCE_ACTION_TYPES.join(" / ")} 之一`;
   }
+  const coordSystem = input.coordSystem;
+  if (coordSystem !== undefined && coordSystem !== "wgs84" && coordSystem !== "gcj02") {
+    return "coordSystem 须为 wgs84 / gcj02 之一";
+  }
 
   const cfg = (input.actionConfig ?? {}) as Record<string, unknown>;
   switch (input.actionType) {
@@ -314,13 +349,22 @@ export class GeofenceService {
   create(actorId: string, input: GeofenceInput): GeofenceDefinition | { error: string } {
     const invalid = validateGeofenceInput(input);
     if (invalid) return { error: invalid };
+    // 坐标系归一（2026-11-18）：入参声明 gcj02（高德 POI 等）时先转 WGS-84 再落库。
+    // 不转的话，围栏中心与客户端上报（WGS-84）会整体错开 50~500m，
+    // 表现为「人明明在家，围栏却判在栏外」。
+    const rawLat = Number(input.latitude);
+    const rawLng = Number(input.longitude);
+    const center =
+      input.coordSystem === "gcj02"
+        ? gcj02ToWgs84(rawLat, rawLng)
+        : { latitude: rawLat, longitude: rawLng };
     const nowIso = this.now().toISOString();
     const fence: GeofenceDefinition = {
       id: `gf_${randomUUID().replace(/-/g, "").slice(0, 12)}`,
       actorId,
       name: String(input.name).trim(),
-      latitude: Number(input.latitude),
-      longitude: Number(input.longitude),
+      latitude: center.latitude,
+      longitude: center.longitude,
       radiusMeters: Number(input.radiusMeters),
       event: input.event,
       actionType: input.actionType,
@@ -499,6 +543,52 @@ export class GeofenceService {
       best = { fence, kind: inferPlaceKind(fence.name), radiusMeters: fence.radiusMeters };
     }
     return best;
+  }
+
+  /**
+   * 记录客户端最新一次围栏注册回执（`client.geofence_report`）。
+   *
+   * 只保留每 actor 最新一条：诊断目的是「端上当前到底注册成功没有」，
+   * 历史回执没有保留价值（会随每次连接/配置变更刷新）。
+   */
+  recordClientSync(actorId: string, report: Record<string, unknown>): void {
+    const ok = report.ok === true;
+    const requested = Number(report.requested ?? 0);
+    const registered = Number(report.registered ?? 0);
+    this.db
+      .prepare(
+        `INSERT INTO geofence_client_status (actor_id, updated_at, ok, requested, registered, report)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(actor_id) DO UPDATE SET
+           updated_at = excluded.updated_at,
+           ok = excluded.ok,
+           requested = excluded.requested,
+           registered = excluded.registered,
+           report = excluded.report`,
+      )
+      .run(
+        actorId,
+        this.now().toISOString(),
+        ok ? 1 : 0,
+        Number.isFinite(requested) ? Math.max(0, Math.trunc(requested)) : 0,
+        Number.isFinite(registered) ? Math.max(0, Math.trunc(registered)) : 0,
+        toJson(report),
+      );
+  }
+
+  /** 读取客户端最新注册回执；从未上报过返回 null。 */
+  getClientSync(actorId: string): GeofenceClientSyncStatus | null {
+    const row = this.db
+      .prepare(`SELECT * FROM geofence_client_status WHERE actor_id = ?`)
+      .get(actorId) as Record<string, unknown> | undefined;
+    if (!row) return null;
+    return {
+      ok: Number(row.ok) === 1,
+      requested: Number(row.requested) || 0,
+      registered: Number(row.registered) || 0,
+      updatedAt: String(row.updated_at ?? ""),
+      report: fromJson(row.report as string | null),
+    };
   }
 
   close(): void {

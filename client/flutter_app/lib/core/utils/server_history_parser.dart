@@ -64,6 +64,18 @@ ParsedServerHistory parseServerHistoryMessages({
         ?.whereType<Map<dynamic, dynamic>>()
         .map((Map<dynamic, dynamic> c) => Map<String, dynamic>.from(c))
         .toList();
+    // 用户照片回填（2026-11-18）：服务端 WAL 透传本轮 userImageUrls，
+    // 重装/换设备后按真实缩略图重建用户泡，替换旧的「配图 ×N」文案。
+    final List<String> userImageUrls = role == "user"
+        ? (item["userImageUrls"] as List<dynamic>?)
+                ?.whereType<String>()
+                .where((String u) => u.startsWith("/agent/images/"))
+                .toList() ??
+            const <String>[]
+        : const <String>[];
+    final int attachmentCount = userImageUrls.isNotEmpty
+        ? userImageUrls.length
+        : ((item["attachmentImageCount"] as num?)?.toInt() ?? 0);
     // 真·分绿泡对账数组（2026-11-13）：真实分泡轮逐泡建消息；旧行/塌缩/
     // 单泡轮缺省（或仅一泡，形态等价）→ 单泡路径，行为与升级前一致。
     final List<Map<String, dynamic>>? histBubbles = role == "assistant"
@@ -95,6 +107,8 @@ ParsedServerHistory parseServerHistoryMessages({
       role: role,
       text: text,
       timestamp: ts,
+      attachmentImageCount: role == "user" ? attachmentCount : 0,
+      userImageUrls: userImageUrls,
       mediaCards:
           (mediaCards != null && mediaCards.isNotEmpty) ? mediaCards : null,
     ));

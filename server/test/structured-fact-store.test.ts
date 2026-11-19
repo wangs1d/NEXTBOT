@@ -25,6 +25,7 @@ import test from "node:test";
 import {
   StructuredFactStore,
   canonicalFactField,
+  matchProfileQuestionFields,
   normalizeFactField,
 } from "../src/agentic-memory/structured-fact-store.js";
 import { openAgenticSqlite } from "../src/agentic-memory/sqlite-store.js";
@@ -101,7 +102,7 @@ test("applyFact: 同字段不同别名写法归并到同一行（别名归一）
     const actives = store.getActiveFacts("user-1");
     assert.equal(actives.length, 2);
     const fields = actives.map((f) => f.field).sort();
-    assert.deepEqual(fields, ["居住地", "称呼"]);
+    assert.deepEqual(fields, ["姓名", "居住地"]);
   });
 });
 
@@ -118,11 +119,21 @@ test("applyFact: 空/超长值与匿名身份拒绝入档", async () => {
 });
 
 test("canonicalFactField: 规范化与别名映射", () => {
-  assert.equal(canonicalFactField(" 名字 "), "称呼");
+  assert.equal(canonicalFactField(" 名字 "), "姓名");
+  assert.equal(canonicalFactField("称呼"), "称呼");
   assert.equal(canonicalFactField("技术栈"), "技术栈");
   assert.equal(canonicalFactField("未知字段"), "未知字段");
   assert.equal(normalizeFactField("称呼："), "称呼");
   assert.equal(canonicalFactField("   "), "");
+});
+
+test("matchProfileQuestionFields: 身份问法直达字段（问名字不落到称呼）", () => {
+  assert.deepEqual(matchProfileQuestionFields("记得我叫什么吗"), ["姓名"]);
+  assert.deepEqual(matchProfileQuestionFields("我的全名是什么"), ["姓名"]);
+  assert.deepEqual(matchProfileQuestionFields("你叫我什么"), ["称呼"]);
+  assert.deepEqual(matchProfileQuestionFields("我几岁了"), ["年龄"]);
+  assert.deepEqual(matchProfileQuestionFields("我住哪"), ["居住地"]);
+  assert.deepEqual(matchProfileQuestionFields("今天天气怎么样"), []);
 });
 
 // ============================================================
@@ -435,7 +446,7 @@ test("persistUnifiedExtraction: forget 字段遗忘经钩子携带（钩子走�
 // 5. 端到端闭环：抽取 facts → 钩子落库 → 换值覆盖旧档
 // ============================================================
 
-test("端到端：'我叫张三'→'我叫李四' 实时更新称呼字段并保留历史", { timeout: 30_000 }, async () => {
+test("端到端：'我叫张三'→'我叫李四' 实时更新姓名字段并保留历史", { timeout: 30_000 }, async () => {
   await withStore(async (store) => {
     const fakeMemory = { async add() { return { results: [] }; } } as unknown as Memory;
     const ingest = new AgenticMemoryIngestService(fakeMemory);
@@ -472,7 +483,7 @@ test("端到端：'我叫张三'→'我叫李四' 实时更新称呼字段并保
       },
       "chat:turn-1",
     );
-    assert.equal(store.getFact("user-1", "称呼")?.value, "张三");
+    assert.equal(store.getFact("user-1", "姓名")?.value, "张三");
 
     await apply(
       {
@@ -487,7 +498,7 @@ test("端到端：'我叫张三'→'我叫李四' 实时更新称呼字段并保
     );
 
     // 别名归一后同字段：当前值已是李四，张三入历史
-    const current = store.getFact("user-1", "称呼");
+    const current = store.getFact("user-1", "姓名");
     assert.ok(current);
     assert.equal(current!.value, "李四");
     const history = store.getHistoryFor("user-1", current!.id, 2);

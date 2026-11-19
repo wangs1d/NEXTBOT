@@ -22,7 +22,7 @@ import {
   truncateProfileForPrompt,
 } from "./profile-heuristics.js";
 import { UserProfileStore, hasRealProfileContent } from "./user-profile-store.js";
-import { projectProfileMarkdown } from "./profile-fact-authority.js";
+import { projectProfileMarkdown, upsertManagedProfileLine } from "./profile-fact-authority.js";
 import {
   decayFactStore,
   defaultFactStore,
@@ -63,6 +63,22 @@ const USER_BEHAVIOR_BASELINE_KEY = "behavior_baseline";
 const BASELINE_REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const BASELINE_ACTIVE_PROBABILITY_THRESHOLD = 0.3;
 const BASELINE_SWITCH_POINT_DELTA = 0.1;
+
+/** 画像里的常去地点受管行（位置历史 → 画像投影，按 query 相关性召回）。 */
+const FREQUENT_PLACES_PROFILE_LABEL = "常去地点";
+/** 行值上限 40 字（净噪器 R7），留出标签与分隔符余量。 */
+const FREQUENT_PLACES_PROFILE_MAX_CHARS = 36;
+
+function buildFrequentPlacesValue(places: readonly string[]): string | null {
+  const names: string[] = [];
+  for (const raw of places) {
+    const name = raw.trim();
+    if (!name || names.includes(name)) continue;
+    if ([...names, name].join("、").length > FREQUENT_PLACES_PROFILE_MAX_CHARS) break;
+    names.push(name);
+  }
+  return names.length > 0 ? names.join("、") : null;
+}
 
 type BehaviorSignals = {
   shoppingInterest: number;
@@ -821,6 +837,26 @@ export class UserPersonalizationService {
     const maxChars = Number.parseInt(process.env.AGENT_USER_PROFILE_PROMPT_MAX_CHARS ?? "3500", 10);
     const cap = Number.isFinite(maxChars) && maxChars > 400 ? maxChars : 3500;
     return { userProfile: truncateProfileForPrompt(profile, cap) };
+  }
+
+  /**
+   * 常去地点落画像（2026-11-19）：位置语义更新时把 top 常去地点投影成
+   * USER_PROFILE.md 的一行，不再维护专门的 prompt 动态块与 10 分钟进程缓存。
+   *
+   * 注入侧由 gateProfileMarkdownForPrompt 按本轮 query 的词面相关性门控——
+   * 问「我常去哪」才会带出这行；精确行政区/门牌仍由 place 工具按需查询。
+   * places 为空时删除该行（数据被清空 → 画像不留旧地点）。
+   */
+  async syncFrequentPlaces(actorId: string, places: readonly string[]): Promise<void> {
+    if (!isUserPersonalizationEnabled()) return;
+    try {
+      const value = buildFrequentPlacesValue(places);
+      const md = await this.store.read(actorId);
+      const next = upsertManagedProfileLine(md, FREQUENT_PLACES_PROFILE_LABEL, value);
+      if (next !== md) await this.store.write(actorId, next);
+    } catch {
+      /* 画像写失败不影响位置主链路 */
+    }
   }
 
   getRelationshipState(actorId: string): PersonalizationRelationshipState {

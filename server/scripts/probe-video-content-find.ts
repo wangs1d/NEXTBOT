@@ -49,27 +49,15 @@ async function main(): Promise<void> {
   }
 
   // ---------- 2. video.find 真实执行：搜候选 → 并发解析可播放流 ----------
-  const { VideoGrabService, setVideoGrabServiceRef, setVideoGrabMcpClientRef } = await import(
+  const { VideoGrabService, setVideoGrabServiceRef } = await import(
     "../src/services/video-grab-service.js"
   );
   const { UpstreamSearchService } = await import("../src/services/upstream-search-service.js");
   const { registerVideoTools } = await import("../src/tools/video-tools.js");
   const { ToolRegistry } = await import("../src/tools/tool-registry.js");
-  const { McpClientService } = await import("../src/services/mcp-client-service.js");
 
   const videoGrabService = new VideoGrabService();
   setVideoGrabServiceRef(videoGrabService);
-  // 生产同源：McpClientService 直连 yby6（抖音/小红书页解析第一优先通道）
-  let mcpReady = false;
-  try {
-    const mcpClientService = new McpClientService();
-    await mcpClientService.discoverTools();
-    setVideoGrabMcpClientRef(mcpClientService);
-    mcpReady = true;
-  } catch (e) {
-    note(`MCP 装配失败（抖音/小红书候选可能解析不出流）：${e instanceof Error ? e.message : e}`);
-  }
-  note(`MCP(yby6) ${mcpReady ? "已装配" : "未装配"}`);
 
   const search = new UpstreamSearchService(null as never);
   const registry = new ToolRegistry() as never as {

@@ -2,7 +2,7 @@
  * 临时验证脚本：验证麦当劳 / 瑞幸 MCP 端点连通性与鉴权行为
  * 用法：cd server && npx tsx scripts/verify-order-mcp-endpoints.ts
  * 无 Token 请求 initialize：预期返回 401/403 类错误（证明端点在线、鉴权生效）；
- * 拿到真实 Token 后用 scripts/verify-yby6-mcp.ts 的方式即可走全链路。验证完可删除
+ * 拿到真实 Token 后用 McpClientService 走全链路即可。验证完可删除
  */
 
 const ENDPOINTS = [

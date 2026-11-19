@@ -10,6 +10,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { composeRealtimeSearchQuery, claimsWebSearch } from "../src/agent/realtime-search-query.js";
+import {
+  resolveTurnReferent,
+  parseReferentPairs,
+} from "../src/agent/realtime-search-query.js";
 
 test("纯指代消息：从最近对话（最新优先）解析实体并拼接", () => {
   // 顺序为最旧在前，实体取自最新一条含人名的消息
@@ -109,4 +113,43 @@ test("构造结果恒非空且全量透传（不截断，长度对齐主流交�
   );
   assert.ok(query.length > 0);
   assert.ok(query.includes(longText), "用户原话必须完整保留在查询词中，不得截断");
+});
+
+// ── 代词指代锚定（2026-11-19 真机事故回归）──────────────────────────────
+// 事故：前几轮反复搜过成龙 → 中间聊定位 → 「我老婆美不美」→「刘浩存那张脸」
+// →「看看他的照片」。模型沿用了三轮前的成龙，没认最近的老婆=刘浩存。
+
+const INCIDENT_REFERENTS = ["老婆是刘浩存"];
+const INCIDENT_RECENT_NEWEST_FIRST = [
+  '可惜啥，喜欢一个人又不犯法。而且你这"老婆"当得挺认真，一问美不美眼睛都亮了。',
+  "可惜只是想象中的老婆",
+  "美，这个不用问。刘浩存那张脸，你眼光确实不差。",
+  "我老婆美不美",
+  "最新这批给你翻出来了，多是他近年公开露面的照片，还有《尖峰时刻》那阵的对比图。",
+  "最新的",
+];
+
+test("代词锚定：近因优先，取最近刚聊到的『老婆』=刘浩存，而不是更早的旧话题", () => {
+  const ref = resolveTurnReferent("看看他的照片", INCIDENT_RECENT_NEWEST_FIRST, INCIDENT_REFERENTS);
+  assert.deepEqual(ref, { entity: "刘浩存", role: "老婆" });
+});
+
+test("代词锚定：当前消息没有代词 / 没有映射 / 映射最近未被提及时不做猜测", () => {
+  assert.equal(resolveTurnReferent("看看刘浩存的照片", INCIDENT_RECENT_NEWEST_FIRST, INCIDENT_REFERENTS), null);
+  assert.equal(resolveTurnReferent("看看他的照片", INCIDENT_RECENT_NEWEST_FIRST, []), null);
+  assert.deepEqual(
+    resolveTurnReferent("看看他的照片", ["今天天气不错", "刘浩存那张脸真好看"], ["老婆是刘浩存"]),
+    { entity: "刘浩存", role: "老婆" },
+  );
+  assert.equal(
+    resolveTurnReferent("看看他的照片", ["其他就没什么了"], ["老婆是刘浩存"]),
+    null,
+    "「其他」里的他不是代词，且对话里没出现映射对象",
+  );
+});
+
+test("指代映射解析：容忍括号注释与语气词", () => {
+  assert.deepEqual(parseReferentPairs(["老婆是刘浩存（演员）啊"]), [
+    { role: "老婆", entity: "刘浩存" },
+  ]);
 });

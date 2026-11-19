@@ -12,3 +12,10 @@
 
 # Flutter / HMS 等 JNI 入口的 native 方法不能重命名（通用规则）。
 -keepclasseswithmembernames class * { native <methods>; }
+
+# 高德定位 SDK（2026-11-18）：内部大量反射与 JNI 回调，必须整流保留。
+# 官方只提供此通用规则，按包名整体 keep 是最稳的做法（体积影响有限）。
+-keep class com.amap.api.** { *; }
+-keep class com.autonavi.** { *; }
+-dontwarn com.amap.api.**
+-dontwarn com.autonavi.**

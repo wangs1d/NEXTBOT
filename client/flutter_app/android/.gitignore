@@ -12,3 +12,5 @@ GeneratedPluginRegistrant.java
 key.properties
 **/*.keystore
 **/*.jks
+# 高德 Android 定位 key（amap.apiKey=xxx），与签名口令同等对待，禁止提交
+amap.properties

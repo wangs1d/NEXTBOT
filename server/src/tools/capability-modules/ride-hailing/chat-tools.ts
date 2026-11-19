@@ -34,7 +34,7 @@ export const RIDE_HAILING_CHAT_TOOLS: ChatCompletionTool[] = [
         "适用场景：用户说「帮我叫个车去机场」「打车去公司多少钱」「晚上八点叫车」。\n" +
         "起点联动：pickup 缺省时自动取用户当前 GPS 定位（需客户端授权定位），也可传地址文本。\n" +
         "Provider：BOOKING_MODE=mock（默认）返回模拟报价（simulated=true，须如实告知用户）；" +
-        "live 模式走高德打车（RIDE_AMAP_WEB_KEY 地理编码+路径规划，价格为本地费率表预估值，非实时报价）。\n" +
+        "live 模式走滴滴官方 MCP（生产端点实时报价，需 DIDI_MCP_KEY）。\n" +
         "与 travel.compute-route（纯路线查询）/ meituan.create_order（跑腿）的区别：本工具为叫车报价。",
       parameters: {
         type: "object",
@@ -58,7 +58,7 @@ export const RIDE_HAILING_CHAT_TOOLS: ChatCompletionTool[] = [
           },
           provider: {
             type: "string",
-            description: "指定 provider key（可选）。缺省自动选择：mock 模式=simulated；live=amap。",
+            description: "指定 provider key（可选）。缺省自动选择：mock 模式=simulated；live=didi。",
           },
         },
         required: ["dropoff"],
@@ -72,9 +72,9 @@ export const RIDE_HAILING_CHAT_TOOLS: ChatCompletionTool[] = [
       name: "ride_hailing.book",
       description:
         "下单叫车。**两阶段确认**：\n" +
-        "① confirm=false（默认）：按 optionId 重新报价校验限额，返回订单摘要（车型/起点/终点/预估价）+ 确认 token。LLM 须向用户复述摘要。\n" +
+        "① confirm=false（默认）：按 optionId 重新报价定位车型，返回订单摘要（车型/起点/终点/预估价）+ 确认 token。LLM 须向用户复述摘要。\n" +
         "② confirm=true + confirmationToken：真实（或模拟）下单，返回本地订单号与司机信息。\n" +
-        "安全：单笔上限 BOOKING_MAX_AMOUNT_CNY（默认 1000）、单日累计上限 BOOKING_DAILY_BUDGET_CNY（默认 500）；" +
+        "安全：所有下单必须用户在确认卡上明确同意（两阶段确认）；" +
         "token 5 分钟过期；Agent 不代付（返回 paymentUrl 时由用户手动支付）。\n" +
         "mock 模式（BOOKING_MODE=mock，默认）为模拟下单（simulated=true），必须如实告知用户非真实订单。\n" +
         "下单前必须先返回确认摘要让用户确认，得到明确同意后再带 confirm=true+token 执行。",

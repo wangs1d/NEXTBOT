@@ -15,7 +15,7 @@ import {
 } from "../services/llm-token-audit.js";
 import { currentBlockingStep, getTaskPlanStore, taskPlanKey } from "../agent/task-plan-store.js";
 import { receiptProducesCard } from "../services/receipt-card-projection.js";
-import { isMediaOnlyRequest } from "../agent/realtime-search-query.js";
+import { isMediaOnlyRequest, mediaToolNameForText, resolveTurnReferent } from "../agent/realtime-search-query.js";
 import { recordThinkingLatency, effortSentFrom } from "./thinking-policy.js";
 import { filterMediaModalityTools, filterTextSearchTools } from "../agent/web-search-consent.js";
 import { classifyToolSensitivity } from "../security/sensitive-action.js";
@@ -1703,6 +1703,40 @@ function extractUserTextFromMessages(messages: ChatCompletionMessageParam[]): st
 }
 
 /**
+ * 最近对话正文（最新在前）：只取 user/assistant 的自然语言，跳过 tool 消息和
+ * 当前这轮用户消息——供代词锚定做近因匹配（见 resolveTurnReferent）。
+ */
+function collectRecentDialogueLines(
+  messages: ChatCompletionMessageParam[],
+  currentUserText: string,
+  max = 10,
+): string[] {
+  const lines: string[] = [];
+  let skippedCurrent = false;
+  for (let i = messages.length - 1; i >= 0 && lines.length < max; i--) {
+    const msg = messages[i];
+    if (msg.role !== "user" && msg.role !== "assistant") continue;
+    let text = "";
+    if (typeof msg.content === "string") {
+      text = msg.content;
+    } else if (Array.isArray(msg.content)) {
+      text = msg.content
+        .filter((part) => part.type === "text")
+        .map((part) => (part as { text?: string }).text ?? "")
+        .join(" ");
+    }
+    text = text.trim();
+    if (!text) continue;
+    if (!skippedCurrent && msg.role === "user" && text === currentUserText.trim()) {
+      skippedCurrent = true;
+      continue;
+    }
+    lines.push(text);
+  }
+  return lines;
+}
+
+/**
  * OpenAI 兼容 Chat Completions：流式输出 + tool_calls 多轮执行（Kimi / OpenAI 共用）。
  */
 // ═══════════════════════════════════════════════════════════════════
@@ -2011,6 +2045,23 @@ const PHOTO_REPLY_HINT =
   "正文一两句话自然引入即可，不要按主题分节盘点，不要写「已确认的/能说的/没查到的」式小节，也不要逐张复述照片内容。";
 
 /**
+ * 搜图零结果提示（2026-11-19 根修）：search_images 执行成功但 items 为空
+ * （图搜 API 无图片能力 / query 被形态闸拒绝 / 全部转存失败）。此前仍挂
+ * PHOTO_REPLY_HINT 并判成纯图轮，模型照着演「图给你翻出来了」，用户端
+ * 一张图都没有。这里在结果回填处显式说明，禁止声称已交图。
+ */
+const MEDIA_EMPTY_HINT =
+  "[系统提示] 本轮 search_images 没有返回任何图片（items 为空）。禁止声称「图给你找来了/翻出来了」或描述照片内容；" +
+  "用一两句如实说明这次没搜到，可以给一句换更具体说法的建议。";
+
+/** search_images 结果里的图片条数；结构不可判定时返回 null（按旧语义处理）。 */
+function searchImagesItemCount(value: unknown): number | null {
+  if (!value || typeof value !== "object") return null;
+  const items = (value as { items?: unknown }).items;
+  return Array.isArray(items) ? items.length : null;
+}
+
+/**
  * 剥除正文中的请求卡标记（<tool_request>…</tool_request>）。
  * 静态架构下请求卡已在收尾分支被拦截续波，不会走到这里；legacy 回退模式下
  * 卡片无处理通道，标记会滞留在正文——统一剥除，防止协议标记透出到用户。
@@ -2039,6 +2090,8 @@ export async function streamCompletionWithTools(
      * 整体删除（已流式即定稿），字段保留以兼容调用方与 turn-trace。
      */
     turnIntent?: string;
+    /** 画像指代映射（「老婆是刘浩存」）：代词轮据此做近因锚定 + 纯媒体轮确定性预执行。 */
+    referentLines?: string[];
     /**
      * 生成前的渲染场景数据面（P3）：由数据持有方（如 evening-digest 服务）
      * 在模型生成之前解析并传入，供 planPreRenderScene 判定 pre 场景。
@@ -2101,6 +2154,40 @@ export async function streamCompletionWithTools(
   },
 ): Promise<string> {
   const userText = extractUserTextFromMessages(messages) || "";
+  // ── 代词指代锚定（2026-11-19 根修）──
+  // 去路由化后「代词指谁」全交模型自由裁量，真机出现「看看他的照片」沿用三轮前
+  // 搜过的成龙（最近话题里的老婆=刘浩存被忽略）。这里在进入工具决策前，用画像
+  // 指代映射 + 最近对话做近因匹配，得到本轮唯一锚点：
+  //   ① 作为系统提示注入本轮上下文（模型写正文/选参数时看得到）；
+  //   ② 纯媒体轮（原话只含代词+找图诉求）由代码确定性预执行 search_images，
+  //      查询词直接就是锚定实体——模型从「决策者」降级为「叙述者」，
+  //      和 2026-10-10 media 预执行同构，只是实体来源换成对话状态而非词频。
+  const turnReferent = options?.referentLines?.length
+    ? resolveTurnReferent(
+        userText,
+        collectRecentDialogueLines(messages, userText),
+        options.referentLines,
+      )
+    : null;
+  if (turnReferent) {
+    messages.push({
+      role: "system",
+      content:
+        `【本轮指代】用户这轮用的是代词。按最近对话锚定：` +
+        `${turnReferent.role ? `「${turnReferent.role}」= ` : ""}${turnReferent.entity}。` +
+        `本轮涉及人/物的操作（搜图、查资料、发消息）都以 ${turnReferent.entity} 为准，` +
+        `不要改用更早话题里出现过的其他人。`,
+    });
+  }
+  const referentMediaRound =
+    Boolean(turnReferent) && isMediaOnlyRequest(userText) && !options?.deterministicToolCalls?.length;
+  const detToolCalls = options?.deterministicToolCalls?.length
+    ? options.deterministicToolCalls
+    : referentMediaRound && turnReferent
+      ? [{ name: mediaToolNameForText(userText), args: { query: turnReferent.entity } }]
+      : undefined;
+  const synthesisTurnIntent =
+    options?.turnIntent ?? (referentMediaRound ? "media_retrieval" : undefined);
   // B4 任务面预算缩放：task_plane 阶段按比例收缩每工具结果预算（前台对话面=1 不变）
   const toolBudgetScale = resolveToolBudgetScale(options?.audit?.stage);
   const budgetForTool = (toolName: string): number | undefined => {
@@ -2443,9 +2530,9 @@ export async function streamCompletionWithTools(
     return run;
   };
 
-  if (options?.deterministicToolCalls?.length && stableApiTools.length > 0) {
-    for (let di = 0; di < options.deterministicToolCalls.length; di++) {
-      const det = options.deterministicToolCalls[di];
+  if (detToolCalls?.length && stableApiTools.length > 0) {
+    for (let di = 0; di < detToolCalls.length; di++) {
+      const det = detToolCalls[di];
       const detName = String(det?.name ?? "").trim();
       const detArgs = (det?.args ?? {}) as Record<string, unknown>;
       const detQuery = String(detArgs.query ?? "").trim();
@@ -2496,12 +2583,20 @@ export async function streamCompletionWithTools(
       const fenced = shouldFenceToolContent(registryName)
         ? fenceUntrustedToolContent(registryName, compacted.content)
         : compacted.content;
+      const detEmptyPhoto =
+        registryName === "search_images" && searchImagesItemCount(exec.result) === 0;
       const detPhotoHint =
-        exec.ok && registryName === "search_images" ? PHOTO_REPLY_HINT : "";
+        exec.ok && registryName === "search_images" && !detEmptyPhoto ? PHOTO_REPLY_HINT : "";
       const detFailureReminder = !exec.ok
         ? buildToolFailureReminder(registryName, compacted.content)
         : "";
-      const detHints = [detPhotoHint, detFailureReminder].filter(Boolean).join("\n");
+      const detHints = [
+        detPhotoHint,
+        detEmptyPhoto ? MEDIA_EMPTY_HINT : "",
+        detFailureReminder,
+      ]
+        .filter(Boolean)
+        .join("\n");
       messages.push({
         role: "tool",
         tool_call_id: detCallId,
@@ -3820,12 +3915,15 @@ export async function streamCompletionWithTools(
       const fencedToolContent = shouldFenceToolContent(wireToolName)
         ? fenceUntrustedToolContent(wireToolName, fullToolContent)
         : fullToolContent;
+      const emptyPhoto =
+        wireToolName === "search_images" && searchImagesItemCount(exec.result) === 0;
       // 对成功的工具结果追加信息充分性提示，减少 LLM 不必要的二次调用。
       // 只追加在本波最后一条成功消息上（内容与具体工具无关，逐条重复纯烧 token）。
       // 关键洞察：LLM 重复调用工具的根因是不确定结果是否足够回答。
       // 明确告诉 LLM「结果已完整」，让它直接回答而非重复调用。
+      // 零结果图搜轮除外：「结果已完整」会盖掉换词重试的余地，改挂 MEDIA_EMPTY_HINT。
       const sufficiencyHint =
-        exec.ok && i === lastOkToolIndex && !BOOKKEEPING_TOOL_NAMES.has(wireToolName)
+        exec.ok && i === lastOkToolIndex && !BOOKKEEPING_TOOL_NAMES.has(wireToolName) && !emptyPhoto
           ? buildToolSufficiencyHint(wireToolName, fullToolContent)
           : "";
       // 对失败的工具结果追加强约束 reminder，防止 LLM 忽略 error 字段后对用户撒谎。
@@ -3833,12 +3931,13 @@ export async function streamCompletionWithTools(
       const failureReminder = !exec.ok
         ? buildToolFailureReminder(wireToolName, fullToolContent)
         : "";
-      // 照片轮回复方式提示：search_images 成功即挂，定住「交图为主、正文一两句」的形态。
+      // 照片轮回复方式提示：search_images 真出了图才挂；零结果改挂如实说明提示。
       const photoReplyHint =
-        exec.ok && wireToolName === "search_images" ? PHOTO_REPLY_HINT : "";
+        exec.ok && wireToolName === "search_images" && !emptyPhoto ? PHOTO_REPLY_HINT : "";
+      const emptyMediaHint = emptyPhoto ? MEDIA_EMPTY_HINT : "";
       // ObservationPack：压缩点归档成功时附读回提示（排在最前，紧贴被压缩的结果原文）。
       const obsHint = settled.status === "fulfilled" ? settled.value.obsHint : "";
-      const appendedHints = [obsHint, sufficiencyHint, failureReminder, photoReplyHint]
+      const appendedHints = [obsHint, sufficiencyHint, failureReminder, photoReplyHint, emptyMediaHint]
         .filter(Boolean)
         .join("\n");
       messages.push({
@@ -4025,7 +4124,7 @@ export async function streamCompletionWithTools(
 
       // 数据驱动策略评估：只产出「本轮数据事实」（几个来源/够不够），
       // 不再产出任何版式或组织方式——结构归 render/scenes，措辞归人格。
-      const strategyDirective = evaluateAndSelectStrategy(allToolExecResults, userText, options?.turnIntent);
+      const strategyDirective = evaluateAndSelectStrategy(allToolExecResults, userText, synthesisTurnIntent);
       const strategyBlock = strategyDirective.instruction
         ? `\n\n【本轮数据】${strategyDirective.instruction}`
         : "";
@@ -4066,7 +4165,7 @@ export async function streamCompletionWithTools(
       // 求简指令与「组织充分/按主题分节」结构模板已删（2026-11-05 架构收敛：把主动权
       // 还给 agent——主流工具环在 tool result 回填后直接让模型续跑，不加修辞导演词；
       // 组织方式由 system 一层管，这里只剩「结果已返回，回答」这个事实）。
-      const photoDeliveryRound = isPhotoDeliveryRound(allToolExecResults, options?.turnIntent);
+      const photoDeliveryRound = isPhotoDeliveryRound(allToolExecResults, synthesisTurnIntent);
       const baseDirective =
         (photoDeliveryRound
           ? `照片已就绪，直接交给用户。`

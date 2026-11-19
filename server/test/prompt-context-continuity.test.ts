@@ -19,8 +19,8 @@ test("finalizeChatSystemPrompt 始终注入事实可靠性约束", () => {
     "普通工具模式应包含事实可靠性约束",
   );
   assert.ok(
-    legacy.includes("禁止编造城市、天气、价格"),
-    "应明确禁止编造位置、天气等事实",
+    legacy.includes("训练记忆不算依据") && legacy.includes("没依据就取数、问用户或说不知道"),
+    "应明确训练记忆不是依据，且无依据时只能取数/提问/说不知道",
   );
 
   const minimal = finalizeChatSystemPrompt(BASE_SYSTEM, { suppressRuntimeSuffixes: true });

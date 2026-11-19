@@ -20,9 +20,12 @@ import test from "node:test";
 
 import {
   LocationHistoryService,
+  type DayTimeline,
   type LocationSample,
 } from "../src/services/location-history-service.js";
 import { LocationIngestPipeline } from "../src/services/location-ingest-pipeline.js";
+import { registerPlaceTools } from "../src/tools/place-tools.js";
+import { ToolRegistry } from "../src/tools/tool-registry.js";
 
 const BASE_AT = Date.parse("2026-09-04T10:00:00Z");
 
@@ -225,6 +228,58 @@ test("movementStats：跳变超过阈值判为移动", async () => {
   });
 });
 
+test("dayTimeline：按本地日期还原停留与移动段", async () => {
+  await withHistory(async ({ svc, setNow }) => {
+    const home = { latitude: 39.9, longitude: 116.4, label: "家", accuracyMeters: 20 };
+    const work = { latitude: 39.95, longitude: 116.45, label: "公司", accuracyMeters: 20 };
+    // 本地 2026-09-04（Asia/Shanghai = UTC+8）：
+    // 06:00-06:20 在家 → 07:00-07:20 在公司
+    const at = (iso: string) => new Date(iso);
+    svc.record("u1", home, "continuous", at("2026-09-03T22:00:00Z"));
+    svc.record("u1", home, "continuous", at("2026-09-03T22:10:00Z"));
+    svc.record("u1", home, "continuous", at("2026-09-03T22:20:00Z"));
+    svc.record("u1", work, "continuous", at("2026-09-03T23:00:00Z"));
+    svc.record("u1", work, "continuous", at("2026-09-03T23:10:00Z"));
+    svc.record("u1", work, "continuous", at("2026-09-03T23:20:00Z"));
+    setNow("2026-09-04T12:00:00Z");
+
+    const timeline = svc.dayTimeline("u1", {
+      date: "2026-09-04",
+      timezone: "Asia/Shanghai",
+    });
+    assert.equal(timeline.date, "2026-09-04");
+    assert.equal(timeline.sampleCount, 6);
+    assert.equal(timeline.visits.length, 3, "两段停留 + 一段移动");
+    assert.equal(timeline.visits[0].kind, "stay");
+    assert.equal(timeline.visits[0].label, "家");
+    assert.equal(timeline.visits[0].startLocal, "06:00");
+    assert.equal(timeline.visits[0].endLocal, "06:20");
+    assert.equal(timeline.visits[1].kind, "trip");
+    assert.equal(timeline.visits[2].kind, "stay");
+    assert.equal(timeline.visits[2].label, "公司");
+    assert.equal(timeline.visits[2].startLocal, "07:00");
+    assert.ok(timeline.pathMeters > 5000, "家到公司的位移应被计入当日路径");
+  });
+});
+
+test("dayTimeline：长时间空档不伪造成移动段", async () => {
+  await withHistory(async ({ svc, setNow }) => {
+    const home = { latitude: 39.9, longitude: 116.4, label: "家", accuracyMeters: 20 };
+    const work = { latitude: 39.95, longitude: 116.45, label: "公司", accuracyMeters: 20 };
+    // 本地 08:00 在家两帧后断档，20:00 直接出现在公司：中间没有任何样本。
+    // 12 小时空档更可能是后台被限流，不能编成一段 12 小时的「在路上」。
+    svc.record("u1", home, "continuous", new Date("2026-09-04T00:00:00Z"));
+    svc.record("u1", home, "continuous", new Date("2026-09-04T00:10:00Z"));
+    svc.record("u1", work, "continuous", new Date("2026-09-04T12:00:00Z"));
+    svc.record("u1", work, "continuous", new Date("2026-09-04T12:10:00Z"));
+    setNow("2026-09-04T13:00:00Z");
+
+    const timeline = svc.dayTimeline("u1", { date: "2026-09-04", timezone: "Asia/Shanghai" });
+    assert.equal(timeline.visits.length, 2);
+    assert.ok(timeline.visits.every((v) => v.kind === "stay"), "空档不应产生 trip 段");
+  });
+});
+
 test("LocationIngestPipeline：历史关闭时静默，开启时落库并回调", async () => {
   await withHistory(async ({ svc }) => {
     const reported: Array<{ actorId: string; source: string }> = [];
@@ -345,4 +400,95 @@ test("精度元数据落库：未提供/非法精度写 null（不污染统计�
     svc.close();
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("place action=timeline/habits：返回日行程与多天习惯", async () => {
+  const timeline: DayTimeline = {
+    date: "2026-11-19",
+    timezone: "Asia/Shanghai",
+    from: "2026-11-18T16:00:00.000Z",
+    to: "2026-11-19T16:00:00.000Z",
+    visits: [
+      {
+        kind: "stay",
+        startAt: "2026-11-19T01:00:00Z",
+        endAt: "2026-11-19T10:00:00Z",
+        startLocal: "09:00",
+        endLocal: "18:00",
+        durationMinutes: 540,
+        latitude: 39.95,
+        longitude: 116.45,
+        label: "望京科技园",
+        city: "北京市",
+        district: "朝阳区",
+        sampleCount: 8,
+        accuracyMeters: 20,
+      },
+    ],
+    sampleCount: 8,
+    pathMeters: 8000,
+  };
+  const registry = new ToolRegistry();
+  registerPlaceTools(registry, {
+    service: {
+      matchCached: () => ({
+        record: {
+          id: "p1",
+          kind: "work",
+          label: "公司",
+          poiName: null,
+          confirmed: true,
+        },
+        distanceMeters: 0,
+      }),
+      habits: async () => [
+        {
+          placeId: "p1",
+          kind: "work",
+          label: "公司",
+          adminArea: "北京市朝阳区",
+          confirmed: true,
+          visitDays: 5,
+          lastVisitAt: timeline.visits[0].endAt,
+          weekday: {
+            visits: 5,
+            arrival: "09:00",
+            departure: "18:00",
+            medianDurationMinutes: 540,
+          },
+          weekend: { visits: 0, arrival: null, departure: null, medianDurationMinutes: null },
+        },
+      ],
+    } as never,
+    history: {
+      dayTimeline: () => timeline,
+      dayTimelines: () => [timeline],
+    } as never,
+    getTimezone: () => "Asia/Shanghai",
+  });
+  const ctx = { sessionId: "u1", userId: "u1" };
+
+  const res = (await registry.execute("place", { action: "timeline" }, ctx)) as {
+    result: {
+      ok: boolean;
+      count: number;
+      timelines: Array<{ visits: Array<{ name: string; startLocal: string }> }>;
+    };
+  };
+  assert.equal(res.result.ok, true);
+  assert.equal(res.result.count, 1);
+  assert.equal(res.result.timelines[0].visits[0].name, "公司");
+  assert.equal(res.result.timelines[0].visits[0].startLocal, "09:00");
+
+  const habits = (await registry.execute("place", { action: "habits", days: 5 }, ctx)) as {
+    result: {
+      ok: boolean;
+      count: number;
+      habits: Array<{ weekday: { arrival: string; departure: string } }>;
+    };
+  };
+  assert.equal(habits.result.ok, true);
+  assert.equal(habits.result.count, 1);
+  assert.equal(habits.result.habits[0].weekday.arrival, "09:00");
+  assert.equal(habits.result.habits[0].weekday.departure, "18:00");
 });

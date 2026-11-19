@@ -2,7 +2,14 @@ package com.example.private_ai_app
 
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import io.flutter.embedding.engine.plugins.FlutterPlugin
+import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 
@@ -23,16 +30,110 @@ class KeepAlivePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     private var channel: MethodChannel? = null
     private var context: Context? = null
 
+    /**
+     * 网络路径事件（2026-11-18 手机端「老是重连」治理）。
+     *
+     * Wi‑Fi ⇄ 蜂窝切换、飞行模式恢复时旧 TCP 连接会静默失效，Dart 侧心跳要
+     * 75s 才判死。这里用 system 的 default network callback 在路径变化的第一
+     * 时间推一帧给 Dart（值：wifi / mobile / ethernet / other / none），由连接
+     * 层立即探活或重建，用户不再干等一分多钟。
+     */
+    private var networkEventChannel: EventChannel? = null
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
+    private var networkSink: EventChannel.EventSink? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         context = binding.applicationContext
         channel = MethodChannel(binding.binaryMessenger, "nextbot/keep_alive")
         channel?.setMethodCallHandler(this)
+        networkEventChannel = EventChannel(binding.binaryMessenger, "nextbot/network_events")
+        networkEventChannel?.setStreamHandler(object : EventChannel.StreamHandler {
+            override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                networkSink = events
+                registerNetworkCallback()
+                emitNetworkState()
+            }
+
+            override fun onCancel(arguments: Any?) {
+                networkSink = null
+                unregisterNetworkCallback()
+            }
+        })
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         channel?.setMethodCallHandler(null)
         channel = null
+        networkEventChannel?.setStreamHandler(null)
+        networkEventChannel = null
+        networkSink = null
+        unregisterNetworkCallback()
         context = null
+    }
+
+    private fun registerNetworkCallback() {
+        val ctx = context ?: return
+        val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        if (networkCallback != null) return
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                val callback = object : ConnectivityManager.NetworkCallback() {
+                    override fun onAvailable(network: Network) = emitNetworkState()
+                    override fun onLost(network: Network) = emitNetworkState()
+                    override fun onCapabilitiesChanged(
+                        network: Network,
+                        networkCapabilities: NetworkCapabilities,
+                    ) = emitNetworkState()
+                }
+                cm.registerDefaultNetworkCallback(callback)
+                networkCallback = callback
+            }
+        } catch (e: Exception) {
+            // 权限缺失/系统限制：Dart 侧仍有心跳兜底，不影响业务。
+            android.util.Log.w("KeepAlive", "register network callback failed", e)
+        }
+    }
+
+    private fun unregisterNetworkCallback() {
+        val ctx = context ?: return
+        val callback = networkCallback ?: return
+        networkCallback = null
+        val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        try {
+            cm.unregisterNetworkCallback(callback)
+        } catch (_: Exception) {
+            // 已注销 / 系统已回收：无害
+        }
+    }
+
+    /** 当前生效网络的类型；回调可能来自任意线程，统一切回主线程再发。 */
+    private fun emitNetworkState() {
+        mainHandler.post {
+            val sink = networkSink ?: return@post
+            val ctx = context ?: return@post
+            val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            val type = when {
+                cm == null -> "other"
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.M -> {
+                    val active = cm.activeNetwork
+                    val caps = active?.let { cm.getNetworkCapabilities(it) }
+                    when {
+                        caps == null -> "none"
+                        caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+                        caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "mobile"
+                        caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ethernet"
+                        else -> "other"
+                    }
+                }
+                else -> if (cm.activeNetworkInfo?.isConnected == true) "other" else "none"
+            }
+            try {
+                sink.success(type)
+            } catch (e: Exception) {
+                android.util.Log.w("KeepAlive", "emit network state failed", e)
+            }
+        }
     }
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {

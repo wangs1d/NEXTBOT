@@ -341,7 +341,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerUnifiedPaymentRoutes(app);
   // AI 网页应用收款（自包含页面 + /api/webpay/*；未配置时端点 503，不影响其他路由）
   registerWebpayRoutes(app);
-  // 官网 API 充值（邮箱 OTP 会话 + 金额计入登录账号；支付仍走上面同一套 webpay）
+  // 官网额度充值（邮箱 OTP 会话 + 金额计入登录账号；支付仍走上面同一套 webpay）
   registerRechargeRoutes(app, deps);
   // /v1 对话网关（OpenAI 兼容，余额按 token 扣减；单价/模型未配置时端点自报 503）
   registerV1GatewayRoutes(app);

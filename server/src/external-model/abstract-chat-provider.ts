@@ -492,6 +492,8 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
               : {}),
             // 路由意图标签：出口检查用它确定性拦截"声明要动手但零工具尝试"的轮次
             turnIntent: effectiveStreamOpts.turnIntent,
+            // 代词指代锚定（2026-11-19）：白名单透传，漏掉 = 指代解析静默失效
+            referentLines: effectiveStreamOpts.referentLines,
             // 生成前渲染场景数据面（P3 前移）：Promise 原样透传，工具循环综合阶段
             // 才 await——漏掉 = pre 场景判定不到数据面，明日预览边界恒不注入
             renderPayloads: effectiveStreamOpts.renderPayloads,

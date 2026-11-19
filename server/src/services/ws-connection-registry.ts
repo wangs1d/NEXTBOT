@@ -114,6 +114,30 @@ export class WsConnectionRegistry {
     return [...this.connections.keys()];
   }
 
+  /**
+   * 关闭全部连接（2026-11-18 优雅重启）。
+   *
+   * 服务端发版/重启时先广播再调用本方法。关闭码用 1001(Going Away) + 明确的
+   * reason——Dart 的 WebSocket 实现会拒收 1012 这类保留码；客户端按 reason
+   * (`server_restart`) 识别发版，走 ~1s 快重连而不是指数退避。
+   * 遍历时先复制集合，close 事件里的 unregister 不会打断遍历。
+   */
+  closeAll(code = 1001, reason = "server_restart"): number {
+    let closed = 0;
+    for (const [sessionId, set] of [...this.connections]) {
+      for (const entry of [...set]) {
+        try {
+          entry.socket.close?.(code, reason);
+        } catch {
+          /* 半开连接 close 可能抛错：照常摘除登记 */
+        }
+        this.dropSocket(sessionId, entry.socket);
+        closed += 1;
+      }
+    }
+    return closed;
+  }
+
   get(sessionId: string): WsLike | undefined {
     const set = this.connections.get(sessionId);
     if (!set || set.size === 0) return undefined;

@@ -332,10 +332,11 @@ export function registerGeoTools(registry: ToolRegistry, deps: GeoToolDeps = {})
         if (context.requestLocation) {
           try {
             // 「离我多远」的起点是此刻位置：旧缓存/粗 fix 会让距离偏差同量级，
-            // 因此要求 2 分钟内且 ≤100m（达不到就现场拉一次 GPS）。
+            // 因此要求 2 分钟内且 ≤10m（2026-11-18 与客户端精度门槛对齐，
+            // 此前 100m 会让「离我多远」直接偏差一个街区）。
             known = await context.requestLocation("geo.distance:计算到目标地点的距离", {
               maxAgeMs: 2 * 60_000,
-              maxAccuracyMeters: 100,
+              maxAccuracyMeters: 10,
             });
           } catch {
             known = null;

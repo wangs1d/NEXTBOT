@@ -16,6 +16,13 @@ test("人物照片：空格分词 query 只留人名", () => {
   assert.equal(normalizeImageSearchQuery("鞠婧祎 照片 高清"), "鞠婧祎");
   assert.equal(normalizeImageSearchQuery("刘亦菲 高清 图片"), "刘亦菲");
   assert.equal(normalizeImageSearchQuery("鞠婧祎 最新 近照"), "鞠婧祎");
+  // 2026-11-19 真机：模型把年份也抄进 query，形态闸整条拒绝，用户一张图都拿不到
+  assert.equal(normalizeImageSearchQuery("成龙 最新 近照 2026"), "成龙");
+  assert.equal(normalizeImageSearchQuery("成龙 2026年 最新 近照"), "成龙");
+});
+
+test("年份噪声：带「年」的尾部年份一并剥掉", () => {
+  assert.equal(normalizeImageSearchQuery("成龙2026年最新近照"), "成龙");
 });
 
 test("具体图片类型词保留（壁纸/头像/表情包/写真 是有效检索词）", () => {

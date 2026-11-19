@@ -27,6 +27,7 @@ import {
   type StoredBookingOrder,
 } from "../src/services/booking/index.js";
 import { localDateKey } from "../src/services/booking/booking-order-store.js";
+import { getBookingConfig } from "../src/services/booking/booking-config.js";
 import { extractLedgerEntry } from "../src/services/consumption-ledger-listener.js";
 import type {
   BookingDraft,
@@ -176,6 +177,39 @@ test("booking-service - 网约车全链路（quote → 两阶段 book → status
     const c2 = cancel2 as { status: string };
     assert.equal(c2.status, "cancelled");
   });
+});
+
+test("booking-service - 金额硬限额默认关闭（0=不限），下单直通确认阶段", async () => {
+  await withBooking(
+    async ({ service }) => {
+      const ctx = makeContext();
+      // 所有下单均由用户确认卡把关，限额 0 = 不限：阶段一直接放行到确认
+      const stage1 = await service.book(ctx, "home_service", {
+        optionId: "clean-basic",
+        params: { serviceType: "cleaning", address: "朝阳区望京" },
+        scheduleAt: "2026-09-10T14:00:00+08:00",
+        confirm: false,
+      });
+      assert.equal(stage1.ok, true);
+      if (stage1.ok) {
+        assert.equal(stage1.needsConfirmation, true);
+        assert.ok(stage1.confirmationToken);
+      }
+    },
+    { maxAmountCny: 0, dailyBudgetCny: 0 },
+  );
+});
+
+test("booking-config - 限额默认 0（不限），显式配置才开启", () => {
+  const cfg = getBookingConfig({} as NodeJS.ProcessEnv);
+  assert.equal(cfg.maxAmountCny, 0);
+  assert.equal(cfg.dailyBudgetCny, 0);
+  const explicit = getBookingConfig({
+    BOOKING_MAX_AMOUNT_CNY: "800",
+    BOOKING_DAILY_BUDGET_CNY: "300",
+  } as NodeJS.ProcessEnv);
+  assert.equal(explicit.maxAmountCny, 800);
+  assert.equal(explicit.dailyBudgetCny, 300);
 });
 
 test("booking-service - 单笔上限拦截", async () => {
@@ -533,5 +567,56 @@ test("booking-service - localDateKey 与 store 统计窗口一致", () => {
   } else {
     // 其他时区：至少与 createdAt 的 UTC 前缀语义分离（key 由本地时区推导）
     assert.equal(key, new Date(iso.getTime() - offset * 60_000).toISOString().slice(0, 10));
+  }
+});
+
+test("booking-service - 报价 id 含时效 trace（滴滴形态）时，用户选择后仍能定位到同车型", async () => {
+  // 每次 search 都换 trace，模拟滴滴 estimate_trace_id 的真实行为
+  let round = 0;
+  const provider: BookingProvider = {
+    key: "didi",
+    domain: "ride",
+    label: "滴滴（测试）",
+    availability: () => ({ ok: true }),
+    async search(): Promise<BookingProviderResult<{ options: BookingOption[] }>> {
+      round += 1;
+      return {
+        ok: true,
+        options: [
+          { id: `didi:trace${round}:3`, provider: "didi", title: "经济型", amountCny: 58 },
+          { id: `didi:trace${round}:5`, provider: "didi", title: "舒适型", amountCny: 76 },
+        ],
+      };
+    },
+    async book(draft: BookingDraft): Promise<BookingProviderResult<BookingProviderBookPayload>> {
+      return { ok: true, providerOrderId: `DID-${draft.optionId}`, status: "confirmed" };
+    },
+    async getStatus(): Promise<BookingProviderResult<{ status: "confirmed" }>> {
+      return { ok: true, status: "confirmed" };
+    },
+    async cancel(): Promise<BookingProviderResult<{ message?: string }>> {
+      return { ok: true };
+    },
+  };
+  const service = new BookingService({ providers: [provider] });
+  try {
+    const ctx = makeContext();
+    const quote = await service.search(ctx, "ride", { params: { pickup: "A", dropoff: "B" } });
+    assert.equal(quote.ok, true);
+    const oldOptionId = (quote as { options: BookingOption[] }).options[1].id;
+    assert.equal(oldOptionId, "didi:trace1:5");
+
+    const stage1 = await service.book(ctx, "ride", {
+      optionId: oldOptionId,
+      params: { pickup: "A", dropoff: "B" },
+      confirm: false,
+    });
+    assert.equal(stage1.ok, true);
+    // 用新报价的 id 铸造草稿：旧 trace 已失效，不能拿它去下单
+    const s1 = stage1 as { confirmationToken: string; optionId: string; optionTitle: string };
+    assert.equal(s1.optionId, "didi:trace2:5");
+    assert.equal(s1.optionTitle, "舒适型");
+  } finally {
+    service.dispose();
   }
 });

@@ -13,6 +13,7 @@ import { test } from "node:test";
 
 import {
   canonicalFieldMap,
+  gateProfileMarkdownForPrompt,
   isProfileFieldCopyLine,
   parseFieldLine,
   parseRenderedFactBlock,
@@ -20,6 +21,7 @@ import {
   projectProfileMarkdown,
   reconcileProfileFactsFromStores,
   stripProfileFactDuplicateLines,
+  upsertManagedProfileLine,
   type ProfileAuthorityDeps,
 } from "../src/services/user-personalization/profile-fact-authority.js";
 
@@ -47,7 +49,10 @@ const MD = `# 用户画像
 test("A 字段标签归一：别名收敛到标准字段，非档案字段返回空", () => {
   assert.equal(profileFieldOfLabel("称呼"), "称呼");
   assert.equal(profileFieldOfLabel("用户称呼"), "称呼");
-  assert.equal(profileFieldOfLabel("名字"), "称呼");
+  // 2026-11-18 拆分：名字/姓名归「姓名」，称呼只表示希望被怎么叫
+  assert.equal(profileFieldOfLabel("名字"), "姓名");
+  assert.equal(profileFieldOfLabel("全名"), "姓名");
+  assert.equal(profileFieldOfLabel("年龄"), "年龄");
   assert.equal(profileFieldOfLabel("职业相关"), "职业");
   assert.equal(profileFieldOfLabel("居住地（城市）"), "居住地");
   assert.equal(profileFieldOfLabel("常用语言"), "");
@@ -59,6 +64,56 @@ test("B parseFieldLine 只认「字段：值」，列表前缀与冒号均可", 
   assert.deepEqual(parseFieldLine("- 称呼：王哥"), { label: "称呼", value: "王哥" });
   assert.deepEqual(parseFieldLine("职业: 程序员"), { label: "职业", value: "程序员" });
   assert.equal(parseFieldLine("- 会打游戏，周末常觉得无聊"), null);
+});
+
+test("B2 画像注入门控：身份字段只跟本轮权威块，非身份行原样保留", () => {
+  const md = `# 用户画像
+
+## 基本信息
+
+- 称呼：大哥
+- 姓名：王铭川
+- 年龄：20岁
+- 居住地：贵州兴义下午屯九华苑
+
+## 兴趣与习惯
+
+- 喜欢刘浩存
+
+## 沟通偏好
+
+- 回复偏好：精简直接
+`;
+  const out = gateProfileMarkdownForPrompt(md, {
+    injectedFactFields: new Set(["称呼"]),
+  })!;
+  assert.ok(out.includes("- 称呼：大哥"), "本轮注入的身份字段保留");
+  assert.ok(!out.includes("姓名"), "未注入的身份字段不进 prompt");
+  assert.ok(!out.includes("年龄"), "未注入的身份字段不进 prompt");
+  assert.ok(!out.includes("居住地"), "未注入的身份字段不进 prompt");
+  assert.ok(out.includes("喜欢刘浩存"), "兴趣行是风格背景，原样保留");
+  assert.ok(out.includes("回复偏好"), "沟通偏好不是身份字段，原样保留");
+});
+
+test("B3 门控后空 section 连标题一起丢弃", () => {
+  const md = "## 基本信息\n\n- 姓名：王铭川\n\n## 沟通偏好\n\n- 回复偏好：精简\n";
+  const out = gateProfileMarkdownForPrompt(md, {
+    injectedFactFields: new Set<string>(),
+  })!;
+  assert.ok(!out.includes("基本信息"), "身份字段全被门控掉后 section 标题也应消失");
+  assert.ok(out.includes("沟通偏好"), "仍有内容的 section 保留");
+});
+
+test("B4 画像门控：传 query 时自由文本也按相关性过滤", () => {
+  const out = gateProfileMarkdownForPrompt(MD, {
+    injectedFactFields: new Set(["称呼"]),
+    query: "我几岁",
+  })!;
+  assert.ok(out.includes("- 称呼：王哥"), "本轮注入的身份字段保留");
+  assert.ok(!out.includes("常用语言"), "无关自由文本不注入");
+  assert.ok(!out.includes("会打游戏"), "无关兴趣行不注入");
+  assert.ok(!out.includes("语气风格"), "无关沟通偏好不注入");
+  assert.ok(out.includes("王哥；也曾使用"), "身份字段行原样保留（去重交给投影层）");
 });
 
 test("C 投影：别名行合并为一行权威行，清掉行内历史注解，保留非字段行", () => {
@@ -165,7 +220,10 @@ test("K canonicalFieldMap：忽略非档案字段与空值", () => {
     { field: "职业", value: "  " },
     { field: "名字", value: "王铭川" },
   ]);
-  assert.deepEqual([...map.entries()], [["称呼", "王哥"]]);
+  assert.deepEqual([...map.entries()], [
+    ["称呼", "王哥"],
+    ["姓名", "王铭川"],
+  ]);
 });
 
 /* ─────────────────────────── 画像去重（prompt 渲染层） ─────────────────────────── */
@@ -240,6 +298,39 @@ test("P 画像去重：〔历史〕/〔计划〕形态不算当前值，画像�
   const out = stripProfileFactDuplicateLines(profile, rendered);
   assert.equal(out.removed, 0, "没有当前值可比对 → 保留");
   assert.ok(out.text.includes("- 居住地：杭州"));
+});
+
+test("R 受管行：常去地点写入/更新/删除幂等（落点兴趣与习惯）", () => {
+  const base = "# 用户画像\n\n## 兴趣与习惯\n\n- 喜欢黑胶\n\n## 备注\n\n- 其他\n";
+  const line = "常去地点：望京科技园、九华苑";
+
+  const added = upsertManagedProfileLine(base, "常去地点", line);
+  assert.ok(added.includes("- 常去地点：望京科技园、九华苑"));
+  assert.ok(added.indexOf("常去地点") > added.indexOf("喜欢黑胶"), "追加在 section 末尾");
+  assert.equal(upsertManagedProfileLine(added, "常去地点", line), added, "重复写入必须幂等");
+
+  const updated = upsertManagedProfileLine(added, "常去地点", "常去地点：望京科技园");
+  assert.ok(updated.includes("- 常去地点：望京科技园"));
+  assert.ok(!updated.includes("九华苑"), "更新必须整行替换，不残留旧地点");
+
+  const removed = upsertManagedProfileLine(updated, "常去地点", null);
+  assert.ok(!removed.includes("常去地点"), "数据清空后画像不留旧地点");
+  assert.ok(removed.includes("- 喜欢黑胶"), "其它画像行不受影响");
+});
+
+test("S 画像门控：常去地点行只在 query 相关时注入", () => {
+  const md = "# 用户画像\n\n## 兴趣与习惯\n\n- 常去地点：望京科技园、九华苑\n";
+  const unrelated = gateProfileMarkdownForPrompt(md, {
+    injectedFactFields: new Set(["称呼"]),
+    query: "帮我写个周报",
+  });
+  assert.ok(!unrelated?.includes("常去地点"), "无关提问不应带出地点行");
+
+  const related = gateProfileMarkdownForPrompt(md, {
+    injectedFactFields: new Set(["称呼"]),
+    query: "我常去哪些地方",
+  });
+  assert.ok(related?.includes("常去地点"), "相关提问应召回地点行");
 });
 
 test("Q parseRenderedFactBlock：只认当前值形态，取括号前的值", () => {

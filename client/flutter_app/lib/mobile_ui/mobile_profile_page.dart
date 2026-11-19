@@ -1,11 +1,18 @@
 import "dart:async";
+import "dart:io" show Platform;
 import "dart:typed_data";
 
+import "package:flutter/foundation.dart" show kIsWeb;
 import "package:flutter/material.dart";
 import "package:image_picker/image_picker.dart";
+import "package:permission_handler/permission_handler.dart";
+import "package:url_launcher/url_launcher.dart";
 
 import "../core/config/api_config.dart";
+import "../core/db/isar_local_history_store.dart";
 import "../core/presentation/user_avatar.dart";
+import "../core/services/account_session_store.dart";
+import "../core/services/keep_alive_service.dart";
 import "../core/services/user_avatar_api.dart";
 import "../features/help/feedback_dialog.dart";
 import "mobile_chat_controller.dart";
@@ -47,17 +54,34 @@ class MobileProfilePage extends StatefulWidget {
   State<MobileProfilePage> createState() => _MobileProfilePageState();
 }
 
-class _MobileProfilePageState extends State<MobileProfilePage> {
+class _MobileProfilePageState extends State<MobileProfilePage>
+    with WidgetsBindingObserver {
   final UserAvatarApi _avatarApi = UserAvatarApi();
   final ImagePicker _imagePicker = ImagePicker();
 
   /// 用户头像相对路径（服务端 /agent/avatars/...；null=未设置）。
   String? _userAvatarPath;
 
+  /// 后台保活真实状态（2026-11-18「老是重连」治理）：前台服务 + 电池优化豁免。
+  /// 只在移动端查询；桌面/Web 保持空转，不显示相关行。
+  bool _fgsRunning = false;
+  bool _batteryExempt = false;
+  bool _keepAliveLoading = true;
+
+  /// 保活提示条只提醒一次；关掉后不再常驻，状态仍留在「后台保活」设置行。
+  bool _keepAliveHintDismissed = false;
+  static const String _keepAliveHintDismissedKey = "keepAliveHintDismissed";
+
+  bool get _isMobile =>
+      !kIsWeb && (Platform.isAndroid || Platform.isIOS);
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     unawaited(_loadAvatar());
+    unawaited(_refreshKeepAlive());
+    unawaited(_loadKeepAliveHintDismissed());
     widget.chatController.addListener(_onChatChanged);
   }
 
@@ -72,8 +96,129 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     widget.chatController.removeListener(_onChatChanged);
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // 从系统「电池优化/应用信息」设置页返回后，状态会变——回前台重查一次。
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_refreshKeepAlive());
+    }
+  }
+
+  /// 读取原生侧真实运行态（不把「请求过启动」当成「正在运行」）。
+  Future<void> _refreshKeepAlive() async {
+    if (!_isMobile) return;
+    final bool running = await KeepAliveService.isRunning();
+    final bool exempt = await KeepAliveService.isBatteryExempt();
+    if (!mounted) return;
+    setState(() {
+      _fgsRunning = running;
+      _batteryExempt = exempt;
+      _keepAliveLoading = false;
+    });
+  }
+
+  /// 提示条关闭状态落本地偏好：关过就不再每次进「我的」页弹出来。
+  Future<void> _loadKeepAliveHintDismissed() async {
+    final dynamic saved = await IsarLocalHistoryStore(
+      userPin: ApiConfig.localPin,
+    ).getPreference(_keepAliveHintDismissedKey);
+    if (!mounted) return;
+    setState(() => _keepAliveHintDismissed = saved == true);
+  }
+
+  Future<void> _dismissKeepAliveHint() async {
+    setState(() => _keepAliveHintDismissed = true);
+    await IsarLocalHistoryStore(
+      userPin: ApiConfig.localPin,
+    ).savePreference(_keepAliveHintDismissedKey, true);
+  }
+
+  /// 「后台保活」详情：展示真实状态 + 一键开启入口。
+  ///
+  /// 只把状态藏进设置还不够——用户看到「老是重连」时第一反应是网络或服务器，
+  /// 不会想到是系统把进程冻结了。这里把两个关键开关（前台服务 / 电池优化豁免）
+  /// 和厂商白名单的说明放在同一处，并提供跳系统设置的出口。
+  Future<void> _showKeepAliveDialog() async {
+    await showDialog<void>(
+      context: context,
+      builder: (BuildContext ctx) {
+        return StatefulBuilder(
+          builder: (BuildContext ctx, StateSetter setLocal) {
+            Future<void> refresh() async {
+              await _refreshKeepAlive();
+              setLocal(() {});
+            }
+
+            return AlertDialog(
+              title: const Text("后台保活"),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _KeepAliveStatusLine(
+                    label: "前台服务",
+                    okText: "运行中",
+                    badText: "未运行",
+                    ok: _fgsRunning,
+                  ),
+                  const SizedBox(height: 8),
+                  _KeepAliveStatusLine(
+                    label: "电池优化",
+                    okText: "已豁免",
+                    badText: "未豁免",
+                    ok: _batteryExempt,
+                  ),
+                  const SizedBox(height: 14),
+                  const Text(
+                    "任一项未开启，切到后台后系统都可能冻结进程，表现就是聊天连接时断时续。"
+                    "华为/小米/OPPO/vivo 还需要在系统设置里允许「自启动」和「后台运行」，"
+                    "并把电池策略设为「不限制」。",
+                    style: TextStyle(fontSize: 13, height: 1.5),
+                  ),
+                ],
+              ),
+              actions: [
+                if (!_batteryExempt)
+                  TextButton(
+                    onPressed: () async {
+                      await KeepAliveService.ensureBatteryExemption();
+                      // 系统确认框返回有延迟，稍等再回读状态。
+                      await Future<void>.delayed(
+                          const Duration(milliseconds: 800));
+                      await refresh();
+                    },
+                    child: const Text("开启电池优化"),
+                  ),
+                if (!_fgsRunning)
+                  TextButton(
+                    onPressed: () async {
+                      await KeepAliveService.start();
+                      await Future<void>.delayed(
+                          const Duration(milliseconds: 600));
+                      await refresh();
+                    },
+                    child: const Text("启动前台服务"),
+                  ),
+                TextButton(
+                  onPressed: () => unawaited(openAppSettings()),
+                  child: const Text("系统设置"),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(),
+                  child: const Text("关闭"),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+    await _refreshKeepAlive();
   }
 
   void _onChatChanged() {
@@ -126,6 +271,25 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
   void _toast(String message) {
     ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  /// 「额度充值」chip：与官网 /recharge 同一套接口（邮箱验证码登录 → 支付宝付款）。
+  ///
+  /// 手机端没有内嵌业务浏览器，统一走系统浏览器（与注册页网页登录同一模式）；
+  /// 当前 App 已登录的邮箱带过去预填，网页侧仍需验证码换取充值会话。
+  Future<void> _openRecharge() async {
+    Uri url = Uri.parse("${ApiConfig.controlPlaneBase}/recharge");
+    final String? email = AccountSessionStore.instance.email;
+    if (email != null && email.isNotEmpty) {
+      url = url.replace(queryParameters: <String, String>{"email": email});
+    }
+    try {
+      final bool opened =
+          await launchUrl(url, mode: LaunchMode.externalApplication);
+      if (!opened && mounted) _toast("无法打开浏览器，请稍后重试");
+    } on Exception {
+      if (mounted) _toast("无法打开浏览器，请稍后重试");
+    }
   }
 
   /// 二级页统一包装:顶栏带返回键(被复用的桌面面板页自身无返回出口,
@@ -189,6 +353,30 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
             avatarUrl: UserAvatarApi.resolveUrl(_userAvatarPath),
             onChangeAvatar: _setAvatar,
           ),
+          const SizedBox(height: 12),
+          // 快捷 chip：额度充值直接复用官网充值页，手机端走系统浏览器完成支付宝付款。
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Row(
+              children: <Widget>[
+                _RechargeChip(onTap: _openRecharge),
+              ],
+            ),
+          ),
+          // 保活异常常驻提示（2026-11-18）：这是「手机端老是重连」最常见的
+          // 根因，藏在二级页里用户找不到，所以状态不对时直接顶在账号卡下面。
+          if (_isMobile &&
+              !_keepAliveLoading &&
+              !_keepAliveHintDismissed &&
+              (!_batteryExempt || !_fgsRunning)) ...<Widget>[
+            const SizedBox(height: 12),
+            _KeepAliveHint(
+              batteryExempt: _batteryExempt,
+              fgsRunning: _fgsRunning,
+              onTap: _showKeepAliveDialog,
+              onDismiss: _dismissKeepAliveHint,
+            ),
+          ],
           const SizedBox(height: 16),
           _GroupLabel(label: "功能"),
           _SectionCard(
@@ -208,6 +396,26 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
           _GroupLabel(label: "设置"),
           _SectionCard(
             children: [
+              if (_isMobile) ...<Widget>[
+                _ListRow(
+                  leading: Icon(Icons.shield_outlined,
+                      color: p.textSecondary, size: 22),
+                  title: "后台保活",
+                  trailing: Text(
+                    _keepAliveLoading
+                        ? "检查中"
+                        : (_batteryExempt && _fgsRunning ? "正常" : "待优化"),
+                    style: TextStyle(
+                      color: _batteryExempt && _fgsRunning
+                          ? const Color(0xFF34C759)
+                          : Theme.of(context).colorScheme.error,
+                      fontSize: 14,
+                    ),
+                  ),
+                  onTap: _showKeepAliveDialog,
+                ),
+                _divider(context),
+              ],
               if (widget.themeMode != null &&
                   widget.onThemeModeChanged != null) ...<Widget>[
                 _ListRow(
@@ -520,6 +728,185 @@ class _ListRow extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// 「额度充值」入口 chip。
+///
+/// 视觉沿用官网充值页的支付宝蓝（#1677FF）标记 + 胶囊描边，点击后在系统
+/// 浏览器打开 `/recharge`，由网页端完成邮箱验证码登录与支付宝下单。
+class _RechargeChip extends StatelessWidget {
+  const _RechargeChip({required this.onTap});
+
+  final VoidCallback onTap;
+
+  static const Color _alipayBlue = Color(0xFF1677FF);
+
+  @override
+  Widget build(BuildContext context) {
+    final MobilePalette p = MobileTheme.of(context);
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(999),
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.fromLTRB(10, 7, 12, 7),
+          decoration: BoxDecoration(
+            color: p.surface,
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(color: p.divider),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Container(
+                width: 18,
+                height: 18,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: _alipayBlue,
+                  borderRadius: BorderRadius.circular(5),
+                ),
+                child: const Text(
+                  "支",
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    height: 1,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 7),
+              Text(
+                "额度充值",
+                style: TextStyle(
+                  color: p.textPrimary,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+              const SizedBox(width: 2),
+              Icon(Icons.chevron_right, size: 16, color: p.textMuted),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 保活异常提示条：只在用户首次看到时出现，点 × 关掉后长期不再常驻。
+class _KeepAliveHint extends StatelessWidget {
+  const _KeepAliveHint({
+    required this.batteryExempt,
+    required this.fgsRunning,
+    required this.onTap,
+    required this.onDismiss,
+  });
+
+  final bool batteryExempt;
+  final bool fgsRunning;
+  final VoidCallback onTap;
+  final VoidCallback onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    final MobilePalette p = MobileTheme.of(context);
+    final Color err = Theme.of(context).colorScheme.error;
+    final String reason = !batteryExempt && !fgsRunning
+        ? "前台服务与电池优化都未开启"
+        : (!batteryExempt ? "电池优化未豁免" : "前台服务未运行");
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16),
+      decoration: BoxDecoration(
+        color: err.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: err.withValues(alpha: 0.35)),
+      ),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(16),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          child: Row(
+            children: [
+              Icon(Icons.battery_alert_outlined, color: err, size: 22),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      "后台连接可能被系统中断",
+                      style: TextStyle(
+                        color: p.textPrimary,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      "$reason，切后台后消息可能收不到",
+                      style: TextStyle(color: p.textSecondary, fontSize: 12),
+                    ),
+                  ],
+                ),
+              ),
+              IconButton(
+                icon: Icon(Icons.close, size: 18, color: p.textMuted),
+                tooltip: "不再提示",
+                onPressed: onDismiss,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints.tightFor(width: 32, height: 32),
+                visualDensity: VisualDensity.compact,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 「后台保活」弹窗里的单行状态（绿点=正常，红点=异常）。
+class _KeepAliveStatusLine extends StatelessWidget {
+  const _KeepAliveStatusLine({
+    required this.label,
+    required this.okText,
+    required this.badText,
+    required this.ok,
+  });
+
+  final String label;
+  final String okText;
+  final String badText;
+  final bool ok;
+
+  @override
+  Widget build(BuildContext context) {
+    final MobilePalette p = MobileTheme.of(context);
+    final Color color = ok ? const Color(0xFF34C759) : p.textMuted;
+    return Row(
+      children: [
+        Container(
+          width: 7,
+          height: 7,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 8),
+        Text("$label：", style: TextStyle(color: p.textSecondary, fontSize: 14)),
+        Text(
+          ok ? okText : badText,
+          style: TextStyle(
+            color: ok ? color : Theme.of(context).colorScheme.error,
+            fontSize: 14,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ],
     );
   }
 }

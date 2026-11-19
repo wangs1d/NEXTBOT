@@ -7,7 +7,7 @@ import {
   type EventEnvelope,
   type WalletAction,
 } from "../protocol.js";
-import { parseClientClock, parseClientLocation } from "../types/client-location.js";
+import { parseClientClock, parseClientLocation, parseGeofenceSyncReport } from "../types/client-location.js";
 import type { RuntimeFacade } from "../runtime/runtime-facade.js";
 import type { AuditService } from "../services/audit-service.js";
 import type { SessionService } from "../services/session-service.js";
@@ -206,6 +206,8 @@ export type WsRouteDeps = {
   worldPartitionWsRegistry: WorldPartitionWsRegistry;
   runtime: RuntimeFacade;
   socialFeedService: SocialFeedService;
+  /** 图像资产服务（用户聊天照片落盘 + 助手图共用），供 chat.user_message 持久化 visionFrames */
+  imageGenerationService?: import("../services/image-generation-service.js").ImageGenerationService | null;
   computeQuotaService: ComputeQuotaService;
   agentMemorySyncService: AgentMemorySyncService;
   unifiedIdempotencyService: UnifiedIdempotencyService;
@@ -231,6 +233,14 @@ export type WsRouteDeps = {
    * 返回空数组＝没有围栏，客户端会清空本地注册。
    */
   geofenceProvider?: (actorId: string) => import("@nextbot/agent-protocol").GeofenceWire[];
+  /**
+   * 围栏注册回执消费方（可选）：客户端如实回报系统围栏注册结果。
+   * 装配层接到 GeofenceService.recordClientSync 落库，供 geofence.list 与日志观测。
+   */
+  onGeofenceSyncReport?: (
+    actorId: string,
+    report: import("@nextbot/agent-protocol").GeofenceSyncReportWire,
+  ) => void;
   virtualPhoneService: VirtualPhoneService;
   userPersonalizationService: UserPersonalizationService;
   deviceRegistry: DeviceRegistry;
@@ -276,6 +286,11 @@ export type WsRouteDeps = {
    * （payment.create_order 卡「我已完成支付」→ queryOrder 原地换卡）。
    */
   paymentService?: import("../services/payment-service.js").PaymentService | null;
+  /**
+   * 统一预订服务（可选）：card.action 的叫车选择/确认卡专用
+   * （ride.book.prepare / ride.book.confirm → BookingService 两阶段确认）。
+   */
+  bookingService?: import("../services/booking/booking-service.js").BookingService | null;
 };
 
 export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps): void {
@@ -290,6 +305,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     worldPartitionWsRegistry,
     runtime,
     socialFeedService,
+    imageGenerationService,
     computeQuotaService,
     agentMemorySyncService,
     unifiedIdempotencyService,
@@ -302,6 +318,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     locationIngest,
     actorContext,
     geofenceProvider,
+    onGeofenceSyncReport,
     virtualPhoneService,
     userPersonalizationService,
     deviceRegistry,
@@ -313,6 +330,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     shoppingOrderService,
     shoppingCompareService,
     paymentService,
+    bookingService,
     agentAccountService,
     actorModelBindings,
     petReactionChat,
@@ -543,6 +561,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
               lastAliveAgeMs: bootPl.lastAliveAgeMs,
               fgsRunning: bootPl.fgsRunning,
               batteryExempt: bootPl.batteryExempt,
+              diagBuild: bootPl.diagBuild,
               platform: bootPl.platform,
             },
             "[client-boot] process start beacon",
@@ -1554,6 +1573,38 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           return;
         }
 
+        if (event.type === ClientEventType.GeofenceReport) {
+          // 围栏注册回执：客户端如实回报系统围栏注册结果（请求数/成功数/失败原因/
+          // 权限与定位开关/开机重建结果）。此前注册失败全静默，服务端只能从
+          // 「不再有事件」反推；现在落库 + 日志，geofence.list 可直接看到。
+          if (!boundActorId) {
+            sendUnifiedError("SESSION_REQUIRED", "请先发送 session.init");
+            return;
+          }
+          const report = parseGeofenceSyncReport(event.payload);
+          if (!report) {
+            console.log(`[Geofence] 客户端回执格式非法（忽略）: actor=${boundActorId}`);
+            return;
+          }
+          try {
+            onGeofenceSyncReport?.(boundActorId, report);
+          } catch (err) {
+            console.log(`[Geofence] 回执落库失败（忽略）: ${err}`);
+          }
+          const failures = report.failures ?? [];
+          console.log(
+            `[Geofence] 客户端回执 actor=${boundActorId} ok=${report.ok} ` +
+              `registered=${report.registered}/${report.requested} ` +
+              `platform=${report.platform ?? "unknown"} ` +
+              `permission=${report.permission ? `fine:${report.permission.fine}/bg:${report.permission.background}` : "unknown"} ` +
+              `providers=${report.providersEnabled ?? "unknown"} ` +
+              `failures=${failures.length ? JSON.stringify(failures).slice(0, 500) : "[]"}` +
+              `${report.warnings?.length ? ` warnings=${JSON.stringify(report.warnings)}` : ""}` +
+              `${report.error ? ` error=${report.error}` : ""}`,
+          );
+          return;
+        }
+
         if (event.type === ClientEventType.ModeChanged) {
           // 语音模式切换上报：记录 per-actor 状态（诊断 + Phase2 投递矩阵消费）。
           // 纯状态记录，无副作用，未上报过的旧客户端不受影响。
@@ -1681,6 +1732,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
               actorContext,
               onboardingIntroService,
               locationIngest,
+              imageGenerationService,
             },
           );
           return;
@@ -1698,7 +1750,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           await handleCardActionEvent(
             { socket, boundActorId, sendUnifiedError },
             event.payload,
-            { shoppingOrderService, shoppingCompareService, paymentService },
+            { shoppingOrderService, shoppingCompareService, paymentService, bookingService },
           );
           return;
         }
@@ -1722,6 +1774,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
               actorContext,
               onboardingIntroService,
               locationIngest,
+              imageGenerationService,
             },
           );
           return;

@@ -21,7 +21,12 @@ import type { Database as SqliteDatabase } from "better-sqlite3";
 
 import { getLocationDbPath } from "../config/location-env.js";
 import { dbscan, haversineMeters } from "./geo-utils.js";
-import type { DwellEpisode, LocationHistoryService } from "./location-history-service.js";
+import {
+  formatLocalTime,
+  recentLocalDateKeys,
+  type DwellEpisode,
+  type LocationHistoryService,
+} from "./location-history-service.js";
 import {
   peekReverseGeocodeCache,
   reverseGeocodeCoordinates,
@@ -66,6 +71,32 @@ export type PlaceMatch = {
   distanceMeters: number;
 };
 
+/** 一个地点在一类日期（工作日/周末）里的出行规律。 */
+export type PlaceHabitWindow = {
+  /** 参与统计的天数（同一天多次进出合并为 1 天，避免把中位数按段数加权） */
+  visits: number;
+  /** 中位到达时间 HH:mm */
+  arrival: string | null;
+  /** 中位离开时间 HH:mm */
+  departure: string | null;
+  /** 中位停留时长（分钟） */
+  medianDurationMinutes: number | null;
+};
+
+/** 从多天日行程里汇总出的地点习惯（零 LLM，纯统计）。 */
+export type PlaceHabit = {
+  placeId: string;
+  kind: PlaceSemanticKind;
+  label: string | null;
+  adminArea: string;
+  confirmed: boolean;
+  /** 有记录的天数 */
+  visitDays: number;
+  lastVisitAt: string | null;
+  weekday: PlaceHabitWindow;
+  weekend: PlaceHabitWindow;
+};
+
 export type PoiKindPrior = {
   kind: PlaceSemanticKind;
   confidence: number;
@@ -105,6 +136,8 @@ export type PlaceSemanticsOptions = {
   history?:
     | (Pick<LocationHistoryService, "dwellEpisodes"> & {
         query?: LocationHistoryService["query"];
+        /** 日级行程（习惯汇总用）；老测试桩可以只给 dwellEpisodes */
+        dayTimeline?: LocationHistoryService["dayTimeline"];
       })
     | null;
   now?: () => Date;
@@ -121,9 +154,8 @@ export type PlaceSemanticsOptions = {
   /** 是否在后台预热逆地理缓存（测试关闭） */
   warmGeocode?: boolean;
   /**
-   * 语义重算落库后的失效回调（装配层接 agentCore.invalidatePlacePrompt）。
-   * 否则常去地点 prompt 缓存最长 10 分钟仍会拿着旧的无行政区文本，
-   * 让「家在哪个城市」在重算成功后继续错误引用当前位置。
+   * 语义重算落库后的同步回调（装配层用于把常去地点投影进用户画像）。
+   * 画像是按需召回的唯一出口：重算后立即更新，下一次相关提问就能拿到新地点。
    */
   onPlacesUpdated?: (actorId: string) => void;
 };
@@ -672,6 +704,45 @@ export function formatPlaceAdminArea(
   return parts.filter((part, index) => index === 0 || part !== parts[index - 1]).join("");
 }
 
+function medianOf(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 1) return sorted[mid];
+  return (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+/**
+ * 「一天中的分钟数」中位数，处理跨午夜。
+ *
+ * 23:50 与 00:10 直取中位数会得到 12:00（完全错误）。当样本同时落在
+ * 凌晨（<04:00）与晚间（≥18:00）时，把凌晨样本平移到 24:00 之后，
+ * 中位数再归一化回 0..1439。
+ */
+function medianClockMinutes(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const hasEarly = values.some((v) => v < 4 * 60);
+  const hasLate = values.some((v) => v >= 18 * 60);
+  const adjusted = hasEarly && hasLate ? values.map((v) => (v < 4 * 60 ? v + 1440 : v)) : values;
+  return medianOf(adjusted);
+}
+
+/** 绝对时刻 → 指定时区的「当天第几分钟」（0..1439）。 */
+function localMinutesOfDay(iso: string, timezone: string): number | null {
+  const text = formatLocalTime(iso, timezone);
+  const match = text.match(/^(\d{2}):(\d{2})$/);
+  if (!match) return null;
+  return Number.parseInt(match[1], 10) * 60 + Number.parseInt(match[2], 10);
+}
+
+function formatMinutesOfDay(minutes: number | null): string | null {
+  if (minutes == null || !Number.isFinite(minutes)) return null;
+  const normalized = ((Math.round(minutes) % 1440) + 1440) % 1440;
+  return `${String(Math.floor(normalized / 60)).padStart(2, "0")}:${String(
+    normalized % 60,
+  ).padStart(2, "0")}`;
+}
+
 export class PlaceSemanticsService {
   private readonly db: SqliteDatabase;
   private readonly history: PlaceSemanticsOptions["history"];
@@ -740,6 +811,152 @@ export class PlaceSemanticsService {
       if (!best || compareRank(rank, best.rank) > 0) best = { record, distanceMeters: distance, rank };
     }
     return best ? { record: best.record, distanceMeters: best.distanceMeters } : null;
+  }
+
+  /**
+   * 多天地点习惯汇总（零 LLM）：把最近 N 天的日行程按语义地点归并，
+   * 算工作日/周末的中位到达、离开时间与停留时长。
+   *
+   * 这是「最近这几天通常几点在哪」的统计，不是「今天具体去了哪」——
+   * 后者由 LocationHistoryService.dayTimeline 逐日给出。
+   */
+  async habits(
+    actorId: string,
+    opts?: { days?: number; timezone?: string },
+  ): Promise<PlaceHabit[]> {
+    const history = this.history;
+    if (!history?.dayTimeline) return [];
+    const timezone = (opts?.timezone ?? "UTC").trim() || "UTC";
+    const days = Math.min(Math.max(Math.trunc(opts?.days ?? 7) || 1, 1), 90);
+    // 走 getPlaces 而不是只读缓存：进程刚启动、语义还没算过时必须先算出来，
+    // 否则习惯查询会稳定返回空（数据在 SQLite 里，只是还没有语义记录）。
+    const records = await this.getPlaces(actorId);
+    if (records.length === 0) return [];
+
+    /**
+     * 同一天、同一地点的多次进出合并为一条日汇总：
+     *   - 到达取当天第一次到达，离开取当天最后一次离开；
+     *   - 时长累加当天所有有效停留段。
+     *
+     * 不能直接对每个停留段取中位数——一天进出三次会把这一天在三组中位数里
+     * 各算一遍，让「偶尔中午回趟家」的样本把习惯整体拽偏。
+     */
+    type DayAgg = {
+      date: string;
+      /** 当日窗口（UTC ISO），用于识别跨午夜的边界段 */
+      from: string;
+      to: string;
+      firstStartAt: string;
+      lastEndAt: string;
+      durationMinutes: number;
+    };
+    type Bucket = { arrivals: number[]; departures: number[]; durations: number[] };
+    type Acc = { record: PlaceSemanticRecord; days: Map<string, DayAgg>; lastVisitAt: string | null };
+
+    const emptyBucket = (): Bucket => ({ arrivals: [], departures: [], durations: [] });
+    const acc = new Map<string, Acc>();
+
+    for (const date of recentLocalDateKeys(days, timezone, this.now())) {
+      let timeline;
+      try {
+        timeline = history.dayTimeline!(actorId, { date, timezone });
+      } catch {
+        continue;
+      }
+      for (const visit of timeline.visits) {
+        if (visit.kind !== "stay") continue;
+        // <10 分钟的多半是 GPS 漂移或路过，不进入习惯统计。
+        if (visit.durationMinutes < 10) continue;
+        let best: { record: PlaceSemanticRecord; distance: number } | null = null;
+        for (const record of records) {
+          const distance = haversineMeters(visit, record);
+          if (distance > record.radiusMeters + MATCH_MARGIN_METERS) continue;
+          if (!best || distance < best.distance) best = { record, distance };
+        }
+        if (!best) continue;
+
+        let item = acc.get(best.record.id);
+        if (!item) {
+          item = { record: best.record, days: new Map<string, DayAgg>(), lastVisitAt: null };
+          acc.set(best.record.id, item);
+        }
+        if (!item.lastVisitAt || visit.endAt > item.lastVisitAt) {
+          item.lastVisitAt = visit.endAt;
+        }
+        const existing = item.days.get(date);
+        if (!existing) {
+          item.days.set(date, {
+            date,
+            from: timeline.from,
+            to: timeline.to,
+            firstStartAt: visit.startAt,
+            lastEndAt: visit.endAt,
+            durationMinutes: visit.durationMinutes,
+          });
+        } else {
+          if (visit.startAt < existing.firstStartAt) existing.firstStartAt = visit.startAt;
+          if (visit.endAt > existing.lastEndAt) existing.lastEndAt = visit.endAt;
+          existing.durationMinutes += visit.durationMinutes;
+        }
+      }
+    }
+
+    // 日汇总达到「有意义停留」门槛才计入：家 4h、公司 2h、其他 10min。
+    // 门槛作用在当天累计时长上，而不是单个停留段——在家待了 3h+2h 仍然是
+    // 5h 的家庭日，不该因为被中午外出切成两段就被丢掉。
+    const minMinutesFor = (kind: PlaceSemanticKind): number =>
+      kind === "home" ? 240 : kind === "work" ? 120 : 10;
+    const isWeekendKey = (date: string): boolean => {
+      const weekday = new Date(`${date}T00:00:00Z`).getUTCDay();
+      return weekday === 0 || weekday === 6;
+    };
+    const summarize = (bucket: Bucket): PlaceHabitWindow => ({
+      visits: bucket.durations.length,
+      arrival: formatMinutesOfDay(medianClockMinutes(bucket.arrivals)),
+      departure: formatMinutesOfDay(medianClockMinutes(bucket.departures)),
+      medianDurationMinutes: medianOf(bucket.durations),
+    });
+
+    const kindRank = (kind: PlaceSemanticKind): number =>
+      kind === "home" ? 0 : kind === "work" ? 1 : 2;
+    return [...acc.values()]
+      .map((item) => {
+        const minMinutes = minMinutesFor(item.record.kind);
+        const weekday = emptyBucket();
+        const weekend = emptyBucket();
+        let visitDays = 0;
+        for (const day of item.days.values()) {
+          if (day.durationMinutes < minMinutes) continue;
+          visitDays += 1;
+          const bucket = isWeekendKey(day.date) ? weekend : weekday;
+          // 跨午夜：00:00 开始的停留，到达实际发生在前一天；24:00 结束的停留，
+          // 离开实际发生在次日。两端都不是当天可观测的事件，不进中位数。
+          const startsAtBoundary = Date.parse(day.firstStartAt) <= Date.parse(day.from) + 60_000;
+          const endsAtBoundary = Date.parse(day.lastEndAt) >= Date.parse(day.to) - 60_000;
+          const arrival = startsAtBoundary ? null : localMinutesOfDay(day.firstStartAt, timezone);
+          const departure = endsAtBoundary ? null : localMinutesOfDay(day.lastEndAt, timezone);
+          if (arrival != null) bucket.arrivals.push(arrival);
+          if (departure != null) bucket.departures.push(departure);
+          bucket.durations.push(day.durationMinutes);
+        }
+        return {
+          placeId: item.record.id,
+          kind: item.record.kind,
+          label: item.record.label?.trim() || item.record.poiName?.trim() || null,
+          adminArea: formatPlaceAdminArea(item.record),
+          confirmed: item.record.confirmed,
+          visitDays,
+          lastVisitAt: item.lastVisitAt,
+          weekday: summarize(weekday),
+          weekend: summarize(weekend),
+        };
+      })
+      .sort(
+        (a, b) =>
+          kindRank(a.kind) - kindRank(b.kind) ||
+          b.visitDays - a.visitDays ||
+          a.placeId.localeCompare(b.placeId),
+      );
   }
 
   /** 找到该 actor 已确认/高置信的某个语义地点（家/公司）。 */
@@ -1085,7 +1302,7 @@ export class PlaceSemanticsService {
           r.updatedAt,
         );
       }
-      // 清理已经不在近 7 天停留段里的自动推断地点；用户确认过的永久保留
+      // 清理已经不在本轮回看窗口（默认 30 天）停留段里的自动推断地点；用户确认过的永久保留
       const keep = new Set(items.map((item) => item.id));
       for (const row of staleStmt.all(actorId) as Array<{ place_id: string }>) {
         if (!keep.has(row.place_id)) deleteStmt.run(actorId, row.place_id);

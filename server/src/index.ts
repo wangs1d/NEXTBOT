@@ -236,6 +236,24 @@ const performShutdown = (): void => {
   stopClientUpdatePusher();
   stopDesktopBridge();
   stopOpenClawModelSync();
+  // 重启预告（2026-11-18 手机端「老是重连」治理）：先广播一帧，再用
+  // 1001(Going Away) + reason=server_restart 关闭全部 WS。客户端据此走 ~1s
+  // 快重连，不会把这次发版当成网络故障按 2s→30s 指数退避干等。
+  try {
+    services.wsConnectionRegistry.broadcastAll(
+      JSON.stringify({
+        type: "server.restarting",
+        payload: {
+          reason: "deploy",
+          retryAfterMs: 800,
+          at: new Date().toISOString(),
+        },
+      }),
+    );
+    services.wsConnectionRegistry.closeAll(1001, "server_restart");
+  } catch {
+    /* 关闭广播失败不阻塞进程退出 */
+  }
   void devHttpsHandle?.close();
   void services.app.close().finally(() => process.exit(0));
 };

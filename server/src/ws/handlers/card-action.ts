@@ -5,6 +5,7 @@ import type { ToolContext } from "../../tools/tool-registry.js";
 import type { ShoppingOrderService } from "../../services/shopping-order-service.js";
 import type { ShoppingCompareService } from "../../services/shopping-compare-service.js";
 import type { PaymentService } from "../../services/payment-service.js";
+import type { BookingService } from "../../services/booking/booking-service.js";
 import { BROWSER_SESSION_SITES } from "../../services/browser-session-sites.js";
 import { buildToolCard } from "../../services/tool-card-registry.js";
 import { getUnifiedPaymentService } from "../../payments/unified-payment-service.js";
@@ -42,6 +43,11 @@ export type CardActionDeps = {
    * 如实报「比价服务未装配」，不影响其它购物动作。
    */
   shoppingCompareService?: ShoppingCompareService | null;
+  /**
+   * 统一预订服务（可选）：叫车选择卡 / 确认卡的卡内动作。
+   * 两阶段确认 token 仍由 BookingService 内生校验，卡只是它的界面。
+   */
+  bookingService?: BookingService | null;
 };
 
 type CardActionPayload = {
@@ -233,7 +239,8 @@ export async function handleCardActionEvent(
   const paymentService = deps.paymentService;
   const isShopping = payload.actionId.startsWith("shopping.");
   const isPayment = payload.actionId.startsWith("payment.");
-  if (!isShopping && !isPayment) {
+  const isRide = payload.actionId.startsWith("ride.");
+  if (!isShopping && !isPayment && !isRide) {
     // 未知族：明确回错误，别让卡片一直转圈
     send({ ok: false, error: `不支持的动作：${payload.actionId}` });
     return true;
@@ -244,6 +251,10 @@ export async function handleCardActionEvent(
   }
   if (isPayment && !paymentService) {
     send({ ok: false, error: "支付服务未装配" });
+    return true;
+  }
+  if (isRide && !deps.bookingService) {
+    send({ ok: false, error: "预订服务未装配" });
     return true;
   }
   // 收窄：shopping 族动作走到这里时 service 必非空（上方闸已回）；
@@ -317,6 +328,77 @@ export async function handleCardActionEvent(
 
   try {
     switch (payload.actionId) {
+      // 叫车选择卡 → 阶段一：重新报价定位车型、校验限额、铸造确认 token，
+      // 把这张卡换成统一确认卡（与购物同款 shopping_confirm）。
+      case "ride.book.prepare": {
+        const booking = deps.bookingService;
+        if (!booking) {
+          send({ ok: false, error: "预订服务未装配" });
+          return true;
+        }
+        const optionId = str(data.optionId);
+        const dropoff = str(data.dropoff);
+        if (!optionId || !dropoff) {
+          send({ ok: false, error: "缺少车型或目的地，请重新报价" });
+          return true;
+        }
+        const pickup = str(data.pickup);
+        const provider = str(data.provider);
+        const city = str(data.city);
+        const scheduleAt = str(data.scheduleAt);
+        const result = await booking.book(toolContext, "ride", {
+          provider: provider || undefined,
+          optionId,
+          params: { dropoff, ...(pickup ? { pickup } : {}) },
+          city: city || undefined,
+          scheduleAt: scheduleAt || null,
+          confirm: false,
+        });
+        if (!result.ok) {
+          send({ ok: false, error: result.error });
+          return true;
+        }
+        const card = buildToolCard("ride_hailing.book", {
+          ...result,
+          dropoff,
+          ...(pickup ? { pickup } : {}),
+          ...(city ? { city } : {}),
+        });
+        send(card ? { ok: true, card } : { ok: false, error: "确认卡生成失败，请重新报价" });
+        return true;
+      }
+
+      // 叫车确认卡 → 阶段二：token 校验通过后真实（或模拟）下单，
+      // 卡面推进到订单/统一支付卡。全程不产生用户消息、不跑模型。
+      case "ride.book.confirm": {
+        const booking = deps.bookingService;
+        if (!booking) {
+          send({ ok: false, error: "预订服务未装配" });
+          return true;
+        }
+        const optionId = str(data.optionId);
+        const dropoff = str(data.dropoff);
+        const provider = str(data.provider);
+        if (!optionId) {
+          send({ ok: false, error: "报价已失效，请重新选择车型" });
+          return true;
+        }
+        const result = await booking.book(toolContext, "ride", {
+          provider: provider || undefined,
+          optionId,
+          params: { dropoff },
+          confirm: true,
+          confirmationToken: str(data.confirmationToken) || undefined,
+        });
+        if (!result.ok) {
+          send({ ok: false, error: result.error });
+          return true;
+        }
+        const card = buildToolCard("ride_hailing.book", result);
+        send(card ? { ok: true, card } : { ok: false, error: "订单卡生成失败，请查看订单状态" });
+        return true;
+      }
+
       // 阶段一：把「选中的这个商品」变成可确认的下单摘要（金额/店铺/收货/截图）。
       // 用户点的是一次「就这家」，服务端当场去结算页捞真实数据 —— 这条链路
       // 原本要发一条 user_message 让模型再调工具，现在一张卡换来同样的结果。

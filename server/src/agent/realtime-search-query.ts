@@ -266,6 +266,76 @@ export function composeMediaSearchQuery(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 代词指代锚定（2026-11-19 根修：真机「看看他的照片」被解析成三轮前搜过的成龙）
+//
+// 主流做法是「先做上下文改写（contextual query rewrite / coreference），再进
+// 工具决策」：Perplexity / ChatGPT 搜索的追问改写、LangChain 的 condense
+// question 链、Rasa 的对话实体记忆都属于同一层。本产品 2026-10-21 去路由化后
+// 把「用不用工具、参数填什么」整体交还主模型，代词消解就只靠模型自由裁量，
+// 于是最近话题（老婆=刘浩存）输给了更早重复出现的人名（成龙）。
+//
+// 这里补的是那一层的确定性半边，规则刻意收窄（不是通用指代解析器）：
+//   1. 只处理「当前消息含代词」的轮次，其余轮次零影响；
+//   2. 只解析画像里已有的指代映射（事实行「老婆是刘浩存」）——映射本身是用户
+//      明确给过的，不引入猜测；
+//   3. 近因优先：从最新一条对话往回扫，先命中角色词/实体名者胜出。不能用词频
+//      投票——旧话题里的人名往往重复更多（成龙三轮 vs 刘浩存一轮），词频正好
+//      会把错误的旧对象顶上来（本次事故的成因）；
+//   4. 找不到映射或当前消息自带主体 → 返回 null，仍交模型判断。
+// ─────────────────────────────────────────────────────────────────────────────
+
+const PRONOUN_PROBE_RE = /[他她它]|(?<![A-Za-z])ta(?![A-Za-z])/i;
+/** 「其他/其它」里的「他/它」不是人称代词。 */
+const NON_PRONOUN_HE_RE = /其他|其它/g;
+const REFERENT_SPLIT_RE = /(?:\s*(?:是|→|->|=>|：|:)\s*)/;
+
+export type TurnReferent = { entity: string; role?: string };
+
+/** 当前消息是否含人称代词（剥掉「其他/其它」再判）。 */
+export function hasTurnPronoun(text: string): boolean {
+  return PRONOUN_PROBE_RE.test((text ?? "").replace(NON_PRONOUN_HE_RE, ""));
+}
+
+/** 解析画像事实行（「老婆是刘浩存」/「女朋友→刘浩存」）为角色→实体映射。 */
+export function parseReferentPairs(
+  referentLines: string[] = [],
+): Array<{ role: string; entity: string }> {
+  const pairs: Array<{ role: string; entity: string }> = [];
+  for (const line of referentLines) {
+    const [role, entity] = String(line ?? "").split(REFERENT_SPLIT_RE).map((s) => s.trim());
+    const cleanEntity = (entity ?? "")
+      .replace(/[啊呀呢吧哦嘛]+$/, "")
+      .replace(/[（(][^）)]*[）)]\s*$/, "")
+      .trim();
+    if (!role || !cleanEntity || role.length > 8 || cleanEntity.length < 2) continue;
+    if (pairs.some((p) => p.role === role && p.entity === cleanEntity)) continue;
+    pairs.push({ role, entity: cleanEntity });
+  }
+  return pairs;
+}
+
+/**
+ * 代词指代锚定：从最近对话（最新在前）里找画像映射中刚被提到的角色/实体。
+ * recentLines 由调用方按「最新一条在最前」传入，且不含本轮用户消息。
+ */
+export function resolveTurnReferent(
+  userText: string,
+  recentLines: string[] = [],
+  referentLines: string[] = [],
+): TurnReferent | null {
+  if (!hasTurnPronoun(userText)) return null;
+  const pairs = parseReferentPairs(referentLines);
+  if (pairs.length === 0) return null;
+  for (const line of recentLines) {
+    const hit = pairs.find((p) => line.includes(p.role));
+    if (hit) return { entity: hit.entity, role: hit.role };
+    const named = pairs.find((p) => line.includes(p.entity));
+    if (named) return { entity: named.entity, role: named.role };
+  }
+  return null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // travel 轮行程请求的确定性构造器（2026-10-10 P1，与 media/realtime 同构）
 //
 // 契约：路由判 travel_planning 后，travel.plan-itinerary 的调用参数必须由

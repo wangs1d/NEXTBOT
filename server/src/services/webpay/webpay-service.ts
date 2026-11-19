@@ -22,7 +22,10 @@ export class WebpayNotConfiguredError extends Error {
 
 export interface WebpayCreateResult {
   outTradeNo: string;
+  /** 电脑端收银台：自动提交表单 HTML（wap 模式为空串） */
   paymentHtml: string;
+  /** 手机端收银台：带签名的跳转地址（page 模式为 undefined） */
+  paymentUrl?: string;
 }
 
 export interface WebpayQueryResult {
@@ -80,8 +83,22 @@ export class WebpayService {
     });
   }
 
-  /** 下单：pageExec 生成自动提交表单 HTML（本地签名，无网络请求） */
-  createOrder(input: { amount: unknown; subject: unknown; accountId?: string; returnUrl?: string }): WebpayCreateResult {
+  /**
+   * 下单：本地签名，无网络请求。
+   *
+   * - page（默认）：alipay.trade.page.pay，生成自动提交表单 HTML（电脑端）；
+   * - wap：alipay.trade.wap.pay，生成带签名的收银台跳转地址（手机端必须走这条，
+   *   电脑收银台在手机浏览器里无法完成付款）。
+   *
+   * 两种模式共用同一张本地订单与同一套查单/通知/对账逻辑。
+   */
+  createOrder(input: {
+    amount: unknown;
+    subject: unknown;
+    accountId?: string;
+    returnUrl?: string;
+    payMode?: "page" | "wap";
+  }): WebpayCreateResult {
     const config = this.requireConfig();
     const cents = parseAmountToCents(input.amount);
     if (cents === null || cents < 1n || cents > 10_000_000_000n) {
@@ -111,8 +128,28 @@ export class WebpayService {
       lastQueryStatus: null,
     });
 
+    const returnUrl = input.returnUrl?.trim() || `${config.baseUrl}/webpay/return`;
+    if (input.payMode === "wap") {
+      const wapParams: IPageExecuteParams = {
+        returnUrl,
+        ...(config.notifyUrl ? { notifyUrl: config.notifyUrl } : {}),
+        bizContent: {
+          out_trade_no: outTradeNo,
+          total_amount: totalAmount,
+          subject,
+          product_code: "QUICK_WAP_WAY",
+          timeout_express: "15m",
+          // 用户中途退出时回到充值页，而不是停在支付宝空页
+          quit_url: returnUrl,
+        },
+      };
+      const paymentUrl = String(this.sdkFor(config).pageExec("alipay.trade.wap.pay", "GET", wapParams) ?? "");
+      if (!/^https?:\/\//i.test(paymentUrl)) throw new Error("支付宝未返回手机收银台地址");
+      return { outTradeNo, paymentHtml: "", paymentUrl };
+    }
+
     const params: IPageExecuteParams = {
-      returnUrl: input.returnUrl?.trim() || `${config.baseUrl}/webpay/return`,
+      returnUrl,
       bizContent: {
         out_trade_no: outTradeNo,
         total_amount: totalAmount,

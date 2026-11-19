@@ -20,7 +20,7 @@ import { isEmailOtpEnforced } from "./accounts.js";
 import type { HttpRouteDeps } from "./types.js";
 
 /**
- * 官网 API 充值：金额直接计入当前登录账号（邮箱），接口调用同账号授权。
+ * 官网额度充值：金额直接计入当前登录账号（邮箱），接口调用同账号授权。
  *
  * - /recharge              充值页（未登录时页内完成邮箱 OTP 登录）
  * - /recharge/success      支付回跳结果页（状态以服务端查单为准）
@@ -75,6 +75,16 @@ function orderStatusText(state: string): "paid" | "pending" | "closed" {
 
 function maskFor(email: string): { email: string; masked: string } {
   return { email, masked: maskEmail(email) };
+}
+
+/**
+ * 手机浏览器必须走手机网站支付（alipay.trade.wap.pay）。
+ * 电脑收银台（page.pay）在手机浏览器里付不了款（只出二维码/提示换电脑）。
+ */
+function isMobileClient(req: FastifyRequest): boolean {
+  return /android|iphone|ipad|ipod|mobile|windows phone|harmonyos/i.test(
+    String(req.headers["user-agent"] ?? ""),
+  );
 }
 
 export function registerRechargeRoutes(app: FastifyInstance, deps: HttpRouteDeps): void {
@@ -137,7 +147,7 @@ export function registerRechargeRoutes(app: FastifyInstance, deps: HttpRouteDeps
         deliver: async (to, code) => {
           const sent = await mailService.sendEmail({
             to,
-            subject: `NEXTBOT API 充值登录验证码：${code}`,
+            subject: `NEXTBOT 额度充值登录验证码：${code}`,
             body: `你的 NEXTBOT 充值页登录验证码是 ${code}，10 分钟内有效。若非本人操作，请忽略本邮件。`,
           });
           if (!sent.ok) throw new Error(sent.error);
@@ -281,11 +291,18 @@ export function registerRechargeRoutes(app: FastifyInstance, deps: HttpRouteDeps
     try {
       const result = getWebpayService().createOrder({
         amount: centsToAmount(cents),
-        subject: "NEXTBOT API 充值",
+        subject: "NEXTBOT 额度充值",
         accountId: email,
         returnUrl: `${config.baseUrl}/recharge/return`,
+        payMode: isMobileClient(req) ? "wap" : "page",
       });
-      return { ok: true, outTradeNo: result.outTradeNo, amount: centsToAmount(cents), paymentHtml: result.paymentHtml };
+      return {
+        ok: true,
+        outTradeNo: result.outTradeNo,
+        amount: centsToAmount(cents),
+        paymentHtml: result.paymentHtml,
+        paymentUrl: result.paymentUrl ?? null,
+      };
     } catch (err) {
       if (err instanceof WebpayNotConfiguredError) {
         return reply.code(503).send({ ok: false, message: "支付通道尚未配置" });

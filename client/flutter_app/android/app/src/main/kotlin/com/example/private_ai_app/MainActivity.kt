@@ -40,6 +40,8 @@ class MainActivity : FlutterActivity() {
         flutterEngine.plugins.add(AlarmClockPlugin())
         flutterEngine.plugins.add(GeofencePlugin())
         flutterEngine.plugins.add(KeepAlivePlugin())
+        // 高德定位（高精度单次取点）：Dart 侧优先走它，缺失 key 时自动回退 geolocator。
+        flutterEngine.plugins.add(AmapLocationPlugin())
         // 用户自有模型 key 的跨卸载保活：稳定设备身份 + 公共目录加密备份。
         // 必须在 Dart 侧 applyBootChannel()/CloudModelBindingStore.load() 之前注册，
         // 否则首帧握手拿不到稳定 actorId，服务端那份加密绑定会认不出来。

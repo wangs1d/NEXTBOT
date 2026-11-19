@@ -26,11 +26,13 @@ class WsChatService {
     Duration probeGrace = const Duration(seconds: 10),
     Duration connectTimeout = const Duration(seconds: 12),
     Duration ackTimeout = const Duration(seconds: 8),
+    Duration resumeProbeGrace = const Duration(seconds: 3),
   })  : _heartbeatInterval = heartbeatInterval,
         _heartbeatTimeout = heartbeatTimeout,
         _probeGrace = probeGrace,
         _connectTimeout = connectTimeout,
-        _ackTimeout = ackTimeout;
+        _ackTimeout = ackTimeout,
+        _resumeProbeGrace = resumeProbeGrace;
 
   /// 进程内唯一连接：连接、解码、心跳、重连、在途重投、握手 `session.init`
   /// 全部唯一（对齐主流"一站一条长连接"的做法）。业务事件由
@@ -78,6 +80,14 @@ class WsChatService {
   /// 此时不能等 75s 心跳，必须主动探活/判死重连并重投。
   final Duration _ackTimeout;
 
+  /// 回前台 / 网络切换探活的等待窗口（2026-11-18）。
+  ///
+  /// 这两个场景下「入站静默」不等于链路已死：手机切后台被冻结、Wi‑Fi ⇄ 蜂窝
+  /// 切换都可能只是短暂停摆。旧实现回前台一旦发现静默超两个心跳周期就直接拆链，
+  /// 用户看到的就是「每次切回来都重连」。现在先发一帧探活，给一个网络往返的
+  /// 宽限：有 ack 就保留原连接，真死了才重建。
+  final Duration _resumeProbeGrace;
+
   /// 退避抖动源（见 [_calculateBackoffDelay]）。
   static final math.Random _rng = math.Random();
   bool _isConnecting = false;
@@ -98,6 +108,13 @@ class WsChatService {
   /// 最近一次空闲探测（`reason=idle_probe`/`pre_send_probe`）的发出时刻；
   /// 收到任意入站即复位。用于给 ack 留出往返时间，不再同步判死。
   DateTime _probeSentAt = DateTime.fromMillisecondsSinceEpoch(0);
+
+  /// 回前台 / 网络切换的探活在途计时器（[probeAndReconnect] 用）。
+  Timer? _linkProbeTimer;
+
+  /// 服务端主动告知「即将重启」：下一次重连走快重试，不让用户吃 2s→30s
+  /// 的指数退避。发版/热重启后所有在线设备都会收到这一帧。
+  bool _serverRestartSignaled = false;
 
   /// 已写入 socket、尚未拿到服务端 ack 的 `chat.user_message`（messageId → 事件）。
   ///
@@ -168,6 +185,8 @@ class WsChatService {
     _reconnectTimer?.cancel();
     _reconnectTimer = null;
     _stopHeartbeat();
+    _linkProbeTimer?.cancel();
+    _linkProbeTimer = null;
     unawaited(_subscription?.cancel());
     _subscription = null;
     _isConnecting = false;
@@ -184,31 +203,82 @@ class WsChatService {
 
   /// 确保连接可用（App 回前台时调用，2026-10-20）。
   ///
-  /// 已连接则空转；断线时重置计数强制重连——App 在后台放久了 WS 链路可能
+  /// 已连接则先探活；断线时重置计数强制重连——App 在后台放久了 WS 链路可能
   /// 已被中间设备掐断，回前台必须重新握一次手，服务端主动消息才送得进来。
   /// 不强制断开现有连接（与 [retryConnect] 的差异）。
   void ensureConnected() {
     if (_isConnecting || _manualClose) return;
     if (_isConnected) {
-      // 回前台健康检查（2026-11-14 真机「断连重连」根修）：进程被系统冻结 /
-      // 网络切换（Wi‑Fi ⇄ 蜂窝）之后，socket 往往仍是 `_isConnected=true`
-      // 且 `closeCode == null`，但早已收不到任何入站。旧实现直接 return，
-      // 只能等 75s 心跳阈值 + 10s 宽限才判死——用户看到的就是「回前台先
-      // 断着，过一会儿才自己连上」。入站静默超过两个心跳周期即视为半死链路，
-      // 立即重建（服务端对重复连接幂等：旧 socket 断开只清理自己）。
+      // 回前台健康检查（2026-11-18 调优）：进程被系统冻结 / 网络切换之后，
+      // socket 往往仍是 `_isConnected=true` 且 `closeCode == null`，但早已收
+      // 不到任何入站。旧实现直接拆链重建，可「静默」本身不能证明链路已死：
+      // 先发一帧 `ws.keepalive` 探活，[_resumeProbeGrace] 内收到任意入站就
+      // 保留原连接；没有任何回应才重建。这样健康链路不再每次回前台都重连。
       final DateTime last = _lastInboundAt;
       if (last == DateTime.fromMillisecondsSinceEpoch(0)) return;
       final Duration idle = DateTime.now().difference(last);
       if (idle <= _heartbeatInterval * 2) return;
-      debugPrint(
-          "[ws] resume on a stale link (${idle.inSeconds}s without inbound), reconnecting");
-      retryConnect();
+      probeAndReconnect("resume_probe");
       return;
     }
     // 通道还在但尚未标记已连接：多半卡在建连窗口，交给建连超时兜底，
     // 这里再抢一次只会制造重复 socket。
     if (_channel != null && _channel!.closeCode == null) return;
     retryConnect();
+  }
+
+  /// 系统网络路径变化（Wi‑Fi ⇄ 蜂窝、飞行模式恢复）时由原生监听调用。
+  ///
+  /// 旧路径依赖「心跳 75s 判死」才发现断链，移动网络切换后用户要干等一分多钟。
+  /// 这里先探活：旧 socket 若还活着（如双网并存）就保留，真死了立即重建。
+  void onNetworkChanged() {
+    if (_manualClose) return;
+    if (!_isConnected) {
+      retryConnect();
+      return;
+    }
+    probeAndReconnect("network_probe");
+  }
+
+  /// 发一帧探活，宽限内无任何入站再判死重建。
+  ///
+  /// [reason] 只用于日志/服务端观测（`resume_probe` / `network_probe`）。
+  /// 已有探活在途时直接空转，避免回前台 + 网络变化连续触发时拆两次链。
+  void probeAndReconnect(String reason) {
+    if (_manualClose) return;
+    if (!_isConnected) {
+      retryConnect();
+      return;
+    }
+    if (_linkProbeTimer != null) return;
+    final WebSocketChannel? channelAtProbe = _channel;
+    if (channelAtProbe == null || channelAtProbe.closeCode != null) {
+      retryConnect();
+      return;
+    }
+    final DateTime startedAt = DateTime.now();
+    final bool sent = _sendNow("ws.keepalive", <String, dynamic>{
+      "clientTime": startedAt.toIso8601String(),
+      "reason": reason,
+    });
+    if (!sent) {
+      retryConnect();
+      return;
+    }
+    _probeSentAt = startedAt;
+    _linkProbeTimer = Timer(_resumeProbeGrace, () {
+      _linkProbeTimer = null;
+      if (_manualClose || !_isConnected) return;
+      if (!identical(_channel, channelAtProbe)) return;
+      if (_lastInboundAt.isAfter(startedAt)) {
+        // 探活有回应：链路是活的，保留原连接（本轮不再判死）。
+        _probeSentAt = DateTime.fromMillisecondsSinceEpoch(0);
+        return;
+      }
+      debugPrint(
+          "[ws] $reason unanswered within ${_resumeProbeGrace.inMilliseconds}ms, reconnecting");
+      _handleDisconnect(channelAtProbe);
+    });
   }
 
   void _connectWithRetry() {
@@ -229,6 +299,7 @@ class WsChatService {
           _probeSentAt = DateTime.fromMillisecondsSinceEpoch(0);
           final Map<String, dynamic> event =
               jsonDecode(data.toString()) as Map<String, dynamic>;
+          _handleServerLifecycle(event);
           _handleServerRejection(event);
           _confirmChatDelivery(event);
           _emitEvent(event);
@@ -250,6 +321,7 @@ class WsChatService {
           _isConnected = true;
           _reconnectAttempts = 0;
           _isConnecting = false;
+          _serverRestartSignaled = false;
           _lastInboundAt = DateTime.now();
           // 新连接从零开始计空闲：上一轮的探测时间戳必须清掉，否则一进入
           // 空闲就按「上轮探测早已超宽限」误判死链。
@@ -357,6 +429,21 @@ class WsChatService {
     _sendSessionInit();
   }
 
+  /// 服务端重启预告（`server.restarting`）与关闭码识别。
+  ///
+  /// 发版/热重启时服务端会先广播一帧再关连接；客户端据此把下一次重连提前到
+  /// ~1s，而不是按指数退避干等 2s/4s/8s。1001/1012 也按同一路径处理——即使
+  /// 广播帧丢了，服务端关闭码仍能告诉我们「这是重启，不是网络故障」。
+  void _handleServerLifecycle(Map<String, dynamic> event) {
+    if (event["type"] != "server.restarting") return;
+    _serverRestartSignaled = true;
+    final Object? payload = event["payload"];
+    _emitEvent(<String, dynamic>{
+      "type": "server_restarting",
+      "payload": payload is Map ? payload : <String, dynamic>{},
+    });
+  }
+
   /// 服务端明确拒收（`error.event`）时的自愈入口。
   ///
   /// `FORBIDDEN` / `SESSION_REQUIRED` 只有一种成因：连接绑定的 actor 与本机
@@ -447,6 +534,8 @@ class WsChatService {
   void _markDisconnected() {
     _connectTimer?.cancel();
     _connectTimer = null;
+    _linkProbeTimer?.cancel();
+    _linkProbeTimer = null;
     // 先记下「这条连接活了多久」再清零，供 [_calculateBackoffDelay] 决定
     // 是快重试还是指数退避（见 [_lastConnectionWasBrief]）。
     _lastConnectionWasBrief = _connectedAt !=
@@ -462,6 +551,16 @@ class WsChatService {
 
   void _handleDisconnect(WebSocketChannel channel) {
     if (!identical(_channel, channel)) return;
+    // 关闭码先读再拆：1012(Service Restart) 或带重启语义的 reason 都说明这是
+    // 服务端发版而不是网络故障——重连应走快路径。1001 不单独认（心跳超时也
+    // 用 1001，见服务端 heartbeat_timeout），只认 reason。
+    final int? closeCode = channel.closeCode;
+    final String closeReason = channel.closeReason ?? "";
+    if (closeCode == 1012 ||
+        closeReason.contains("restart") ||
+        closeReason.contains("shutdown")) {
+      _serverRestartSignaled = true;
+    }
     _stopHeartbeat();
     unawaited(_subscription?.cancel());
     _subscription = null;
@@ -688,6 +787,11 @@ class WsChatService {
   }
 
   Duration _calculateBackoffDelay() {
+    // 服务端主动重启：所有在线设备同一时刻重连，给 ~0.5-0.9s 抖动打散，
+    // 不让用户吃 2s→30s 的指数退避。
+    if (_serverRestartSignaled) {
+      return Duration(milliseconds: 500 + _rng.nextInt(400));
+    }
     final bool wasBriefConnection = _lastConnectionWasBrief;
     if (wasBriefConnection && _reconnectAttempts <= 2) {
       // 短命连接（连上就掉）快重试，同样叠抖动：多设备同刻被踢时打散。
@@ -884,6 +988,8 @@ class WsChatService {
     _connectTimer?.cancel();
     _connectTimer = null;
     _stopHeartbeat();
+    _linkProbeTimer?.cancel();
+    _linkProbeTimer = null;
     _ackWatchdog?.cancel();
     _ackWatchdog = null;
     await _subscription?.cancel();

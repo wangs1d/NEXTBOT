@@ -93,12 +93,22 @@ test("仅坐标 payload → 回退服务端逆地理，且同坐标二次命中�
     const callsAfterFirst = stub.calls();
     assert.ok(callsAfterFirst >= 1, "首次应发生网络请求");
 
-    // 取整到 4 位小数（≈11m）的同一坐标 → 命中缓存，不再产生网络请求
+    // 缓存键精确到 6 位小数（≈0.11m，高德 location 参数的上限）：
+    // 完全相同的坐标必须命中缓存；相邻但不同的坐标（0.00004°≈4m）不得共用同一条
+    // 门牌地址——4 位小数的旧键会把 11m 内的两个位置归并，精度提升会被缓存吃掉。
     const second = await resolveUserGeo({
-      clientLocation: { latitude: 25.09114, longitude: 104.90114 },
+      clientLocation: { latitude: 25.0911, longitude: 104.9011 },
     });
     assert.equal(second?.city, "黔西南布依族苗族自治州");
-    assert.equal(stub.calls(), callsAfterFirst, "同坐标第二次必须命中缓存");
+    assert.equal(stub.calls(), callsAfterFirst, "同一坐标第二次必须命中缓存");
+
+    await resolveUserGeo({
+      clientLocation: { latitude: 25.09114, longitude: 104.90114 },
+    });
+    assert.ok(
+      stub.calls() > callsAfterFirst,
+      "不同坐标不得被 11m 网格归并到同一条逆地理结果",
+    );
   } finally {
     stub.restore();
   }

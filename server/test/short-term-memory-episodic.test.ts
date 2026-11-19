@@ -41,6 +41,24 @@ test("referent short prompt retrieves the earlier discussed subject by anchor", 
   assert.match(context, /刘浩存/);
 });
 
+test("明确回忆问句只回灌用户原话，不回灌助手整段回答（2026-11-18 回音根修）", () => {
+  const service = createService();
+  const sessionId = "epi-no-echo";
+
+  // 历史里问过一次，助手回了全量档案（姓名+称呼+年龄+住址）
+  service.reconcileTaskAfterTurn(
+    sessionId,
+    "还记得我叫什么吗",
+    "王铭川，大哥，二十岁，家在兴义下午屯九华苑。这还能忘？",
+  );
+
+  const context = service.buildPromptContext(sessionId, "记得我叫什么吗") ?? "";
+  assert.match(context, /episodic-memory/, "同款问句应命中历史轮次");
+  assert.match(context, /U:还记得我叫什么吗/, "用户原话可回灌");
+  assert.doesNotMatch(context, /二十岁/, "助手整段回答不得回灌——否则模型会原样复述全量清单");
+  assert.match(context, /不要整段复述历史回复/, "回灌纪律应显式告知模型");
+});
+
 test("clean topic switch does NOT inject episodic memory (串台保护 + 省 token)", () => {
   const service = createService();
   const sessionId = "epi-switch";

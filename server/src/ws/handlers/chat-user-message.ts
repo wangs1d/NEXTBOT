@@ -361,6 +361,12 @@ export type ChatUserMessageHandlerDeps = {
    * 称呼/名字并落库，再让主对话按新阶段自然接话。未装配时零影响。
    */
   onboardingIntroService?: import("../../services/onboarding-intro-service.js").OnboardingIntroService | null;
+  /**
+   * 图像资产服务（可选）：用户随消息发出的 visionFrames 在此落盘为可跨设备
+   * 加载的 URL，随本轮 done 阶段写入 WAL 供历史回填。未装配时零影响——照片
+   * 仍进模型上下文，只是历史只剩文字（升级前行为）。
+   */
+  imageGenerationService?: import("../../services/image-generation-service.js").ImageGenerationService | null;
 };
 
 export type ChatUserMessageContext = {
@@ -528,6 +534,29 @@ export async function handleChatUserMessageEvent(
     return true;
   }
 
+  // 用户照片持久化（2026-11-18）：把 visionFrames 落盘为稳定 URL，随本轮
+  // done 阶段写进 WAL，让重启/换设备后历史能按真实缩略图重建用户泡。
+  // 与「喂给模型看图」完全解耦：落盘失败只记日志，绝不阻断本轮对话。
+  let userImageUrls: string[] | undefined;
+  if (visionFrames?.length && deps.imageGenerationService) {
+    try {
+      userImageUrls = [];
+      for (const f of visionFrames) {
+        const url = await deps.imageGenerationService.saveImageBuffer(
+          msgActor,
+          Buffer.from(f.dataBase64, "base64"),
+          msgActor,
+          { turnId: data.messageId },
+          { libraryHidden: true },
+        );
+        userImageUrls.push(url);
+      }
+    } catch (imgErr) {
+      console.log(`[ChatUserMessage] 用户照片落盘失败（忽略）: ${imgErr}`);
+      userImageUrls = undefined;
+    }
+  }
+
   const textTrim = data.text.trim();
   const agentAccessMode = parseAgentAccessMode(data.agentAccessMode);
   let effectiveText =
@@ -595,6 +624,7 @@ export async function handleChatUserMessageEvent(
   messageBatchProcessor.submit(turnSessionId, {
     text: effectiveText,
     visionFrames,
+    ...(userImageUrls && userImageUrls.length > 0 ? { userImageUrls } : {}),
     agentAccessMode,
     clientIp: data.clientIp || ctx.clientIp,
     clientLocation: data.clientLocation,
@@ -2363,6 +2393,9 @@ async function processBatchedMessage(
         messageId: batched.originalMessageId,
         assistantText: finalText,
         ...(mediaCards.length > 0 ? { mediaCards } : {}),
+        ...(batched.userImageUrls && batched.userImageUrls.length > 0
+          ? { userImageUrls: batched.userImageUrls }
+          : {}),
         ...(bubbleSplitLive ? { bubbles: bubbleTracker.snapshot } : {}),
       })
       .catch(() => {});

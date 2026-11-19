@@ -31,6 +31,17 @@ fun signingCredential(envName: String, propKey: String): String {
     )
 }
 
+// 高德 Android 定位 key（2026-11-18）：注入 manifest meta-data com.amap.api.v2.apikey。
+// 优先级：环境变量 AMAP_ANDROID_KEY > android/amap.properties 的 amap.apiKey > 空。
+// 空值时 SDK 不会被初始化，Dart 侧自动回退 geolocator（不影响定位可用性）。
+val amapProperties = Properties()
+val amapPropertiesFile = rootProject.file("amap.properties")
+if (amapPropertiesFile.isFile) {
+    amapPropertiesFile.inputStream().use { amapProperties.load(it) }
+}
+val amapApiKey: String =
+    (System.getenv("AMAP_ANDROID_KEY") ?: amapProperties.getProperty("amap.apiKey") ?: "").trim()
+
 android {
     namespace = "com.example.private_ai_app"
     compileSdk = flutter.compileSdkVersion
@@ -68,6 +79,8 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        // 高德定位 key 注入 manifest（见文件顶部的 amapApiKey 解析）。
+        manifestPlaceholders["amapApiKey"] = amapApiKey
     }
 
     // NextBot 正式签名（2026-10-13）：nextbot-release.jks 与华为 AGC 登记的
@@ -134,6 +147,10 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     // CameraX ProcessCameraProvider.getInstance 返回 ListenableFuture（由 guava 提供）
     implementation("com.google.guava:guava:33.5.0-android")
+
+    // 高德定位 SDK（2026-11-18）：GPS + WiFi + 基站 + 传感器融合，设备精度上限。
+    // 只有 AmapLocationPlugin 直接使用；未配置 key 时 SDK 不会被初始化。
+    implementation("com.amap.api:location:6.4.9")
 }
 
 flutter {

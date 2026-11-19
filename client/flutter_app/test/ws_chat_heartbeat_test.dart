@@ -429,4 +429,174 @@ void main() {
     );
     expect(service.isConnected, isTrue);
   });
+
+  test("回前台先探活：健康链路保留原连接，不重建", () async {
+    // 2026-11-18：旧实现回前台发现入站静默就直接拆链，用户每次切回来都看到
+    // 「正在重连」。新语义先发 resume_probe，收到任意入站就保留连接。
+    final _Harness server = await _startServer();
+    server.ackKeepalive = false;
+    final WsChatService service = WsChatService(
+      url: server.url,
+      heartbeatInterval: const Duration(milliseconds: 80),
+      // 心跳阈值放长：把判死权交给 ensureConnected 的探活路径。
+      heartbeatTimeout: const Duration(seconds: 30),
+      probeGrace: const Duration(seconds: 5),
+      resumeProbeGrace: const Duration(milliseconds: 300),
+      connectTimeout: const Duration(seconds: 3),
+    );
+    final List<String> events = <String>[];
+    final StreamSubscription<Map<String, dynamic>> sub = service.events.listen(
+      (Map<String, dynamic> e) => events.add((e["type"] ?? "").toString()),
+    );
+    addTearDown(() async {
+      await sub.cancel();
+      await service.close();
+      await server.close();
+    });
+
+    service.connect();
+    await _waitFor(() => service.isConnected);
+    final int connections = server.connections;
+    // 静默超过两个心跳周期（80ms × 2），进入「回前台疑似半死链」状态。
+    await Future<void>.delayed(const Duration(milliseconds: 220));
+    // 恢复 ack：探活会立刻得到回应。
+    server.ackKeepalive = true;
+    service.ensureConnected();
+
+    await _waitFor(
+      () => server.receivedRaw.any((String r) => r.contains("resume_probe")),
+      timeout: const Duration(seconds: 2),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 400));
+    expect(
+      events.contains("ws_disconnected"),
+      isFalse,
+      reason: "探活有回应时回前台不得拆链重连",
+    );
+    expect(server.connections, connections, reason: "健康链路不允许新建连接");
+    expect(service.isConnected, isTrue);
+  });
+
+  test("回前台探活无回应：宽限后判死重连（真半死链）", () async {
+    final _Harness server = await _startServer();
+    server.ackKeepalive = false;
+    final WsChatService service = WsChatService(
+      url: server.url,
+      heartbeatInterval: const Duration(milliseconds: 80),
+      heartbeatTimeout: const Duration(seconds: 30),
+      probeGrace: const Duration(seconds: 5),
+      resumeProbeGrace: const Duration(milliseconds: 120),
+      connectTimeout: const Duration(seconds: 3),
+    );
+    final List<String> events = <String>[];
+    final StreamSubscription<Map<String, dynamic>> sub = service.events.listen(
+      (Map<String, dynamic> e) => events.add((e["type"] ?? "").toString()),
+    );
+    addTearDown(() async {
+      await sub.cancel();
+      await service.close();
+      await server.close();
+    });
+
+    service.connect();
+    await _waitFor(() => service.isConnected);
+    await Future<void>.delayed(const Duration(milliseconds: 220));
+    service.ensureConnected();
+
+    await _waitFor(
+      () => server.receivedRaw.any((String r) => r.contains("resume_probe")),
+      timeout: const Duration(seconds: 2),
+    );
+    await _waitFor(
+      () => events.contains("ws_disconnected"),
+      timeout: const Duration(seconds: 2),
+    );
+    expect(events.contains("ws_disconnected"), isTrue);
+  });
+
+  test("网络切换：先探活，真死才重连", () async {
+    final _Harness server = await _startServer();
+    final WsChatService service = WsChatService(
+      url: server.url,
+      heartbeatInterval: const Duration(seconds: 30),
+      heartbeatTimeout: const Duration(seconds: 60),
+      resumeProbeGrace: const Duration(milliseconds: 120),
+      connectTimeout: const Duration(seconds: 3),
+    );
+    final List<String> events = <String>[];
+    final StreamSubscription<Map<String, dynamic>> sub = service.events.listen(
+      (Map<String, dynamic> e) => events.add((e["type"] ?? "").toString()),
+    );
+    addTearDown(() async {
+      await sub.cancel();
+      await service.close();
+      await server.close();
+    });
+
+    service.connect();
+    await _waitFor(() => service.isConnected);
+    final int connections = server.connections;
+
+    // 1) 链路活着：探活有 ack → 不重建。
+    service.onNetworkChanged();
+    await _waitFor(
+      () => server.receivedRaw.any((String r) => r.contains("network_probe")),
+      timeout: const Duration(seconds: 2),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    expect(server.connections, connections, reason: "探活有回应时不应重建");
+    expect(events.contains("ws_disconnected"), isFalse);
+
+    // 2) 路径切换后半开：探活无人应答 → 判死重连。
+    server.ackKeepalive = false;
+    service.onNetworkChanged();
+    await _waitFor(
+      () => events.contains("ws_disconnected"),
+      timeout: const Duration(seconds: 2),
+    );
+    expect(events.contains("ws_disconnected"), isTrue);
+  });
+
+  test("服务端重启预告：按快重连节奏回来，不吃指数退避", () async {
+    final _Harness server = await _startServer();
+    final WsChatService service = WsChatService(
+      url: server.url,
+      heartbeatInterval: const Duration(seconds: 30),
+      heartbeatTimeout: const Duration(seconds: 60),
+      connectTimeout: const Duration(seconds: 3),
+    );
+    final StreamSubscription<Map<String, dynamic>> sub = service.events.listen(
+      (Map<String, dynamic> _) {},
+    );
+    addTearDown(() async {
+      await sub.cancel();
+      await service.close();
+      await server.close();
+    });
+
+    service.connect();
+    await _waitFor(() => service.isConnected);
+    expect(server.connections, 1);
+
+    final DateTime closeAt = DateTime.now();
+    for (final WebSocket ws in server._sockets) {
+      ws.add(jsonEncode(<String, dynamic>{
+        "type": "server.restarting",
+        "payload": <String, dynamic>{"reason": "deploy"},
+      }));
+      await ws.close(1001, "server_restart");
+    }
+
+    await _waitFor(
+      () => server.connections >= 2,
+      timeout: const Duration(seconds: 3),
+    );
+    final int gapMs =
+        server.connectionTimes[1].difference(closeAt).inMilliseconds;
+    expect(
+      gapMs,
+      lessThan(1500),
+      reason: "收到重启预告后应 ~0.5-0.9s 重连（实际 ${gapMs}ms）",
+    );
+  });
 }

@@ -88,7 +88,22 @@ export class LocationIngestPipeline {
     let sampleId: number | null = null;
     if (!rateLimited && this.deps.history) {
       try {
-        sampleId = this.deps.history.record(actorId, loc, source).id;
+        // 时间戳用 fix 的真实采集时刻，而不是服务端收到时刻：App 被杀后补报的
+        // 围栏事件可能是几小时前的坐标，用接收时刻落库会把「07:00 到公司」
+        // 记成「20:00 到公司」，日行程与习惯整段错位。未来时间（设备钟飘）
+        // 仍回退服务端时刻。
+        const nowMs = this.now();
+        const capturedMs = loc.capturedAt
+          ? Date.parse(loc.capturedAt)
+          : loc.triggeredAt
+            ? Date.parse(loc.triggeredAt)
+            : NaN;
+        const recordedAt = new Date(
+          Number.isFinite(capturedMs) && capturedMs <= nowMs + 5 * 60_000
+            ? capturedMs
+            : nowMs,
+        );
+        sampleId = this.deps.history.record(actorId, loc, source, recordedAt).id;
       } catch (err) {
         console.log(`[LocationIngest] 历史写入失败（忽略）: ${err}`);
       }

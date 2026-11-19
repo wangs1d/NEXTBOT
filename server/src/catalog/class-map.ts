@@ -179,7 +179,6 @@ const RULES: ClassRule[] = [
 /** MCP server alias → 生活域（MCP 工具名形如 mcp.<alias>.<tool>）。 */
 const MCP_ALIAS_DOMAINS: Record<string, LifeDomain> = {
   didi: "travel",
-  yby6: "media",
 };
 
 /** 系统兜底分类（未命中任何规则；FeatureCatalog 会把这类名单独 warn 出来）。 */

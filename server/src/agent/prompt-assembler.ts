@@ -84,7 +84,6 @@ const RENDERED_MEMORY_FIELDS: ReadonlyArray<keyof AgentPromptMemoryContext> = [
   "toolPlan",
   "currentUserState",
   "userLocation",
-  "frequentPlaces",
   "turnAside",
   "onboardingHint",
   "narrativeRecall",
@@ -208,7 +207,12 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
   if (m.userFacts) stableMemory.push(m.userFacts);
   // 用户关系一览（生活模型）：用户生活中人物/宠物的结构化一览，紧跟结构化事实。
   if (m.lifeRelations) stableMemory.push(m.lifeRelations);
-  if (m.userProfileSummary) stableMemory.push(`【用户长期画像】\n${m.userProfileSummary}`);
+  if (m.userProfileSummary) {
+    stableMemory.push(
+      `【用户长期画像】\n（背景资料，不是要朗读的清单：本轮只回答用户问到的那一项，` +
+        `不要把其余字段连带报出；用户明确问多项时才可一起说）\n${m.userProfileSummary}`,
+    );
+  }
 
   const stablePrefix: string[] = [...stableCore, ...stableSlow, ...stableMemory];
 
@@ -248,7 +252,9 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
   // 当下状态（P0）：贴此刻的屏幕焦点/在线状态，顺嘴与关心的 grounded 依据
   if (m.currentUserState) dynamicContext.push(`【当下状态】\n${m.currentUserState}`);
   if (m.userLocation) dynamicContext.push(`【用户位置】\n${m.userLocation}`);
-  if (m.frequentPlaces) dynamicContext.push(`【常去地点】\n${m.frequentPlaces}`);
+
+
+
   // 记忆图联想检索：保留专属免责（项目硬约束：该块必须带免责声明）。
   // 衔接口径（2026-10-06 治啰嗦 P2-6 合并）：旧事只在话题相关时顺着提，
   // 不主动翻旧账、不以承接话开头——与【消息时间戳】的【话题切换】禁令同源。

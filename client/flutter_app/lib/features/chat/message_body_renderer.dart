@@ -840,7 +840,8 @@ Widget? _buildUnifiedMediaCardBody(
 /// 订单号、倒计时、时间轴都是卡片的一部分。旧逻辑见到 actions 非空就直接
 /// 换成 AgentActionChoiceCard，整张卡被降级成一串按钮 + 列表（真机实证：
 /// 支付卡只剩「💳 支付确认 + 订单/平台 + 两个按钮」，金额和订单号全丢）。
-bool _cardOwnsChrome(AgentResultData data) {
+/// 手机端气泡外的独立卡（mobile_chat_page）也复用这份判定。
+bool cardOwnsChrome(AgentResultData data) {
   final Object? shopping = data.extra?["shopping"];
   if (shopping is! Map) return false;
   final String stage = (shopping["stage"] ?? "").toString();
@@ -867,7 +868,7 @@ void _appendCardWidget(
   // 行程卡单独分段（2026-09-25 用户定稿）：travel_itinerary 是独立规划卡，
   // 与介绍文字之间用「大间距 + 细分隔线」显式切开成新的一段（其余小卡维持
   // 紧凑贴排）。
-  final Widget card = data.actions.isNotEmpty && !_cardOwnsChrome(data)
+  final Widget card = data.actions.isNotEmpty && !cardOwnsChrome(data)
       ? AgentActionChoiceCard(
           data: data,
           onAction: onUserAction == null

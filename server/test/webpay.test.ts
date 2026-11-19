@@ -160,6 +160,22 @@ describe("下单", () => {
     assert.equal(order.status, "pending");
     assert.equal(order.totalAmount, "0.01");
   });
+  it("wap 模式返回带签名的手机收银台地址（不生成电脑表单）", () => {
+    const result = service.createOrder({
+      amount: "0.01",
+      subject: "手机充值",
+      payMode: "wap",
+      returnUrl: "https://example.com/recharge/return",
+    });
+    assert.equal(result.paymentHtml, "");
+    assert.ok(result.paymentUrl?.startsWith("https://openapi-sandbox.dl.alipaydev.com/gateway.do?"));
+    assert.match(result.paymentUrl!, /alipay\.trade\.wap\.pay/);
+    assert.match(result.paymentUrl!, /QUICK_WAP_WAY/);
+    const order = store.getOrder(result.outTradeNo);
+    assert.ok(order);
+    assert.equal(order.status, "pending");
+    assert.equal(order.totalAmount, "0.01");
+  });
   it("非法金额与空标题被拒绝", () => {
     assert.throws(() => service.createOrder({ amount: "0", subject: "x" }));
     assert.throws(() => service.createOrder({ amount: "1.001", subject: "x" }));

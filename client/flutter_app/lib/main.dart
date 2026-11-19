@@ -126,6 +126,7 @@ import "core/services/pure_voice_mode.dart";
 import "core/presentation/phone_call_page.dart";
 import "core/services/local_notification_service.dart";
 import "core/services/keep_alive_service.dart";
+import "core/services/network_watch_service.dart";
 import "core/services/media_playback_service.dart";
 import "core/services/mobile_briefing_launcher.dart";
 import "core/services/presence_gate_service.dart";
@@ -564,9 +565,20 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// 差值随 `ws.client_boot` 上报服务端：差值几十秒内 ≈ 上个进程崩溃/被杀，
   /// 几分钟以上 ≈ 冻结后解冻或正常冷启动。免 USB 即可远程判定断连根因分布。
   static const String _kLastAlivePrefKey = "client.lastAliveAtMs";
+  /// 构建标记：随 `ws.client_boot` 上报，用来确认手机上跑的到底是不是
+  /// 本次修复后的包（服务端日志直接可见，不再靠时间戳猜）。
+  static const String _kClientDiagBuild = "2026-11-19-wsfix1";
   int _aliveTick = 0;
   int _bootLastAliveAgeMs = -1;
   bool _bootBeaconSent = false;
+
+  /// 「上次存活时刻」是否已读完（2026-11-18 修复信标恒 -1）。
+  ///
+  /// WS 往往在 [_bootstrap] 读盘完成之前就连上了：旧实现此时把
+  /// `_bootBeaconSent` 置真并发出 `lastAliveAgeMs = -1`，真值读出来后也不会
+  /// 再发——服务端看到的永远是「无历史」。现在把发送挂到「读盘完成」之后，
+  /// 连上得晚就等读盘，读盘早就在连上时发。
+  bool _bootBeaconReady = false;
 
   /// 站内信（平台→用户收件箱）未读数：随消息轮询刷新 + WS 推送即时 +1，
   /// 进侧栏「站内信」红点角标。
@@ -922,6 +934,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     // 记录生命周期切换：若随后进程退出，可据此区分「用户关了窗口/系统杀进程」与「崩溃」。
     // 只写单行状态、不带堆栈——生命周期事件高频触发，带堆栈曾把日志刷到 189MB。
     _writeCrashLog("[LIFECYCLE]", "state=$state");
+    // 进程存活时刻在切后台/退出瞬间补写一次：每 60s 的周期写盘可能刚好没赶上
+    // 系统回收，补这一笔后下次启动的 lastAliveAgeMs 才能准确指到「被杀」时刻。
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.detached) {
+      unawaited(_writeAliveBeaconNow());
+    }
     // 推送 token 注册自愈（2026-10-14）：回到前台时补一次注册——首装后 HMS
     // token 就绪可能晚于启动重试窗口，用户打开 App 的每个时机都补一次
     // （内部按 actorId 去重，已注册则空转）。
@@ -935,6 +952,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
         unawaited(KeepAliveService.start());
       }
+      // 定位自愈（2026-11-19）：用户可能刚在弹窗里选了「始终允许」，或刚去系统
+      // 设置把定位改成「始终允许」——回前台重新检查并拉起后台上报（幂等）。
+      unawaited(_resumeLocationTracking());
       // 推送 token 注册自愈（2026-10-14）：回到前台时补一次注册——首装后 HMS
       // token 就绪可能晚于启动重试窗口，用户打开 App 的每个时机都补一次
       // （内部按 actorId 去重，已注册则空转）。
@@ -982,6 +1002,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       // 电池优化豁免（2026-11-12）：前台服务仍被 ROM 冻结的关键兜底。
       // 未豁免时拉起系统对话框，用户点一次「允许」永久生效；已豁免空转。
       unawaited(KeepAliveService.ensureBatteryExemption());
+      // 网络路径监听（2026-11-18）：Wi‑Fi ⇄ 蜂窝切换/飞行模式恢复后旧 TCP
+      // 会静默失效，原生回调一变化就让连接层立即探活，不再等 75s 心跳。
+      NetworkWatchService.instance.start();
     }
     // 移动端系统通知初始化（后台收 WS 消息时用系统通知提醒，类微信）
     await LocalNotificationService.init();
@@ -1015,6 +1038,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       }
     } catch (_) {
       // 诊断辅助，失败按无历史处理
+    } finally {
+      _bootBeaconReady = true;
+      _maybeSendBootBeacon();
     }
 
     // 一次性清理历史上「裸 taskId」格式的孤儿日程事项（详见 store 注释）。
@@ -1452,10 +1478,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         // MediaPlaybackService.ensureBusSubscription，main 不再逐条接线。
         // 服务端按需请求实时位置（agent.location_request）同理：
         // AgentLocationResponder.ensureBusSubscription（手机端归聊天控制器）。
-        // 持续定位配置（服务端 LOCATION_TRACKING_MODE=continuous 时随 session 绑定下发）：
+        // 持续定位配置（服务端 LOCATION_TRACKING_MODE 缺省 continuous，随 session 绑定下发）：
         // 客户端按 intervalSec 定时上报位置（source:"continuous"），供位置历史/
-        // 地理围栏/常去地点挖掘使用。隐私：服务端默认 ondemand 不下发本事件；
-        // 即使下发，用户未同意定位时定时器会自行停止。
+        // 地理围栏/常去地点挖掘使用。隐私：显式 LOCATION_TRACKING_MODE=ondemand
+        // 可不下发本事件；即使下发，用户未同意定位时定时器会自行停止。
         if (type == "agent.location_tracking_config") {
           _configureContinuousLocationTracking(payload);
         }
@@ -3717,24 +3743,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     SphereEmbodimentMotionBridge.instance.setMainAgentLinked(true);
     // 进程启动信标（2026-11-12）：每次进程的首条连接上报一次启动诊断，
     // 服务端日志可远程判定「断开重连」是崩溃重启还是冻结解冻（免 USB）。
-    if (!_bootBeaconSent) {
-      _bootBeaconSent = true;
-      unawaited(() async {
-        try {
-          final bool fgsRunning = await KeepAliveService.isRunning();
-          final bool batteryExempt = await KeepAliveService.isBatteryExempt();
-          _ws.sendEvent("ws.client_boot", <String, dynamic>{
-            "lastAliveAgeMs": _bootLastAliveAgeMs,
-            "fgsRunning": fgsRunning,
-            "batteryExempt": batteryExempt,
-            "platform": defaultTargetPlatform.name,
-            "bootAt": DateTime.now().toIso8601String(),
-          });
-        } catch (_) {
-          // 诊断信标，失败不影响业务
-        }
-      }());
-    }
+    _maybeSendBootBeacon();
     // 档案自愈（2026-11-12）：每次连上（含断线重连）都补拉一次 agent 档案。
     // 改名广播 identity_renamed 是一次性 trySend，不落 WAL 不重放——登录改绑
     // / 断线窗口里错过的改名，靠这里的幂等 GET 收敛，顶栏名牌不再依赖
@@ -3762,6 +3771,31 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       // 时补一次（内部按 actorId 去重，同身份不重复上报）。
       unawaited(MobilePushRegistrar.registerIfNeeded());
     }
+  }
+
+  /// 上报一次进程启动信标（读盘完成 + WS 已连才算就绪，幂等）。
+  ///
+  /// 两个触发点：WS 连上、`_bootstrap` 读完「上次存活时刻」。谁后到谁负责发，
+  /// 保证 `lastAliveAgeMs` 一定是真实差值而不是 -1。
+  void _maybeSendBootBeacon() {
+    if (!_bootBeaconReady || _bootBeaconSent || !_ws.isConnected) return;
+    _bootBeaconSent = true;
+    unawaited(() async {
+      try {
+        final bool fgsRunning = await KeepAliveService.isRunning();
+        final bool batteryExempt = await KeepAliveService.isBatteryExempt();
+        _ws.sendEvent("ws.client_boot", <String, dynamic>{
+          "lastAliveAgeMs": _bootLastAliveAgeMs,
+          "fgsRunning": fgsRunning,
+          "batteryExempt": batteryExempt,
+          "diagBuild": _kClientDiagBuild,
+          "platform": defaultTargetPlatform.name,
+          "bootAt": DateTime.now().toIso8601String(),
+        });
+      } catch (_) {
+        // 诊断信标，失败不影响业务
+      }
+    }());
   }
 
   Future<void> _sendMessage({String? text, bool isRetry = false}) async {
@@ -4198,9 +4232,14 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   Future<void> _touchAliveBeacon() async {
     _aliveTick++;
     if (_aliveTick % 4 != 2) return; // 15s × 4 ≈ 60s 写一次
+    await _writeAliveBeaconNow();
+  }
+
+  /// 无视节流立即写一次存活时刻（切后台/退出路径用）。
+  Future<void> _writeAliveBeaconNow() async {
     try {
-      await _store.savePreference(_kLastAlivePrefKey,
-          DateTime.now().millisecondsSinceEpoch);
+      await _store.savePreference(
+          _kLastAlivePrefKey, DateTime.now().millisecondsSinceEpoch);
     } catch (_) {
       // 诊断辅助写入，失败不影响业务
     }
@@ -5425,8 +5464,21 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     await UpdateResultCard.runManualUpdateCheck(ctx);
   }
 
+  /// 回前台自愈：定位权限可能刚被升级为「始终允许」（弹窗/系统设置）。
+  /// 服务端 continuous 时补拉起后台上报流；用户自己开过常驻开关时也补一次。
+  /// 两者都幂等，权限不够时静默跳过。
+  Future<void> _resumeLocationTracking() async {
+    if (_continuousLocationTimer != null) {
+      await _syncServerContinuousTracking(true);
+    }
+    if (await ClientLocationService.getResidentLocationEnabled()) {
+      await _startResidentLocationReporting();
+    }
+  }
+
   /// 弹窗询问 GPS 定位权限：仅询问一次，未显式拒绝则默认同意并立即拉一次 GPS。
-  /// 「常驻定位」= 始终允许 + 位移触发后台上报（Agent 感知位置改变/进出常去地点）。
+  /// 「始终允许」= 系统定位权限选「始终允许/允许所有时间」+ 位移触发后台上报
+  /// （Agent 感知位置改变/进出常去地点）。
   Future<void> _promptLocationConsentIfNeeded() async {
     final bool? existing = await ClientLocationService.getLocationConsent();
     if (existing != null) {
@@ -5490,12 +5542,14 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     final String mode = payload["mode"]?.toString() ?? "";
     if (mode != "continuous") {
       _stopContinuousLocationTracking();
+      unawaited(_syncServerContinuousTracking(false));
       return;
     }
     int intervalSec = (payload["intervalSec"] as num?)?.toInt() ?? 300;
     if (intervalSec < 30) intervalSec = 30;
     if (intervalSec > 3600) intervalSec = 3600;
     _startContinuousLocationTracking(intervalSec);
+    unawaited(_syncServerContinuousTracking(true));
   }
 
   void _startContinuousLocationTracking(int intervalSec) {
@@ -5504,6 +5558,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       Duration(seconds: intervalSec),
       (Timer t) => unawaited(_reportContinuousLocation()),
     );
+    // 配置到达先补报一次：否则最长要等一个间隔（缺省 5 分钟）服务端才有新坐标。
+    // 重连风暴会重复下发配置，1 分钟内已报过就不再触发一次新 GPS。
+    final DateTime? last = _lastContinuousReportAt;
+    if (last == null || DateTime.now().difference(last) > const Duration(minutes: 1)) {
+      unawaited(_reportContinuousLocation());
+    }
   }
 
   void _stopContinuousLocationTracking() {
@@ -5511,31 +5571,113 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     _continuousLocationTimer = null;
   }
 
-  /// 持续模式单次上报：拉新 GPS（绕过展示缓存），静默失败，下个周期自然重试。
+  /// 上一次向服务端上报持续定位的时刻（重连补报限流用）。
+  DateTime? _lastContinuousReportAt;
+
+  /// 统一出口：记录上报时刻并发送（source 固定 continuous）。
+  void _sendContinuousReport(ClientLocationPayload payload) {
+    _lastContinuousReportAt = DateTime.now();
+    _ws.sendEvent("client.location_report", <String, dynamic>{
+      "source": "continuous",
+      ...payload.toJson(),
+    });
+  }
+
+  /// 后台心跳可直接复用的 fix 上限：超过就当「可能已经移动」，走一次主动定位。
+  static const Duration _continuousBackgroundFixMaxAge = Duration(minutes: 10);
+
+  /// 后台主动定位的最小间隔：常驻流不产生 fix（长时间没动）时才补一次，
+  /// 避免每 5 分钟唤醒 GPS（耗电）。
+  static const Duration _continuousBackgroundFixMinGap = Duration(minutes: 15);
+
+  /// 上一次后台主动定位的时刻（限流用）。
+  DateTime? _lastBackgroundFixAttemptAt;
+
+  /// 服务端 continuous 是否已拉起后台上报流（避免重复启动/误停用户自己的常驻开关）。
+  bool _serverContinuousActive = false;
+
+  /// 服务端 continuous 模式下的后台上报流：常驻前台服务 + 位移触发。
   ///
-  /// 2026-11-05 降级为**仅前台轮询**：Android 8+ 应用在后台（非前台服务）时，
-  /// 系统把定位更新限制成「每小时几次」，请求 5 分钟一次也兑现不了——后台
-  /// 硬轮询只是白耗电。后台的「到达/离开」改由系统围栏触发（agent.geofence_sync
-  /// → 原生 addProximityAlert，App 被杀也能唤醒）。
+  /// 与前台定时器的分工：前台定时器主动取新 GPS（间隔 intervalSec）；这里负责
+  /// App 退后台/锁屏后的位置变化——常驻定位流带自己的前台服务（location 类型），
+  /// 后台照样能收到位移回调。仅在已拿到「始终允许」时启动，避免从连接事件里
+  /// 反复弹权限框；权限只到「使用期间」时前台定时器照常工作。
+  Future<void> _syncServerContinuousTracking(bool enabled) async {
+    if (!enabled) {
+      if (!_serverContinuousActive) return;
+      _serverContinuousActive = false;
+      // 用户自己也开了常驻开关时保留那条流，只撤服务端驱动的那份意图。
+      if (!await ClientLocationService.getResidentLocationEnabled()) {
+        await ClientLocationService.stopResidentTracking();
+      }
+      return;
+    }
+    if (_serverContinuousActive) return;
+    if (!await ClientLocationService.hasAlwaysPermission()) {
+      debugPrint(
+        "[ContinuousLocation] 未授予「始终允许」，后台上报流未启动（前台定时器继续工作）",
+      );
+      return;
+    }
+    _serverContinuousActive = await ClientLocationService.startServerContinuousTracking(
+      onFix: _sendContinuousReport,
+    );
+  }
+
+  /// 持续模式单次上报：前台主动取新 GPS；后台回传常驻流最近一次 fix。
+  ///
+  /// 后台不做高频主动定位（Android 8+ 把后台定位限成每小时几次，硬轮询只是白耗电），
+  /// 位置变化由常驻前台服务的位移回调（[_syncServerContinuousTracking]）即时上报；
+  /// 这里的后台心跳负责「人没动也让 Agent 知道位置没变」：优先复用最近一次 fix，
+  /// 只有它已过期（超过 [_continuousBackgroundFixMaxAge]）才低频补一次主动定位
+  /// （至少间隔 [_continuousBackgroundFixMinGap]），绝不用过期坐标冒充当前位置。
   Future<void> _reportContinuousLocation() async {
     try {
-      final AppLifecycleState? lifecycle = WidgetsBinding.instance.lifecycleState;
-      if (lifecycle != null && lifecycle != AppLifecycleState.resumed) {
-        return; // 后台不轮询：系统会限流，靠围栏事件驱动
-      }
       final bool? consent = await ClientLocationService.getLocationConsent();
       if (consent != true) {
         // 用户撤回定位同意：立刻停表，直到重新授权前不再产生任何位置上报
         _stopContinuousLocationTracking();
         return;
       }
+      final AppLifecycleState? lifecycle = WidgetsBinding.instance.lifecycleState;
+      final bool foreground =
+          lifecycle == null || lifecycle == AppLifecycleState.resumed;
+      if (!foreground) {
+        final DateTime now = DateTime.now();
+        final ClientLocationPayload? last = ClientLocationService.lastKnownPayload;
+        final DateTime? lastAt = last == null
+            ? null
+            : DateTime.tryParse(last.capturedAt ?? "") ??
+                ClientLocationService.lastKnownRecordedAt;
+        if (last != null &&
+            lastAt != null &&
+            now.difference(lastAt).abs() <= _continuousBackgroundFixMaxAge) {
+          // 常驻流最近刚给过 fix：直接复用，不唤醒 GPS。
+          _sendContinuousReport(last);
+          return;
+        }
+        // 位置过期（人长时间没动 → 常驻流没有新事件）：低频补一次主动定位。
+        final DateTime? lastAttempt = _lastBackgroundFixAttemptAt;
+        if (lastAttempt != null &&
+            now.difference(lastAttempt) < _continuousBackgroundFixMinGap) {
+          return;
+        }
+        _lastBackgroundFixAttemptAt = now;
+        final ClientLocationPayload? fresh =
+            await ClientLocationService.getCurrentLocationForAgentReply();
+        if (fresh == null) return;
+        final DateTime? freshAt = DateTime.tryParse(fresh.capturedAt ?? "");
+        if (freshAt != null &&
+            now.difference(freshAt).abs() > _continuousBackgroundFixMaxAge) {
+          return; // 拿到的仍是旧 fix（磁盘兜底）：宁可不上报，别冒充当前位置
+        }
+        _sendContinuousReport(fresh);
+        return;
+      }
       final ClientLocationPayload? loc =
           await ClientLocationService.getCurrentLocationForChat();
       if (loc == null) return;
-      _ws.sendEvent("client.location_report", <String, dynamic>{
-        "source": "continuous",
-        ...loc.toJson(),
-      });
+      _sendContinuousReport(loc);
     } catch (_) {
       // 单次失败静默
     }

@@ -485,6 +485,10 @@ class MobileChatController extends ChangeNotifier {
   /// 错误提示(轻提示用)。
   String? errorMessage;
 
+  /// 错误提示自动消失定时器：报错条只临时展示，不再常驻输入框上方
+  /// （此前「单帧超过 4194304 字节」这类原始报错会一直挂着）。
+  Timer? _errorHintClearTimer;
+
   // ===== 分泡逐泡揭示（2026-11-10）：打字机下线后的新节奏 =====
   //
   // 分泡轮的流式 chunk 不再直接进 messages 打字，而是先攒进缓冲；
@@ -738,7 +742,8 @@ class MobileChatController extends ChangeNotifier {
       // 服务端明确报错：卡片停在原态，只用一条提示告知，不伪造新卡
       final String err = (payload["error"] ?? "").toString().trim();
       if (err.isNotEmpty) {
-        errorMessage = err;
+        errorMessage = _friendlyErrorText(err);
+        _armErrorHintAutoClear();
         notifyListeners();
       }
       return;
@@ -1333,6 +1338,29 @@ class MobileChatController extends ChangeNotifier {
     unawaited(_reportGeofencePosition(event));
   }
 
+  /// 注册系统围栏并上报回执（client.geofence_report）。
+  ///
+  /// 此前注册结果被整体丢弃：权限被拒、系统定位关闭、ROM 拦截都只留一条
+  /// debugPrint，服务端完全不知道端上有没有围栏。现在把原生回执原样上报，
+  /// 服务端落库（geofence.list 的 clientSync）并写日志。
+  Future<void> _syncClientGeofences(List<Map<String, dynamic>> fences) async {
+    final Map<String, dynamic>? report =
+        await ClientGeofenceService.sync(fences);
+    final Map<String, dynamic> payload = <String, dynamic>{
+      "ok": false,
+      "requested": fences.length,
+      "registered": 0,
+      ...?report,
+      "platform": report?["platform"] ?? "android",
+      "at": report?["at"] ?? DateTime.now().toUtc().toIso8601String(),
+    };
+    final bool sent = _send("client.geofence_report", payload);
+    if (!sent) {
+      // 回执丢失不阻塞主链路：下次连接服务端会重新下发 sync，届时再回执
+      debugPrint("[MobileChatController] 围栏回执未送达（连接不可用）");
+    }
+  }
+
   /// 补报 App 未运行期间积压的围栏事件（原生队列 → 取走 → 逐条上报）。
   Future<void> _flushPendingGeofenceEvents() async {
     try {
@@ -1450,14 +1478,15 @@ class MobileChatController extends ChangeNotifier {
       case "agent.location_request":
         unawaited(_handleLocationRequest(payload));
       case "agent.geofence_sync":
-        // 服务端下发围栏 → 注册为系统围栏（App 被杀也能触发到达/离开）
+        // 服务端下发围栏 → 注册为系统围栏（App 被杀也能触发到达/离开），
+        // 并把原生注册结果作为回执上报（服务端可观测，见 client.geofence_report）
         final List<Map<String, dynamic>> fences = payload["fences"] is List
             ? (payload["fences"] as List)
                 .whereType<Map>()
                 .map((Map e) => e.cast<String, dynamic>())
                 .toList(growable: false)
             : const <Map<String, dynamic>>[];
-        unawaited(ClientGeofenceService.sync(fences));
+        unawaited(_syncClientGeofences(fences));
       case "reminder_popup":
         // 提醒升级链 popup 级（2026-10-14 与桌面端对齐）：决策卡落对话流。
         // 后台时应用内卡片看不见，补一条系统通知触达（点开回前台后卡在流里）。
@@ -1607,12 +1636,39 @@ class MobileChatController extends ChangeNotifier {
     _maybeAutoOpenTravelCard(payload);
   }
 
+  /// 已知服务端错误码 → 用户可读文案：原始报错（错误码 + 字节数）不该
+  /// 直接怼给用户；客户端压缩后这些码只会在异常兜底时出现。
+  static String _friendlyErrorText(String raw) {
+    final String msg = raw.trim();
+    if (msg.contains("VISION_IMAGE_TOO_LARGE")) {
+      return "这张图太大了，没能发出去，换一张试试？";
+    }
+    if (msg.contains("VISION_TOO_MANY_FRAMES")) {
+      return "一次最多发 4 张图，先挑几张发吧";
+    }
+    return msg;
+  }
+
+  /// 错误条自动消失：6 秒后清空。身份重同步提示（_identityResyncHint）
+  /// 不走这里——它是「重发中」的状态提示，由后续事件自然覆盖。
+  void _armErrorHintAutoClear() {
+    _errorHintClearTimer?.cancel();
+    _errorHintClearTimer = Timer(const Duration(seconds: 6), () {
+      if (_disposed) return;
+      if (errorMessage != null) {
+        errorMessage = null;
+        notifyListeners();
+      }
+    });
+  }
+
   /// 错误帧统一收口：按 traceId 归位到出错线程（多轮并发时只复位那一轮）。
   ///
   /// 归位优先级：载荷 traceId → threadId → 唯一在处理中的线程 → 激活线程。
   /// 找不到归属时不盲目复位全部线程——另一线程可能还在正常出泡。
   void _handleTurnError(Map<String, dynamic> payload, String message) {
-    errorMessage = message;
+    errorMessage = _friendlyErrorText(message);
+    _armErrorHintAutoClear();
     String threadKey = _threadKeyOf(payload);
     final String traceId = payload["traceId"]?.toString() ?? "";
     if (traceId.isNotEmpty && _traceThread.containsKey(traceId)) {
@@ -2809,6 +2865,7 @@ class MobileChatController extends ChangeNotifier {
     _disposed = true;
     _introQueue.clear();
     _clockWatchTimer?.cancel();
+    _errorHintClearTimer?.cancel();
     _revealTimer?.cancel();
     for (final _ThreadTurnState t in _turnStates.values) {
       t.deliveryStallTimer?.cancel();

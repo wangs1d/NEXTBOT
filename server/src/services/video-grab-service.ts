@@ -19,7 +19,7 @@ import path from "node:path";
 
 const execFileAsync = promisify(execFile);
 
-/** 项目根目录（mcporter 需在此目录执行才能发现 config/mcporter.json 中的 MCP server） */
+/** 项目根目录（mcporter CLI 需在此目录执行） */
 const PROJECT_ROOT_DIR = serverRoot();
 
 /** 标准化视频信息 */
@@ -188,28 +188,7 @@ class DouyinAdapter implements VideoGrabAdapter {
   }
 
   async grab(url: string): Promise<VideoInfo> {
-    // 1) 优先 McpClientService（yby6 stdio 直连，生产可用通道）→ mcporter CLI 兜底（yby6 单工具适配所有平台）
-    const mcpRun = await callMcpClientParser(url);
-    const run = mcpRun.ok ? mcpRun : await callMcporter(["yby6-video.share_url_parse_tool_wrapper"], url);
-    if (run.ok) {
-      const parsed = parseVideoJson(run.stdout);
-      if (parsed && (parsed.title || parsed.video_url)) {
-        return {
-          provider: "douyin-mcporter",
-          platform: "douyin",
-          title: parsed.title ?? "",
-          author: parsed.author ?? "",
-          durationSeconds: parsed.duration,
-          description: parsed.description ?? "",
-          videoUrl: parsed.video_url,
-          thumbnailUrl: parsed.cover_url ?? parsed.thumbnail_url,
-          playPageUrl: url,
-          notes: [],
-        };
-      }
-    }
-
-    // 2) 网页解析（best-effort）：window._ROUTER_DATA 中的视频信息
+    // 网页解析（best-effort）：window._ROUTER_DATA 中的视频信息
     const html = await fetchHtmlFor(this, url);
     if (html) {
       const info = parseDouyinRouterData(html);
@@ -229,7 +208,7 @@ class DouyinAdapter implements VideoGrabAdapter {
     }
 
     return {
-      ...emptyVideo("douyin", "douyin", run.ok ? "抖音网页解析未命中视频数据" : "MCP/网页解析均失败，请点击原链接播放"),
+      ...emptyVideo("douyin", "douyin", "抖音网页解析未命中视频数据，请点击原链接播放"),
       playPageUrl: url,
     };
   }
@@ -245,28 +224,7 @@ class XiaohongshuAdapter implements VideoGrabAdapter {
   }
 
   async grab(url: string): Promise<VideoInfo> {
-    // 1) 优先 McpClientService（yby6 stdio 直连，生产可用通道）→ mcporter CLI 兜底（yby6 单工具适配所有平台）
-    const mcpRun = await callMcpClientParser(url);
-    const run = mcpRun.ok ? mcpRun : await callMcporter(["yby6-video.share_url_parse_tool_wrapper"], url);
-    if (run.ok) {
-      const parsed = parseVideoJson(run.stdout);
-      if (parsed && (parsed.title || parsed.video_url)) {
-        return {
-          provider: "xiaohongshu-mcporter",
-          platform: "xiaohongshu",
-          title: parsed.title ?? "",
-          author: parsed.author ?? "",
-          durationSeconds: parsed.duration,
-          description: parsed.description ?? parsed.desc ?? "",
-          videoUrl: parsed.video_url,
-          thumbnailUrl: parsed.cover_url ?? parsed.thumbnail_url,
-          playPageUrl: url,
-          notes: [],
-        };
-      }
-    }
-
-    // 2) 网页解析（best-effort）：window.__INITIAL_STATE__ 中的 note 视频数据
+    // 网页解析（best-effort）：window.__INITIAL_STATE__ 中的 note 视频数据
     const html = await fetchHtmlFor(this, url);
     if (html) {
       const info = parseXiaohongshuInitialState(html);
@@ -286,7 +244,7 @@ class XiaohongshuAdapter implements VideoGrabAdapter {
     }
 
     return {
-      ...emptyVideo("xiaohongshu", "xiaohongshu", run.ok ? "小红书网页解析未命中视频数据" : "MCP/网页解析均失败，请点击原链接播放"),
+      ...emptyVideo("xiaohongshu", "xiaohongshu", "小红书网页解析未命中视频数据，请点击原链接播放"),
       playPageUrl: url,
     };
   }
@@ -566,59 +524,6 @@ export function setVideoGrabServiceRef(service: VideoGrabService): void {
   currentServiceRef = service;
 }
 
-// ---- McpClientService 直连通道（2026-10-02 根修）----
-// 此前适配器只走 mcporter CLI，但生产机未装 mcporter → yby6 MCP 通道恒空转，
-// 网页兜底又被反爬挡 → video.grab 恒失败。McpClientService（stdio 直连
-// tools/mcp/yby6-video venv）才是项目内真正可用的 MCP 通道，优先走它。
-
-type McpClientLike = {
-  callTool: (
-    serverAlias: string,
-    toolName: string,
-    args: Record<string, unknown>,
-    timeoutMs?: number,
-  ) => Promise<{ ok: boolean; result: Record<string, unknown> }>;
-};
-
-let currentMcpClientRef: McpClientLike | null = null;
-
-/** 由 create-app-services 在 McpClientService 装配后注入（MCP 不可用时可传 null） */
-export function setVideoGrabMcpClientRef(client: McpClientLike | null): void {
-  currentMcpClientRef = client;
-}
-
-/** 经 McpClientService 调 yby6 解析工具；命中时把结果对象伪装成 stdout 供 parseVideoJson 复用。
- * 上游拉平台分享页存在间歇性失败（code!==200，如抖音偶发不下发 _ROUTER_DATA），做一次退避重试。 */
-async function callMcpClientParser(
-  url: string,
-): Promise<{ ok: true; stdout: string } | { ok: false; note: string }> {
-  if (!currentMcpClientRef) return { ok: false, note: "McpClientService 未注入" };
-  const attempt = async (): Promise<{ ok: boolean; result: Record<string, unknown> }> => {
-    try {
-      return await currentMcpClientRef!.callTool(
-        "yby6-video",
-        "share_url_parse_tool_wrapper",
-        { url },
-        30_000,
-      );
-    } catch (e) {
-      return { ok: false, result: { error: e instanceof Error ? e.message : String(e) } };
-    }
-  };
-  const failed = (r: { ok: boolean; result: Record<string, unknown> }): boolean => {
-    if (!r.ok) return true;
-    const code = (r.result as { code?: unknown }).code;
-    return typeof code === "number" && code !== 200;
-  };
-  let res = await attempt();
-  if (failed(res)) {
-    await new Promise((r) => setTimeout(r, 1_200));
-    res = await attempt();
-  }
-  if (!res.ok) return { ok: false, note: `MCP 调用失败: ${JSON.stringify(res.result).slice(0, 160)}` };
-  return { ok: true, stdout: JSON.stringify(res.result) };
-}
-
 /** 解析 mcporter 返回的视频 JSON（容错：尝试多种字段名） */
 function parseVideoJson(stdout: string): {
   title?: string;
@@ -635,7 +540,7 @@ function parseVideoJson(stdout: string): {
     let obj = Array.isArray(parsed) ? parsed[0] : parsed;
     if (!obj || typeof obj !== "object") return null;
     let r = obj as Record<string, unknown>;
-    // yby6 MCP 返回格式: { code: 200, msg: "解析成功", data: { video_url, cover_url, title, author: {...}, ... } }
+    // MCP 返回格式: { code: 200, msg: "...", data: { video_url, cover_url, title, author: {...}, ... } }
     // 命中 data 包装时，优先以 data 作为字段来源；code !== 200 视为失败
     if (
       r &&
@@ -667,7 +572,7 @@ function parseVideoJson(stdout: string): {
       str(r.thumbnailUrl) ??
       str(r.cover);
     if (!videoUrl && !str(r.title)) return null;
-    // yby6 的 author 是 { name, uid, avatar } 对象
+    // 部分上游把 author 返回为 { name, uid, avatar } 对象
     const authorObj =
       r.author && typeof r.author === "object"
         ? (r.author as Record<string, unknown>)

@@ -156,6 +156,7 @@ export function registerChatDataRoutes(
           text: string;
           ts: number | null;
           clientMessageId?: string;
+          userImageUrls?: string[];
           mediaCards?: unknown[];
           bubbles?: Array<{ id: string; text: string }>;
         }> = [];
@@ -166,8 +167,14 @@ export function registerChatDataRoutes(
               text: string;
               ts: number | null;
               clientMessageId?: string;
+              userImageUrls?: string[];
             } = { role: "user", text: turn.userText.slice(0, 8000), ts: turn.ts };
             if (turn.clientMessageId) item.clientMessageId = turn.clientMessageId;
+            // 用户随消息发出的照片（2026-11-18）：WAL 已持久化 URL，透传给
+            // 两端按真实缩略图重建用户泡，替换旧的「配图 ×N」文案。
+            if (turn.userImageUrls && turn.userImageUrls.length > 0) {
+              item.userImageUrls = turn.userImageUrls;
+            }
             messages.push(item);
           }
           if (turn.assistantText) {

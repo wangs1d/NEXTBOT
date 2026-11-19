@@ -154,6 +154,44 @@ test("mediaCards 透传（2026-11-09）：出口补写的媒体卡随转史下�
   }
 });
 
+test("userImageUrls 透传（2026-11-18）：用户照片 URL 随转史下发，脏 URL 被过滤，旧行不受影响", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "wal-userimg-"));
+  try {
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, "2026-11-18.jsonl"),
+      [
+        JSON.stringify({
+          ts: "2026-11-18T10:00:00+08:00",
+          actorId: "u@x",
+          userText: "（见图）",
+          assistantText: "这是你发的照片",
+          messageId: "um1",
+          userImageUrls: [
+            "/agent/images/u_x/1-a1b2c3d4.png",
+            "https://evil.example/steal.png",
+          ],
+        }),
+        JSON.stringify({
+          ts: "2026-11-18T10:01:00+08:00",
+          actorId: "u@x",
+          userText: "普通轮",
+          assistantText: "普通回复",
+          messageId: "um2",
+        }),
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const turns = await readActorTranscriptFromWal(dir, "u@x");
+    assert.equal(turns.length, 2);
+    assert.deepEqual(turns[0].userImageUrls, ["/agent/images/u_x/1-a1b2c3d4.png"]);
+    assert.equal(turns[1].userImageUrls, undefined, "无图轮不得带空 userImageUrls");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("清空可见性（2026-10-16）：cleared-at 之前的轮次不下发，之后的照常回填", async () => {
   const dir = await mkdtemp(join(tmpdir(), "wal-cleared-"));
   try {

@@ -54,7 +54,7 @@ function withEnv(env: Record<string, string>, fn: () => void | Promise<void>): (
   };
 }
 
-test("location-env：默认 ondemand + 间隔夹紧 + 历史默认开启（env 可关）", async () => {
+test("location-env：默认 continuous + 间隔夹紧 + 历史默认开启（env 可关）", async () => {
   await withEnv(
     {
       LOCATION_TRACKING_MODE: "",
@@ -62,9 +62,19 @@ test("location-env：默认 ondemand + 间隔夹紧 + 历史默认开启（env �
       LOCATION_HISTORY_ENABLED: "",
     },
     () => {
-      assert.equal(getLocationTrackingMode(), "ondemand");
+      assert.equal(getLocationTrackingMode(), "continuous", "2026-11-19 起缺省持续上报");
       assert.equal(isLocationHistoryEnabled(), true, "2026-09-05 起历史默认开启（常去地点注入依赖样本）");
       assert.equal(getLocationReportIntervalSec(), 30, "5s 被夹紧到下限 30s");
+    },
+  )();
+  await withEnv(
+    {
+      LOCATION_TRACKING_MODE: "ondemand",
+      LOCATION_REPORT_INTERVAL_SEC: "600",
+    },
+    () => {
+      assert.equal(getLocationTrackingMode(), "ondemand", "显式 ondemand 仍可退回按需");
+      assert.equal(getLocationReportIntervalSec(), 600);
     },
   )();
   await withEnv(
@@ -102,7 +112,7 @@ test("LocationCoordinator：持续模式随绑定下发 config，ondemand 静默
     assert.equal(msg.payload.intervalSec, 600);
   })();
 
-  await withEnv({ LOCATION_TRACKING_MODE: "" }, () => {
+  await withEnv({ LOCATION_TRACKING_MODE: "ondemand" }, () => {
     const sent: string[] = [];
     const socket = { send: (d: string) => sent.push(d) };
     const coord = new LocationCoordinator();

@@ -27,14 +27,41 @@ class ClientGeofenceService {
 
   /// 同步围栏配置到系统（幂等：先清空本应用注册的全部围栏再重新注册）。
   /// 非 Android（桌面/Web）静默跳过——那里没有系统围栏，位置上报走按需/常驻。
-  static Future<void> sync(List<Map<String, dynamic>> fences) async {
-    if (kIsWeb || !Platform.isAndroid) return;
+  ///
+  /// 返回**原生注册回执**（2026-11-18）：requested / registered / failures
+  /// （逐围栏失败原因）/ permission / providersEnabled / lastBootRestore。
+  /// 服务端凭这份回执判断「端上到底注册成功没有」，不再只能从「没有事件」反推。
+  /// 非 Android 或通道异常时返回 null（调用方按未注册上报）。
+  static Future<Map<String, dynamic>?> sync(
+    List<Map<String, dynamic>> fences,
+  ) async {
+    if (kIsWeb || !Platform.isAndroid) return null;
+    final Stopwatch sw = Stopwatch()..start();
     try {
-      await _method.invokeMethod<void>("sync", <String, dynamic>{"fences": fences});
-      debugPrint("[ClientGeofenceService] 已同步 ${fences.length} 个系统围栏");
+      final String? raw = await _method.invokeMethod<String>(
+        "sync",
+        <String, dynamic>{"fences": fences},
+      );
+      final Map<String, dynamic>? report = raw == null ? null : _decode(raw);
+      if (report != null) {
+        report["durationMs"] = sw.elapsedMilliseconds;
+        debugPrint(
+          "[ClientGeofenceService] 注册回执 registered=${report["registered"]}"
+          "/${report["requested"]} ok=${report["ok"]}",
+        );
+      }
+      return report;
     } catch (e) {
-      // 权限不足/系统不支持一律静默：服务端仍可按上报流判围栏（降级不报错）
-      debugPrint("[ClientGeofenceService] 围栏同步失败(降级为服务端判定): $e");
+      // 权限不足/系统不支持/通道异常：如实回传失败原因，不再静默
+      debugPrint("[ClientGeofenceService] 围栏同步失败: $e");
+      return <String, dynamic>{
+        "ok": false,
+        "requested": fences.length,
+        "registered": 0,
+        "error": e.toString(),
+        "durationMs": sw.elapsedMilliseconds,
+        "at": DateTime.now().toUtc().toIso8601String(),
+      };
     }
   }
 

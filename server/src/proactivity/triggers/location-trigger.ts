@@ -41,7 +41,7 @@ export function buildLocationArrivalIntent(actorId: string, place: FrequentPlace
     importance: "low",
     title: `用户到达常去地点：${where}`,
     summary:
-      `用户刚到达常去地点「${where}」（近 7 天到访 ${place.visitCount} 次）。` +
+      `用户刚到达常去地点「${where}」（近 14 天到访 ${place.visitCount} 次）。` +
       `像家人注意到对方到家了一样自然地打个招呼即可：一句简短的到达问候，` +
       `若上下文里有和这个地点/时间相关的待办（拿快递、买菜、休息）可顺带轻提，` +
       `没有就只问好，别编造任务。`,

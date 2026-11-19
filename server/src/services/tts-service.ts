@@ -5,8 +5,10 @@ import { inspectMp3, type VoiceQualityVerdict } from "./alarm-clock/voice-qualit
 
 /**
  * 文本转语音服务：
- * - 优先使用 MiniMax TTS（speech-2.5，中文拟真度最佳，按字符计费）
- * - 其次硅基流动 CosyVoice2（OpenAI 兼容 /audio/speech，中文，按 .env 注释
+ * - 优先使用 Breeze Blue TTS（2026-11-18 接入；配了 BREEZE_API_KEY 就优先，
+ *   失败再按顺序回退，BREEZE_TTS_ENABLED=0 可临时关掉而不删密钥）
+ * - 其次 MiniMax TTS（speech-2.5，中文拟真度佳，按字符计费）
+ * - 再次硅基流动 CosyVoice2（OpenAI 兼容 /audio/speech，中文，按 .env 注释
  *   「优先于 OpenAI TTS」；SILICONFLOW_API_KEY 早就配好了但旧实现没接线，
  *   表现为「闹钟响铃却没有 agent 说话」）
  * - 最后回退 OpenAI TTS
@@ -26,6 +28,15 @@ function qualityReport(v: VoiceQualityVerdict): TtsQualityReport {
 export class TtsService {
   private openai: OpenAI | null = null;
   private minimax: MiniMaxTTSAdapter | null = null;
+  private breeze: {
+    apiKey: string;
+    baseUrl: string;
+    voiceId: string;
+    modelId: string;
+    outputFormat: string;
+    languageCode: string;
+  } | null = null;
+  private breezeFingerprint = "";
   private siliconflow: {
     apiKey: string;
     baseUrl: string;
@@ -44,6 +55,42 @@ export class TtsService {
    * 的主对话热替换同一时序语义）。
    */
   private resolveClients(): void {
+    // Breeze Blue TTS：HTTP /v1/text-to-speech/{voice_id}，鉴权走 xi-api-key。
+    // 密钥/音色/开关任一变化都重建配置，和下面几家保持同一热生效语义。
+    const breezeKey = process.env.BREEZE_API_KEY?.trim() ?? "";
+    const breezeEnabled = !["0", "false", "no", "off"].includes(
+      (process.env.BREEZE_TTS_ENABLED?.trim() || "1").toLowerCase(),
+    );
+    const breezeBaseUrl = (
+      process.env.BREEZE_TTS_BASE_URL?.trim() || "https://api.breeze.blue/v1"
+    ).replace(/\/+$/, "");
+    const breezeVoice = process.env.BREEZE_TTS_VOICE?.trim() || "voc_u3nxkd5578wc";
+    const breezeModel = process.env.BREEZE_TTS_MODEL?.trim() || "breeze-tts-2";
+    // 音质门禁拒绝 <32kHz；Breeze 默认 mp3 是 24kHz，必须显式要求 44.1k。
+    const breezeFormat = process.env.BREEZE_TTS_OUTPUT_FORMAT?.trim() || "mp3_44100_128";
+    const breezeLanguage = process.env.BREEZE_TTS_LANGUAGE?.trim() || "";
+    const breezeFp = [
+      breezeKey,
+      breezeEnabled,
+      breezeBaseUrl,
+      breezeVoice,
+      breezeModel,
+      breezeFormat,
+      breezeLanguage,
+    ].join("@");
+    if (breezeFp !== this.breezeFingerprint) {
+      this.breezeFingerprint = breezeFp;
+      this.breeze = breezeEnabled && breezeKey
+        ? {
+            apiKey: breezeKey,
+            baseUrl: breezeBaseUrl,
+            voiceId: breezeVoice,
+            modelId: breezeModel,
+            outputFormat: breezeFormat,
+            languageCode: breezeLanguage,
+          }
+        : null;
+    }
     // OpenAI TTS：可单独指向支持 /audio/speech 的网关。
     // 主对话常把 OPENAI_BASE_URL 配成 DeepSeek/其它 LLM 网关，那些端点没有
     // audio/speech（实测 404），若直接复用会让「MiniMax 失败 → OpenAI 回退」
@@ -110,7 +157,12 @@ export class TtsService {
 
   isEnabled(): boolean {
     this.resolveClients();
-    return this.minimax?.isEnabled() || this.siliconflow !== null || this.openai !== null;
+    return (
+      this.breeze !== null ||
+      this.minimax?.isEnabled() ||
+      this.siliconflow !== null ||
+      this.openai !== null
+    );
   }
 
   /**
@@ -118,6 +170,7 @@ export class TtsService {
    */
   getProvider(): string {
     this.resolveClients();
+    if (this.breeze) return "breeze";
     if (this.minimax?.isEnabled()) return "minimax";
     if (this.siliconflow) return "siliconflow";
     if (this.openai) return "openai";
@@ -142,6 +195,43 @@ export class TtsService {
       console.warn(`[TtsService] ${provider} 音质告警: ${v.warnings.join("; ")}`);
     }
     return v;
+  }
+
+  /**
+   * Breeze Blue：xi-api-key 鉴权 + /v1/text-to-speech/{voice_id}。
+   * 非音频响应（key 无效 / 额度用尽时会回 JSON）必须显式判错，否则错误文本
+   * 会被音质门禁当成音频拒绝后一路回退，却看不到根因。
+   */
+  private async synthesizeWithBreeze(text: string): Promise<Buffer> {
+    const cfg = this.breeze!;
+    const url =
+      `${cfg.baseUrl}/text-to-speech/${encodeURIComponent(cfg.voiceId)}` +
+      `?output_format=${encodeURIComponent(cfg.outputFormat)}`;
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "xi-api-key": cfg.apiKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        text,
+        model_id: cfg.modelId,
+        ...(cfg.languageCode ? { language_code: cfg.languageCode } : {}),
+      }),
+      signal: AbortSignal.timeout(12_000),
+    });
+    if (!res.ok) {
+      const detail = (await res.text().catch(() => "")).slice(0, 300);
+      throw new Error(`Breeze TTS HTTP ${res.status}: ${detail}`);
+    }
+    const contentType = res.headers.get("content-type") ?? "";
+    if (!contentType.includes("audio") && !contentType.includes("octet-stream")) {
+      const detail = (await res.text().catch(() => "")).slice(0, 300);
+      throw new Error(`Breeze TTS 返回非音频 (${contentType}): ${detail}`);
+    }
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length < 128) throw new Error(`Breeze TTS 音频过短 (${buf.length} bytes)`);
+    return buf;
   }
 
   private async synthesizeWithSiliconFlow(text: string): Promise<Buffer> {
@@ -179,7 +269,7 @@ export class TtsService {
 
   /**
    * 生成为 mp3 的 base64；未配置密钥或失败时 ok=false，语音通话仍可以仅靠 transcript。
-   * 优先 MiniMax TTS，失败后回退 OpenAI TTS
+   * 优先 Breeze TTS（若配置），随后 MiniMax / 硅基流动 / OpenAI 依次回退
    */
   async synthesizeMp3Base64(text: string): Promise<
     | { ok: true; format: "mp3"; base64: string; provider?: string; quality?: TtsQualityReport }
@@ -209,7 +299,28 @@ export class TtsService {
     const clipped = trimmed.length > 450 ? `${trimmed.slice(0, 447)}…` : trimmed;
     this.resolveClients();
 
-    // 1. 尝试 MiniMax TTS（speech-2.5，中文拟真度最佳）
+    // 1. Breeze Blue（用户提供 key 后作为首选；失败按既有顺序回退）
+    if (this.breeze) {
+      try {
+        const buffer = await this.synthesizeWithBreeze(clipped);
+        const quality = this.guardMp3(buffer, clipped.length, "breeze");
+        console.log(
+          `[TtsService] 使用 Breeze TTS 合成成功 (${buffer.length} bytes, quality=${quality.score})`,
+        );
+        return {
+          ok: true,
+          format: "mp3",
+          buffer,
+          provider: "breeze",
+          quality: qualityReport(quality),
+        };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.warn(`[TtsService] Breeze TTS 失败，回退到 MiniMax: ${msg}`);
+      }
+    }
+
+    // 2. 尝试 MiniMax TTS（speech-2.5，中文拟真度最佳）
     if (this.minimax?.isEnabled()) {
       try {
         const result = await this.minimax.synthesize(clipped);
@@ -223,7 +334,7 @@ export class TtsService {
       }
     }
 
-    // 2. 硅基流动 CosyVoice2（中文）——优先于 OpenAI TTS：主对话网关常配成
+    // 3. 硅基流动 CosyVoice2（中文）——优先于 OpenAI TTS：主对话网关常配成
     // DeepSeek 等 LLM 网关，没有 /audio/speech，OpenAI 回退实测 404；这条是
     // OpenAI 兼容的语音端点，用已配置的 SILICONFLOW_API_KEY 即可出真实中文语音。
     if (this.siliconflow) {
@@ -238,7 +349,7 @@ export class TtsService {
       }
     }
 
-    // 3. 最后回退 OpenAI TTS
+    // 4. 最后回退 OpenAI TTS
     if (this.openai) {
       try {
         const res = await this.openai.audio.speech.create({
@@ -258,7 +369,8 @@ export class TtsService {
 
     return {
       ok: false,
-      reason: "未配置任何可用 TTS 服务（MINIMAX_API_KEY / SILICONFLOW_API_KEY / OPENAI_API_KEY）",
+      reason:
+        "未配置任何可用 TTS 服务（BREEZE_API_KEY / MINIMAX_API_KEY / SILICONFLOW_API_KEY / OPENAI_API_KEY）",
     };
   }
 }

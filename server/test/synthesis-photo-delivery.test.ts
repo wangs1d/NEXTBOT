@@ -70,6 +70,23 @@ test("search_images 失败的轮次不是纯图轮", () => {
   );
 });
 
+test("search_images 成功但一张图都没出（items 空）不是纯图轮", () => {
+  // 2026-11-19 根修：图搜 API 无图片能力 / query 被形态闸拒绝时 items=[]，
+  // 旧逻辑仍判纯图轮并把收尾指令改成「照片已就绪」，模型于是演「图给你翻出来了」。
+  assert.equal(
+    isPhotoDeliveryRound([{ toolName: "search_images", ok: true, result: { items: [] } }]),
+    false,
+  );
+  assert.notEqual(
+    evaluateAndSelectStrategy(
+      [{ toolName: "search_images", ok: true, result: { items: [] } }],
+      "看看他的照片",
+      "media_retrieval",
+    ).strategy,
+    "photo_delivery",
+  );
+});
+
 test("只有 search_images_batch 成功（对比出图流）不算纯图轮", () => {
   assert.equal(
     isPhotoDeliveryRound([{ toolName: "search_images_batch", ok: true }]),

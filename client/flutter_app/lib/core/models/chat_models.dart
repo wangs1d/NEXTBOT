@@ -102,6 +102,7 @@ class ChatMessage {
     required this.text,
     required this.timestamp,
     this.attachmentImageCount = 0,
+    this.userImageUrls = const [],
     this.playUrl,
     this.attachments = const [],
     this.contentType = "text",
@@ -135,6 +136,10 @@ class ChatMessage {
   final DateTime timestamp;
   /// 随本条用户消息发往服务端的配图张数（仅本地展示，不参与 WS 回包）。
   final int attachmentImageCount;
+  /// 用户随消息发出的照片在服务端落盘后的稳定 URL（/agent/images/...）。
+  /// 本会话内气泡优先用内存字节即时渲染；重启/换设备后历史回填靠这份 URL
+  /// 重建真实缩略图，替换旧的「配图 ×N」文案。服务端未落盘的旧消息为空。
+  final List<String> userImageUrls;
   /// 对局入口（来自 tool.result 或回复文本解析）。
   final String? playUrl;
 
@@ -313,6 +318,7 @@ class ChatMessage {
     String? text,
     DateTime? timestamp,
     int? attachmentImageCount,
+    List<String>? userImageUrls,
     String? playUrl,
     bool? streaming,
     bool? pendingDelivery,
@@ -345,6 +351,7 @@ class ChatMessage {
       text: text ?? this.text,
       timestamp: timestamp ?? this.timestamp,
       attachmentImageCount: attachmentImageCount ?? this.attachmentImageCount,
+      userImageUrls: userImageUrls ?? this.userImageUrls,
       playUrl: playUrl ?? this.playUrl,
       streaming: streaming ?? this.streaming,
       pendingDelivery: pendingDelivery ?? this.pendingDelivery,

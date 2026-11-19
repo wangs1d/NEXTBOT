@@ -17,7 +17,7 @@ import { isObj, requestJson, str, toItems, withSource } from "./shared.js";
  *
  * 图片搜索：无独立端点，而是 /v1/search + tag={domain}.{sub_domain} 的垂直路由。
  * tag 由 GET /v1/sub-domains?domain=image 能力自发现（服务端灰度开放），
- * 或 ANYSEARCH_IMAGE_TAG 显式指定；未开放时返回 []（不回落必应爬页兜底）。
+ * 或 ANYSEARCH_IMAGE_TAG 显式指定；未开放时返回 []，由上游兜底必应图片页。
  */
 
 const ANYSEARCH_ENDPOINT =
@@ -90,7 +90,7 @@ async function resolveAnySearchImageTag(cfg: SearchApiConfig): Promise<string | 
   if (!tag) {
     console.warn(
       `[SearchApi] AnySearch 图片垂直能力未开放（探测 ${ANYSEARCH_IMAGE_PROBE_DOMAINS.join("/")} 域均不可用），` +
-        `search_images 返回空图、不回落必应爬页；能力开放后 ${Math.round(ANYSEARCH_IMAGE_PROBE_TTL_MS / 60_000)} 分钟内自动切换，` +
+        `本层返回空图，交上游走必应图片页兜底；能力开放后 ${Math.round(ANYSEARCH_IMAGE_PROBE_TTL_MS / 60_000)} 分钟内自动切换，` +
         `或设 ANYSEARCH_IMAGE_TAG=<tag> 强制启用`,
     );
   }

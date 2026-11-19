@@ -42,11 +42,12 @@ async function geoCtx(context: {
     };
   }
 
-  // 「我在哪」必须回答此刻的位置：15 分钟复用窗口里的旧坐标、或 ±100m 以上的
+  // 「我在哪」必须回答此刻的位置：15 分钟复用窗口里的旧坐标、或 10m 以上的
   // 粗 fix（后台常驻上报常见）都不能直接拿来答，不达标就现场拉一次 GPS。
+  // 2026-11-18：门槛与客户端 10m 对齐（此前 50m，街区尺度仍会答错门牌）。
   const live = await context.requestLocation?.("clock.get_user_location:当前精确位置", {
     maxAgeMs: 60_000,
-    maxAccuracyMeters: 50,
+    maxAccuracyMeters: 10,
   });
 
   if (live) {

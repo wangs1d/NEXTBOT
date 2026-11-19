@@ -114,3 +114,30 @@ test("mediaCards 一并补写（2026-11-09）：无卡轮不添字段，有卡�
 function raw0(): string {
   return `${line({ messageId: "msg-0", assistantText: "上一轮" })}\n${line({})}\n`;
 }
+
+test("userImageUrls 一并补写（2026-11-18）：无图轮不添字段，有图轮原样落行", () => {
+  const noImage = replaceAssistantTextInJsonl(raw0(), {
+    actorId: "a@x.com",
+    messageId: "msg-1",
+    assistantText: CARD_TEXT,
+  });
+  assert.ok(noImage);
+  assert.ok(
+    !("userImageUrls" in (JSON.parse((noImage ?? "").trimEnd().split("\n")[1]) as Record<string, unknown>)),
+  );
+
+  const urls = [
+    "/agent/images/a_x_com/1-a1b2c3d4.png",
+    "/agent/images/a_x_com/2-e5f6a7b8.png",
+  ];
+  const withImages = replaceAssistantTextInJsonl(raw0(), {
+    actorId: "a@x.com",
+    messageId: "msg-1",
+    assistantText: CARD_TEXT,
+    userImageUrls: urls,
+  });
+  assert.ok(withImages);
+  const replaced = JSON.parse((withImages ?? "").trimEnd().split("\n")[1]) as Record<string, unknown>;
+  assert.deepEqual(replaced.userImageUrls, urls);
+  assert.equal(replaced.userText, "帮我规划三亚2天", "其余字段不能被回写抹掉");
+});

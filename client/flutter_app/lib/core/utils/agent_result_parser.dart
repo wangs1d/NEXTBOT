@@ -147,11 +147,18 @@ class AgentResultAction {
   factory AgentResultAction.fromJson(Map<String, dynamic> json) {
     final Map<String, dynamic>? rawPayload =
         json["payload"] as Map<String, dynamic>?;
+    // 服务端两种写法都要认：cardAction 既可能写在 payload 里（卡内动作约定），
+    // 也可能写在 action 顶层（payment.pay 等既有 builder）。统一并到 payload，
+    // 否则手机端会把「确认支付/我已授权」当成普通提问发消息，卡内动作失效。
+    final String cardAction = json["cardAction"]?.toString().trim() ?? "";
     return AgentResultAction(
       id: json["id"]?.toString() ?? "",
       label: json["label"]?.toString() ?? "",
       variant: json["variant"]?.toString() ?? "primary",
-      payload: rawPayload ?? const <String, dynamic>{},
+      payload: <String, dynamic>{
+        ...(rawPayload ?? const <String, dynamic>{}),
+        if (cardAction.isNotEmpty) "cardAction": cardAction,
+      },
     );
   }
 

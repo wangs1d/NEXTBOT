@@ -390,8 +390,6 @@ export class AgentCore {
   private actorContext: ActorContextService | null = null;
   /** prompt 按要 GPS 的上次尝试时间（失败冷却用，per-actor）。 */
   private promptLocationLastAttemptAt = new Map<string, number>();
-  /** 常去地点文本的进程内缓存（DBSCAN 全量扫 7 天样本，不必每轮重算）。 */
-  private frequentPlacesCache = new Map<string, { text: string | undefined; at: number }>();
   private moodInferenceService: MoodInferenceService | null = null;
   private wsRegistry: ClientPushPort | null = null;
   private lifeSignalHubService: LifeSignalHubService | null = null;
@@ -503,11 +501,6 @@ export class AgentCore {
   /** 注入地点语义（家/公司/常去地点）：prompt 的位置块与常去地点块读它。 */
   setPlaceSemantics(service: PlaceSemanticsService | null): void {
     this.placeSemantics = service;
-  }
-
-  /** 用户确认/纠正地点语义后失效常去地点 prompt 缓存（下次装配立即生效）。 */
-  invalidatePlacePrompt(actorId: string): void {
-    this.frequentPlacesCache.delete(actorId);
   }
 
   /**
@@ -1046,7 +1039,20 @@ export class AgentCore {
     //   - journal 当日检索：从未随门控运行过（恒空），整段拆除。
     // 系统不擅自注入旧记忆；话题级防串台由「画像常驻 + 工具拉取」结构性承担。
 
-    const [narrativeRecall, workingMemorySummary, recentConversationHistory, userLocation, personalization, frequentPlaces] =
+    // 指代映射（2026-11-19 根修）：画像结构化事实里的「指代·老婆=刘浩存」。
+    // 工具循环用它 + 最近对话做代词近因锚定；读本地事实库，同步、零 LLM。
+    let referentLines: string[] = [];
+    try {
+      const { getMemoryComponents } = await import("../agentic-memory/index.js");
+      referentLines = (getMemoryComponents().factStore?.getActiveFacts(actorId) ?? [])
+        .filter((f) => f.field.startsWith("指代·"))
+        .map((f) => `${f.field.replace(/^指代·/, "")}是${f.value}`)
+        .filter((line) => line.length > 2);
+    } catch {
+      /* 记忆组件未装配 → 不做指代锚定，回退模型判断 */
+    }
+
+    const [narrativeRecall, workingMemorySummary, recentConversationHistory, userLocation, personalization] =
       route.plane === "chat"
       ? await Promise.all([
           // 对话面记忆注入（v3）：主循环恒 undefined；cognize 召回结果经
@@ -1065,7 +1071,6 @@ export class AgentCore {
             this.userPersonalizationService?.getProfileOnlySlice(actorId) ??
               Promise.resolve({} as PersonalizationPromptSlice),
           ),
-          ctxTiming("frequentPlaces", Promise.resolve(this.resolveFrequentPlacesPrompt(actorId))),
         ])
       : await Promise.all([
           // 任务面同 v3 语义：主循环不擅自注入长期记忆
@@ -1075,7 +1080,6 @@ export class AgentCore {
           // 2026-09-05：每轮无条件注入（缓存/按需 RPC，零 LLM；措辞层已禁止反问）
           this.resolveUserLocationForPrompt(actorId, opts),
           this.userPersonalizationService?.getPromptSlice(actorId, text) ?? Promise.resolve({}),
-          Promise.resolve(this.resolveFrequentPlacesPrompt(actorId)),
         ]);
 
     // 位置证据门（2026-10-19）：本轮有定位、且定位落到某个"计划搬去 X"的目标地，
@@ -1157,7 +1161,6 @@ if (route.plane === "task") {
             workingMemorySummary,
             recentConversationHistory,
             userLocation,
-            frequentPlaces,
             personalization,
             shortTermTurn,
             orchestrateToolCtx: orchestrateOpts,
@@ -1184,7 +1187,6 @@ if (route.plane === "task") {
           workingMemorySummary,
           recentConversationHistory,
           userLocation,
-          frequentPlaces,
           personalization,
           orchestrateOpts,
           sessionId,
@@ -1212,7 +1214,6 @@ if (route.plane === "task") {
         workingMemorySummary,
         recentConversationHistory,
         userLocation,
-        frequentPlaces,
         personalization,
         orchestrateToolCtx: orchestrateOpts,
         sessionId,
@@ -1220,6 +1221,7 @@ if (route.plane === "task") {
         cognitiveEmotion,
         cognitiveUserPattern,
         cognitiveToolPlan,
+        referentLines,
         webSearchForbidden,
       });
 
@@ -1267,13 +1269,13 @@ if (route.plane === "task") {
             workingMemorySummary,
             recentConversationHistory,
             userLocation,
-            frequentPlaces,
             personalization,
             orchestrateToolCtx: orchestrateOpts,
             sessionId,
             shortTermTurn,
             cognitiveUserPattern,
             cognitiveToolPlan,
+            referentLines,
           });
         } catch (retryErr) {
           // 降级也失败：不再用 apology 兜底文案，尝试一次最小化 LLM 调用生成回复
@@ -1554,8 +1556,6 @@ if (route.plane === "task") {
   private static readonly PROMPT_LOCATION_FRESH_MS = 5 * 60 * 1000;
   /** 按要 GPS 的失败冷却：客户端离线/拒绝定位时，避免每条消息都白等 6s 超时。 */
   private static readonly PROMPT_LOCATION_RETRY_MS = 10 * 60 * 1000;
-  /** 常去地点缓存 TTL。 */
-  private static readonly FREQUENT_PLACES_TTL_MS = 10 * 60 * 1000;
 
   /**
    * Prompt 阶段的位置注入（全链路零 LLM、**零阻塞**）。
@@ -1696,69 +1696,9 @@ if (route.plane === "task") {
     })();
   }
 
-  /**
-   * 常去地点背景块（零 LLM）：位置历史 DBSCAN 聚类结果直接格式化注入，
-   * 进程内按 actor 缓存 10 分钟。minPoints 放宽到 3——按需模式样本稀疏
-   * （每日启动/工具触发各 1 条），沿用持续模式的 20 会永远聚不出簇。
-   */
-  private resolveFrequentPlacesPrompt(actorId: string): string | undefined {
-    const history = this.locationHistory;
-    if (!history) return undefined;
-    const cached = this.frequentPlacesCache.get(actorId);
-    if (cached && Date.now() - cached.at <= AgentCore.FREQUENT_PLACES_TTL_MS) return cached.text;
-
-    let text: string | undefined;
-    try {
-      const places = history.mineFrequentPlaces(actorId, { maxPlaces: 5, minPoints: 3 });
-      // 地点语义（家/公司）：与常去地点分开表述——常去地点是「去过几次」的统计，
-      // 语义是「这是什么地方」的判断。用户确认过的写「已确认」，推断写置信度，
-      // 让模型自己决定能不能当事实用（不许把推断当铁定）。
-      const kindText = (kind: string): string =>
-        kind === "home" ? "家" : kind === "work" ? "公司" : "常去地点";
-      const known = this.placeSemantics?.load(actorId) ?? [];
-      const knownLines = known
-        .filter((place) => place.kind !== "other")
-        .slice(0, 4)
-        .map((place) => {
-          const name =
-            place.label?.trim() ||
-            place.poiName?.trim() ||
-            `${place.latitude.toFixed(3)}, ${place.longitude.toFixed(3)}`;
-          // prompt 只保留地点名称：行政区/地址按需走 place 工具查询，
-          // 置信度百分比也不再常驻（2026-11-16 用户要求）。
-          return `- ${kindText(place.kind)}：${name}`;
-        });
-
-      const lines = places.map((p, i) => {
-        const semantic = this.placeSemantics?.matchCached(actorId, p)?.record;
-        const baseName =
-          semantic?.label?.trim() ||
-          semantic?.poiName?.trim() ||
-          p.label?.trim() ||
-          `${p.latitude.toFixed(3)}, ${p.longitude.toFixed(3)}`;
-        const tag =
-          semantic && semantic.kind !== "other"
-            ? `（${kindText(semantic.kind)}${semantic.confirmed ? "，已确认" : "，推断"}）`
-            : "";
-        return `${i + 1}. ${baseName}${tag}｜到访 ${p.visitCount} 次 · 覆盖 ${p.distinctDays} 天 · 最近 ${p.lastSeenAt.slice(0, 10)}`;
-      });
-
-      if (places.length > 0 || knownLines.length > 0) {
-        text = [
-          "由用户位置历史自动聚类得出（系统背景，禁止主动向用户提及或反问本块；",
-          "本块只给地点名称，不含行政区/门牌，与【当前位置】是两件事。",
-          "用户问家/公司在哪个城市、具体地址时，必须调用 place 工具按需查询；",
-          "禁止用当前位置的城市/区县顶替，也禁止凭记忆猜城市）：",
-          ...knownLines,
-          ...lines,
-        ].join("\n");
-      }
-    } catch {
-      text = undefined;
-    }
-    this.frequentPlacesCache.set(actorId, { text, at: Date.now() });
-    return text;
-  }
+  // 常去地点不占 prompt 动态块（2026-11-19）：位置历史/地点语义更新时由装配层
+  // 投影进用户画像，画像注入门控按本轮 query 相关性召回；精确地址走 place 工具。
+  // 今日足迹/出行习惯同理，统一由 place 工具 action=timeline / habits 按需回查。
 
   // buildRecentConversationHistoryBlock 已随 recallGate 管道拆除（2026-10-22）：跨会话开放环路经恒驻速览与 brain.recall 承担。
 
@@ -1864,8 +1804,6 @@ if (route.plane === "task") {
       workingMemorySummary?: string;
       recentConversationHistory?: string;
       userLocation?: string;
-      /** 常去地点背景块（DBSCAN 纯算法挖掘，零 LLM） */
-      frequentPlaces?: string;
       orchestrateOpts: ReturnType<AgentCore["buildOrchestrateOpts"]>;
       personalization: PersonalizationPromptSlice;
       sessionId: string;
@@ -1930,7 +1868,6 @@ if (route.plane === "task") {
             workingMemorySummary: ctx.workingMemorySummary,
             recentConversationHistory: ctx.recentConversationHistory,
             userLocation: ctx.userLocation,
-            frequentPlaces: ctx.frequentPlaces,
             orchestrateToolCtx: ctx.orchestrateOpts,
             personalization: ctx.personalization ?? {},
             sessionId: ctx.sessionId,
@@ -1980,8 +1917,6 @@ if (route.plane === "task") {
       /** 最近对话回顾（独立块注入，thread 较短时填充） */
       recentConversationHistory?: string;
       userLocation?: string;
-      /** 常去地点背景块（DBSCAN 纯算法挖掘，零 LLM） */
-      frequentPlaces?: string;
       /** 后台派发路径（dispatchBackgroundTask）可不传：执行层逐项可选化 */
       orchestrateToolCtx?: ReturnType<AgentCore["buildOrchestrateOpts"]>;
       personalization?: PersonalizationPromptSlice;
@@ -2018,6 +1953,8 @@ if (route.plane === "task") {
       routeConfidence?: number;
       /** realtime_lookup 轮由路由器生成的搜索词（前置检索用，见 runFreshEvidenceSearch）。 */
       routeSearchQuery?: string;
+      /** 画像指代映射（「老婆是刘浩存」），工具循环做代词锚定用。 */
+      referentLines?: string[];
       /** travel_planning 轮由路由器代码构造的行程请求参数（确定性预执行用）。 */
       routeTravelPlanRequest?: TravelPlanRequest;
       /**
@@ -2300,7 +2237,6 @@ if (route.plane === "task") {
             recentConversationHistory: ctx.recentConversationHistory,
             interruptedContext: opts?.interruptedContext,
             userLocation: ctx.userLocation,
-            frequentPlaces: ctx.frequentPlaces,
             deviceClass: opts?.deviceClass,
             personalization: ctx.personalization ?? {},
             userPattern: ctx.cognitiveUserPattern,
@@ -2331,6 +2267,8 @@ if (route.plane === "task") {
                 }),
           maxOutputTokens: chatLaneMaxOutputTokens(),
           toolRankingHint,
+          // 代词指代锚定（2026-11-19）：画像映射透传进工具循环，漏传 = 锚定静默失效
+          ...(ctx.referentLines?.length ? { referentLines: ctx.referentLines } : {}),
         } satisfies AgentStreamOptions)
       : {
           ...(this.promptContextBuilder.build({
@@ -2343,7 +2281,6 @@ if (route.plane === "task") {
             recentConversationHistory: ctx.recentConversationHistory,
             interruptedContext: opts?.interruptedContext,
             userLocation: ctx.userLocation,
-            frequentPlaces: ctx.frequentPlaces,
             deviceClass: opts?.deviceClass,
             personalization: ctx.personalization ?? {},
             onToolLoopAfterBatch: onBatchFromCaller,
@@ -3054,7 +2991,6 @@ if (route.plane === "task") {
       workingMemorySummary?: string;
       recentConversationHistory?: string;
       userLocation?: string;
-      frequentPlaces?: string;
       personalization?: PersonalizationPromptSlice;
       shortTermTurn?: ShortTermTurnContext;
       orchestrateToolCtx?: ReturnType<AgentCore["buildOrchestrateOpts"]>;
@@ -3223,7 +3159,6 @@ if (route.plane === "task") {
           ? { recentConversationHistory: input.recentConversationHistory }
           : {}),
         ...(input.userLocation ? { userLocation: input.userLocation } : {}),
-        ...(input.frequentPlaces ? { frequentPlaces: input.frequentPlaces } : {}),
         ...(input.personalization ? { personalization: input.personalization } : {}),
         ...(input.shortTermTurn ? { shortTermTurn: input.shortTermTurn } : {}),
         ...(input.orchestrateToolCtx ? { orchestrateToolCtx: input.orchestrateToolCtx } : {}),

@@ -62,6 +62,27 @@ test("E 两类信号同时命中时两条原子行都产出", () => {
   assert.equal(r.extractLines.length, 2);
 });
 
+test("G L1 漏判 personalFact 时，自我陈述仍进抽取（2026-11-18 生日写入事故）", () => {
+  // 事故现场：L1 把「还有我的生日是6月18」判成非 personalFact，高信号只来自
+  // 助手「记上了，6月18」；抽取只拿到助手话 → 生日永远落不进 structured_facts，
+  // 而助手已经承诺"记上了"。
+  const r = detectMemorySignals("还有我的生日是6月18", "记上了，6月18。明年这天我给你过。", false, false);
+  assert.equal(r.isHighSignal, true);
+  assert.ok(r.reasons.includes("personal_fact"), "自我陈述兜底应补上 personal_fact");
+  assert.ok(
+    r.extractLines.includes("[用户事实] 还有我的生日是6月18"),
+    "用户原文必须进抽取行，不能只抽助手那句",
+  );
+  assert.ok(r.extractLines.some((l) => l.startsWith("[Agent 承诺/结论]")));
+
+  // 年龄自述同样走确定性兜底（阿拉伯/中文数字）
+  const age = detectMemorySignals("我今年20岁", "嗯", false, false);
+  assert.equal(age.isHighSignal, true);
+  assert.deepEqual(age.extractLines, ["[用户事实] 我今年20岁"]);
+  const ageCn = detectMemorySignals("我二十岁", "嗯", false, false);
+  assert.equal(ageCn.isHighSignal, true);
+});
+
 test("F 产出的原子行能通过 LTM 写入门（不被当提醒/协议残留误杀）", () => {
   const userFactLine = detectMemorySignals("以后叫我王哥", "好的", false, true).extractLines[0]!;
   const verdict = gateLtmWrite(userFactLine, "chat:fast_path");

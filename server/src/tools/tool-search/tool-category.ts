@@ -83,7 +83,7 @@ export const DOMAIN_REGISTRY: DomainDef[] = [
   },
   {
     name: "place",
-    summary: "地点语义（识别家/公司/常去地点）",
+    summary: "地点语义与行程（家/公司/常去地点、今天去了哪、出行习惯）",
     prefixes: ["place"],
     secondaryTools: ["geofence"],
   },

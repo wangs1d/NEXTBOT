@@ -167,7 +167,7 @@
   <a class="logo" href="/"><span class="next">Next</span><span class="bot">Bot</span></a>
   <div class="nav-links">
     <a href="/">首页</a>
-    <a href="/recharge" class="on">API 充值</a>
+    <a href="/recharge" class="on">额度充值</a>
   </div>
   <a class="nav-cta" href="/beta">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 11l5 5 5-5M4 21h16"/></svg>
@@ -180,11 +180,11 @@
     <div class="head">
       <div class="eyebrow">PRICING</div>
       <h1>计费说明</h1>
-      <p class="sub">先充值到账号，再按实际 token 用量扣减；余额不足时接口会拒绝调用，不透支。</p>
+      <p class="sub">按需购买额度，使用量按实际 token 扣减；额度不足时接口拒绝调用，不透支。</p>
     </div>
 
     <div class="card">
-      <div class="card-t">充值金额</div>
+      <div class="card-t">购买额度</div>
       <div class="amounts">
         <div class="amount">¥10</div>
         <div class="amount">¥20</div>
@@ -217,6 +217,7 @@
     <div class="card">
       <div class="card-t">计费规则</div>
       <div class="rules">
+        <div class="rule"><b>计费模式</b><span>额度充值、按量扣费，无订阅套餐或包月会员。</span></div>
         <div class="rule"><b>计费方式</b><span>按输入与输出的 token 数量从账户余额中扣减。</span></div>
         <div class="rule"><b>账户绑定</b><span>充值金额直接计入当前登录账号（邮箱），接口调用使用同一账号。</span></div>
         <div class="rule"><b>余额下限</b><span>余额为 0 时无法继续调用接口，不会产生欠费或透支。</span></div>

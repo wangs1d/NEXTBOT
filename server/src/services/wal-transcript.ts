@@ -28,6 +28,8 @@ type WalRawEntry = {
   mediaCards?: unknown[];
   /** 出口补写的真·分绿泡对账数组（2026-11-13）；旧行/非分泡轮缺省。 */
   bubbles?: Array<{ id?: unknown; text?: unknown }>;
+  /** 出口补写的用户照片 URL（2026-11-18）；旧行/无图轮缺省。 */
+  userImageUrls?: string[];
 };
 
 export type WalTranscriptTurn = {
@@ -38,6 +40,8 @@ export type WalTranscriptTurn = {
   clientMessageId?: string;
   /** 本轮媒体卡（照片/视频卡原样透传，供历史回填重建图片气泡）。 */
   mediaCards?: unknown[];
+  /** 用户随消息发出的照片 URL（2026-11-18），供历史回填真实缩略图。 */
+  userImageUrls?: string[];
   /**
    * 本轮分泡对账数组（2026-11-13）：真实分泡轮逐泡透传，客户端回填按泡
    * 重建多条消息；旧行/塌缩/单泡轮缺省 → 客户端降级单泡（现状行为）。
@@ -149,6 +153,11 @@ export async function readActorTranscriptFromWal(
       if (entry.messageId?.trim()) turn.clientMessageId = entry.messageId.trim();
       if (Array.isArray(entry.mediaCards) && entry.mediaCards.length > 0) {
         turn.mediaCards = entry.mediaCards;
+      }
+      if (Array.isArray(entry.userImageUrls) && entry.userImageUrls.length > 0) {
+        turn.userImageUrls = entry.userImageUrls.filter(
+          (u): u is string => typeof u === "string" && u.startsWith("/agent/images/"),
+        );
       }
       // 分泡对账数组透传（2026-11-13）：只收 id+text 均非空串的泡，且整轮
       // 至少一泡才挂字段——单泡塌缩轮（bubbles 长度 1）也透传，客户端按泡

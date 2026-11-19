@@ -126,6 +126,17 @@ export const ClientEventType = {
   /** 客户端回传实时位置（响应 agent.location_request，或天气面板主动上报） */
   LocationReport: "client.location_report",
   /**
+   * 围栏注册回执（客户端 → 服务端，2026-11-18）。
+   *
+   * 服务端的 `agent.geofence_sync` 只是「请求客户端注册」，注册是否真的成功
+   * 此前完全不可见：权限被拒、系统定位关闭、ROM 限制都静默失败，服务端只能
+   * 从「从此不再有围栏事件」反推。本事件把结果如实回传（请求数/成功数/
+   * 逐围栏失败原因/权限与定位开关/开机重建结果），服务端落库并写日志。
+   *
+   * payload 与 `geofenceSyncReportSchema` 一致。
+   */
+  GeofenceReport: "client.geofence_report",
+  /**
    * 客户端上报设备时钟（2026-11-05 时间感知重构）。
    *
    * 与位置完全解耦：不申请定位权限、不等 GPS、不依赖逆地理。两个用途：

@@ -12,6 +12,7 @@ import { consumeAnySearchWebFailure } from "./search-providers/anysearch.js";
 import { filterByQueryFragments, primaryRelevanceRatio } from "./domestic-web-providers.js";
 import { rerankImagesByVlm } from "./image-relevance-vlm.js";
 import { filterUnseenMedia, rememberShownMedia } from "./media-shown-ledger.js";
+import { normalizeImageSearchQuery } from "./image-query-normalizer.js";
 import type { ImageGenerationService } from "./image-generation-service.js";
 import type { MediaTurnInfo } from "./library-meta.js";
 
@@ -320,29 +321,25 @@ export class UpstreamSearchService {
     }
 
     // ② Bing 图片页兜底：同一个 query 并行打 cn / cn-async / www 三个端点，
-    //    按文本相关性择优合并。query 质量由模型在工具层负责（builtin-chat-tools
-    //    的 search_images query 描述约束为短实体词），本层不改写。
+    //    按文本相关性择优合并。
     //
-    //    兜底前的 query 形态硬闸（2026-11-09 实测）：cn.bing.com 中文图片索引只对
-    //    两类 query 有可靠召回——① 单实体词（100%）；② 非人物普通名词组合（100%）。
-    //    「人名+任何修饰词」哪怕 2 个词段也 0% 可用（17/17 全灭，引擎用随机填充
-    //    顶满页面）。因此只允许短 query 进入抓取：去空白 ≤16 字且词段 ≤2；
-    //    超限直接拒绝并在 notes 说明，让模型改发单一实体词重试。
-    const querySegments = keyword.split(/[\s,，、。；;:：/|?？!！]+/).filter((s) => s.trim().length > 0);
-    if (keyword.replace(/\s+/g, "").length > 16 || querySegments.length > 2) {
-      const hint = querySegments[0] ?? "";
-      return {
-        provider: "bing-images",
-        mediaType: "image",
-        items: [],
-        notes: [
-          `query 过长已拒绝（${querySegments.length} 个词段 / ${keyword.length} 字）：Bing 中文图片搜索只对单一实体词与普通名词组合有可靠召回，人名+修饰词组合只会返回随机无关填充`,
-          `要继续出图：用「${hint}」（仅此一词，不带任何修饰）重新调用一次即可拿到该主体的照片；普通事物可用「事物 场景」两词组合`,
-        ],
-      };
+    //    查询词先过 `normalizeImageSearchQuery` 净化（2026-11-19 根修）：图搜 API
+    //    无图片能力时（AnySearch 图片垂直未开放）全靠这一层出图，而模型常把
+    //    「最新/近照/2026」等时间词一起抄进 query（真机：搜索 API 返回空后
+    //    「成龙 最新 近照 2026」被形态闸整条拒绝，用户一张图都拿不到）。
+    //    净化只作用于必应兜底这一层，搜索 API 主路仍拿模型原词。
+    //
+    //    旧入口形态闸已删除（2026-11-19）：此前「词段 ≤2 / 长度超限」整条拒绝，
+    //    真机实测生产机直连 cn.bing.com「成龙 2026」「成龙 最新 近照 2026」均
+    //    35/35 标题命中本人，多词本身不导致跑偏；而同一条规则又会误杀
+    //    「刘浩存 红毯」这类合法诉求。查询形态判断交还搜索引擎，这里只做净化。
+    const bingKeyword = normalizeImageSearchQuery(keyword);
+    if (bingKeyword !== keyword) {
+      console.log(`[UpstreamSearch] 必应图搜查询词净化 "${keyword}" -> "${bingKeyword}"`);
     }
+    const querySegments = bingKeyword.split(/[\s,，、。；;:：/|?？!！]+/).filter((s) => s.trim().length > 0);
 
-    const batches = await this.fetchBingImageBatches(keyword, candidateLimit);
+    const batches = await this.fetchBingImageBatches(bingKeyword, candidateLimit);
     const scored = batches
       .map((b) => {
         const items = rankImageCandidates(b.items, b.query);
@@ -360,31 +357,58 @@ export class UpstreamSearchService {
       };
     }
 
-    const winner = scored[0]!;
-    // 分级相关率守卫（2026-11-09）：入口形态闸无法区分「人名+修饰」与「普通名词
-    // 组合」（那是语义判断），但两者在结果层签名完全不同——普通名词组合实测
-    // 100% 候选命中，人名+修饰实测恒为 0。因此多词 query 要求 ≥50% 候选命中才
-    // 交付，单实体词保持零相关守卫。低于阈值一律拒绝交付，让模型改词重试。
-    const minRatio = imageBatchGuardRatio(querySegments.length);
-    if (winner.ratio <= minRatio) {
-      const hint = querySegments[0] ?? "";
-      return {
-        provider: `bing-images:${winner.label}`,
-        mediaType: "image",
-        items: [],
-        notes: [
-          `多端点结果与 query 的相关率 ${Math.round(winner.ratio * 100)}% 低于交付阈值 ${Math.round(minRatio * 100)}%（判定为搜索引擎召回失效/随机填充），已拒绝交付`,
-          `要继续出图：用「${hint}」（仅此一词，不带任何修饰）重新调用一次即可拿到该主体的照片`,
-        ],
-      };
+    let effectiveScored = scored;
+    let effectiveWinner = scored[0]!;
+    let fallbackNote = "";
+    // 旧「分级交付阈值」硬闸已删除（2026-11-19 删除，第二个旧闸）：
+    // 原逻辑要求多词 query 候选相关率 ≥50%，否则整轮拒绝交付、让模型改词重试。
+    // 真机实测这条阈值必然误杀：同为「人名+修饰词」，「迪丽热巴 红毯」33/35，
+    // 而「刘浩存 红毯」「刘浩存 性感」在单端点上 0/35——阈值无法区分「引擎没给」
+    // 和「用户问法非法」，模型又多半不会按 notes 重试，最后就是零图收场。
+    // 相关性判断交还搜索引擎排序 + rankImageCandidates 文本软闸 + VLM 复核，
+    // 交付不再被静态相关率阻断。
+    //
+    // 保留的只是召回补救（不是闸）：多词 query 相关率偏低时用主体词补搜一次，
+    // 两批取更好的那批；若仍然偏低，只在 notes 里如实标注「可能不完全是该主体」，
+    // 由模型在措辞上诚实处理，不阻断交付。
+    const softThreshold = imageBatchGuardRatio(querySegments.length);
+    if (effectiveWinner.ratio < softThreshold && querySegments.length > 1) {
+      const failedRatio = effectiveWinner.ratio;
+      const entityOnly = querySegments[0] ?? "";
+      if (entityOnly && entityOnly !== bingKeyword) {
+        const retryBatches = await this.fetchBingImageBatches(entityOnly, candidateLimit);
+        const retryScored = retryBatches
+          .map((b) => {
+            const retryItems = rankImageCandidates(b.items, b.query);
+            return { ...b, items: retryItems, ratio: imageRelevanceRatio(b.items, b.query) };
+          })
+          .filter((b) => b.items.length > 0)
+          .sort((a, b) => b.ratio - a.ratio || b.items.length - a.items.length);
+        const retryWinner = retryScored[0];
+        if (retryWinner && retryWinner.ratio > failedRatio) {
+          effectiveScored = retryScored;
+          effectiveWinner = retryWinner;
+          fallbackNote =
+            `原查询「${bingKeyword}」相关率 ${Math.round(failedRatio * 100)}%，` +
+            `已回退主体词「${entityOnly}」补搜（相关率 ${Math.round(retryWinner.ratio * 100)}%）`;
+        }
+      }
+      if (effectiveWinner.ratio < softThreshold) {
+        fallbackNote = [
+          fallbackNote,
+          `本次图片与查询的相关率偏低（${Math.round(effectiveWinner.ratio * 100)}%），可能不完全是该主体，回复时别把画面内容说死`,
+        ]
+          .filter(Boolean)
+          .join("；");
+      }
     }
-    const merged = dedupeMediaItems(scored.flatMap((b) => b.items));
+    const merged = dedupeMediaItems(effectiveScored.flatMap((b) => b.items));
     // 「再来几张」去重（2026-11-09）：同一 query 每次抓回的结果集是稳定的，
     // 逐轮展示必须扣掉本会话已给过的原图，否则「再来几张」会重复同一批。
     const unseen = filterUnseenMedia(sessionId, merged);
     if (merged.length > 0 && unseen.length === 0) {
       return {
-        provider: `bing-images:${winner.label}`,
+        provider: `bing-images:${effectiveWinner.label}`,
         mediaType: "image",
         items: [],
         notes: [
@@ -409,14 +433,15 @@ export class UpstreamSearchService {
 
     // ③ 像素级复核：独立视觉模型只做重排，不删图；失败/超时原序返回，
     //    保证「一定能拿到图片」不因复核链路而破功。
-    const vlm = await rerankImagesByVlm(items, keyword);
+    const vlm = await rerankImagesByVlm(items, effectiveWinner.query);
     return {
-      provider: `bing-images:${winner.label}`,
+      provider: `bing-images:${effectiveWinner.label}`,
       mediaType: "image",
       items: vlm.items,
       notes: [
         "mediaUrl/thumbnailUrl 已转存为服务端本地 PNG；pageUrl 保留原始来源页",
-        `多端点择优：${scored.length} 批候选，采用 ${winner.label} 端点（相关度 ${winner.ratio.toFixed(2)}）`,
+        `多端点择优：${effectiveScored.length} 批候选，采用 ${effectiveWinner.label} 端点（相关度 ${effectiveWinner.ratio.toFixed(2)}）`,
+        ...(fallbackNote ? [fallbackNote] : []),
         ...(vlm.applied ? [] : ["视觉复核未启用或不可用，已按文本相关性顺序交付"]),
       ],
     };
@@ -1649,10 +1674,9 @@ export function imageRelevanceRatio(items: MediaSearchItem[], query: string): nu
 }
 
 /**
- * Bing 图片兜底的分级交付阈值（按 query 词段数）。
- * 实测（2026-11-09 修饰词矩阵）：普通名词组合（「灯塔 风景」）100% 候选命中，
- * 「人名+修饰词」恒为 0 命中——以 0.5 为多词 query 的交付线可精确切分两类；
- * 单实体词实测恒 100%，保持零相关守卫即可。
+ * 多词 query 的「主体词补搜」软阈值（按 query 词段数）。
+ * 2026-11-19 起不再作为交付闸：相关率低于它只触发一次主体词补搜 + notes 提示，
+ * 绝不拒绝交付。分档仍保留是因为单实体词的 0 命中不值得再补搜（主体词就是它自己）。
  */
 export function imageBatchGuardRatio(segmentCount: number): number {
   return segmentCount >= 2 ? 0.5 : 0;

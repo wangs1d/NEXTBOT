@@ -131,6 +131,8 @@ export interface ToolCardPayload {
     id: string;
     label: string;
     variant?: "primary" | "secondary" | "ghost";
+    /** 卡内动作：非空时客户端走 card.action（只换这张卡、不发消息） */
+    cardAction?: string;
     payload?: Record<string, unknown>;
   }>;
 }
@@ -963,9 +965,15 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
   // 如实标注（api/scraped/database/estimated），模拟报价必须带标记。
   // book 阶段仍由模型带着 optionId 走两阶段确认，卡不代点。
   "travel_booking.search": buildBookingSearchCard,
-  "ride_hailing.quote": buildBookingSearchCard,
+  // 叫车报价单独出「选择车型卡」：通用列表卡没有可点的车型入口，手机端
+  // 报价只能看不能选（用户反馈）。卡内动作把 optionId + 起终点原样带回，
+  // 由 card.action 的两阶段确认闭环，不再让用户打字「就选经济型」。
+  "ride_hailing.quote": buildRideQuoteCard,
   "restaurant.search": buildBookingSearchCard,
   "home_service.search": buildBookingSearchCard,
+  // 叫车下单：阶段一出统一确认卡（与购物同款 shopping_confirm），
+  // 阶段二成功出订单/支付卡（有支付链接时复用统一支付卡 shopping_pay）。
+  "ride_hailing.book": buildRideBookCard,
 
   // 统一支付模块（2026-11-13）：payment.pay 的下一步动作决定卡面——
   // 待授权→授权页 + 「我已授权，继续」；待确认→一键确认扣款；待付款→收款码；
@@ -1232,6 +1240,226 @@ function buildBookingSearchCard(r: Record<string, unknown>): ToolCardPayload | n
     items,
     footer,
     cardType: "",
+  };
+}
+
+/** 网约车 provider key → 展示名（回执里没带 providerLabel 时兜底）。 */
+const RIDE_PROVIDER_LABELS: Record<string, string> = {
+  didi: "滴滴出行（官方 MCP）",
+  simulated: "模拟网约车",
+};
+
+function rideProviderLabel(r: Record<string, unknown>): string {
+  return str(r.providerLabel) || RIDE_PROVIDER_LABELS[str(r.provider)] || str(r.provider);
+}
+
+/** 去掉标题里重复的「（预估 ¥58）」价格括注——价格由卡面单独展示。 */
+function stripPriceFromTitle(title: string): string {
+  return title
+    .replace(
+      /\s*[（(]\s*(?:预估|模拟)?\s*(?:价|价格|估价)?\s*[:：]?\s*[¥￥]?\s*[\d.]+\s*元?\s*[）)]/g,
+      "",
+    )
+    .trim();
+}
+
+/** 叫车报价 → 选择车型卡（每个车型一行 + 一个可点的选择动作）。 */
+function buildRideQuoteCard(r: Record<string, unknown>): ToolCardPayload | null {
+  const rawOptions = Array.isArray(r.options) ? r.options : [];
+  if (rawOptions.length === 0) return null;
+  const req = (r.rideRequest ?? {}) as Record<string, unknown>;
+  const pickup = str(req.pickup);
+  const dropoff = str(req.dropoff);
+  const city = str(req.city);
+  const scheduleAt = str(req.scheduleAt);
+  const provider = str(r.provider);
+  const providerLabel = rideProviderLabel(r);
+
+  const items: ToolCardItem[] = [];
+  const rideOptions: Array<Record<string, unknown>> = [];
+  for (const raw of rawOptions.slice(0, 4)) {
+    const o = (raw ?? {}) as Record<string, unknown>;
+    const optionId = str(o.id);
+    const fullTitle = str(o.title);
+    if (!optionId || !fullTitle) continue;
+    const name = stripPriceFromTitle(fullTitle) || fullTitle;
+    const price = num(o.amountCny);
+    const priceLabel = price != null ? `¥${price}` : "价格以平台为准";
+    let meta = str(o.description);
+    if (meta.startsWith(name)) meta = meta.slice(name.length).replace(/^[\s·]+/, "");
+    const route = pickup && dropoff ? `${pickup} → ${dropoff}` : "";
+    if (route && meta.startsWith(route)) meta = meta.slice(route.length).replace(/^[\s·]+/, "");
+    // 价格已单独展示：去掉描述尾部的「· 预估 ¥58」，避免同一行重复两次。
+    meta = meta.replace(/\s*·?\s*预估\s*[¥￥]?\s*[\d.]+\s*元?\s*$/, "").trim();
+    const simulated = o.simulated === true;
+    const extra = (o.extra ?? {}) as Record<string, unknown>;
+
+    items.push({
+      type: "num",
+      text: [priceLabel, name, meta ? `· ${meta}` : "", simulated ? "· 模拟报价" : ""]
+        .filter(Boolean)
+        .join(" "),
+    });
+    rideOptions.push({
+      optionId,
+      name,
+      price: priceLabel,
+      amountCny: price,
+      description: meta,
+      etaMinutes: num(o.etaMinutes),
+      durationMinutes: num(o.durationMinutes),
+      simulated,
+      carType: str(extra.carType),
+      action: {
+        id: `ride_pick_${rideOptions.length}`,
+        label: "就选这个",
+        variant: "primary",
+        cardAction: "ride.book.prepare",
+        // 客户端不解释参数：起终点/城市/时间由服务端预埋，点选原样回传。
+        payload: {
+          optionId,
+          dropoff,
+          ...(pickup ? { pickup } : {}),
+          ...(provider ? { provider } : {}),
+          ...(city ? { city } : {}),
+          ...(scheduleAt ? { scheduleAt } : {}),
+        },
+      },
+    });
+  }
+  if (items.length === 0) return null;
+
+  const note = str(r.note) || str(r.pickupNote);
+  const footer = [
+    providerLabel,
+    scheduleAt ? `用车时间 ${shortTime(scheduleAt)}` : "",
+    note,
+    "价格为预估，实际以平台结算为准",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  return {
+    title: pickup && dropoff ? `叫车报价 · ${pickup} → ${dropoff}` : "叫车报价",
+    items,
+    footer,
+    cardType: "ride_quote",
+    extra: {
+      ride: {
+        stage: "quote",
+        pickup,
+        dropoff,
+        providerLabel,
+        scheduleAt,
+        note,
+        options: rideOptions,
+      },
+    },
+  };
+}
+
+/**
+ * 叫车下单 → 阶段一确认卡（与购物同款 shopping_confirm，令牌倒计时 + 确认按钮）；
+ * 阶段二成功 → 有支付链接时复用统一支付卡 shopping_pay，否则出订单回执卡。
+ */
+function buildRideBookCard(r: Record<string, unknown>): ToolCardPayload | null {
+  if (r.ok !== true) return null;
+  const simulated = r.simulated === true;
+  const amount = num(r.amountCny);
+  const providerLabel = rideProviderLabel(r);
+  const orderId = str(r.orderId);
+
+  if (r.needsConfirmation === true) {
+    const optionTitle = stripPriceFromTitle(str(r.optionTitle)) || str(r.optionTitle);
+    const pickup = str(r.pickup);
+    const dropoff = str(r.dropoff);
+    const scheduleAt = str(r.scheduleAt);
+    const token = str(r.confirmationToken);
+    const expiresInMs = num(r.expiresInMs);
+    const optionId = str(r.optionId);
+
+    const rows: Array<{ k: string; v: string }> = [];
+    if (optionTitle) rows.push({ k: "车型", v: optionTitle });
+    if (pickup) rows.push({ k: "上车点", v: pickup });
+    if (dropoff) rows.push({ k: "目的地", v: dropoff });
+    if (scheduleAt) rows.push({ k: "用车时间", v: shortTime(scheduleAt) });
+
+    return {
+      title: "确认叫车",
+      items: rows.map((row) => ({ type: "num" as const, text: `${row.k}：${row.v}` })),
+      footer: simulated ? "当前为模拟模式，不会真实下单或扣费" : "确认后立即叫车，费用以平台结算为准",
+      cardType: "shopping_confirm",
+      extra: {
+        shopping: {
+          stage: "confirm",
+          title: "确认叫车",
+          ...(expiresInMs != null && expiresInMs > 0 ? { expiresInMs } : {}),
+          rows,
+          ...(amount != null ? { total: `¥${amount}`, totalLabel: "预估车费" } : {}),
+          note: "确认令牌有时效，过期需重新报价",
+          buttons: [
+            { label: "确认叫车", variant: "primary", cardAction: "ride.book.confirm" },
+            { label: "先不叫", variant: "secondary", cardAction: "local.dismiss" },
+          ],
+          actions: {
+            optionId,
+            dropoff,
+            ...(pickup ? { pickup } : {}),
+            ...(str(r.city) ? { city: str(r.city) } : {}),
+            ...(str(r.provider) ? { provider: str(r.provider) } : {}),
+            ...(scheduleAt ? { scheduleAt } : {}),
+            ...(token ? { confirmationToken: token } : {}),
+          },
+        },
+      },
+    };
+  }
+
+  const tracking = (r.tracking ?? {}) as Record<string, unknown>;
+  const driver = str(tracking.driver);
+  const plate = str(tracking.plate);
+  const eta = num(tracking.etaMinutes);
+  const paymentUrl = str(r.paymentUrl);
+
+  const items: ToolCardItem[] = [
+    ...(orderId ? [{ type: "check" as const, text: `订单：${orderId}` }] : []),
+    ...(driver
+      ? [{ type: "check" as const, text: `司机：${driver}${plate ? ` · ${plate}` : ""}` }]
+      : []),
+    ...(eta != null ? [{ type: "check" as const, text: `预计 ${eta} 分钟到达` }] : []),
+    ...(amount != null
+      ? [{ type: "num" as const, text: `预估车费：¥${amount}` }]
+      : []),
+  ];
+  if (items.length === 0) items.push({ type: "check", text: "叫车请求已提交" });
+
+  if (paymentUrl) {
+    return {
+      title: "订单已提交 · 待支付",
+      items,
+      footer: "支付链接已生成，请打开完成支付；支付结果以平台为准",
+      cardType: "shopping_pay",
+      extra: {
+        shopping: {
+          stage: "pay",
+          title: `${providerLabel} · 待支付`,
+          ...(amount != null ? { amount: `${amount}` } : {}),
+          amountLabel: "应付金额",
+          ...(orderId ? { orderNo: orderId } : {}),
+          platformLabel: providerLabel,
+          note: "Agent 不代付，支付页由你本人完成",
+        },
+      },
+    };
+  }
+
+  return {
+    title: simulated ? "已提交叫车（模拟）" : "已叫车",
+    items,
+    footer: simulated
+      ? "模拟模式：不会产生真实订单与扣费"
+      : "司机接单后可在对话里问「车到哪了」查看进度",
+    cardType: "order",
   };
 }
 

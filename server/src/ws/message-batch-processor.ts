@@ -1,6 +1,8 @@
 export type BatchedMessage = {
   text: string;
   visionFrames?: import("../external-model/types.js").VisionFrame[];
+  /** 用户照片落盘后的稳定 URL（done 阶段写 WAL，供历史回填真实缩略图） */
+  userImageUrls?: string[];
   agentAccessMode?: string;
   clientIp?: string;
   clientLocation?: import("../types/client-location.js").ClientLocationWire;
@@ -330,6 +332,7 @@ export class MessageBatchProcessor {
     return {
       text: texts.join("\n"),
       visionFrames: last.visionFrames,
+      userImageUrls: last.userImageUrls,
       agentAccessMode: last.agentAccessMode,
       clientIp: last.clientIp,
       clientLocation: last.clientLocation,

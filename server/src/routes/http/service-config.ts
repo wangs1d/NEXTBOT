@@ -134,10 +134,20 @@ export function registerServiceConfigRoutes(app: FastifyInstance, deps: ServiceC
         updatedAt: persisted?.model?.updatedAt ?? null,
       },
       tts: {
-        provider: persisted?.tts?.provider ?? null,
-        configured: Boolean(persisted?.tts?.apiKey) || Boolean(process.env.MINIMAX_API_KEY?.trim()),
+        // env 直配 Breeze 时也要报已配置，否则状态页会说「没配语音」而实际能出声
+        provider:
+          persisted?.tts?.provider ??
+          (process.env.BREEZE_API_KEY?.trim() ? "breeze" : null),
+        configured:
+          Boolean(persisted?.tts?.apiKey) ||
+          Boolean(process.env.MINIMAX_API_KEY?.trim()) ||
+          Boolean(process.env.BREEZE_API_KEY?.trim()),
         // 多租户云端：语音由平台 key 提供，用户无需也不应看到运营方密钥尾号
-        keyTail: sharedTenant ? null : maskServiceKey(persisted?.tts?.apiKey ?? process.env.MINIMAX_API_KEY),
+        keyTail: sharedTenant
+          ? null
+          : maskServiceKey(
+              persisted?.tts?.apiKey ?? process.env.MINIMAX_API_KEY ?? process.env.BREEZE_API_KEY,
+            ),
         updatedAt: persisted?.tts?.updatedAt ?? null,
       },
       mail,

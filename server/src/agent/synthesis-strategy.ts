@@ -150,16 +150,29 @@ const CALENDAR_CONFIRM_TOOL_NAMES = new Set(["calendar"]);
 export type PreamblePolicy = "allow" | "suppress";
 
 /**
- * 是否是「纯图轮」：本轮至少一次 search_images 成功，且没有任何成功的
- * 文字检索/抓取结果（图文混合时仍走常规合成策略）。search_images_batch
+ * 是否是「纯图轮」：本轮至少一次 search_images 成功**且真的出了图**，且没有任何
+ * 成功的文字检索/抓取结果（图文混合时仍走常规合成策略）。search_images_batch
  * 是对比出图流，前端按「一段介绍 + 一组对比图」交错渲染，不在此列。
+ *
+ * 2026-11-19 根修：此前只看工具 ok，不看 items——图搜链路返回 0 张（搜索 API
+ * 无图片能力、query 被形态闸拒绝等）仍被判成纯图轮，收尾指令变成「照片已就绪，
+ * 直接交给用户」，模型照着演「图给你翻出来了」，用户却一张图都看不到。
+ * 无结构结果（旧调用/仅测 ok 的用例）保持原语义，有结果时以 items 是否非空为准。
  */
 export function isPhotoDeliveryRound(
-  results: Array<{ toolName: string; ok: boolean }>,
+  results: Array<{ toolName: string; ok: boolean; result?: unknown }>,
   turnIntent?: string,
 ): boolean {
   const okResults = results.filter((r) => r.ok);
-  if (!okResults.some((r) => r.toolName === "search_images")) return false;
+  const photoResults = okResults.filter((r) => r.toolName === "search_images");
+  if (photoResults.length === 0) return false;
+  const delivered = photoResults.some((r) => {
+    const result = r.result;
+    if (!result || typeof result !== "object") return true;
+    const items = (result as { items?: unknown }).items;
+    return !Array.isArray(items) || items.length > 0;
+  });
+  if (!delivered) return false;
   // 媒体意图是结构性判据（2026-10-21 根修）：用户这一轮要的就是照片，即便
   // 某次网页检索意外成功（历史事故），正文也不能转成「按主题分节 + 表格」的
   // 资料汇总——交付形态由意图决定，不由工具结果的组合碰运气。

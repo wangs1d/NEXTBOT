@@ -31,10 +31,18 @@ test("V1 字段：值 形态直接归一（提示词里的规范写法）", () =
     field: "称呼",
     value: "王哥",
   });
-  // 别名也要归一（姓名/名字/昵称 → 称呼）
+  // 别名也要归一，但姓名/称呼必须分开（2026-11-18）：姓名=用户是谁，称呼=怎么叫
   assert.deepEqual(detectProfileFieldFromText("姓名：王铭川"), {
-    field: "称呼",
+    field: "姓名",
     value: "王铭川",
+  });
+  assert.deepEqual(detectProfileFieldFromText("称呼：大哥"), {
+    field: "称呼",
+    value: "大哥",
+  });
+  assert.deepEqual(detectProfileFieldFromText("年龄：20岁"), {
+    field: "年龄",
+    value: "20岁",
   });
 });
 
@@ -82,9 +90,9 @@ test("V4 值必须像短值（带主语/带助词/太长一律拒绝）", () => 
 });
 
 test("V5 模型给的 field/value 也要过归一与校验", () => {
-  assert.deepEqual(normalizeDetectedProfileFact("名字", "王哥"), {
-    field: "称呼",
-    value: "王哥",
+  assert.deepEqual(normalizeDetectedProfileFact("名字", "王铭川"), {
+    field: "姓名",
+    value: "王铭川",
   });
   assert.deepEqual(normalizeDetectedProfileFact("职业", "后端开发"), {
     field: "职业",

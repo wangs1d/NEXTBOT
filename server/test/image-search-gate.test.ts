@@ -85,9 +85,9 @@ test("来源闸软降级：水印站可保底放行，地图/装饰图硬闸仍�
   );
 });
 
-test("分级交付阈值：多词组合要求 ≥50% 命中，单实体词保持零相关守卫", () => {
-  assert.equal(imageBatchGuardRatio(1), 0, "单实体词：零相关即拒");
-  assert.equal(imageBatchGuardRatio(2), 0.5, "2 词组合：≥50% 命中才交付（普通名词组合实测 100%，人名+修饰实测 0%）");
+test("软阈值：多词组合低于 50% 触发主体词补搜，但不再拒绝交付", () => {
+  assert.equal(imageBatchGuardRatio(1), 0, "单实体词：主体词就是自己，不补搜");
+  assert.equal(imageBatchGuardRatio(2), 0.5, "2 词组合：低于 50% 时用第一个词段补搜一次");
   assert.equal(imageBatchGuardRatio(3), 0.5);
 });
 

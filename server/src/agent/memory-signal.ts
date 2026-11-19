@@ -12,6 +12,8 @@
  * 确定发生过的文本，不存在「猜意图猜错带偏整轮」的失败模式。
  */
 
+import { isProfileExtractHint } from "../agentic-memory/unified-extractor.js";
+
 export const MEMORY_EXPLICIT_RE =
   /记住|记得|别忘了|帮我记着|记一下|不要忘记|偏好|喜欢|讨厌|不喜欢|禁忌|生日|纪念日|important|remember|prefer/i;
 
@@ -58,6 +60,9 @@ function firstSentence(text: string, maxLen: number): string {
  *        「以后叫我王哥」被 L1 正确判为 personal_fact，却因写入闸门只认
  *        memoryInstruction / 承诺话术而不进抽取链路，称呼永远落不进结构化
  *        事实库（2026-10-09 称呼事故）。现与显式记住同轨，均为高信号。
+ *        ⚠️ 2026-11-18：L1 仍会漏判（「我的生日是6月18」被判 personalFact=false，
+ *        高信号只剩助手「记上了」），因此用 isProfileExtractHint 做确定性兜底——
+ *        画像候选与抽取行必须同口径，不能把"用户事实能否落库"押在单点分类上。
  */
 export function detectMemorySignals(
   userText: string,
@@ -74,7 +79,14 @@ export function detectMemorySignals(
     reasons.push("explicit_remember");
     extractLines.push(`[用户要求记住] ${firstSentence(user, 200)}`);
   }
-  if (personalFact) {
+  // 自我陈述确定性兜底（2026-11-18 写入事故）：L1 的 personalFact 漏判时，
+  // 用户明确的自述（「我的生日是6月18」「我叫X」「我住在X」）如果没有进
+  // 抽取行，高信号就只剩助手那句「记上了」——抽取器看不到用户事实，档案
+  // 永远写不进去，而助手已经向用户承诺"记上了"。
+  // 复用 turn-wal 候选的同一份 hint 正则（isProfileExtractHint），保证
+  // 「标成画像候选」与「真的进了抽取」是同一口径，不再依赖 L1 单点分类。
+  const selfStatement = isProfileExtractHint(user);
+  if (personalFact || selfStatement) {
     reasons.push("personal_fact");
     extractLines.push(`[用户事实] ${firstSentence(user, 200)}`);
   }

@@ -42,20 +42,15 @@ async function main(): Promise<void> {
 
   // ---------- 2. 真实 LLM 轮：生产同源解析 + 真实执行器 ----------
   const { createExternalChatProviderFromEnv } = await import("../src/external-model/resolve-provider.js");
-  const { VideoGrabService, setVideoGrabServiceRef, setVideoGrabMcpClientRef } = await import("../src/services/video-grab-service.js");
+  const { VideoGrabService, setVideoGrabServiceRef } = await import("../src/services/video-grab-service.js");
   const { registerVideoTools } = await import("../src/tools/video-tools.js");
   const { ToolRegistry } = await import("../src/tools/tool-registry.js");
-  const { McpClientService } = await import("../src/services/mcp-client-service.js");
 
   const provider = createExternalChatProviderFromEnv();
   if (!provider?.isEnabled()) fail("外部模型 provider 未启用");
 
   const videoGrabService = new VideoGrabService();
   setVideoGrabServiceRef(videoGrabService);
-  // 生产同源：McpClientService 直连 yby6（video-grab 适配器第一优先通道）
-  const mcpClientService = new McpClientService();
-  await mcpClientService.discoverTools();
-  setVideoGrabMcpClientRef(mcpClientService);
   const registry = new ToolRegistry() as never as { register: (n: string, h: unknown) => void; execute: (n: string, a: unknown, c?: unknown) => Promise<{ ok: boolean; result: Record<string, unknown> }> };
   registerVideoTools(registry as never, videoGrabService);
   // 合成点：search 束桩（解析场景不应被调用）

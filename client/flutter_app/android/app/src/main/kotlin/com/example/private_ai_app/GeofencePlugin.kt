@@ -1,19 +1,23 @@
 package com.example.private_ai_app
 
+import android.Manifest
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.location.LocationManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import androidx.core.content.ContextCompat
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import org.json.JSONArray
 import org.json.JSONObject
+import java.time.Instant
 
 /**
  * 系统级地理围栏（GeofencePlugin）—— 持续感知架构的 Sense 层
@@ -61,6 +65,14 @@ class GeofencePlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
          * 现在把 id/name/坐标/半径/方向整体落盘，开机按这份定义重建。
          */
         private const val KEY_FENCES = "fence_definitions"
+        /**
+         * 上次开机/应用更新后的围栏重建结果（2026-11-18）。
+         *
+         * 开机时进程刚从冷启动恢复、Flutter 引擎与 WS 都不可达，没法实时回执。
+         * 这里先落盘，等 App 下次连上服务端、收到 agent.geofence_sync 时
+         * 作为 lastBootRestore 随回执补报——「重启后围栏还在不在」变得可观测。
+         */
+        private const val KEY_LAST_BOOT = "last_boot_restore"
 
         @Volatile
         private var sink: EventChannel.EventSink? = null
@@ -125,6 +137,21 @@ class GeofencePlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
                 }
             }
             prefs.edit().putString(KEY_IDS, ids.toString()).apply()
+            // 重建结果落盘：开机时无连接可回执，等下次上线由 sync 回执补报
+            try {
+                prefs.edit()
+                    .putString(
+                        KEY_LAST_BOOT,
+                        JSONObject().apply {
+                            put("registered", registered)
+                            put("total", arr.length())
+                            put("at", Instant.now().toString())
+                        }.toString(),
+                    )
+                    .apply()
+            } catch (e: Exception) {
+                Log.w(TAG, "开机重建结果落盘失败（忽略）", e)
+            }
             Log.i(TAG, "开机重建系统围栏 $registered/${arr.length()} 个")
             return registered
         }
@@ -243,16 +270,17 @@ class GeofencePlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
         when (call.method) {
             "sync" -> {
                 val fences = call.argument<List<Map<String, Any?>>>("fences") ?: emptyList()
-                val ok = try {
+                val report = try {
                     syncFences(fences)
                 } catch (e: SecurityException) {
                     Log.w(TAG, "缺少定位权限，无法注册围栏", e)
-                    false
+                    failureReport(fences, "missing_location_permission")
                 } catch (e: Exception) {
                     Log.e(TAG, "注册围栏失败", e)
-                    false
+                    failureReport(fences, "sync_failed: ${e.message ?: e.javaClass.simpleName}")
                 }
-                result.success(ok)
+                // 回执走 JSON 字符串：与 EventChannel 同口径，避免嵌套 Map 跨通道歧义
+                result.success(report.toString())
             }
             "clear" -> {
                 try {
@@ -270,32 +298,89 @@ class GeofencePlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
     private fun locationManager(): LocationManager? =
         context?.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
 
-    /** 幂等同步：先撤销本应用注册过的全部围栏，再按最新配置重建。 */
-    private fun syncFences(fences: List<Map<String, Any?>>): Boolean {
-        val lm = locationManager() ?: return false
-        if (!lm.isProviderEnabled(LocationManager.GPS_PROVIDER) &&
-            !lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
-        ) {
-            Log.w(TAG, "系统定位已关闭，围栏无法注册")
-            return false
+    /** 幂等同步：先撤销本应用注册过的全部围栏，再按最新配置重建。
+     *
+     * 返回**注册回执**（2026-11-18）：请求数/成功数/逐围栏失败原因/权限与
+     * 定位开关/上次开机重建结果。此前这里只返回 bool，Dart 侧又丢掉返回值，
+     * 权限被拒、系统定位关闭、ROM 拦截全是静默失败——服务端完全不可见。
+     *
+     * 权限缺失或系统定位关闭时**不清理**已注册的旧围栏：它们可能仍然生效，
+     * 清掉就真的没了；等用户授权/打开定位后的下一次同步再重建。
+     */
+    private fun syncFences(fences: List<Map<String, Any?>>): JSONObject {
+        val ctx = context
+        val lm = locationManager()
+        if (ctx == null) return failureReport(fences, "context_unavailable")
+        if (lm == null) return failureReport(fences, "location_service_unavailable")
+
+        val fineGranted = isGranted(Manifest.permission.ACCESS_FINE_LOCATION) ||
+            isGranted(Manifest.permission.ACCESS_COARSE_LOCATION)
+        val backgroundGranted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            isGranted(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+        } else {
+            true
         }
+        val gpsEnabled = lm.isProviderEnabled(LocationManager.GPS_PROVIDER)
+        val networkEnabled = lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)
+        val providersEnabled = gpsEnabled || networkEnabled
+
+        val report = JSONObject().apply {
+            put("platform", "android")
+            put("requested", fences.size)
+            put("at", Instant.now().toString())
+            put("permission", JSONObject().put("fine", fineGranted).put("background", backgroundGranted))
+            put("providersEnabled", providersEnabled)
+        }
+        // 没有「始终允许」定位时，围栏在 App 被杀后不会触发（注册 API 仍会成功），
+        // 这是警告而非失败：前台/后台存活期间仍能工作。
+        val warnings = JSONArray()
+        if (!backgroundGranted) warnings.put("background_location_not_granted")
+        report.put("warnings", warnings)
+
+        if (!fineGranted) {
+            report.put("ok", false)
+            report.put("registered", 0)
+            report.put("failures", collectFailures(fences, "missing_location_permission"))
+            Log.w(TAG, "缺少定位权限，跳过围栏重建（保留旧注册）")
+            return report
+        }
+        if (!providersEnabled) {
+            report.put("ok", false)
+            report.put("registered", 0)
+            report.put("failures", collectFailures(fences, "location_disabled"))
+            Log.w(TAG, "系统定位已关闭，跳过围栏重建（保留旧注册）")
+            return report
+        }
+
         clearAll()
 
         val ids = JSONArray()
         // 围栏完整定义落盘：开机重建用（系统注册是易失的，重启即丢）
         val definitions = JSONArray()
+        val failures = JSONArray()
         var registered = 0
         for (fence in fences) {
-            val id = fence["id"] as? String ?: continue
-            val name = fence["name"] as? String ?: ""
-            val lat = (fence["latitude"] as? Number)?.toDouble() ?: continue
-            val lon = (fence["longitude"] as? Number)?.toDouble() ?: continue
+            val id = (fence["id"] as? String)?.takeIf { it.isNotEmpty() }
+            val lat = (fence["latitude"] as? Number)?.toDouble()
+            val lon = (fence["longitude"] as? Number)?.toDouble()
             val radius = (fence["radiusMeters"] as? Number)?.toFloat() ?: 200f
+            if (id == null || lat == null || lon == null ||
+                lat.isNaN() || lon.isNaN() || radius <= 0f
+            ) {
+                failures.put(
+                    JSONObject().apply {
+                        put("fenceId", id ?: "unknown")
+                        put("reason", "invalid_definition")
+                    },
+                )
+                continue
+            }
+            val name = (fence["name"] as? String) ?: ""
             // 2026-11-13：leave 围栏现在也注册。
             // 原注释「平台只支持进入」是错的——Android `addProximityAlert` 对 enter/leave
             // 都会触发，靠广播里的 KEY_PROXIMITY_ENTERING 区分。此前把 leave 围栏
             // 直接跳过注册，等于「出门上班」这类离开事件在端上永远不会发生。
-            val kind = fence["event"] as? String ?: "enter"
+            val kind = (fence["event"] as? String) ?: "enter"
             definitions.put(
                 JSONObject().apply {
                     put("id", id)
@@ -310,15 +395,74 @@ class GeofencePlugin : FlutterPlugin, MethodChannel.MethodCallHandler,
                 lm.addProximityAlert(lat, lon, radius, -1L, buildPendingIntent(id, name, kind))
                 ids.put(id)
                 registered++
+            } catch (e: SecurityException) {
+                Log.w(TAG, "围栏 $id 注册失败（权限）", e)
+                failures.put(
+                    JSONObject().apply {
+                        put("fenceId", id)
+                        put("reason", "missing_location_permission")
+                    },
+                )
             } catch (e: Exception) {
                 Log.w(TAG, "围栏 $id 注册失败", e)
+                failures.put(
+                    JSONObject().apply {
+                        put("fenceId", id)
+                        put(
+                            "reason",
+                            "register_failed: ${e.message ?: e.javaClass.simpleName}",
+                        )
+                    },
+                )
             }
         }
-        context?.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            ?.edit()?.putString(KEY_IDS, ids.toString())
+        ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()?.putString(KEY_IDS, ids.toString())
             ?.putString(KEY_FENCES, definitions.toString())?.apply()
+
+        report.put("registered", registered)
+        report.put("failures", failures)
+        report.put("ok", registered == fences.size)
+        // 上次开机/应用更新后的重建结果：开机时无连接，只能这次补报
+        try {
+            ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getString(KEY_LAST_BOOT, null)
+                ?.let { report.put("lastBootRestore", JSONObject(it)) }
+        } catch (e: Exception) {
+            Log.w(TAG, "读取开机重建记录失败（忽略）", e)
+        }
         Log.i(TAG, "已注册 $registered/${fences.size} 个系统围栏")
-        return true
+        return report
+    }
+
+    private fun isGranted(permission: String): Boolean {
+        val ctx = context ?: return false
+        return ContextCompat.checkSelfPermission(ctx, permission) == PackageManager.PERMISSION_GRANTED
+    }
+
+    /** 前置条件不满足时的整批失败回执（逐围栏给同一原因）。 */
+    private fun failureReport(fences: List<Map<String, Any?>>, reason: String): JSONObject {
+        return JSONObject().apply {
+            put("platform", "android")
+            put("ok", false)
+            put("requested", fences.size)
+            put("registered", 0)
+            put("failures", collectFailures(fences, reason))
+            put("at", Instant.now().toString())
+        }
+    }
+
+    private fun collectFailures(fences: List<Map<String, Any?>>, reason: String): JSONArray {
+        val arr = JSONArray()
+        for (fence in fences) {
+            arr.put(
+                JSONObject().apply {
+                    put("fenceId", (fence["id"] as? String) ?: "unknown")
+                    put("reason", reason)
+                },
+            )
+        }
+        return arr
     }
 
     private fun clearAll() {

@@ -48,6 +48,11 @@ const FETCH_TIMEOUT_MS = 8_000;
  *
  * 2026-11-14 由 3 位（≈110m）收紧到 4 位：结果里现在带门牌/小区级地址，
  * 110m 的取整会把隔壁小区的地址当成用户的——精度要求上来了，缓存键必须跟上。
+ *
+ * 2026-11-18 再收紧到 6 位（≈0.11m）：这是高德 regeo `location` 参数允许的
+ * 最大输入精度，也是整条链路唯一还会「量化坐标」的地方。保留 4 位时，
+ * 同一个 11m 网格内的两次定位会复用同一条门牌地址，客户端把门槛收到 10m 后
+ * 这层归并会直接吃掉提升。6 位与高德上限对齐，不再额外损失精度。
  */
 const GEO_CACHE_TTL_MS = 30 * 60 * 1000;
 const GEO_CACHE_MAX = 512;
@@ -55,7 +60,7 @@ const geoCache = new Map<string, { at: number; hit: ReverseGeocodeHit }>();
 const geoInflight = new Map<string, Promise<ReverseGeocodeHit | null>>();
 
 function geoCacheKey(latitude: number, longitude: number): string {
-  return `${latitude.toFixed(4)},${longitude.toFixed(4)}`;
+  return `${latitude.toFixed(6)},${longitude.toFixed(6)}`;
 }
 
 /** 只读缓存（不触发网络）：prompt/工具补精确地址时用，拿不到就走原降级链。 */
@@ -188,9 +193,19 @@ async function reverseFromAmap(latitude: number, longitude: number): Promise<Rev
   if (!key) return null;
 
   const gcj = wgs84ToGcj02(latitude, longitude);
+  // 高德 `location` 只接受 6 位小数（≈0.11m），与链路其它环节的精度上限一致：
+  // 再多的位数会被接口丢弃，这里显式截断，避免「以为传了更高精度」。
+  const gcjLon = Number(gcj.longitude.toFixed(6));
+  const gcjLat = Number(gcj.latitude.toFixed(6));
   // extensions=all：只有 all 才返回 pois/aois（最近地标）与完整 formatted_address；
   // base 只有省市区，用户问「我在哪」只能答到行政区。
-  const url = `https://restapi.amap.com/v3/geocode/regeo?key=${encodeURIComponent(key)}&location=${gcj.longitude},${gcj.latitude}&extensions=all&output=JSON`;
+  // radius=200 + roadlevel=0（2026-11-18）：半径只约束「最近 POI/AOI 的检索范围」。
+  // 高德默认 1000m 会把八百米外的商场当成「最近地标」，用户问「我在哪」就被带到
+  // 隔壁街区；200m 覆盖一个街区/小区尺度，超出宁可不给地标也不给错的。
+  // 地址本身（formatted_address）始终由坐标直接解算，不受 radius 影响。
+  const url =
+    `https://restapi.amap.com/v3/geocode/regeo?key=${encodeURIComponent(key)}` +
+    `&location=${gcjLon},${gcjLat}&extensions=all&radius=200&roadlevel=0&output=JSON`;
   const data = (await fetchJson(url)) as {
     status?: string;
     regeocode?: {

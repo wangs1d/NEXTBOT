@@ -26,7 +26,7 @@ function item(title: string, pageUrl: string): MediaSearchItem {
   return { type: "video", title, pageUrl, source: "probe" };
 }
 
-/** 假 grab：抖音页恒失败（与当前 yby6 上游实况一致），B 站页恒出流 */
+/** 假 grab：抖音页恒失败（第三方解析通道已下线），B 站页恒出流 */
 function fakeGrabService(seen: string[]): never {
   return {
     async grab(url: string) {

@@ -2,6 +2,7 @@ import "dart:async";
 import "dart:convert";
 
 import "package:flutter/foundation.dart";
+import "package:flutter/services.dart" show MethodChannel, MissingPluginException, PlatformException;
 import "package:flutter_timezone/flutter_timezone.dart";
 import "package:geolocator/geolocator.dart";
 import "package:http/http.dart" as http;
@@ -102,9 +103,23 @@ class ClientLocationService {
 
   static LocationPrefsReader? _readPref;
   static LocationPrefsWriter? _writePref;
-  /// `null` 尚未询问；`true`/`false` 用户已选择。
-  /// 默认 `true`：让 Agent 实时拿到用户位置；用户可在权限弹窗里显式「暂不允许」回退。
-  static bool? _locationConsent = true;
+
+  // ─── 高德定位（2026-11-18）─────────────────────────────────────────
+  // Android 端接 AMapLocationClient 做「GPS + WiFi + 基站 + 传感器」融合定位，
+  // 精度档位 Hight_Accuracy + GpsFirst，是设备硬件的上限；geolocator 保留为
+  // 回退（未配 key / 非 Android / SDK 初始化失败时静默降级）。
+  // 坐标系：高德返回 GCJ-02，原生层已转回 WGS-84，与服务端「WGS→GCJ 再逆地理」
+  // 的口径一致，避免二次偏移。
+  static const MethodChannel _amapChannel =
+      MethodChannel("private_ai_agent/amap_location");
+  /// 一旦确定不可用（无 key / 插件缺失）就本进程内不再尝试，避免每次定位都付一次失败开销。
+  static bool _amapUsable = true;
+  /// `null` 尚未选择；`true`/`false` 用户已选择。
+  ///
+  /// 手机端首次保持 `null`（而不是默认 `true`），否则 [getLocationConsent] 永远
+  /// 非空、启动弹窗被跳过——「始终允许（后台持续）」就永远没有入口。桌面端没有
+  /// 「始终允许」这个概念，沿用默认同意。
+  static bool? _locationConsent;
   /// 常驻定位开关（用户显式开启；开启后走「始终允许」权限 + 位移触发的后台上报）。
   static bool? _residentEnabled;
   /// 常驻定位流订阅（Android 走前台服务保活；iOS 依赖 Always 授权的 Significant-change）。
@@ -119,11 +134,17 @@ class ClientLocationService {
     _writePref = write;
   }
 
+  /// 手机端需要用户显式选择定位同意（弹窗里有「始终允许」）；桌面端没有该概念。
+  static bool get _needsExplicitConsent =>
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.iOS);
+
   static Future<bool?> getLocationConsent() async {
     if (_locationConsent != null) return _locationConsent;
-    if (_readPref == null) return true;
+    if (_readPref == null) return _needsExplicitConsent ? null : true;
     final dynamic raw = await _readPref!(_consentKey);
-    if (raw == null) return true;
+    if (raw == null) return _needsExplicitConsent ? null : true;
     _locationConsent = raw == true;
     return _locationConsent;
   }
@@ -162,8 +183,10 @@ class ClientLocationService {
   }
 
   /// 升级到「始终允许」：iOS 在已授 WhileUsing 后再调 requestPermission 会弹
-  /// Always 升级框；Android 10+ 的二级弹窗含「始终允许」，11+ 可能落在系统设置，
-  /// 此时打开本应用的定位设置页引导。返回最终拿到的权限档位。
+  /// Always 升级框；Android 10+ 的二级弹窗含「始终允许」，11+ 的弹窗里已经没有
+  /// 这个选项，必须打开**本应用的权限设置页**（设置 → 应用 → 权限 → 位置 →
+  /// 「允许所有时间」）手动选。注意不能用 openLocationSettings——那是设备的
+  /// 定位总开关页，上面根本没有「始终允许」。返回最终拿到的权限档位。
   static Future<LocationPermission> ensureAlwaysPermission() async {
     if (!await Geolocator.isLocationServiceEnabled()) {
       return LocationPermission.denied;
@@ -174,9 +197,9 @@ class ClientLocationService {
     }
     if (permission == LocationPermission.whileInUse) {
       permission = await Geolocator.requestPermission();
-      // Android 11+ 二级弹窗可能只给「仅本次」：仍差一级时引导去系统设置
+      // 仍只到「使用期间」：Android 11+ 只能去应用权限页选「允许所有时间」。
       if (permission == LocationPermission.whileInUse) {
-        await Geolocator.openLocationSettings();
+        await Geolocator.openAppSettings();
         permission = await Geolocator.checkPermission();
       }
     }
@@ -185,6 +208,34 @@ class ClientLocationService {
 
   static bool get isResidentTrackingActive => _residentSub != null;
 
+  /// 最近一次 fix（常驻流/按需定位都会刷新）：后台心跳用它回传「仍在原处」。
+  static ClientLocationPayload? get lastKnownPayload => _cached;
+
+  /// 最近一次 fix 的本地记录时刻（后台心跳的新鲜度门槛）。
+  static DateTime? get lastKnownRecordedAt => _cachedAt;
+
+  /// 是否已拿到「始终允许」——纯检查，不触发任何权限弹窗（后台路径用）。
+  static Future<bool> hasAlwaysPermission() async {
+    try {
+      return await Geolocator.checkPermission() == LocationPermission.always;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 服务端 continuous 驱动：绕过用户本地常驻开关（服务端已显式要求持续定位），
+  /// 但仍然要求定位同意 + 「始终允许」权限；高精度、位移阈值 50m。
+  static Future<bool> startServerContinuousTracking({
+    required void Function(ClientLocationPayload payload) onFix,
+  }) {
+    return startResidentTracking(
+      onFix: onFix,
+      distanceFilterMeters: 50,
+      accuracy: LocationAccuracy.high,
+      ignoreUserToggle: true,
+    );
+  }
+
   /// 启动常驻定位流（位移 ≥ [distanceFilterMeters] 米才产一次 fix，不动不报——
   /// 不是 GPS 轮询，省电）。Android 走前台服务常驻（通知栏可见、可随时关）；
   /// iOS 依赖 Always 授权 + 系统对位移事件的唤醒。
@@ -192,11 +243,13 @@ class ClientLocationService {
   static Future<bool> startResidentTracking({
     required void Function(ClientLocationPayload payload) onFix,
     int distanceFilterMeters = 150,
+    LocationAccuracy accuracy = LocationAccuracy.medium,
+    bool ignoreUserToggle = false,
   }) async {
     if (isResidentTrackingActive) return true;
     final bool consent = await getLocationConsent() == true;
-    final bool enabled = await getResidentLocationEnabled();
-    if (!consent || !enabled) return false;
+    if (!consent) return false;
+    if (!ignoreUserToggle && !await getResidentLocationEnabled()) return false;
     final LocationPermission permission = await ensureAlwaysPermission();
     if (permission != LocationPermission.always) {
       debugPrint(
@@ -208,7 +261,7 @@ class ClientLocationService {
       LocationSettings settings;
       if (defaultTargetPlatform == TargetPlatform.android) {
         settings = AndroidSettings(
-          accuracy: LocationAccuracy.medium,
+          accuracy: accuracy,
           distanceFilter: distanceFilterMeters,
           foregroundNotificationConfig: const ForegroundNotificationConfig(
             notificationTitle: "NEXTBOT 位置服务",
@@ -220,7 +273,7 @@ class ClientLocationService {
         );
       } else {
         settings = LocationSettings(
-          accuracy: LocationAccuracy.medium,
+          accuracy: accuracy,
           distanceFilter: distanceFilterMeters,
         );
       }
@@ -311,22 +364,90 @@ class ClientLocationService {
       debugPrint("[ClientLocationService] 定位权限未授予，按需回包回 null");
       return null;
     }
-    // 快速窗口契约：服务端只等 12s，本方法外层封顶 8s。引擎预算 6s：
-    // last-known 快路毫秒级；高精度流拿到 ≤30m 的 fix 即刻返回，预算耗尽
-    // 给最佳 fix；GPS 零 fix 时降级中精度 4s（在 6s 预算内）。
+    // 快速窗口契约：服务端只等 12s，本方法外层封顶 8s（高德 + geolocator 回退共享）。
+    // 高德融合定位通常 1~3s 出结果；geolocator 只用剩余预算，绝不超过总窗口。
     //
-    // 2026-11-13 精度门槛 150m → 30m：用户要求「百分百精确」。
-    // 150m 的 fix 在室内/城市街区尺度下毫无意义（半径 150m ≈ 半个街区），
-    // 「我在哪」「离某地多远」这类问题会答出偏差数百米的结果。
-    // 30m 是 GPS 在开阔环境下的可达精度，仍在 6s 预算内可获取；
-    // 达不到时按「预算耗尽给最佳 fix」处理，如实带上 accuracyMeters 上报，
-    // 由服务端按精度裁决（低精度降级）而不是把低精度当高精度用。
-    final Position? position = await _fetchPrecisePosition(
-      budget: const Duration(seconds: 6),
-      maxAccuracyMeters: 30,
+    // 2026-11-18 门槛 30m → 10m（用户要求「高德允许下的无限精确」）：30m 在城市
+    // 街区尺度已经会答错（≈半个街区）。10m 是开阔户外 GPS 的常见可达值，与高德
+    // regeo 6 位小数（≈0.11m）输入相比也只是硬件本身的极限。达不到时仍按
+    // 「预算耗尽给最佳 fix」返回，如实携带 accuracyMeters 交给服务端裁决。
+    final DateTime deadline = DateTime.now().add(const Duration(milliseconds: 7500));
+    final ClientLocationPayload? amap = await _amapFix(
+      timeout: const Duration(milliseconds: 5000),
+      maxAccuracyMeters: 10,
     );
-    if (position == null) return null;
-    return _payloadFrom(position);
+    if (amap != null && _isAccurateEnough(amap.accuracyMeters, 10)) return amap;
+
+    final Duration remaining = deadline.difference(DateTime.now());
+    if (remaining >= const Duration(milliseconds: 500)) {
+      final Position? position = await _fetchPrecisePosition(
+        budget: remaining,
+        maxAccuracyMeters: 10,
+      );
+      if (position != null) return _payloadFrom(position);
+    }
+    // 高德给了低精度 fix 也比「什么都拿不到」强，如实带回 accuracyMeters。
+    return amap;
+  }
+
+  static bool _isAccurateEnough(double? accuracyMeters, double maxAccuracyMeters) {
+    return accuracyMeters != null &&
+        accuracyMeters > 0 &&
+        accuracyMeters <= maxAccuracyMeters;
+  }
+
+  /// 高德单次高精度取点（Android 原生 AMapLocationClient，Hight_Accuracy + GpsFirst）。
+  /// 未配 key / 非 Android / SDK 异常时返回 null，由 geolocator 回退，不阻塞主链路。
+  static Future<ClientLocationPayload?> _amapFix({
+    required Duration timeout,
+    required double maxAccuracyMeters,
+  }) async {
+    if (!_amapUsable || defaultTargetPlatform != TargetPlatform.android) return null;
+    try {
+      final Map<dynamic, dynamic>? raw =
+          await _amapChannel.invokeMethod<Map<dynamic, dynamic>>(
+        "getCurrentLocation",
+        <String, dynamic>{
+          "timeoutMs": timeout.inMilliseconds,
+          "maxAccuracyMeters": maxAccuracyMeters,
+        },
+      ).timeout(timeout + const Duration(seconds: 2));
+      if (raw == null) return null;
+      final double lat = (raw["latitude"] as num?)?.toDouble() ?? 0;
+      final double lon = (raw["longitude"] as num?)?.toDouble() ?? 0;
+      if (lat == 0 && lon == 0) return null;
+      final int? capturedAtMs = (raw["capturedAtMs"] as num?)?.toInt();
+      return ClientLocationPayload(
+        latitude: lat,
+        longitude: lon,
+        accuracyMeters: (raw["accuracyMeters"] as num?)?.toDouble(),
+        altitudeMeters: (raw["altitudeMeters"] as num?)?.toDouble(),
+        speedMps: (raw["speedMps"] as num?)?.toDouble(),
+        headingDegrees: (raw["headingDegrees"] as num?)?.toDouble(),
+        capturedAt: capturedAtMs != null
+            ? DateTime.fromMillisecondsSinceEpoch(capturedAtMs, isUtc: true)
+                .toIso8601String()
+            : null,
+        timezone: await _deviceTimezone(),
+        label: "${lat.toStringAsFixed(6)}, ${lon.toStringAsFixed(6)}",
+      );
+    } on MissingPluginException {
+      _amapUsable = false;
+      return null;
+    } on PlatformException catch (e) {
+      // 无 key / 初始化失败属确定性不可用：本进程内不再重试（避免每次定位多付一次失败开销）；
+      // 超时类错误保留重试，下次可能拿到 fix。
+      if (e.code == "amap_key_missing" ||
+          e.code == "amap_init_failed" ||
+          e.code == "amap_start_failed") {
+        _amapUsable = false;
+      }
+      debugPrint("[ClientLocationService] 高德定位不可用: ${e.code} ${e.message}");
+      return null;
+    } catch (e) {
+      debugPrint("[ClientLocationService] 高德定位异常: $e");
+      return null;
+    }
   }
 
   /// 读取设备真实 IANA 时区（如 America/New_York）；失败返回 null（不上报，交服务端判定）。
@@ -362,6 +483,10 @@ class ClientLocationService {
     required Duration budget,
     required double maxAccuracyMeters,
   }) async {
+    // 总预算 deadline：高精度流用满预算后，降级的中精度流只能用**剩余时间**。
+    // 旧实现固定再给 4s，实际总耗时 10s+，外层 8s 超时会把整次定位直接判死。
+    final DateTime deadline = DateTime.now().add(budget);
+
     // 快路：last-known 足够新且达标 → 毫秒级返回。
     try {
       final Position? last = await Geolocator.getLastKnownPosition();
@@ -386,10 +511,15 @@ class ClientLocationService {
     );
     if (best != null) return best;
 
-    // 降级：高精度零 fix（室内/无 GPS 硬件的桌面）→ 中精度短预算。
+    // 降级：高精度零 fix（室内/无 GPS 硬件的桌面）→ 剩余预算内的中精度。
+    final Duration remaining = deadline.difference(DateTime.now());
+    if (remaining < const Duration(milliseconds: 500)) return null;
+    final Duration mediumBudget = remaining < const Duration(seconds: 4)
+        ? remaining
+        : const Duration(seconds: 4);
     return _collectBestFix(
       accuracy: LocationAccuracy.medium,
-      budget: const Duration(seconds: 4),
+      budget: mediumBudget,
       maxAccuracyMeters: maxAccuracyMeters,
     );
   }
@@ -440,7 +570,7 @@ class ClientLocationService {
       capturedAt: position.timestamp.toUtc().toIso8601String(),
       timezone: await _deviceTimezone(),
       label:
-          "${position.latitude.toStringAsFixed(4)}, ${position.longitude.toStringAsFixed(4)}",
+          "${position.latitude.toStringAsFixed(6)}, ${position.longitude.toStringAsFixed(6)}",
     );
   }
 
@@ -456,19 +586,33 @@ class ClientLocationService {
         return disk ?? _cached;
       }
 
-      final Position? position = await _fetchPrecisePosition(
-        budget: const Duration(seconds: 7),
-        // 精确化（2026-11-14）：100m 会让逆地理落到隔壁街区/小区，用户问
-        // 「我现在在哪」就答错门牌。目标 50m；达不到仍返回最佳 fix 并如实
-        // 携带 accuracyMeters，由服务端决定是否降级展示。
-        maxAccuracyMeters: 50,
+      // 精度门槛（2026-11-18）：50m → 10m，与聊天按需路径统一。50m 的 fix
+      // 做逆地理会落到隔壁街区/小区，用户问「我现在在哪」就答错门牌；
+      // 达不到时仍返回最佳 fix 并如实携带 accuracyMeters，由服务端决定降级展示。
+      final DateTime deadline = DateTime.now().add(const Duration(seconds: 8));
+      final ClientLocationPayload? amap = await _amapFix(
+        timeout: const Duration(milliseconds: 5000),
+        maxAccuracyMeters: 10,
       );
-      if (position == null) {
+      Position? position;
+      final Duration remaining = deadline.difference(DateTime.now());
+      if (!_isAccurateEnough(amap?.accuracyMeters, 10) &&
+          remaining >= const Duration(milliseconds: 500)) {
+        position = await _fetchPrecisePosition(
+          budget: remaining,
+          maxAccuracyMeters: 10,
+        );
+      }
+
+      // 高德 fix 优先（精度达标时 geolocator 已跳过）；否则用 geolocator 的结果。
+      final ClientLocationPayload? coordsPayload = position != null
+          ? await _payloadFrom(position)
+          : amap;
+      if (coordsPayload == null) {
         debugPrint("[ClientLocationService] 预算内未取到任何 fix，回缓存兜底");
         return _cached ?? disk;
       }
 
-      final ClientLocationPayload coordsPayload = await _payloadFrom(position);
       final ClientLocationPayload? resolved =
           await _reverseGeocodeViaServer(coordsPayload.latitude, coordsPayload.longitude);
       // 逆地理只补城市文本与时区（定位→当地时区的主路）；精度元数据原样保留

@@ -174,7 +174,13 @@ export class ImageGenerationService {
    * 把图片 buffer 统一转成 PNG 落盘（Gemini 系直接返回 base64 数据时使用），
    * 复用 data/images/{actorId}/ 目录与 /agent/images/ 静态拉流路由。
    */
-  async saveImageBuffer(actorId: string, buf: Buffer, sessionId?: string, turn?: MediaTurnInfo): Promise<string> {
+  async saveImageBuffer(
+    actorId: string,
+    buf: Buffer,
+    sessionId?: string,
+    turn?: MediaTurnInfo,
+    opts: { libraryHidden?: boolean } = {},
+  ): Promise<string> {
     const safeActorId = actorId.replace(/[^a-zA-Z0-9_-]/g, "_") || "anonymous";
     const dir = join(this.storageRoot, safeActorId);
     await mkdir(dir, { recursive: true });
@@ -182,7 +188,8 @@ export class ImageGenerationService {
     const sharp = await loadSharp();
     const png = await sharp(buf, { animated: false }).rotate().png().toBuffer();
     await writeFile(join(dir, fileName), png);
-    recordMediaSession(actorId, "images", fileName, sessionId, false, turn);
+    // libraryHidden=true：用户聊天照片是附件不是能力产物，不进资料库卡片流
+    recordMediaSession(actorId, "images", fileName, sessionId, opts.libraryHidden === true, turn);
     return `/agent/images/${safeActorId}/${fileName}`;
   }
 

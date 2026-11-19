@@ -75,6 +75,61 @@ export const clientClockWireSchema = z.object({
 
 export type ClientClockWire = z.infer<typeof clientClockWireSchema>;
 
+/**
+ * 围栏注册回执（`client.geofence_report`）。
+ *
+ * 服务端下发围栏后，客户端必须如实回报「系统围栏是否真的注册成功」：
+ *  - 失败项逐条给原因（权限缺失 / 系统定位关闭 / addProximityAlert 异常）；
+ *  - 权限与定位开关是**诊断字段**：Android 10+ 没有「始终允许」定位，
+ *    App 被杀后围栏不会触发，但注册 API 仍返回成功——不带上这一层，
+ *    服务端会把「注册成功但永不触发」当成正常；
+ *  - lastBootRestore 是上次开机重建的结果（开机时无连接，只能下次连上补报）。
+ *
+ * 全部字段宽松校验：回执坏了不能影响主链路。
+ */
+export const geofenceSyncReportSchema = z.object({
+  ok: z.boolean(),
+  platform: z.enum(["android", "ios", "other"]).optional(),
+  /** 本次要求注册的围栏数（含 disabled 已过滤后的在线配置） */
+  requested: z.number().int().min(0).max(200),
+  /** 实际注册成功的数量 */
+  registered: z.number().int().min(0).max(200),
+  failures: z
+    .array(
+      z.object({
+        fenceId: z.string().max(80),
+        /** 机器可读原因，如 missing_location_permission / location_disabled / register_failed: ... */
+        reason: z.string().max(200),
+      }),
+    )
+    .max(200)
+    .optional(),
+  /** 非致命问题，如 background_location_not_granted */
+  warnings: z.array(z.string().max(120)).max(20).optional(),
+  permission: z.object({ fine: z.boolean(), background: z.boolean() }).optional(),
+  providersEnabled: z.boolean().optional(),
+  lastBootRestore: z
+    .object({
+      registered: z.number().int().min(0).max(200),
+      total: z.number().int().min(0).max(200),
+      at: z.string().max(64),
+    })
+    .optional(),
+  /** 同步过程整体失败（通道不可用/异常）时的原样错误 */
+  error: z.string().max(300).optional(),
+  /** 回执生成时刻（ISO） */
+  at: z.string().max(64).optional(),
+  /** 同步耗时（毫秒），用于诊断 ROM 卡顿 */
+  durationMs: z.number().int().min(0).max(600_000).optional(),
+});
+
+export type GeofenceSyncReportWire = z.infer<typeof geofenceSyncReportSchema>;
+
+export function parseGeofenceSyncReport(raw: unknown): GeofenceSyncReportWire | undefined {
+  const parsed = geofenceSyncReportSchema.safeParse(raw);
+  return parsed.success ? parsed.data : undefined;
+}
+
 export type ClientGeoContext = {
   clientIp?: string;
   clientLocation?: ClientLocationWire;

@@ -78,6 +78,23 @@ function parseResultJson(result: Record<string, unknown>): unknown {
 /** optionId 形态：didi:{estimate_trace_id}:{product_category} */
 const OPTION_ID_RE = /^didi:([A-Za-z0-9_-]+):(\d+)$/;
 
+/**
+ * 从一行车型文案里取预估价。
+ *
+ * 必须带货币符号或「元/块」才算价格：滴滴估价自由文本里还有
+ * 「预估流程ID：traceECO123」「3 分钟内接驾」这类数字/近似文本，
+ * 早前全局取第一个「预估/约 + 数字」会把「约 1 分钟」或流程 ID 当金额，
+ * 再把同一个数字套到所有车型上（真机表现：所有车型价格都一样）。
+ */
+function parseLineAmount(line: string): number | null {
+  const m =
+    line.match(/[¥￥]\s*(\d+(?:\.\d+)?)/) ??
+    line.match(/(?:预估价|预估价格|价格|车费|费用|金额)\s*[:：]?\s*[¥￥]?\s*(\d+(?:\.\d+)?)/) ??
+    line.match(/(\d+(?:\.\d+)?)\s*(?:元|块)/);
+  const n = m ? Number(m[1]) : NaN;
+  return Number.isFinite(n) ? Math.round(n * 100) / 100 : null;
+}
+
 export class DidiMcpRideProvider implements BookingProvider {
   readonly key = "didi";
   readonly domain = "ride" as const;
@@ -176,15 +193,34 @@ export class DidiMcpRideProvider implements BookingProvider {
     );
     if (!est.ok) return { ok: false, error: "滴滴估价请求失败（MCP 调用未成功）", retryable: true };
 
-    // 沙箱估价是自由文本：解析「车型 (product_category: N)」行 + 预估流程ID + 预估价
+    // 沙箱估价是自由文本：逐行解析「车型 (product_category: N)」，
+    // 每行各自取价/接驾时长，不能拿全局第一个价格套给全部车型。
     const text = textOf(est.result);
-    const categories = [
-      ...text.matchAll(/([\u4e00-\u9fa5A-Za-z]{2,6})\s*[（(]\s*product_category[:：=]\s*(\d+)\s*[）)]/g),
-    ];
-    const traceId = text.match(/预估流程ID[:：]\s*([A-Za-z0-9_-]+)/)?.[1] ?? "";
-    const amount = Number(text.match(/(?:预估|约)[^0-9]{0,6}[¥￥]?\s*(\d+(?:\.\d+)?)/)?.[1] ?? NaN);
-    const eta = Number(text.match(/(\d+)\s*分钟内?[接驾|到达]/)?.[1] ?? NaN);
-    if (categories.length === 0 || !traceId) {
+    const traceIdGlobal = text.match(/预估流程ID[:：]\s*([A-Za-z0-9_-]+)/)?.[1] ?? "";
+    const parsed: Array<{
+      name: string;
+      category: string;
+      traceId: string;
+      amount: number | null;
+      etaMinutes: number | null;
+    }> = [];
+    for (const line of text.split(/\r?\n/)) {
+      const m = line.match(
+        /([\u4e00-\u9fa5A-Za-z]{2,6})\s*[（(]\s*product_category[:：=]\s*(\d+)\s*[）)]/,
+      );
+      if (!m) continue;
+      const etaMin = Number(line.match(/(\d+)\s*分钟内?[接驾|到达]/)?.[1] ?? NaN);
+      parsed.push({
+        name: m[1],
+        category: m[2],
+        traceId: line.match(/预估流程ID[:：]\s*([A-Za-z0-9_-]+)/)?.[1] ?? traceIdGlobal,
+        amount: parseLineAmount(line),
+        etaMinutes: Number.isFinite(etaMin) ? etaMin : null,
+      });
+    }
+    // 流程ID可能只在首行出现一次，也可能每行各带一个；两种形态都保留。
+    const usable = parsed.filter((p) => p.traceId);
+    if (usable.length === 0) {
       return {
         ok: false,
         error: `滴滴估价返回无法解析（片段：${text.slice(0, 80)}），请稍后重试`,
@@ -192,16 +228,16 @@ export class DidiMcpRideProvider implements BookingProvider {
       };
     }
 
-    const options: BookingOption[] = categories.slice(0, 4).map((m) => ({
+    const options: BookingOption[] = usable.slice(0, 4).map((m) => ({
       // 报价上下文（流程ID/车型）编码进 optionId，下单阶段原样带回
-      id: `didi:${traceId}:${m[2]}`,
+      id: `didi:${m.traceId}:${m.category}`,
       provider: this.key,
-      title: `${m[1]}${Number.isFinite(amount) ? `（预估 ¥${amount}）` : ""}`,
-      description: `${from.name} → ${dest.name}${Number.isFinite(amount) ? ` · 预估 ¥${amount}` : " · 价格以平台为准"}`,
-      amountCny: Number.isFinite(amount) ? amount : null,
+      title: m.amount != null ? `${m.name}（预估 ¥${m.amount}）` : m.name,
+      description: `${from.name} → ${dest.name}${m.amount != null ? ` · 预估 ¥${m.amount}` : " · 价格以平台为准"}`,
+      amountCny: m.amount,
       currency: "CNY" as const,
-      etaMinutes: Number.isFinite(eta) ? eta : null,
-      extra: { carType: m[1], estimateTraceId: traceId, productCategory: m[2] },
+      etaMinutes: m.etaMinutes,
+      extra: { carType: m.name, estimateTraceId: m.traceId, productCategory: m.category },
     }));
     return {
       ok: true,

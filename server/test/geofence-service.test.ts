@@ -24,6 +24,8 @@ import {
   validateGeofenceInput,
   type GeofenceTriggeredEvent,
 } from "../src/services/geofence-service.js";
+import { haversineMeters } from "../src/services/geo-utils.js";
+import { wgs84ToGcj02 } from "../src/services/reverse-geocode-service.js";
 import { GEOFENCE_CHAT_TOOLS, registerGeofenceTools } from "../src/tools/geofence-tools.js";
 import { ToolRegistry } from "../src/tools/tool-registry.js";
 
@@ -277,7 +279,20 @@ test("geofence.* 工具：create/list/delete round trip", async () => {
     );
 
     const ctx = { sessionId: "u1", userId: "u1" };
-    const createdRes = (await registry.execute("geofence", { ...validInput(), action: "create" }, ctx)) as {
+    // 2026-11-18：create 必须声明坐标系（否则坐标可能整体偏移 50~500m）
+    const missingDatum = (await registry.execute(
+      "geofence",
+      { ...validInput(), action: "create" },
+      ctx,
+    )) as { result: { ok: boolean; error: string } };
+    assert.equal(missingDatum.result.ok, false);
+    assert.match(String(missingDatum.result.error), /coordSystem/);
+
+    const createdRes = (await registry.execute(
+      "geofence",
+      { ...validInput(), action: "create", coordSystem: "wgs84" },
+      ctx,
+    )) as {
       ok: boolean;
       result: { ok: boolean; geofence: { id: string; name: string } };
     };
@@ -355,5 +370,63 @@ test("精度裁决：accuracy <= 半径时正常触发（边界内的高精度 f
     const entered = svc.processLocationReport("u1", { ...NEAR_HOME, accuracyMeters: 150 });
     assert.equal(entered.length, 1);
     assert.equal(events.length, 1);
+  });
+});
+
+// ─── 2026-11-18 坐标系归一 ──────────────────────────────────────────────
+test("坐标系归一：coordSystem=gcj02 的入参在落库前转成 WGS-84", async () => {
+  await withGeofence(async ({ svc }) => {
+    // 高德 POI 的 GCJ-02 坐标（兴义附近）
+    const gcj = { latitude: 25.062506, longitude: 104.892552 };
+    const created = svc.create(
+      "u1",
+      validInput({ ...gcj, coordSystem: "gcj02" }),
+    );
+    assert.ok(!("error" in created), "合法 gcj02 入参不应被拒");
+    if ("error" in created) throw new Error(created.error);
+
+    const stored = { latitude: created.latitude, longitude: created.longitude };
+    // 与输入存在坐标系固有偏移（国内 50~500m）
+    assert.ok(haversineMeters(stored, gcj) > 50, "应发生坐标转换而不是原样落库");
+    // 转回 GCJ 应与原输入重合（<1m）：证明存的确实是同一地点的 WGS-84
+    const back = wgs84ToGcj02(stored.latitude, stored.longitude);
+    assert.ok(haversineMeters(back, gcj) < 1, "逆向转换应回到原 POI 坐标");
+  });
+});
+
+test("坐标系归一：coordSystem 非法时校验拒绝", async () => {
+  await withGeofence(async ({ svc }) => {
+    const bad = svc.create("u1", validInput({ coordSystem: "bd09" }));
+    assert.ok("error" in bad);
+    assert.match(String(bad.error), /coordSystem/);
+  });
+});
+
+// ─── 2026-11-18 客户端注册回执 ──────────────────────────────────────────
+test("客户端回执：recordClientSync 只保留最新一条，getClientSync 可读", async () => {
+  await withGeofence(async ({ svc }) => {
+    assert.equal(svc.getClientSync("u1"), null);
+
+    svc.recordClientSync("u1", {
+      ok: false,
+      requested: 1,
+      registered: 0,
+      failures: [{ fenceId: "gf_1", reason: "missing_location_permission" }],
+      permission: { fine: false, background: false },
+    });
+    svc.recordClientSync("u1", {
+      ok: true,
+      requested: 1,
+      registered: 1,
+      permission: { fine: true, background: true },
+    });
+
+    const status = svc.getClientSync("u1");
+    assert.ok(status);
+    assert.equal(status?.ok, true);
+    assert.equal(status?.registered, 1);
+    // 后写入覆盖前一条（只留最新状态）
+    assert.equal(status?.report.ok, true);
+    assert.equal("failures" in (status?.report ?? {}), false);
   });
 });

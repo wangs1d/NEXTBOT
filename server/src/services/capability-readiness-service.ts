@@ -110,12 +110,12 @@ const CAPABILITY_ENTRIES: CapabilityEntry[] = [
   {
     id: "ride_hailing",
     label: "打车出行",
-    description: "网约车叫车与行程跟踪（滴滴 MCP / 高德打车）",
+    description: "网约车叫车与行程跟踪（滴滴官方 MCP）",
     groups: [
       {
-        anyOf: ["DIDI_MCP_KEY", "AMAP_WEB_KEY", "RIDE_AMAP_WEB_KEY"],
+        anyOf: ["DIDI_MCP_KEY"],
         required: true,
-        hint: "配置 DIDI_MCP_KEY（滴滴）或 AMAP_WEB_KEY（高德打车）",
+        hint: "配置 DIDI_MCP_KEY（滴滴）解锁真实叫车",
       },
     ],
   },

@@ -283,9 +283,21 @@ export class UserUnderstandingStore {
    * 理解档案块渲染（注入侧直接使用；空返回 null 零注入）。
    * 按性质标注回应的指令写在块头；本轮提问命中的主题带寻址标记；
    * 有修订史的理解附「理解演变」（仅供追溯）。
+   *
+   * onlyMatched（2026-11-18 按需召回）：只渲染 groundedTopics 命中的条目。
+   * 默认 false 保持旧的全量渲染（面板/测试）；主对话注入传 true——
+   * 理解档案和结构化事实同口径：用户问什么才给什么，不全量摊在上下文里。
    */
-  renderForPrompt(actorId: string, groundedTopics?: Set<string>): string | null {
-    const notes = this.getActiveUnderstandings(actorId);
+  renderForPrompt(
+    actorId: string,
+    groundedTopics?: Set<string>,
+    opts?: { onlyMatched?: boolean },
+  ): string | null {
+    let notes = this.getActiveUnderstandings(actorId);
+    if (opts?.onlyMatched) {
+      const wanted = new Set([...(groundedTopics ?? [])].map(normalizeTopic));
+      notes = notes.filter((n) => wanted.has(normalizeTopic(n.topic)));
+    }
     if (notes.length === 0) return null;
     const lines = notes.slice(0, 12).map((n) => {
       const confirmedAt = n.lastConfirmedAt.slice(5, 10).replace("-", "/");
@@ -307,6 +319,8 @@ export class UserUnderstandingStore {
       "（以下是你在过往对话中对用户形成的理解记录，含语境与语气判断。被问及用户的",
       "偏好、关系等话题时，以本块为当前理解的依据，并按性质回应：玩笑/",
       "粉丝式称呼/比喻不要当作真实事实转述。「理解演变」仅供追溯，不代表现状。",
+      "本块是背景理解，不是要朗读的清单：本轮只回答用户问到的那一项，",
+      "其余理解记录哪怕相关也不要连带罗列。",
       "仅当用户最新消息明确表达新理解时以最新消息为准——此时系统会自动登记修订）",
       ...lines,
     ].join("\n");

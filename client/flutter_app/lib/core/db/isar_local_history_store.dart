@@ -194,6 +194,10 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
             timestamp: DateTime.parse(map["timestamp"] as String),
             contentType: map["contentType"] as String? ?? "text",
             attachmentImageCount: (map["attachmentImageCount"] as num?)?.toInt() ?? 0,
+            userImageUrls: (map["userImageUrls"] as List<dynamic>?)
+                    ?.whereType<String>()
+                    .toList() ??
+                const <String>[],
             playUrl: map["playUrl"] as String?,
             pendingDelivery: map["pendingDelivery"] == true,
             mediaCards: _decryptMediaCards(map["mediaCards"]),
@@ -737,6 +741,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
       timestamp: message.timestamp,
       contentType: message.contentType,
       attachmentImageCount: message.attachmentImageCount,
+      userImageUrls: message.userImageUrls,
       playUrl: message.playUrl,
       pendingDelivery: message.pendingDelivery,
       mediaCards: message.mediaCards,
@@ -910,6 +915,8 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
                   // 默认 "text" 不写盘，旧记录读回时同样缺省 "text"。
                   if (m.contentType != "text") "contentType": m.contentType,
                   "attachmentImageCount": m.attachmentImageCount,
+                  if (m.userImageUrls.isNotEmpty)
+                    "userImageUrls": m.userImageUrls,
                   if (m.playUrl != null) "playUrl": m.playUrl,
                   if (m.pendingDelivery) "pendingDelivery": true,
                   if (m.mediaCards != null)

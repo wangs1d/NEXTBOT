@@ -3,7 +3,7 @@ import "package:flutter/services.dart";
 
 import "../theme/app_theme.dart";
 
-/// 定位权限选择结果：allow=使用期间允许；alwaysResident=始终允许并常驻定位；
+/// 定位权限选择结果：allow=使用期间允许；alwaysResident=始终允许（后台持续）；
 /// deny=暂不允许。
 enum LocationConsentChoice { allow, alwaysResident, deny }
 
@@ -82,7 +82,7 @@ class _LocationPermissionDialogBodyState
                   ),
                   const SizedBox(height: 12),
                   Text(
-                    "「常驻定位」= 始终允许 + 位置变化时后台告知 Agent（进出常去地点提醒、到点路上提示需要它）。",
+                    "「始终允许」= 系统定位权限选「始终允许 / 允许所有时间」+ 位置变化时后台告知 Agent（进出常去地点、到点提醒依赖它）。",
                     style: TextStyle(
                       color: AppPalette.locationDialogMuted,
                       fontSize: 12.5,
@@ -110,7 +110,7 @@ class _LocationPermissionDialogBodyState
                             color: AppPalette.locationDialogButtonBg.withValues(alpha: 0.6),
                           ),
                         ),
-                        child: const Text("常驻定位"),
+                        child: const Text("始终允许"),
                       ),
                       const SizedBox(width: 8),
                       FilledButton(
@@ -120,7 +120,7 @@ class _LocationPermissionDialogBodyState
                           backgroundColor: AppPalette.locationDialogButtonBg,
                           foregroundColor: AppPalette.locationDialogButtonFg,
                         ),
-                        child: const Text("允许"),
+                        child: const Text("使用期间允许"),
                       ),
                     ],
                   ),

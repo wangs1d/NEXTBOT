@@ -195,7 +195,13 @@ export function normalizeFactField(field: string): string {
  * 本库的投影（见 profile-fact-authority.ts）。新增档案字段在此登记即可。
  */
 export const PROFILE_FIELD_ALIASES: ReadonlyArray<readonly [string, RegExp]> = [
-  ["称呼", /^(姓名|名字|全名|叫我|昵称|英名|花名|称呼)$/],
+  // 姓名与称呼拆分（2026-11-18 根修）：此前「姓名/名字/全名」归一进「称呼」，
+  // 「全名王铭川」被后来的「叫我大哥」覆盖 → 问名字时档案里没有姓名，只能从
+  // 历史对话里捡，模型于是把姓名+称呼+年龄+住址一起倒出来。两者语义不同：
+  //   姓名 = 用户是谁（王铭川）；称呼 = 用户希望被怎么叫（大哥）。
+  ["姓名", /^(姓名|名字|全名|真名|本名)$/],
+  ["称呼", /^(称呼|叫我|昵称|英名|花名|外号)$/],
+  ["年龄", /^(年龄|岁数|年纪)$/],
   ["职业", /^(工作|职务|职位|岗位|行业|职业)$/],
   ["居住地", /^(住址|住处|所在地|城市|定居地|家在|坐标|居住地)$/],
   ["技术栈", /^(技术|技术方向|stack|编程语言|技术栈)$/i],
@@ -217,6 +223,46 @@ export function canonicalFactField(field: string): string {
 export const PROFILE_FIELDS: readonly string[] = PROFILE_FIELD_ALIASES.map(
   ([canonical]) => canonical,
 );
+
+/**
+ * 字段级「问法」信号（2026-11-18 根修）。
+ *
+ * 语义召回在身份类问句上不可靠：实测「记得我叫什么吗」对
+ * `称呼：大哥` 的余弦 0.458、对 `姓名：王铭川` 只有 0.337（称呼反而更高，
+ * 因为「叫我」字面更近），于是问名字只召回称呼。这里把中文里固定的
+ * 自指问法当作 T2 字面信号——它是字段词表的一部分，不是意图路由：
+ * 命中哪一项就召回哪一项，其余字段照旧走语义/恒带。
+ */
+export const PROFILE_FIELD_QUESTION_HINTS: ReadonlyArray<readonly [string, RegExp]> = [
+  ["姓名", /(?:我|本人)(?:叫|名叫|名字叫|全名叫)(?:什么|啥|什么名字)|我的?(?:名字|姓名|全名)(?:是|叫|呢|？|\?|$)/],
+  ["称呼", /(?:你|您)(?:都|总|还|就)?(?:叫|称呼)我(?:什么|啥)|怎么(?:称呼|叫)我/],
+  ["年龄", /(?:我|本人)(?:今年)?(?:几岁|多大|多少岁|多大年纪)|我的?(?:年龄|岁数|年纪)/],
+  ["居住地", /(?:我|本人)(?:现在)?(?:住哪|住在哪|在哪住|住什么地方)|我的?(?:住址|居住地)/],
+  ["职业", /(?:我|本人)(?:是)?(?:做什么|干什么)(?:工作|的)?|我的?(?:职业|工作)(?:是|呢|？|\?|$)/],
+  ["生日", /(?:我|本人)(?:的)?生日|我(?:哪天|几号)生日|我(?:是)?哪年哪月(?:几号)?出生/],
+];
+
+/** 问句里明确指向的档案字段（无命中返回空数组，调用方零注入） */
+export function matchProfileQuestionFields(text: string): string[] {
+  const t = text?.trim();
+  if (!t) return [];
+  const out = new Set<string>();
+  // 整句 + 分句各扫一遍：多问题（「我叫什么，几岁了」）第二问常省略主语，
+  // 只跑整句正则会把「几岁了」漏掉。
+  const clauses = t.split(/[，,。；;！!？?、\s]+/).filter(Boolean);
+  for (const part of [t, ...clauses]) {
+    for (const [field, re] of PROFILE_FIELD_QUESTION_HINTS) {
+      if (re.test(part)) out.add(field);
+    }
+  }
+  // 自指省略主语：整句出现「我/本人」时，独立短问句「几岁/多大」按用户年龄处理。
+  if (/(?:我|本人)/.test(t)) {
+    for (const clause of clauses) {
+      if (/^(?:几岁|多大|多少岁|多大年纪)/.test(clause)) out.add("年龄");
+    }
+  }
+  return [...out];
+}
 
 /**
  * 是否为「档案字段」（确定性、字段固定的用户信息：称呼/职业/居住地…）。
@@ -1208,7 +1254,11 @@ export class StructuredFactStore {
   matchFactsInText(actorId: string, text: string, entity = "user"): StructuredFact[] {
     const t = text?.trim();
     if (!t) return [];
+    // 问法信号（2026-11-18）：身份类问句（"我叫什么"）先按字段问法直达，
+    // 不依赖语义相似度——实测语义会把「姓名」误排到「称呼」之后。
+    const hinted = new Set(matchProfileQuestionFields(t));
     return this.getActiveFacts(actorId, entity).filter((f) => {
+      if (hinted.has(canonicalFactField(f.field))) return true;
       if (f.field.length >= 2 && t.includes(f.field)) return true;
       const v = f.value?.trim();
       return !!v && v.length >= 2 && v.length <= 20 && !/^\d+$/.test(v) && t.includes(v);
@@ -1354,11 +1404,11 @@ export class StructuredFactStore {
       "「王哥」）；没有指定时用「姓氏+先生/女士」（如「王先生」）或自然省略",
       "称呼。称呼/姓名字段的大名（如「王铭川」）只是事实记录，供问答引用，",
       "不要在回复里连名带姓直呼用户）",
-      "（名字方向不要混（2026-11-08 实测事故）：你（Agent）自己的名字来自",
-      "「用户为你取名」的记忆，用户被叫的称呼来自本档案「称呼」字段，两者",
-      "互不相干。用户问「叫我什么/你怎么称呼我/你知道我叫什么吗」一律是在",
-      "问**用户自己的称呼**——答本档案「称呼」当前值，绝不能答你自己的名字；",
-      "同理「我叫X」登记的是称呼，「你叫X/你就叫X」才是给你取名）",
+      "（名字方向不要混（2026-11-08 实测事故，2026-11-18 拆分姓名/称呼）：你",
+      "（Agent）自己的名字来自「用户为你取名」的记忆；用户的名字是本档案「姓名」",
+      "字段，用户希望被怎么叫是本档案「称呼」字段，三者互不相干。用户问「我叫",
+      "什么/我的名字/我的全名」答「姓名」当前值；问「你叫我什么/你怎么称呼我」",
+      "答「称呼」当前值；「你叫X/你就叫X」才是给你取名。答哪一项就只答哪一项）",
       ...lines,
       ...pastLines,
       ...planLines,

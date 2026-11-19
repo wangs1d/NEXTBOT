@@ -63,7 +63,10 @@ export function createRideQuoteHandler(service: BookingService): ToolHandler {
       provider,
     );
     if (!result.ok) return result;
-    return note ? { ...result, pickupNote: note } : result;
+    // 报价上下文回带给卡片：选择车型的卡内动作要原样带回起终点/时间，
+    // 客户端不解释参数，只把服务端给的 payload 回传。
+    const rideRequest = { pickup, dropoff, ...(city ? { city } : {}), ...(scheduleAt ? { scheduleAt } : {}) };
+    return { ...result, ...(note ? { pickupNote: note } : {}), rideRequest };
   };
 }
 
@@ -96,7 +99,7 @@ export function createRideBookHandler(service: BookingService): ToolHandler {
     const params = confirm
       ? { dropoff, passengerPhone }
       : { dropoff, passengerPhone, pickup: (await resolvePickup(context, input.pickup)).pickup };
-    return service.book(context, "ride", {
+    const result = await service.book(context, "ride", {
       provider,
       optionId,
       params,
@@ -105,6 +108,15 @@ export function createRideBookHandler(service: BookingService): ToolHandler {
       confirm,
       confirmationToken,
     });
+    if (!result.ok || confirm) return result;
+    // 阶段一的确认卡需要完整上下文（起终点/城市/用车时间），
+    // 卡内「确认叫车」按钮再把 token 原样带回执行阶段二。
+    return {
+      ...result,
+      dropoff,
+      pickup: params.pickup,
+      ...(city ? { city } : {}),
+    };
   };
 }
 

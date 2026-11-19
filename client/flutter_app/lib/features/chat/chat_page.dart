@@ -17,9 +17,11 @@ import "../../core/services/speech_service.dart";
 import "../../core/services/image_preview_launcher.dart";
 import "../../core/theme/app_typography.dart";
 import "../../core/theme/app_theme.dart";
+import "../../core/config/media_url.dart";
 import "agent_home_page.dart";
 import "agent_profile_page.dart" show AgentProfileData;
 import "media_disk_cache.dart";
+import "image_preview_panel.dart";
 import "voice_message_bubble.dart";
 import "message_body_renderer.dart";
 import "agent_result_card.dart";
@@ -3078,6 +3080,120 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
     );
   }
 
+  /// 历史回填的用户照片缩略图（服务端落盘的 /agent/images/... URL）。
+  /// 走 CachedMediaImage（磁盘缓存 + 同源凭证头注入），与助手图同构。
+  Widget _buildHistoryUserThumbnails(List<String> urls) {
+    return Wrap(
+      spacing: 6,
+      runSpacing: 6,
+      children: <Widget>[
+        for (int i = 0; i < urls.length; i++)
+          GestureDetector(
+            onTap: () => showImagePreviewFullScreenFromUrls(
+              context,
+              urls: urls,
+              index: i,
+              source: "发出的照片",
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(8),
+              child: CachedMediaImage(
+                url: MediaUrl.resolveForHeaders(urls[i]),
+                width: 72,
+                height: 72,
+                fit: BoxFit.cover,
+                gaplessPlayback: true,
+                cacheWidth: 216,
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  /// 用户照片泡 + 文字泡的共享布局：[thumbs] 已构建好（内存字节或历史 URL）。
+  Widget _buildUserPhotoBubbles(BuildContext context, Widget thumbs) {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    final String bodyText = widget.mainMessage.text.trim();
+    final bool hasText = bodyText.isNotEmpty &&
+        bodyText != "（见图）" &&
+        !bodyText.contains("用户发送了摄像头/配图画面");
+
+    Widget shell(Widget child, {required bool isTail}) {
+      final BorderRadius r = isTail
+          ? const BorderRadius.only(
+              topLeft: Radius.circular(16),
+              topRight: Radius.circular(6),
+              bottomLeft: Radius.circular(16),
+              bottomRight: Radius.circular(16),
+            )
+          : BorderRadius.circular(16);
+      return Container(
+        decoration: widget.isSelected
+            ? BoxDecoration(
+                borderRadius: r,
+                color: Colors.red.withValues(alpha: 0.08),
+                border: Border.all(color: Colors.red.withValues(alpha: 0.4)),
+              )
+            : BoxDecoration(
+                borderRadius: r,
+                color: cs.primaryContainer,
+                boxShadow: <BoxShadow>[
+                  BoxShadow(
+                    color: cs.primary.withValues(alpha: 0.15),
+                    blurRadius: 12,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+        child: ClipRRect(
+          borderRadius: r,
+          child: Padding(padding: widget.cardPadding, child: child),
+        ),
+      );
+    }
+
+    // 照片不套泡壳（2026-11-19 用户定）：裸图右对齐，与 IM 惯例一致；
+    // 只有文字仍走气泡。选中态（批量选择）给照片套红框保留。
+    final Widget photoBlock = Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: widget.isSelected
+          ? Container(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(12),
+                color: Colors.red.withValues(alpha: 0.08),
+                border: Border.all(color: Colors.red.withValues(alpha: 0.4)),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(6),
+                child: thumbs,
+              ),
+            )
+          : thumbs,
+    );
+    if (!hasText) return photoBlock;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.end,
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        photoBlock,
+        shell(
+          _buildMessageTextInner(
+            context,
+            widget.cs,
+            widget.mainMessage,
+            isUser: true,
+            contentSummary: widget.contentSummary,
+            onUserAction: widget.onUserAction,
+            onFollowupTap: widget.onFollowupTap,
+          ),
+          isTail: true,
+        ),
+      ],
+    );
+  }
+
   /// 构建消息卡片（支持高亮态）。
   ///
   /// 视觉分层：用户消息保留主题色气泡；Agent 消息用扣子（Coze）式描边容器——
@@ -3085,6 +3201,21 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
   /// 对称的视觉分组；左侧内边距收紧，照片得以贴近左边框。
   Widget _buildMessageCard(BuildContext context, {bool highlight = false}) {
     final ColorScheme cs = Theme.of(context).colorScheme;
+
+    // 用户随消息发出的照片：与文字隔离，各自独立成一个气泡（IM 式布局）。
+    // 本会话用内存字节即时显示；重启/换设备后字节不在，走服务端落盘 URL。
+    if (widget.isUser) {
+      final List<Uint8List>? bytes = widget.userGalleryImages;
+      if (bytes != null && bytes.isNotEmpty) {
+        return _buildUserPhotoBubbles(
+            context, _buildSentGalleryThumbnails(bytes, cs));
+      }
+      if (widget.mainMessage.userImageUrls.isNotEmpty) {
+        return _buildUserPhotoBubbles(
+            context, _buildHistoryUserThumbnails(widget.mainMessage.userImageUrls));
+      }
+    }
+
     final BorderRadius borderRadius = widget.isUser
         ? const BorderRadius.only(
             topLeft: Radius.circular(16),

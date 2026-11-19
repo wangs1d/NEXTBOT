@@ -85,8 +85,6 @@ export type AgentPromptMemoryContext = {
   interruptedContext?: string;
   /** 用户当前所在地（前端 GPS + 逆地理，注入 system，供位置相关问答使用） */
   userLocation?: string;
-  /** 用户常去地点（位置历史 DBSCAN 聚类，程序化注入，零 LLM） */
-  frequentPlaces?: string;
   /**
    * 当下状态（WorldBoard.current 程序化整理，零 LLM）：屏幕焦点/在线状态 +
    * 持续时长 + 顺嘴纪律锚点。让顺嘴/关心贴着「此刻」说，不再拿旧记忆套模板。
@@ -335,6 +333,13 @@ export type AgentStreamOptions = {
    * "路由声明需要动手、模型却零工具尝试"的续波——不用文本风格正则。
    */
   turnIntent?: string;
+  /**
+   * 画像里的指代映射（事实行「老婆是刘浩存」）。工具循环在进入工具决策前用它
+   * + 最近对话做代词锚定（2026-11-19 根修：去路由化后「他/她」全交模型自由
+   * 裁量，真机把「看看他的照片」解析成三轮前搜过的成龙）。provider 必须透传
+   * 进 streamCompletionWithTools，漏掉 = 锚定静默失效、回退纯模型判断。
+   */
+  referentLines?: string[];
   /**
    * 生成前的渲染场景数据面（P3 前移，2026-11-07）：允许传未决 Promise，provider
    * 必须原样透传进 streamCompletionWithTools——白名单漏掉它会导致 pre 场景

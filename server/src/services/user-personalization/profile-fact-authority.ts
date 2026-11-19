@@ -160,7 +160,9 @@ export function sectionBounds(
  * 不是「职业」字段的副本，误删会丢真信息。
  */
 const FIELD_CUES: Readonly<Record<string, readonly string[]>> = {
-  称呼: ["称呼", "名字", "姓名", "昵称", "叫我", "全名", "名儿"],
+  姓名: ["姓名", "名字", "全名", "真名", "本名", "名叫"],
+  称呼: ["称呼", "叫我", "昵称", "外号", "花名"],
+  年龄: ["年龄", "岁数", "年纪", "几岁", "多大"],
   职业: ["职业", "职位", "岗位", "职务", "行业"],
   居住地: ["居住地", "住在", "定居", "所在地", "坐标"],
   技术栈: ["技术栈", "编程语言", "技术方向"],
@@ -283,6 +285,129 @@ export function stripProfileFactDuplicateLines(
     kept.push(raw);
   }
   return { text: kept.join("\n"), removed, staleRemoved };
+}
+
+/**
+ * 画像注入门控（2026-11-18 根修）：身份事实行只在权威块本轮确实注入该字段时保留。
+ *
+ * 事故：USER_PROFILE.md 全文每轮无条件注入（称呼/居住地/年龄…），用户只问
+ * 「记得我叫什么吗」，模型把画像里所有身份字段连同历史回答一起倒出来。
+ * 画像里的「字段：值」行本来就是 structured_facts 的投影——投影不该比权威源
+ * 更常驻。现在按字段白名单过滤：
+ *   - 身份字段行（称呼/姓名/年龄/居住地…）：字段在本轮结构化事实块已渲染
+ *     （即 T2 字面命中 / T3 语义命中 / 称呼恒带）才保留；
+ *   - 非身份行（兴趣、沟通偏好、备注等自由描述）：传了 query 时只保留与
+ *     用户原话有词面相关的行；query 缺省（面板/程序调用）才原样保留。
+ * 空 section 连标题一起丢弃，避免 prompt 里留下空壳。
+ */
+export function gateProfileMarkdownForPrompt(
+  profileText: string | undefined | null,
+  opts: { injectedFactFields: ReadonlySet<string>; query?: string },
+): string | undefined {
+  const text = (profileText ?? "").trim();
+  if (!text) return undefined;
+
+  // 自由文本行的 query 相关性（2-gram / 英文词）。query 缺省时保持旧行为：
+  // 非身份行全保留（面板/测试/程序调用）。
+  const q = (opts.query ?? "").replace(/\s+/g, "").toLowerCase();
+  const grams = new Set<string>();
+  if (q) {
+    for (let i = 0; i + 2 <= q.length; i++) grams.add(q.slice(i, i + 2));
+    for (const term of q.match(/[a-z0-9]{3,}/g) ?? []) grams.add(term);
+  }
+  const lineMatchesQuery = (line: string): boolean => {
+    if (grams.size === 0) return true;
+    const lower = line.toLowerCase();
+    for (const gram of grams) {
+      if (lower.includes(gram)) return true;
+    }
+    return false;
+  };
+
+  const filtered: Array<string | null> = text.split("\n").map((raw) => {
+    // 标题恒留；引用元信息（> 更新于/用户标识）不参与注入
+    if (raw.trim().startsWith("# ")) return raw;
+    if (raw.trim().startsWith(">")) return null;
+    const parsed = parseFieldLine(raw);
+    const field = parsed ? profileFieldOfLabel(parsed.label) : "";
+    if (field) {
+      // 身份字段行：本轮权威块没注入 → 投影退场
+      return opts.injectedFactFields.has(field) ? raw : null;
+    }
+    // 兴趣/沟通偏好/备注等自由文本：只有与本轮问题相关才注入
+    return lineMatchesQuery(raw) ? raw : null;
+  });
+
+  const out: string[] = [];
+  for (let i = 0; i < filtered.length; i++) {
+    const line = filtered[i];
+    if (line !== null && line.trim().startsWith("## ")) {
+      // section 内没有可保留内容 → 连标题一起丢
+      let j = i + 1;
+      let hasContent = false;
+      while (j < filtered.length) {
+        const next = filtered[j];
+        if (next !== null && next.trim().startsWith("## ")) break;
+        if (next !== null && next.trim()) hasContent = true;
+        j++;
+      }
+      if (!hasContent) {
+        i = j - 1;
+        continue;
+      }
+    }
+    if (line !== null) out.push(line);
+  }
+  return out.join("\n").trim() || undefined;
+}
+
+/**
+ * 受管画像行写入/更新/删除（如「常去地点：A、B、C」）。
+ *
+ * 为什么放画像而不是 prompt 动态块（2026-11-19）：常去地点是长期画像事实，
+ * 不该占一个专门常驻块 + 进程缓存。写进画像后由 gateProfileMarkdownForPrompt
+ * 按 query 词面相关性决定本轮是否注入——这正是「按需召回」。
+ *
+ * 落点优先「兴趣与习惯」，其次「备注」；都没有时补一个「兴趣与习惯」section。
+ * value 为空表示删除该受管行。无变化时返回原字符串（调用方可据此跳过写盘）。
+ */
+export function upsertManagedProfileLine(
+  md: string,
+  label: string,
+  value: string | null,
+): string {
+  const lines = md.replace(/\r\n/g, "\n").split("\n");
+  const prefix = `- ${label}：`;
+  for (const title of ["兴趣与习惯", "备注"]) {
+    const bounds = sectionBounds(lines, title);
+    if (!bounds) continue;
+    const { start, end } = bounds;
+    let existing = -1;
+    for (let i = start; i < end; i++) {
+      if (lines[i]!.trim().startsWith(prefix)) {
+        existing = i;
+        break;
+      }
+    }
+    if (value == null) {
+      if (existing < 0) return md;
+      lines.splice(existing, 1);
+      return lines.join("\n");
+    }
+    if (existing >= 0) {
+      lines[existing] = `- ${value}`;
+      return lines.join("\n");
+    }
+    // 插到 section 内最后一个列表项之后；没有列表项就紧跟标题。
+    let insertAt = start;
+    for (let i = start; i < end; i++) {
+      if (lines[i]!.trim().startsWith("- ")) insertAt = i + 1;
+    }
+    lines.splice(insertAt, 0, `- ${value}`);
+    return lines.join("\n");
+  }
+  if (value == null) return md;
+  return `${md.trimEnd()}\n\n## 兴趣与习惯\n\n- ${value}\n`;
 }
 
 /* ─────────────────────────── 编排（IO） ─────────────────────────── */

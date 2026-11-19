@@ -104,7 +104,7 @@ function adminPaymentSnapshot(deps: HttpRouteDeps): {
         product: "网页充值",
         accountId: o.accountId,
         amount: Number(o.totalAmount),
-        description: "NEXTBOT API 充值",
+        description: "NEXTBOT 额度充值",
         status: o.status,
         tradeNo: o.tradeNo,
         createdAt: o.createdAt,

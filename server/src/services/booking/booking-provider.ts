@@ -6,7 +6,8 @@
  * reschedule），由 `BookingService` 统一编排：
  *
  *   - 统一走 ask_first 分支：book / cancel 两阶段确认（金融 + 不可逆操作，
- *     下单前必须用户确认），单笔 / 单日金额上限
+ *     下单前必须用户确认卡同意）；金额硬限额默认关闭，可经
+ *     BOOKING_MAX_AMOUNT_CNY / BOOKING_DAILY_BUDGET_CNY 显式开启
  *   - booking 结果统一写入承诺板（commitment board）跟踪状态
  *   - 支付边界：Agent 只下单，不代付。Provider 可返回 paymentUrl，
  *     由用户手动完成支付（「下单到支付页面」模式）

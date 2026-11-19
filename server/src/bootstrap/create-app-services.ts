@@ -99,12 +99,14 @@ import { registerPlaceTools } from "../tools/place-tools.js";
 import { ActorContextService } from "../services/actor-context-service.js";
 import { AbstractChatProvider } from "../external-model/abstract-chat-provider.js";
 import { GeofenceService, inferPlaceKind, isPublicHttpUrl } from "../services/geofence-service.js";
+import { haversineMeters } from "../services/geo-utils.js";
 import { LocationHistoryService } from "../services/location-history-service.js";
 import { PlaceSemanticsService } from "../services/place-semantics-service.js";
 import { LocationIngestPipeline } from "../services/location-ingest-pipeline.js";
 import {
   getLocationDbPath,
   getLocationHistoryRetentionDays,
+  isAutoObserveFrequentPlacesEnabled,
   isLocationHistoryEnabled,
 } from "../config/location-env.js";
 import { LocationSensor } from "../rhythm/sensors/location-sensor.js";
@@ -247,7 +249,7 @@ import { MiniMaxRealtimeService } from "../services/voice-dialogue/minimax-realt
 import { OpenAILLMAdapter } from "../services/voice-dialogue/adapters/openai-llm-adapter.js";
 import { createIntelligentReminderSystem } from "../services/intelligent-reminder/index.js";
 import { UpstreamSearchService } from "../services/upstream-search-service.js";
-import { VideoGrabService, setVideoGrabServiceRef, setVideoGrabMcpClientRef } from "../services/video-grab-service.js";
+import { VideoGrabService, setVideoGrabServiceRef } from "../services/video-grab-service.js";
 import { WsConnectionRegistry } from "../services/ws-connection-registry.js";
 import { startClientUpdatePusher } from "../services/client-update-pusher.js";
 import { SkillManager } from "../skills/index.js";
@@ -876,12 +878,10 @@ export async function createAppServices(
 
   // ========== MCP 客户端服务 ==========
   const mcpClientService = new McpClientService();
-  // video.grab 的抖音/小红书适配器优先经 McpClientService 直连 yby6（mcporter CLI 生产机不可用）
-  setVideoGrabMcpClientRef(mcpClientService);
   await Promise.all(bootLoads);
-  // MCP 工具发现不在启动关键路径上：它要 spawn 子进程 / 调 mcporter CLI，单 server
-  // 最长 15s，stdio initialize 卡死时吃满 30s 超时（实证 yby6-video 让首次就绪 +31s）。
-  // 发现完成后再补注册工具即可，期间服务照常监听，聊天工具列表随之刷新。
+  // MCP 工具发现不在启动关键路径上：它要 spawn 子进程 / 调 HTTP 端点，单 server
+  // 最长 15s，stdio initialize 卡死时吃满 30s 超时。发现完成后再补注册工具即可，
+  // 期间服务照常监听，聊天工具列表随之刷新。
   if (mcpClientService.listServers().length > 0) {
     void discoverMcpToolsInBackground(mcpClientService, toolRegistry, (line) =>
       app.log.info(line),
@@ -3817,7 +3817,7 @@ export async function createAppServices(
     );
   });
 
-  // ─── 位置能力（方案 A-D）：默认全部关闭（隐私优先），LOCATION_TRACKING_MODE=continuous 显式开启 ───
+  // ─── 位置能力（方案 A-D）：缺省 continuous 持续上报（Agent 持续可知）；显式 ondemand 退回按需 ───
   // 方案 C 地理围栏：用户显式创建围栏才存在位置触发，独立于持续模式常驻装配。
   const locationGeofenceService = new GeofenceService();
   registerGeofenceTools(toolRegistry, { service: locationGeofenceService, audit: auditService });  // ─── 情境快照（持续感知 State 层，2026-11-05）───
@@ -3862,7 +3862,7 @@ export async function createAppServices(
   });
 
   // 方案 B 位置历史：默认开启（2026-09-05，本地 SQLite 不上云，LOCATION_HISTORY_ENABLED=0 关闭）。
-  // 常去地点挖掘（对话 prompt 的【常去地点】块，零 LLM）依赖历史样本。
+  // 常去地点/日行程挖掘（画像投影 + place 工具，零 LLM）依赖历史样本。
   const locationTrackingMode = locationCoordinator.getTrackingConfig().mode;
   const locationHistoryEnabled = isLocationHistoryEnabled(locationTrackingMode);
   const locationHistoryService = locationHistoryEnabled ? new LocationHistoryService() : null;
@@ -3887,18 +3887,49 @@ export async function createAppServices(
       at,
     };
   });
-  // 常去地点/移动信号注入 AgentCore：对话 prompt 的位置背景（实时位置 + 常去地点）。
+  // 位置历史注入 AgentCore：实时位置仍走 prompt；常去地点改为画像投影 + place 工具。
   agentCore.setLocationHistory(locationHistoryService);
 
   // ── 地点语义（方案 E）：POI 先验 + 停留时间分布 → 家/公司/常去地点 ──
   // 与位置历史共用 location.db；历史关闭时只读已持久化的旧结果（不再重算）。
   const placeSemanticsService = new PlaceSemanticsService({
     history: locationHistoryService,
-    // 行政区回填/重算落库后立即失效常去地点 prompt 缓存，避免 10 分钟窗口里
-    // 仍拿着「九华苑（无城市）」的旧文本回答家在哪个城市。
-    onPlacesUpdated: (actorId) => agentCore.invalidatePlacePrompt(actorId),
+    // 语义重算/clarify 后把常去地点重新投影进用户画像（按需召回，见下方 sync）。
+    onPlacesUpdated: (actorId) => syncPlacesToProfile(actorId),
   });
   agentCore.setPlaceSemantics(placeSemanticsService);
+  /**
+   * 常去地点 → 用户画像（2026-11-19）。
+   *
+   * 不再维护 prompt 动态块与 10 分钟进程缓存：画像里的「常去地点：…」行由
+   * gateProfileMarkdownForPrompt 按本轮 query 词面相关性决定是否注入，
+   * 精确行政区/门牌仍由 place 工具按需查询。
+   * 家/公司优先（确认或高置信），其余用 DBSCAN 到访次数补足。
+   */
+  const syncPlacesToProfile = (actorId: string): void => {
+    try {
+      const timezone = actorContext.resolveClock(actorId).timezone;
+      const names: string[] = [];
+      for (const kind of ["home", "work"] as const) {
+        const record = placeSemanticsService
+          .load(actorId)
+          .find((place) => place.kind === kind && (place.confirmed || place.confidence >= 0.6));
+        const name = record?.label?.trim() || record?.poiName?.trim();
+        if (name) names.push(name);
+      }
+      for (const place of locationHistoryService?.mineFrequentPlaces(actorId, {
+        maxPlaces: 5,
+        minPoints: 3,
+        timezone,
+      }) ?? []) {
+        const name = place.label?.trim();
+        if (name) names.push(name);
+      }
+      void userPersonalizationService.syncFrequentPlaces(actorId, names);
+    } catch (err) {
+      console.log(`[Location] 常去地点写入画像失败（忽略）: ${err}`);
+    }
+  };
   // 启动回填：首次上报会按保留期 prune 老样本，必须先用手里的历史把「家/公司」
   // 算出来并持久化；否则用户已有的数据来不及参与语义推断就被清掉了。
   for (const actorId of locationHistoryService?.listActors() ?? []) {
@@ -3909,7 +3940,9 @@ export async function createAppServices(
   const removeAutoPlaceFences = (actorId: string, placeId?: string): void => {
     try {
       for (const fence of locationGeofenceService.list(actorId)) {
-        if (String(fence.actionConfig.source ?? "") !== "place_semantics") continue;
+        const source = String(fence.actionConfig.source ?? "");
+        // 两类自动围栏：用户确认家/公司后的 observe，以及常去地点自动 observe。
+        if (source !== "place_semantics" && source !== "frequent_place") continue;
         if (placeId && String(fence.actionConfig.placeId ?? "") !== placeId) continue;
         locationGeofenceService.delete(actorId, fence.id);
       }
@@ -3917,10 +3950,79 @@ export async function createAppServices(
       console.log(`[Location] 自动围栏清理失败（忽略）: ${err}`);
     }
   };
+  // 常去地点 observe 系统围栏（env 显式开启；默认关，避免把推断地点自动写进系统定位服务）。
+  // App 退后台/被杀后，系统围栏是唯一还能拿到「进了/离开了哪个常去地点」的通道。
+  const frequentFenceSyncAt = new Map<string, number>();
+  const syncFrequentPlaceFences = (actorId: string): void => {
+    if (!isAutoObserveFrequentPlacesEnabled() || !locationHistoryService) return;
+    const nowMs = Date.now();
+    const last = frequentFenceSyncAt.get(actorId) ?? 0;
+    if (nowMs - last < 30 * 60 * 1000) return;
+    frequentFenceSyncAt.set(actorId, nowMs);
+    try {
+      const places = locationHistoryService
+        .mineFrequentPlaces(actorId, {
+          maxPlaces: 5,
+          minPoints: 3,
+          timezone: actorContext.resolveClock(actorId).timezone,
+        })
+        .filter(
+          (place) =>
+            place.visitCount >= 8 &&
+            !!place.label?.trim() &&
+            place.radiusMeters <= 400,
+        );
+      const allFences = locationGeofenceService.list(actorId);
+      const existing = allFences.filter(
+        (fence) => String(fence.actionConfig.source ?? "") === "frequent_place",
+      );
+      const keep = new Set<string>();
+      for (const place of places) {
+        keep.add(place.id);
+        const exists = existing.some(
+          (fence) => String(fence.actionConfig.placeId ?? "") === place.id,
+        );
+        if (exists) continue;
+        // 用户已在该地点手动建过围栏：不重复注册，避免系统定位服务里出现两个重叠围栏。
+        const covered = allFences.some(
+          (fence) =>
+            String(fence.actionConfig.source ?? "") !== "frequent_place" &&
+            haversineMeters(fence, place) <= Math.max(fence.radiusMeters, 100) + 50,
+        );
+        if (covered) continue;
+        locationGeofenceService.create(actorId, {
+          name: `常去地点（自动）· ${place.label!.trim()}`.slice(0, 80),
+          latitude: place.latitude,
+          longitude: place.longitude,
+          // 簇半径 + 50m 容差，夹紧到 100..300m：太大会把路上也算作到达。
+          radiusMeters: Math.min(300, Math.max(100, Math.round(place.radiusMeters + 50))),
+          event: "both",
+          actionType: "observe",
+          actionConfig: {
+            source: "frequent_place",
+            placeId: place.id,
+            label: place.label,
+          },
+          coordSystem: "wgs84",
+        });
+      }
+      for (const fence of existing) {
+        const placeId = String(fence.actionConfig.placeId ?? "");
+        if (placeId && !keep.has(placeId)) {
+          locationGeofenceService.delete(actorId, fence.id);
+        }
+      }
+    } catch (err) {
+      console.log(`[Location] 常去地点自动围栏同步失败（忽略）: ${err}`);
+    }
+  };
   registerPlaceTools(toolRegistry, {
     service: placeSemanticsService,
+    // 日行程/习惯的数据源与本地时区：place action=timeline / habits 用
+    history: locationHistoryService,
+    getTimezone: (actorId) => actorContext.resolveClock(actorId).timezone,
     audit: auditService,
-    onChanged: (actorId) => agentCore.invalidatePlacePrompt(actorId),
+    onChanged: (actorId) => syncPlacesToProfile(actorId),
     // 用户确认「家/公司」后注册一个 observe 系统围栏（只观察进出、不执行动作）：
     // App 被杀时服务端也能收到 enter/leave，主动行为才能真正闭环。
     // 只对用户确认过的地点做，推断结果不自动写进系统定位服务（隐私边界）。
@@ -5412,7 +5514,11 @@ export async function createAppServices(
     places: placeSemanticsService,
     // 快照与事件流同源：每次上报（含被历史频控丢弃的）都刷新 Actor 当前状态
     context: actorContext,
-    onLocationReported: (actorId, loc) => locationTrigger.handleLocationReport(actorId, loc),
+    onLocationReported: (actorId, loc) => {
+      locationTrigger.handleLocationReport(actorId, loc);
+      // 常去地点 observe 围栏（env 开启时）随上报节流同步：后台进出的唯一可靠通道。
+      syncFrequentPlaceFences(actorId);
+    },
     // 语义转换同样不受频控影响：geofence 触发的那一条 fix 必须能看到
     onLocationObserved: (actorId, loc) => {
       // 后台预热地点语义（TTL 内零成本）：否则用户不聊天时永远没有语义，
@@ -8190,6 +8296,7 @@ export async function createAppServices(
     worldPartitionWsRegistry,
     runtime,
     socialFeedService,
+    imageGenerationService,
     computeQuotaService,
     agentMemorySyncService,
     unifiedIdempotencyService,
@@ -8213,6 +8320,10 @@ export async function createAppServices(
           radiusMeters: f.radiusMeters,
           event: f.event,
         })),
+    // 围栏注册回执（client.geofence_report）：落库供 geofence.list 观测端上真实状态
+    onGeofenceSyncReport: (actorId: string, report) => {
+      locationGeofenceService.recordClientSync(actorId, { ...report });
+    },
     virtualPhoneService,
     devicePairingService,
     userPersonalizationService,
@@ -8227,6 +8338,8 @@ export async function createAppServices(
     shoppingCompareService,
     // 卡内收款确认（payment.pay.check）：queryOrder 原地换卡
     paymentService,
+    // 卡内叫车（ride.book.prepare / ride.book.confirm）：两阶段确认不出消息
+    bookingService,
     agentAccountService,
     actorModelBindings,
     petReactionChat: externalChat,
