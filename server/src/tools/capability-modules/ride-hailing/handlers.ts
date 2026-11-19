@@ -1,6 +1,7 @@
 import type { ToolHandler, ToolContext, ToolRegistry } from "../../tool-registry.js";
 import type { ClientLocationWire } from "../../../types/client-location.js";
 import type { BookingService } from "../../../services/booking/booking-service.js";
+import type { RidePickupService } from "../../../services/ride-pickup-service.js";
 
 /**
  * ride_hailing.* 工具 handler 工厂集合 + 注册入口。
@@ -17,6 +18,7 @@ import type { BookingService } from "../../../services/booking/booking-service.j
 
 export interface RideHailingModuleDeps {
   bookingService: BookingService;
+  ridePickupService: RidePickupService;
 }
 
 function formatLocationLabel(loc: ClientLocationWire): string {
@@ -78,6 +80,38 @@ function buildPickupParams(
   return params;
 }
 
+/** ride_hailing.pickup —— 弹「选上车点」地图卡（滴图 MCP 数据源）。 */
+export function createRidePickupHandler(service: RidePickupService): ToolHandler {
+  return async (input: Record<string, unknown>, context: ToolContext) => {
+    const dropoff = typeof input.dropoff === "string" ? input.dropoff.trim() : "";
+    if (!dropoff) return { ok: false, error: "缺少 dropoff（目的地）" };
+    const city = typeof input.city === "string" && input.city.trim() ? input.city.trim() : undefined;
+
+    // 中心点优先用前端 GPS；没有就按需向客户端要一次，拿不到再由目的地兜底。
+    let location: { lat: number; lng: number } | null = null;
+    if (context.clientLocation) {
+      location = {
+        lat: context.clientLocation.latitude,
+        lng: context.clientLocation.longitude,
+      };
+    } else if (context.requestLocation) {
+      const requested = await context.requestLocation("选择上车点需要获取当前位置");
+      if (requested) location = { lat: requested.latitude, lng: requested.longitude };
+    }
+
+    const plan = await service.buildPlan({ dropoff, city, location });
+    return {
+      ok: true,
+      summary:
+        plan.dest || plan.center
+          ? `已生成上车点地图卡（目的地：${dropoff}）`
+          : `已生成上车点地图卡（暂未解析出「${dropoff}」坐标，地图以当前位置为中心）`,
+      ...plan,
+      mcpAvailable: service.availability().ok,
+    };
+  };
+}
+
 /** ride_hailing.quote —— 车型与价格预估。 */
 export function createRideQuoteHandler(service: BookingService): ToolHandler {
   return async (input: Record<string, unknown>, context: ToolContext) => {
@@ -103,6 +137,9 @@ export function createRideQuoteHandler(service: BookingService): ToolHandler {
       dropoff,
       ...(city ? { city } : {}),
       ...(scheduleAt ? { scheduleAt } : {}),
+      ...(resolvedPickup.location
+        ? { pickupCoords: { lat: resolvedPickup.location.latitude, lng: resolvedPickup.location.longitude } }
+        : {}),
     };
     return {
       ...result,
@@ -189,7 +226,8 @@ export function createRideCancelHandler(service: BookingService): ToolHandler {
 
 /** 注册 ride-hailing 全部工具到 ToolRegistry。 */
 export function registerRideHailingTools(registry: ToolRegistry, deps: RideHailingModuleDeps): void {
-  const { bookingService } = deps;
+  const { bookingService, ridePickupService } = deps;
+  registry.register("ride_hailing.pickup", createRidePickupHandler(ridePickupService));
   registry.register("ride_hailing.quote", createRideQuoteHandler(bookingService));
   registry.register("ride_hailing.book", createRideBookHandler(bookingService));
   registry.register("ride_hailing.status", createRideStatusHandler(bookingService));

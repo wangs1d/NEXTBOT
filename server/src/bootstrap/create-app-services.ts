@@ -238,6 +238,7 @@ import {
   buildDefaultBookingProviders,
   getBookingConfig,
 } from "../services/booking/index.js";
+import { RidePickupService } from "../services/ride-pickup-service.js";
 import {
   buildQuoteAggregator,
   createSharedBrowserRunner,
@@ -1166,6 +1167,9 @@ export async function createAppServices(
     audit: auditService,
     config: bookingConfig,
   });
+  // 打车选点地图卡：目的地解析/逆地理/周边推荐点统一走滴图 MCP（与
+  // DidiMcpRideProvider 同一个 mcpClientService，避免两套服务器配置）。
+  const ridePickupService = new RidePickupService(mcpClientService);
   app.log.info(
     `[Booking] 统一预订层已启用（mode=${bookingConfig.mode}，providers=[${bookingProviders.map((p) => `${p.key}:${p.domain}`).join(",")}]，限额 ¥${bookingConfig.maxAmountCny}/单、¥${bookingConfig.dailyBudgetCny}/日）`,
   );
@@ -1603,6 +1607,7 @@ export async function createAppServices(
     sharedBrowserCoordinator,
     sharedBrowserCdpGateway,
     bookingService,
+    ridePickupService,
     phoneCallCoordinator,
     periodCareService,
     safetyGuardService,
@@ -8001,6 +8006,7 @@ export async function createAppServices(
     autonomySettings,
     travelPlanningService,
     shoppingCompareService,
+    ridePickupService,
     skillMetadataValidator,
     realFundsWallet,
     paymentService,

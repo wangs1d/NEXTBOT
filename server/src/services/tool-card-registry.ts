@@ -968,6 +968,7 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
   // 叫车报价单独出「选择车型卡」：通用列表卡没有可点的车型入口，手机端
   // 报价只能看不能选（用户反馈）。卡内动作把 optionId + 起终点原样带回，
   // 由 card.action 的两阶段确认闭环，不再让用户打字「就选经济型」。
+  "ride_hailing.pickup": buildRidePickupCard,
   "ride_hailing.quote": buildRideQuoteCard,
   "restaurant.search": buildBookingSearchCard,
   "home_service.search": buildBookingSearchCard,
@@ -1263,7 +1264,72 @@ function stripPriceFromTitle(title: string): string {
     .trim();
 }
 
-/** 叫车报价 → 选择车型卡（每个车型一行 + 一个可点的选择动作）。 */
+/** 叫车点位载荷归一：客户端只认 {name,address,lat,lng,distanceM}。 */
+function normalizeRidePoint(raw: unknown): Record<string, unknown> | null {
+  if (!raw || typeof raw !== "object") return null;
+  const p = raw as Record<string, unknown>;
+  const lat = num(p.lat);
+  const lng = num(p.lng);
+  const name = str(p.name);
+  if (lat == null || lng == null || (!name && !str(p.address))) return null;
+  return {
+    name,
+    ...(str(p.address) ? { address: str(p.address) } : {}),
+    lat,
+    lng,
+    ...(num(p.distanceM) != null ? { distanceM: num(p.distanceM) } : {}),
+  };
+}
+
+/**
+ * ride_hailing.pickup —— 「选个上车点」地图卡。
+ *
+ * 卡片本体（地图/图钉/推荐点/确认按钮）由手机端 flutter_map 自绘，这里只
+ * 提供数据：目的地、初始中心、预选点、周边推荐点。所有坐标/地址都来自
+ * 滴图 MCP；解析不到就留空，绝不编地址骗用户。
+ */
+function buildRidePickupCard(r: Record<string, unknown>): ToolCardPayload | null {
+  const dropoff = str(r.dropoff);
+  if (!dropoff) return null;
+  const dest = normalizeRidePoint(r.dest);
+  const centerRaw = r.center && typeof r.center === "object" ? (r.center as Record<string, unknown>) : null;
+  const centerLat = centerRaw ? num(centerRaw.lat) : undefined;
+  const centerLng = centerRaw ? num(centerRaw.lng) : undefined;
+  const center =
+    centerLat != null && centerLng != null ? { lat: centerLat, lng: centerLng } : null;
+  const pickup = normalizeRidePoint(r.pickup);
+  const candidates = (Array.isArray(r.candidates) ? r.candidates : [])
+    .map(normalizeRidePoint)
+    .filter((p): p is Record<string, unknown> => !!p)
+    .slice(0, 6);
+  const city = str(r.city);
+
+  const items: ToolCardItem[] = [
+    { type: "check", text: `目的地：${dropoff}` },
+    ...(dest && str(dest.address)
+      ? [{ type: "check" as const, text: `目的地地址：${str(dest.address)}` }]
+      : []),
+  ];
+
+  return {
+    title: "选个上车点",
+    items,
+    footer: "拖动地图选点 · 图钉固定中心 · 双指缩放",
+    cardType: "ride_pickup",
+    extra: {
+      ride: {
+        stage: "pickup",
+        dropoff,
+        ...(city ? { city } : {}),
+        ...(dest ? { dest } : {}),
+        ...(center ? { center } : {}),
+        ...(pickup ? { pickup } : {}),
+        candidates,
+      },
+    },
+  };
+}
+
 function buildRideQuoteCard(r: Record<string, unknown>): ToolCardPayload | null {
   const rawOptions = Array.isArray(r.options) ? r.options : [];
   if (rawOptions.length === 0) return null;
@@ -1272,6 +1338,12 @@ function buildRideQuoteCard(r: Record<string, unknown>): ToolCardPayload | null 
   const dropoff = str(req.dropoff);
   const city = str(req.city);
   const scheduleAt = str(req.scheduleAt);
+  const pickupCoords =
+    req.pickupCoords && typeof req.pickupCoords === "object"
+      ? (req.pickupCoords as Record<string, unknown>)
+      : null;
+  const pickupLat = pickupCoords ? num(pickupCoords.lat) : undefined;
+  const pickupLng = pickupCoords ? num(pickupCoords.lng) : undefined;
   const provider = str(r.provider);
   const providerLabel = rideProviderLabel(r);
 
@@ -1323,6 +1395,9 @@ function buildRideQuoteCard(r: Record<string, unknown>): ToolCardPayload | null 
           ...(provider ? { provider } : {}),
           ...(city ? { city } : {}),
           ...(scheduleAt ? { scheduleAt } : {}),
+          ...(pickupLat != null && pickupLng != null
+            ? { pickupCoords: { lat: pickupLat, lng: pickupLng } }
+            : {}),
         },
       },
     });

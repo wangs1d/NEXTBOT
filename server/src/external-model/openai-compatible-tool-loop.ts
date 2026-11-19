@@ -1466,6 +1466,7 @@ const ALWAYS_INCLUDED_TOOLS = [
   // contextual 分类召回不命中 → quote/book 从可见 schema 被裁掉，模型只能幻觉提升
   // 调用或走 tool_call 桥（桥上 ms=0 fail），两阶段确认永远走不通。时点性刚需
   // （错过到站窗口就没意义）必须 1-2 轮内走通，与 weather.get_local 常驻核心同理。
+  'ride_hailing.pickup',
   'ride_hailing.quote',
   'ride_hailing.book',
   // 2026-09-05：escalate 哨兵工具已随车道内升级机制一起删除。

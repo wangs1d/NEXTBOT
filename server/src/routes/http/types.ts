@@ -230,4 +230,6 @@ export type HttpRouteDeps = {
   recommendationCatalog?: import("../../recommendation/index.js").ProductCatalog;
   /** 跨平台比价服务（shopping.compare.* 工具同源；POST /shopping/compare 只读触发用） */
   shoppingCompareService?: import("../../services/shopping-compare-service.js").ShoppingCompareService;
+  /** 打车选点地图卡的逆地理/推荐点（滴图 MCP）；未装配时 /geo/ride-pickup/resolve 返回 503 */
+  ridePickupService?: import("../../services/ride-pickup-service.js").RidePickupService;
 };

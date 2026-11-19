@@ -34,6 +34,7 @@ import type { SharedBrowserCoordinator } from "../../services/shared-browser-coo
 import type { SharedBrowserCdpGateway } from "../../services/shared-browser/cdp-gateway.js";
 import type { PhoneCallCoordinator } from "../../services/phone-call-coordinator.js";
 import type { BookingService } from "../../services/booking/booking-service.js";
+import type { RidePickupService } from "../../services/ride-pickup-service.js";
 import type { PeriodCareService } from "../../services/period-care-service.js";
 import type { SafetyGuardService } from "../../services/safety-guard-service.js";
 import type { ClientPushPort } from "../../ports/client-push-port.js";
@@ -214,6 +215,8 @@ export interface CapabilityModuleDeps {
   sharedBrowserCdpGateway?: SharedBrowserCdpGateway;
   /** 统一预订编排服务（方案 A：网约车/家政/餐厅共用） */
   bookingService: BookingService;
+  /** 打车「选上车点」地图卡数据源（滴图 MCP：逆地理/周边推荐点） */
+  ridePickupService: RidePickupService;
   /** 电话代办协调器（phone_call.*：真实外呼确认门/频控/状态机/结果回填） */
   phoneCallCoordinator: PhoneCallCoordinator;
   /** 生理周期关怀（period.*：经期记录/预测/临近提醒，数据本地加密） */
@@ -416,7 +419,7 @@ export function buildCapabilityModules(deps: CapabilityModuleDeps): CapabilityMo
       label: "打车/网约车（统一预订抽象层）",
       chatTools: RIDE_HAILING_CHAT_TOOLS,
       intentRules: RIDE_HAILING_INTENT_RULES,
-      register: (registry) => registerRideHailingTools(registry, { bookingService: deps.bookingService }),
+      register: (registry) => registerRideHailingTools(registry, { bookingService: deps.bookingService, ridePickupService: deps.ridePickupService }),
       category: RIDE_HAILING_CATEGORY_MAPPING,
     },
     {

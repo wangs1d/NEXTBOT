@@ -28,10 +28,37 @@ export const RIDE_HAILING_CHAT_TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
+      name: "ride_hailing.pickup",
+      description:
+        "弹出「选上车点」地图卡：用滴图 MCP 解析目的地坐标、逆地理当前位置、并推荐周边公交站/地铁站作为预选上车点。\n" +
+        "使用顺序：用户要打车且还没确认上车点时，先调用本工具；用户在地图上确认后（客户端卡内动作会自动接着报价），不要再重复弹卡。\n" +
+        "拿到回执后请用你自己的话简短告诉用户「地图卡已经弹出，拖动地图或点推荐点选上车点」，不要照抄固定话术。\n" +
+        "若回执里 dest 为空，说明目的地坐标没解析出来，如实告诉用户可在车上再和司机确认目的地。",
+      parameters: {
+        type: "object",
+        properties: {
+          dropoff: {
+            type: "string",
+            description: "目的地地址，如「街心花园」「北京南站北广场」。",
+          },
+          city: {
+            type: "string",
+            description: "城市（可选，提升目的地解析准确度），如「兴义」「北京」。",
+          },
+        },
+        required: ["dropoff"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "ride_hailing.quote",
       description:
         "查询网约车车型与价格预估（经济/舒适/商务），供后续下单选择。\n" +
         "适用场景：用户说「帮我叫个车去机场」「打车去公司多少钱」「晚上八点叫车」。\n" +
+        "若用户还没确认上车点，先调用 ride_hailing.pickup 弹地图卡让用户选；不要直接假设上车点报价。\n" +
         "起点联动：pickup 缺省时自动取用户当前 GPS 定位（需客户端授权定位），也可传地址文本。\n" +
         "Provider：BOOKING_MODE=mock（默认）返回模拟报价（simulated=true，须如实告知用户）；" +
         "live 模式走滴滴官方 MCP（生产端点实时报价，需 DIDI_MCP_KEY）。\n" +

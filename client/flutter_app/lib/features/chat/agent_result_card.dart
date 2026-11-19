@@ -24,6 +24,7 @@ import "display_effects/soft_icon_chip.dart";
 import "media_gallery.dart";
 import "morning_briefing_card.dart";
 import "reminder_confirm_card.dart";
+import "ride_pickup_card.dart";
 import "ride_quote_card.dart";
 import "travel_guide_select_card.dart";
 import "media_thumbnail.dart";
@@ -156,6 +157,21 @@ class AgentResultCard extends StatelessWidget {
         case "product_compare":
           // 注意：这是 shopping.suggest（开源保留）的二分化对比卡， oss 不闸
           return _ProductCompareCard(data: data, cs: cs);
+        case "ride_pickup": {
+          // 打车「选个上车点」地图卡：真实底图 + 固定图钉 + 滴图 MCP 逆地理。
+          final Object? rawRide = data.extra?["ride"];
+          return RidePickupCard(
+            cs: cs,
+            payload: rawRide is Map
+                ? <String, dynamic>{
+                    for (final MapEntry<Object?, Object?> e in rawRide.entries)
+                      e.key.toString(): e.value,
+                  }
+                : const <String, dynamic>{},
+            onUserAction: onUserAction,
+            cardData: data,
+          );
+        }
         case "ride_quote": {
           // 叫车报价选择卡：每档车型独立价格 + 「就选这个」卡内动作。
           // 载荷缺失（旧服务端/历史消息）时由组件自绘空态，不白屏。

@@ -46,6 +46,8 @@ export const CORE_TOOL_LIBRARY = {
       // ALWAYS_INCLUDED_TOOLS 决定（已同步加入），两处须同时在场——
       // quote/book 是时点性刚需，接驳确认后 1-2 轮内必须走通（错过窗口就没意义）。
       // status/cancel 低频，留在延迟目录按需召回。
+      // 上车点地图卡是报价前置步骤，同样必须每轮可见（否则模型会跳过选点直接报价）。
+      "ride_hailing.pickup",
       "ride_hailing.quote",
       "ride_hailing.book",
     ],

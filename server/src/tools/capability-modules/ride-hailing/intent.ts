@@ -10,6 +10,21 @@ import type { ToolIntentRule } from "../../tool-search/intent-metadata.js";
 
 export const RIDE_HAILING_INTENT_RULES: ToolIntentRule[] = [
   {
+    exact: "ride_hailing.pickup",
+    metadata: {
+      aliases: [
+        "pickup point", "where to get picked up", "choose pickup",
+        "上车点", "选上车点", "在哪上车", "挨哪上车", "定位上车点", "地图选点",
+      ],
+      examples: [
+        "帮我打辆车去街心花园",
+        "打车去公司，在哪儿上车",
+        "call a cab, let me pick the pickup point",
+      ],
+      negativeExamples: ["查一下刚才那个打车订单", "取消刚叫的车"],
+    },
+  },
+  {
     prefix: "ride_hailing.",
     metadata: {
       aliases: [

@@ -328,6 +328,58 @@ export async function handleCardActionEvent(
 
   try {
     switch (payload.actionId) {
+      // 上车点地图卡 → 报价：用户在地图上确认后，用选中的坐标直接报价，
+      // 换卡为车型选择（不进模型、不新增消息）。坐标优先于地址文本，
+      // 避免「自定义上车点」这种泛化标签被地理编码到区中心。
+      case "ride.pickup.quote": {
+        const booking = deps.bookingService;
+        if (!booking) {
+          send({ ok: false, error: "预订服务未装配" });
+          return true;
+        }
+        const dropoff = str(data.dropoff);
+        if (!dropoff) {
+          send({ ok: false, error: "缺少目的地，请重新发起叫车" });
+          return true;
+        }
+        const pickup = str(data.pickup) || "自定义上车点";
+        const provider = str(data.provider);
+        const city = str(data.city);
+        const lat = num(data.latitude);
+        const lng = num(data.longitude);
+        const pickupCoords =
+          lat != null && lng != null ? { lat, lng } : undefined;
+        const result = await booking.search(
+          toolContext,
+          "ride",
+          {
+            city: city || undefined,
+            scheduleAt: null,
+            params: {
+              dropoff,
+              pickup,
+              ...(pickupCoords ? { pickupCoords } : {}),
+            },
+          },
+          provider || undefined,
+        );
+        if (!result.ok) {
+          send({ ok: false, error: result.error });
+          return true;
+        }
+        const card = buildToolCard("ride_hailing.quote", {
+          ...result,
+          rideRequest: {
+            pickup,
+            dropoff,
+            ...(city ? { city } : {}),
+            ...(pickupCoords ? { pickupCoords } : {}),
+          },
+        });
+        send(card ? { ok: true, card } : { ok: false, error: "报价卡生成失败，请稍后重试" });
+        return true;
+      }
+
       // 叫车选择卡 → 阶段一：重新报价定位车型、校验限额、铸造确认 token，
       // 把这张卡换成统一确认卡（与购物同款 shopping_confirm）。
       case "ride.book.prepare": {
@@ -346,10 +398,22 @@ export async function handleCardActionEvent(
         const provider = str(data.provider);
         const city = str(data.city);
         const scheduleAt = str(data.scheduleAt);
+        const pickupCoordsRaw =
+          data.pickupCoords && typeof data.pickupCoords === "object"
+            ? (data.pickupCoords as Record<string, unknown>)
+            : null;
+        const pickupLat = pickupCoordsRaw ? num(pickupCoordsRaw.lat) : undefined;
+        const pickupLng = pickupCoordsRaw ? num(pickupCoordsRaw.lng) : undefined;
         const result = await booking.book(toolContext, "ride", {
           provider: provider || undefined,
           optionId,
-          params: { dropoff, ...(pickup ? { pickup } : {}) },
+          params: {
+            dropoff,
+            ...(pickup ? { pickup } : {}),
+            ...(pickupLat != null && pickupLng != null
+              ? { pickupCoords: { lat: pickupLat, lng: pickupLng } }
+              : {}),
+          },
           city: city || undefined,
           scheduleAt: scheduleAt || null,
           confirm: false,

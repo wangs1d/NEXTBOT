@@ -142,7 +142,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerInfoRoutes(app, deps);
   registerScheduleRoutes(app, deps);
   registerWeatherRoutes(app, deps);
-  registerGeoRoutes(app);
+  registerGeoRoutes(app, deps);
   // 版本闸（NEXTBOT_EDITION=oss 开源版剔除）：旅游全家桶（媒体/行程/地图）+ 虚拟电话
   if (!isOssEdition()) {
     registerTravelMediaRoutes(app, deps);
