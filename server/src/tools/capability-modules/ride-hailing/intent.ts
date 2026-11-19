@@ -108,6 +108,27 @@ export const RIDE_HAILING_INTENT_RULES: ToolIntentRule[] = [
   },
 ];
 
+/**
+ * 从一句用户话里提取打车目的地（确定性兜底用）。
+ *
+ * 只在「明确的叫车动作 + 目的地」同时成立时返回；问价、路线、订单/司机
+ * 查询、取消一律返回 null——这些轮次该由模型选 quote/status/cancel，
+ * 不能强行弹「选上车点」卡。
+ */
+export function extractRideDropoffFromText(text: string): string | null {
+  const s = (text ?? "").trim();
+  if (!s || s.length > 120) return null;
+  if (!/打车|打[个辆]车|叫车|叫[个辆]车|叫一辆|网约车|滴滴|出租车|送我去|来辆车/.test(s)) {
+    return null;
+  }
+  if (/怎么走|怎么去|路线|多远|多久|多少钱|车费|报价|预估价|订单|司机|车牌|取消|查一下|记录/.test(s)) {
+    return null;
+  }
+  const m = /(?:去|到|往|回)\s*([^\s，。,.!！？?；;、]{1,20})/.exec(s);
+  const raw = m?.[1]?.replace(/[吧呢啊呀哦嘛]+$/, "").trim() ?? "";
+  return raw || null;
+}
+
 export const RIDE_HAILING_CATEGORY_MAPPING: { name: string; keywords: string[] } = {
   name: "ride_hailing",
   keywords: [

@@ -57,8 +57,10 @@ export const RIDE_HAILING_CHAT_TOOLS: ChatCompletionTool[] = [
       name: "ride_hailing.quote",
       description:
         "查询网约车车型与价格预估（经济/舒适/商务），供后续下单选择。\n" +
-        "适用场景：用户说「帮我叫个车去机场」「打车去公司多少钱」「晚上八点叫车」。\n" +
-        "若用户还没确认上车点，先调用 ride_hailing.pickup 弹地图卡让用户选；不要直接假设上车点报价。\n" +
+        "触发条件（必须同时满足）：用户已确认上车点，或用户明确在问价格（「多少钱」「车费」「报价」「预估价」）。\n" +
+        "用户只说「帮我叫个车去机场」「打车去公司」「送我去X」这类还没选上车点的请求时，" +
+        "不要调用本工具，必须先调用 ride_hailing.pickup 弹地图卡让用户确认上车点；" +
+        "卡内确认动作会自动进入报价，不需要你再调 quote。\n" +
         "起点联动：pickup 缺省时自动取用户当前 GPS 定位（需客户端授权定位），也可传地址文本。\n" +
         "Provider：BOOKING_MODE=mock（默认）返回模拟报价（simulated=true，须如实告知用户）；" +
         "live 模式走滴滴官方 MCP（生产端点实时报价，需 DIDI_MCP_KEY）。\n" +

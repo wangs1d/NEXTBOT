@@ -22,6 +22,7 @@ import { resolvePreviewPayloads } from "../../services/tomorrow-preview-bridge.j
 import { sceneRegistry } from "../../render/scenes/index.js";
 import { updateEventAnswerSafely } from "../../agentic-memory/event-store.js";
 import { parseAgentAccessMode } from "../../agent/agent-access-mode.js";
+import { extractRideDropoffFromText } from "../../tools/capability-modules/ride-hailing/intent.js";
 import {
   embodimentAlert,
   embodimentHappy,
@@ -1896,6 +1897,66 @@ async function processBatchedMessage(
         if (projected) {
           finalText = projected;
           break;
+        }
+      }
+    }
+    // 「打车必出选上车点卡」确定性兜底（2026-11-20）：
+    // 模型有时只回一句文字（或直接报价），不调 ride_hailing.pickup，用户就
+    // 看不到这张卡。这里在正文/卡片决策之前补一次真实工具调用——只在本轮
+    // 完全没有 ride_hailing.* 回执，且用户话里同时有「叫车动作 + 目的地」
+    // 时触发；问价、路线、订单/司机/取消等问题已在提取器里排除。
+    if (
+      !turnEffects.some((e) => e.tool.startsWith("ride_hailing.")) &&
+      !isStale()
+    ) {
+      const forcedDropoff = extractRideDropoffFromText(batched.text);
+      if (forcedDropoff) {
+        const forcedPickupInput = { dropoff: forcedDropoff };
+        ctx.socket.send(
+          JSON.stringify({
+            type: ServerEventType.ToolCall,
+            payload: {
+              toolName: "ride_hailing.pickup",
+              input: forcedPickupInput,
+              traceId: batched.originalMessageId,
+              threadId,
+            },
+          }),
+        );
+        const forcedPickupStartedAt = Date.now();
+        const forcedPickup = await deps.runtime.runToolIfNeeded(
+          msgActor,
+          { text: "", toolName: "ride_hailing.pickup", toolInput: forcedPickupInput },
+          {
+            chatUserMessageId: batched.originalMessageId,
+            userId: batched.userId,
+            agentAccessMode: parseAgentAccessMode(batched.agentAccessMode),
+            clientIp: batched.clientIp,
+            clientLocation: batched.clientLocation,
+          },
+        );
+        if (isStale()) return;
+        ctx.socket.send(
+          JSON.stringify({
+            type: ServerEventType.ToolResult,
+            payload: {
+              toolName: "ride_hailing.pickup",
+              ok: forcedPickup.ok,
+              result: forcedPickup.result ?? {},
+              traceId: batched.originalMessageId,
+              threadId,
+              durationMs: Date.now() - forcedPickupStartedAt,
+            },
+          }),
+        );
+        if (forcedPickup.ok && forcedPickup.result) {
+          turnEffects.push({
+            tool: "ride_hailing.pickup",
+            status: effectStatusOf(forcedPickup.result),
+            result: forcedPickup.result as Record<string, unknown>,
+          });
+          // 正文已按纯文本流式送达，补卡后需要整段替换才会重渲染出卡片。
+          finalTextReplacesStream = true;
         }
       }
     }

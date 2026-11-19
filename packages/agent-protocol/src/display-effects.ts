@@ -30,6 +30,7 @@ export type DisplayEffectType =
   | "travel_itinerary" // 旅游行程卡（工具：travel.*；前端以独立界面打开）
   | "travel_requirement" // 需求确认卡（工具回执声明 needInput 时下发，点选回传）
   | "reminder_confirm" // 提醒确认卡（工具：calendar.create；只读、卡内多行）
+  | "ride_pickup" // 选上车点地图卡（工具：ride_hailing.pickup；拖拽/单击选点）
   | "ride_quote" // 叫车报价选择卡（工具：ride_hailing.quote；卡内选车型）
   | "";
 
@@ -54,6 +55,7 @@ export const DISPLAY_EFFECT_TYPES = [
   "travel_itinerary",
   "travel_requirement",
   "reminder_confirm",
+  "ride_pickup",
   "ride_quote",
   "",
 ] as const satisfies readonly DisplayEffectType[];
