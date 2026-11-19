@@ -29,20 +29,53 @@ function formatLocationLabel(loc: ClientLocationWire): string {
 async function resolvePickup(
   context: ToolContext,
   pickupInput: unknown,
-): Promise<{ pickup: string; note?: string; location?: ClientLocationWire }> {
+): Promise<{
+  pickup: string;
+  note?: string;
+  location?: ClientLocationWire;
+}> {
   if (typeof pickupInput === "string" && pickupInput.trim()) {
     return { pickup: pickupInput.trim() };
   }
   if (context.clientLocation) {
     const label = formatLocationLabel(context.clientLocation);
-    return { pickup: label, note: `起点自动取当前位置：${label}`, location: context.clientLocation };
+    return {
+      pickup: label,
+      note: `起点自动取当前位置：${label}`,
+      location: context.clientLocation,
+    };
   }
   const requested = (await context.requestLocation?.("叫车需要获取当前位置作为起点")) ?? null;
   if (requested) {
     const label = formatLocationLabel(requested);
-    return { pickup: label, note: `起点已获取实时定位：${label}`, location: requested };
+    return {
+      pickup: label,
+      note: `起点已获取实时定位：${label}`,
+      location: requested,
+    };
   }
   return { pickup: "当前位置", note: "未获取到定位，起点按「当前位置」处理" };
+}
+
+/**
+ * 把 resolvePickup 结果折进下单/报价参数。
+ *
+ * 关键：GPS 命中时把**原始坐标**一并带给 provider（pickupCoords）。
+ * 定位标签只有区县级粗粒度（「成都市武侯区」），拿它做地理编码要么失败
+ * 要么把上车点锚到区中心——真机实证报「无法定位/没有细地址」。坐标在手
+ * 就不该倒腾回文本再搜一遍。
+ */
+function buildPickupParams(
+  resolved: Awaited<ReturnType<typeof resolvePickup>>,
+): Record<string, unknown> {
+  const params: Record<string, unknown> = { pickup: resolved.pickup };
+  if (resolved.location) {
+    params.pickupCoords = {
+      lat: resolved.location.latitude,
+      lng: resolved.location.longitude,
+    };
+  }
+  return params;
 }
 
 /** ride_hailing.quote —— 车型与价格预估。 */
@@ -55,18 +88,27 @@ export function createRideQuoteHandler(service: BookingService): ToolHandler {
     const scheduleAt =
       typeof input.scheduleAt === "string" && input.scheduleAt.trim() ? input.scheduleAt.trim() : null;
 
-    const { pickup, note } = await resolvePickup(context, input.pickup);
+    const resolvedPickup = await resolvePickup(context, input.pickup);
     const result = await service.search(
       context,
       "ride",
-      { city, scheduleAt, params: { pickup, dropoff, scheduleAt } },
+      { city, scheduleAt, params: { dropoff, scheduleAt, ...buildPickupParams(resolvedPickup) } },
       provider,
     );
     if (!result.ok) return result;
     // 报价上下文回带给卡片：选择车型的卡内动作要原样带回起终点/时间，
     // 客户端不解释参数，只把服务端给的 payload 回传。
-    const rideRequest = { pickup, dropoff, ...(city ? { city } : {}), ...(scheduleAt ? { scheduleAt } : {}) };
-    return { ...result, ...(note ? { pickupNote: note } : {}), rideRequest };
+    const rideRequest = {
+      pickup: resolvedPickup.pickup,
+      dropoff,
+      ...(city ? { city } : {}),
+      ...(scheduleAt ? { scheduleAt } : {}),
+    };
+    return {
+      ...result,
+      ...(resolvedPickup.note ? { pickupNote: resolvedPickup.note } : {}),
+      rideRequest,
+    };
   };
 }
 
@@ -94,11 +136,12 @@ export function createRideBookHandler(service: BookingService): ToolHandler {
         ? input.passengerPhone.trim()
         : undefined;
 
-    // 阶段一解析起点（摘要里向用户复述上车点）；阶段二 token 草稿已带起点，
-    // 跳过解析避免确认时多余的客户端定位往返
+    // 阶段一解析起点（摘要里向用户复述上车点 + 坐标直传）；阶段二 token 草稿
+    // 已带起点，跳过解析避免确认时多余的客户端定位往返
+    const resolved = confirm ? null : await resolvePickup(context, input.pickup);
     const params = confirm
       ? { dropoff, passengerPhone }
-      : { dropoff, passengerPhone, pickup: (await resolvePickup(context, input.pickup)).pickup };
+      : { dropoff, passengerPhone, ...buildPickupParams(resolved!) };
     const result = await service.book(context, "ride", {
       provider,
       optionId,
@@ -114,7 +157,7 @@ export function createRideBookHandler(service: BookingService): ToolHandler {
     return {
       ...result,
       dropoff,
-      pickup: params.pickup,
+      pickup: resolved?.pickup ?? "",
       ...(city ? { city } : {}),
     };
   };

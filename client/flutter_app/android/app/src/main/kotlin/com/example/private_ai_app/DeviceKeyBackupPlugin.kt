@@ -48,26 +48,43 @@ class DeviceKeyBackupPlugin(private val context: Context) : MethodChannel.Method
         private const val ID_SALT = "nextbot-stable-install-v1"
         private const val KEY_SALT = "nextbot-byok-backup-v1"
         private const val BAD_ANDROID_ID = "9774d56d682e549c"
+        /** 全部支持的方法名；不在表内的走 notImplemented（与旧 when 分支等价）。 */
+        private val METHODS = setOf("stableInstallId", "readBackup", "writeBackup", "deleteBackup")
     }
 
+    // MediaStore 查询/读写不能在主线程跑（2026-11-19 启动卡顿定位）：readBackup
+    // 会对 Downloads 集合做全量 LIKE 扫描，冷库首装可达秒级——原来同步跑在
+    // 主线程上，既顶后 Flutter 首帧，UI 起来后还是一处 ANR 隐患。统一挪到
+    // 单线程后台执行器，结果回投主线程后再 reply（MethodChannel.Result 的
+    // 官方建议调用线程就是平台主线程）。
+    private val executor = java.util.concurrent.Executors.newSingleThreadExecutor()
+    private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
-        try {
-            when (call.method) {
-                "stableInstallId" -> result.success(stableInstallId())
-                "readBackup" -> result.success(readBackup())
-                "writeBackup" -> {
-                    val json = call.argument<String>("json")
-                    result.success(!json.isNullOrEmpty() && writeBackup(json))
+        if (call.method !in METHODS) {
+            result.notImplemented()
+            return
+        }
+        executor.execute {
+            val outcome: Any? = try {
+                when (call.method) {
+                    "stableInstallId" -> stableInstallId()
+                    "readBackup" -> readBackup()
+                    "writeBackup" -> {
+                        val json = call.argument<String>("json")
+                        !json.isNullOrEmpty() && writeBackup(json)
+                    }
+                    "deleteBackup" -> deleteBackup()
+                    else -> null
                 }
-                "deleteBackup" -> result.success(deleteBackup())
-                else -> result.notImplemented()
+            } catch (e: Exception) {
+                Log.w(TAG, "${call.method} failed: ${e.message}")
+                when (call.method) {
+                    "writeBackup", "deleteBackup" -> false
+                    else -> null
+                }
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "${call.method} failed: ${e.message}")
-            when (call.method) {
-                "writeBackup", "deleteBackup" -> result.success(false)
-                else -> result.success(null)
-            }
+            mainHandler.post { result.success(outcome) }
         }
     }
 

@@ -6,16 +6,15 @@ import "package:flutter/foundation.dart" show kIsWeb;
 import "package:flutter/material.dart";
 import "package:image_picker/image_picker.dart";
 import "package:permission_handler/permission_handler.dart";
-import "package:url_launcher/url_launcher.dart";
 
 import "../core/config/api_config.dart";
 import "../core/db/isar_local_history_store.dart";
 import "../core/presentation/user_avatar.dart";
-import "../core/services/account_session_store.dart";
 import "../core/services/keep_alive_service.dart";
 import "../core/services/user_avatar_api.dart";
 import "../features/help/feedback_dialog.dart";
 import "mobile_chat_controller.dart";
+import "mobile_recharge_page.dart";
 import "mobile_service_access_page.dart";
 import "mobile_theme.dart";
 
@@ -273,23 +272,13 @@ class _MobileProfilePageState extends State<MobileProfilePage>
         .showSnackBar(SnackBar(content: Text(message)));
   }
 
-  /// 「额度充值」chip：与官网 /recharge 同一套接口（邮箱验证码登录 → 支付宝付款）。
+  /// 「额度充值」chip：进入 App 内充值页。
   ///
-  /// 手机端没有内嵌业务浏览器，统一走系统浏览器（与注册页网页登录同一模式）；
-  /// 当前 App 已登录的邮箱带过去预填，网页侧仍需验证码换取充值会话。
-  Future<void> _openRecharge() async {
-    Uri url = Uri.parse("${ApiConfig.controlPlaneBase}/recharge");
-    final String? email = AccountSessionStore.instance.email;
-    if (email != null && email.isNotEmpty) {
-      url = url.replace(queryParameters: <String, String>{"email": email});
-    }
-    try {
-      final bool opened =
-          await launchUrl(url, mode: LaunchMode.externalApplication);
-      if (!opened && mounted) _toast("无法打开浏览器，请稍后重试");
-    } on Exception {
-      if (mounted) _toast("无法打开浏览器，请稍后重试");
-    }
+  /// 身份直接用本机登录 access token（`/api/recharge/app/*`），不再跳官网网页、
+  /// 不再重复邮箱验证码；只有最后一步支付宝付款交给系统浏览器/支付宝 App，
+  /// 下单与记账仍复用官网同一套 webpay 服务。
+  Future<void> _openRecharge() {
+    return _push(const MobileRechargePage(), "额度充值");
   }
 
   /// 二级页统一包装:顶栏带返回键(被复用的桌面面板页自身无返回出口,
@@ -353,16 +342,6 @@ class _MobileProfilePageState extends State<MobileProfilePage>
             avatarUrl: UserAvatarApi.resolveUrl(_userAvatarPath),
             onChangeAvatar: _setAvatar,
           ),
-          const SizedBox(height: 12),
-          // 快捷 chip：额度充值直接复用官网充值页，手机端走系统浏览器完成支付宝付款。
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Row(
-              children: <Widget>[
-                _RechargeChip(onTap: _openRecharge),
-              ],
-            ),
-          ),
           // 保活异常常驻提示（2026-11-18）：这是「手机端老是重连」最常见的
           // 根因，藏在二级页里用户找不到，所以状态不对时直接顶在账号卡下面。
           if (_isMobile &&
@@ -381,6 +360,15 @@ class _MobileProfilePageState extends State<MobileProfilePage>
           _GroupLabel(label: "功能"),
           _SectionCard(
             children: [
+              _ListRow(
+                leading: Icon(Icons.account_balance_wallet_outlined,
+                    color: p.textSecondary, size: 22),
+                title: "额度充值",
+                trailing:
+                    Icon(Icons.chevron_right, color: p.textMuted, size: 20),
+                onTap: _openRecharge,
+              ),
+              _divider(context),
               _ListRow(
                 leading:
                     Icon(Icons.tune_outlined, color: p.textSecondary, size: 22),
@@ -726,72 +714,6 @@ class _ListRow extends StatelessWidget {
             ),
             if (trailing != null) trailing!,
           ],
-        ),
-      ),
-    );
-  }
-}
-
-/// 「额度充值」入口 chip。
-///
-/// 视觉沿用官网充值页的支付宝蓝（#1677FF）标记 + 胶囊描边，点击后在系统
-/// 浏览器打开 `/recharge`，由网页端完成邮箱验证码登录与支付宝下单。
-class _RechargeChip extends StatelessWidget {
-  const _RechargeChip({required this.onTap});
-
-  final VoidCallback onTap;
-
-  static const Color _alipayBlue = Color(0xFF1677FF);
-
-  @override
-  Widget build(BuildContext context) {
-    final MobilePalette p = MobileTheme.of(context);
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        borderRadius: BorderRadius.circular(999),
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.fromLTRB(10, 7, 12, 7),
-          decoration: BoxDecoration(
-            color: p.surface,
-            borderRadius: BorderRadius.circular(999),
-            border: Border.all(color: p.divider),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: <Widget>[
-              Container(
-                width: 18,
-                height: 18,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: _alipayBlue,
-                  borderRadius: BorderRadius.circular(5),
-                ),
-                child: const Text(
-                  "支",
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                    height: 1,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 7),
-              Text(
-                "额度充值",
-                style: TextStyle(
-                  color: p.textPrimary,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-              const SizedBox(width: 2),
-              Icon(Icons.chevron_right, size: 16, color: p.textMuted),
-            ],
-          ),
         ),
       ),
     );

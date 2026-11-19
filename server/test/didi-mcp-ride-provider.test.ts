@@ -201,6 +201,66 @@ test("didi-mcp - search：接驾分钟数不能当价格（每行价格独立解
   assert.equal(options[1].etaMinutes, 3);
 });
 
+test("didi-mcp - search：GPS 坐标直传起点，不再倒腾文本地理编码", async () => {
+  const fake = new FakeMcp(
+    [{ alias: "didi", url: "https://mcp.didichuxing.com/mcp-servers-sandbox?key=k" }],
+    sandboxResponses(),
+  );
+  const provider = new DidiMcpRideProvider(asMcp(fake));
+
+  // 真机形态：pickup 是区县级粗标签（没有细地址），坐标由 handler 直传
+  const query: BookingSearchQuery = {
+    ...SEARCH_QUERY,
+    params: {
+      pickup: "成都市武侯区",
+      dropoff: "太古里亚朵S酒店",
+      pickupCoords: { lat: 30.6423, lng: 104.0432 },
+    },
+  };
+  const result = await provider.search(query, PROVIDER_CTX);
+  assert.equal(result.ok, true);
+  // maps_textsearch 只应搜过目的地一次（起点坐标直传，不走地理编码）
+  const searchCalls = fake.calls.filter((c) => c.tool === "maps_textsearch");
+  assert.equal(searchCalls.length, 1);
+  assert.match(searchCalls[0].args.keywords as string, /太古里/);
+  // 估价拿到的是直传坐标（6 位小数字符串契约）
+  const est = fake.calls.find((c) => c.tool === "taxi_estimate");
+  assert.equal(est?.args.from_lat, "30.642300");
+  assert.equal(est?.args.from_lng, "104.043200");
+});
+
+/** 第一次 textsearch 返回未命中（模拟区县粗标签搜不到），其余正常 */
+class FirstSearchMissMcp extends FakeMcp {
+  private textsearchCalls = 0;
+  async callTool(alias: string, toolName: string, args: Record<string, unknown>) {
+    if (toolName === "maps_textsearch") {
+      this.textsearchCalls += 1;
+      if (this.textsearchCalls === 1) {
+        return { ok: true, result: { content: [{ type: "text", text: "未找到相关地点" }] } };
+      }
+    }
+    return super.callTool(alias, toolName, args);
+  }
+}
+
+test("didi-mcp - search：粗标签检索失败时回退客户端 GPS 坐标，不直接报无法定位", async () => {
+  const fake = new FirstSearchMissMcp(
+    [{ alias: "didi", url: "https://mcp.didichuxing.com/mcp-servers-sandbox?key=k" }],
+    sandboxResponses(),
+  );
+  const provider = new DidiMcpRideProvider(asMcp(fake));
+  const ctx = { ...PROVIDER_CTX, location: { latitude: 30.65, longitude: 104.06, label: "成都市武侯区" } as never };
+  const query: BookingSearchQuery = {
+    ...SEARCH_QUERY,
+    params: { pickup: "成都市武侯区", dropoff: "太古里亚朵S酒店" },
+  };
+  const result = await provider.search(query, ctx);
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const est = fake.calls.find((c) => c.tool === "taxi_estimate");
+  assert.equal(est?.args.from_lat, "30.650000");
+  assert.equal(est?.args.from_lng, "104.060000");
+});
+
 test("didi-mcp - search 诚实边界：估价文本解析不出车型/流程ID 时不造假", async () => {
   const fake = new FakeMcp(
     [{ alias: "didi", url: "https://mcp.didichuxing.com/mcp-servers-sandbox?key=k" }],

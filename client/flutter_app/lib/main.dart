@@ -210,9 +210,14 @@ void main() async {
     // 预加载本机访问凭据（token），确保首次 session.init 就能带上
     _writeCrashLog("[BOOT]", "stage 1: before AccessCredentialStore.load", StackTrace.current);
     await AccessCredentialStore.instance.load();
-    // 预加载云端连接版「用户自有模型」配置，确保首次 session.init 就能带上
-    // （仅云端连接版消费；byok 本地版不读此文件）。
-    await CloudModelBindingStore.instance.load();
+    // 预加载云端连接版「用户自有模型」配置——后台加载，不挡首帧：
+    // 未配置时 load() 会走跨卸载恢复链（Android 上是 MediaStore 全 Downloads
+    // 查询，首装冷库可达秒级），原实现串在 runApp 之前，未登录启动表现为
+    // 「点开 app 先静默黑屏一大段才出登录页」。挪到后台后首帧不再等它；
+    // session.init 在建连握手回调里显式 await 本 load（幂等）收口，
+    // 「首次 session.init 带上 BYOK 三元组」的语义不变。
+    // （仅云端连接版消费；byok 本地版不读此文件。）
+    unawaited(CloudModelBindingStore.instance.load());
     // 手机端：账号会话读盘提前到首帧之前。系统启动画面（已去掉应用图标层）
     // 与 Flutter 首帧之间不再插「等读盘」的静止画面——首帧即按登录态武装
     // N 光扫动画，点开应用直接进入动画，不留任何延迟层。

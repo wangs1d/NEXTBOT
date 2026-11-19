@@ -19,7 +19,10 @@
 
          This Theme is only used starting with V2 of Flutter's Android embedding. -->
     <style name="NormalTheme" parent="@android:style/Theme.Light.NoTitleBar">
-        <item name="android:windowBackground">?android:colorBackground</item>
+        <!-- 与系统启动画面/LaunchTheme 同底色（#161616）：引擎启动到 Flutter
+             首帧之间窗口背景走本主题，浅色系统下 ?android:colorBackground 是
+             白底，首帧慢（首次安装 DEX 优化+着色器编译）时会白→黑硬切闪跳。 -->
+        <item name="android:windowBackground">@color/boot_background</item>
     </style>
 
     <!-- 手机桥接拨号确认窗：半透明全屏，覆盖在当前界面之上 -->

@@ -78,6 +78,27 @@ function parseResultJson(result: Record<string, unknown>): unknown {
 /** optionId 形态：didi:{estimate_trace_id}:{product_category} */
 const OPTION_ID_RE = /^didi:([A-Za-z0-9_-]+):(\d+)$/;
 
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null;
+}
+
+/**
+ * 解析「纬度,经度」坐标对文本（formatLocationLabel 的兜底形态）。
+ * 中国域内纬度约 20–55、经度约 73–135，按值域判向，不依赖书写顺序。
+ */
+function parseCoordPair(text: string): { lat: number; lng: number } | null {
+  const m = text.match(/^\s*(-?\d{1,3}(?:\.\d+)?)\s*[,，]\s*(-?\d{1,3}(?:\.\d+)?)\s*$/);
+  if (!m) return null;
+  const a = Number(m[1]);
+  const b = Number(m[2]);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+  const inLat = (v: number) => v >= 15 && v <= 60;
+  const inLng = (v: number) => v >= 70 && v <= 140;
+  if (inLat(a) && inLng(b)) return { lat: a, lng: b };
+  if (inLat(b) && inLng(a)) return { lat: b, lng: a };
+  return null;
+}
+
 /**
  * 从一行车型文案里取预估价。
  *
@@ -155,13 +176,31 @@ export class DidiMcpRideProvider implements BookingProvider {
     const pickupText = typeof query.params.pickup === "string" ? query.params.pickup.trim() : "";
     const city = query.city?.trim() || undefined;
 
-    // 起点：显式地址 → textsearch；缺省 → 客户端 GPS（坐标在手，name 取 label）
-    let from: { lng: string; lat: string; name: string };
-    if (pickupText) {
-      const r = await this.textsearch(pickupText, city);
-      if (!r) return { ok: false, error: `无法定位起点「${pickupText}」，请换更具体的地址`, retryable: true };
-      from = r;
-    } else {
+    // 起点：坐标直传 > 坐标对文本 > 地址检索 > 客户端 GPS。
+    // 定位标签只有区县级粗粒度，地理编码要么失败要么锚到区中心
+    // （真机实证报「无法定位/没有细地址」），有坐标就绝不倒腾回文本。
+    let from: { lng: string; lat: string; name: string } | null = null;
+    const coords =
+      isRecord(query.params.pickupCoords) &&
+      typeof query.params.pickupCoords.lat === "number" &&
+      typeof query.params.pickupCoords.lng === "number"
+        ? { lat: query.params.pickupCoords.lat as number, lng: query.params.pickupCoords.lng as number }
+        : null;
+    if (coords) {
+      from = {
+        lng: coords.lng.toFixed(6),
+        lat: coords.lat.toFixed(6),
+        name: pickupText || "当前位置",
+      };
+    } else if (pickupText) {
+      const pair = parseCoordPair(pickupText);
+      if (pair) {
+        from = { lng: pair.lng.toFixed(6), lat: pair.lat.toFixed(6), name: "当前位置" };
+      } else {
+        from = await this.textsearch(pickupText, city);
+      }
+    }
+    if (!from) {
       const loc = ctx.location ?? query.location;
       if (loc) {
         from = {
@@ -169,13 +208,21 @@ export class DidiMcpRideProvider implements BookingProvider {
           lat: loc.latitude.toFixed(6),
           name: loc.label?.trim() || "当前位置",
         };
-      } else {
-        return { ok: false, error: "缺少起点：请提供 pickup，或确保客户端已上报定位", retryable: true };
       }
+    }
+    if (!from) {
+      return {
+        ok: false,
+        error:
+          pickupText
+            ? `起点「${pickupText}」定位失败：请说更具体的上车点（如「太古里北门」），或检查定位授权后重试`
+            : "缺少起点：请提供 pickup，或确保客户端已上报定位",
+        retryable: true,
+      };
     }
 
     const dest = await this.textsearch(dropoffText, city);
-    if (!dest) return { ok: false, error: `无法定位目的地「${dropoffText}」，请换更具体的地址`, retryable: true };
+    if (!dest) return { ok: false, error: `无法定位目的地「${dropoffText}」，请说更具体的地址（如「太古里北门」）`, retryable: true };
 
     // 数字/坐标参数一律传字符串（滴滴 MCP 契约）
     const est = await this.mcp.callTool(

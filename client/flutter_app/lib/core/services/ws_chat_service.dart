@@ -7,6 +7,7 @@ import "package:web_socket_channel/web_socket_channel.dart";
 
 import "../config/api_config.dart";
 import "access_auth_api.dart";
+import "cloud_model_binding_store.dart";
 import "ws_session_init.dart";
 
 class _PendingWsEvent {
@@ -314,7 +315,7 @@ class WsChatService {
       );
 
       unawaited(
-        channel.ready.then((_) {
+        channel.ready.then((_) async {
           if (!identical(_channel, channel)) return;
           _connectTimer?.cancel();
           _connectTimer = null;
@@ -328,6 +329,11 @@ class WsChatService {
           _probeSentAt = DateTime.fromMillisecondsSinceEpoch(0);
           _connectedAt = _lastInboundAt;
           _startHeartbeat(channel);
+          // BYOK 本地绑定必须先读完再组装 session.init（幂等，已加载时立即
+          // 返回）：2026-11-19 起 main() 把 load() 挪到后台跑，未配置时会走
+          // 跨卸载恢复链（MediaStore 查询，首装冷库可达秒级）——在这里收口，
+          // 首帧不再被它顶后，同时「首次 session.init 带上三元组」的语义不变。
+          await CloudModelBindingStore.instance.load();
           // 握手即上报身份：连接层唯一一份 session.init，必须先于任何业务事件
           // 与重连补发队列（否则服务端把消息归错车道）。
           _sendSessionInit();

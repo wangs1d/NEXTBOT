@@ -16,6 +16,7 @@ import {
 } from "../../services/recharge/site-session-store.js";
 import { getApiTokenStore } from "../../services/recharge/api-token-store.js";
 import { readApiPrices, resolveApiGatewayConfig } from "../../services/recharge/api-billing.js";
+import { AccessAuthService } from "../../services/access-auth-service.js";
 import { isEmailOtpEnforced } from "./accounts.js";
 import type { HttpRouteDeps } from "./types.js";
 
@@ -87,6 +88,25 @@ function isMobileClient(req: FastifyRequest): boolean {
   );
 }
 
+/**
+ * App 内购额度用的身份：Bearer access token（登录时签发，无需再做邮箱验证码）。
+ *
+ * 与官网充值页的 Cookie 会话相互独立，但记账主体同为登录邮箱；token 的
+ * userId 不是邮箱形态时一律拒绝（额度只能记到邮箱账号）。
+ */
+function resolveBearerEmail(req: FastifyRequest, deps: HttpRouteDeps): string | null {
+  const service = deps.accessAuthService;
+  if (!service) return null;
+  const raw = req.headers.authorization;
+  const authorization = Array.isArray(raw) ? String(raw[0] ?? "") : String(raw ?? "");
+  const token = AccessAuthService.extractToken({ authorization });
+  if (!token) return null;
+  const verified = service.verifyToken(token);
+  if (!verified) return null;
+  const email = verified.userId.trim().toLowerCase();
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : null;
+}
+
 export function registerRechargeRoutes(app: FastifyInstance, deps: HttpRouteDeps): void {
   const otpEnabled = isEmailOtpEnforced(deps);
   const otpService = deps.emailOtpService ?? null;
@@ -96,6 +116,36 @@ export function registerRechargeRoutes(app: FastifyInstance, deps: HttpRouteDeps
     const html = servePage(name);
     if (!html) return { status: 500, body: `${name} missing` };
     return { status: 200, body: html };
+  }
+
+  /**
+   * 本人订单快照：pending 时主动向网关查单收敛；非本人订单返回 null（对外按不存在）。
+   * 官网 Cookie 会话与 App Bearer 会话共用这一套状态口径。
+   */
+  async function orderSnapshot(outTradeNo: string, email: string) {
+    const store = getWebpayStore();
+    const order = store.getOrder(outTradeNo);
+    if (!order || order.accountId !== email) return null;
+    let state = order.status === "paid" ? "PAID" : order.status === "closed" ? "CLOSED" : "PENDING_PAYMENT";
+    if (order.status === "pending") {
+      try {
+        const queried = await getWebpayService().queryOrder(outTradeNo);
+        if (queried) state = queried.businessState;
+      } catch (err) {
+        if (!(err instanceof WebpayNotConfiguredError)) {
+          console.error("[recharge] query order failed:", outTradeNo, err instanceof Error ? err.message : err);
+        }
+      }
+    }
+    const latest = store.getOrder(outTradeNo) ?? order;
+    return {
+      outTradeNo,
+      amount: latest.totalAmount,
+      status: orderStatusText(state),
+      paidAt: latest.paidAt,
+      masked: maskEmail(email),
+      balance: centsToAmount(BigInt(store.getRechargeBalanceCents(email))),
+    };
   }
 
   app.get("/recharge", async (_req, reply) => {
@@ -315,32 +365,64 @@ export function registerRechargeRoutes(app: FastifyInstance, deps: HttpRouteDeps
     const email = resolveSessionEmail(req);
     if (!email) return reply.code(401).send({ ok: false, message: "未登录" });
     const { outTradeNo } = req.params as { outTradeNo: string };
-    const store = getWebpayStore();
-    const order = store.getOrder(outTradeNo);
+    const snap = await orderSnapshot(outTradeNo, email);
     // 非本人订单按不存在处理，不泄露他人订单信息
-    if (!order || order.accountId !== email) {
-      return reply.code(404).send({ ok: false, message: "订单不存在" });
-    }
-    let state = order.status === "paid" ? "PAID" : order.status === "closed" ? "CLOSED" : "PENDING_PAYMENT";
-    if (order.status === "pending") {
-      try {
-        const queried = await getWebpayService().queryOrder(outTradeNo);
-        if (queried) state = queried.businessState;
-      } catch (err) {
-        if (!(err instanceof WebpayNotConfiguredError)) {
-          console.error("[recharge] query order failed:", outTradeNo, err instanceof Error ? err.message : err);
-        }
-      }
-    }
-    const latest = store.getOrder(outTradeNo) ?? order;
+    if (!snap) return reply.code(404).send({ ok: false, message: "订单不存在" });
+    return { ok: true, ...snap };
+  });
+
+  // ── App 内购额度：Bearer 登录态直连，不再跳网页、不再重复邮箱验证码 ──
+  // 支付仍走同一套支付宝 webpay 下单与验签记账，只是入口与 UI 在 App 内。
+
+  app.get("/api/recharge/app/me", async (req, reply) => {
+    const email = resolveBearerEmail(req, deps);
+    if (!email) return reply.code(401).send({ ok: false, message: "登录已失效，请重新登录" });
     return {
       ok: true,
-      outTradeNo,
-      amount: latest.totalAmount,
-      status: orderStatusText(state),
-      paidAt: latest.paidAt,
-      masked: maskEmail(email),
-      balance: centsToAmount(BigInt(store.getRechargeBalanceCents(email))),
+      ...maskFor(email),
+      balance: centsToAmount(BigInt(getWebpayStore().getRechargeBalanceCents(email))),
     };
+  });
+
+  app.post("/api/recharge/app/orders", async (req, reply) => {
+    const email = resolveBearerEmail(req, deps);
+    if (!email) return reply.code(401).send({ ok: false, message: "登录已失效，请重新登录" });
+    const body = (req.body ?? {}) as { amount?: unknown };
+    const cents = parseAmountToCents(body.amount);
+    if (cents === null || cents < MIN_CENTS || cents > MAX_CENTS) {
+      return reply.code(400).send({ ok: false, message: "充值金额需为 1 ~ 100000 元、最多两位小数" });
+    }
+    const config = loadWebpayConfig();
+    if (!config) return reply.code(503).send({ ok: false, message: "支付通道尚未配置" });
+    try {
+      const result = getWebpayService().createOrder({
+        amount: centsToAmount(cents),
+        subject: "NEXTBOT 额度充值",
+        accountId: email,
+        returnUrl: `${config.baseUrl}/recharge/return`,
+        // App 内购固定走手机网站收银台：由系统浏览器拉起支付宝 App 完成支付
+        payMode: "wap",
+      });
+      return {
+        ok: true,
+        outTradeNo: result.outTradeNo,
+        amount: centsToAmount(cents),
+        paymentUrl: result.paymentUrl ?? null,
+      };
+    } catch (err) {
+      if (err instanceof WebpayNotConfiguredError) {
+        return reply.code(503).send({ ok: false, message: "支付通道尚未配置" });
+      }
+      return reply.code(400).send({ ok: false, message: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  app.get("/api/recharge/app/orders/:outTradeNo", async (req, reply) => {
+    const email = resolveBearerEmail(req, deps);
+    if (!email) return reply.code(401).send({ ok: false, message: "登录已失效，请重新登录" });
+    const { outTradeNo } = req.params as { outTradeNo: string };
+    const snap = await orderSnapshot(outTradeNo, email);
+    if (!snap) return reply.code(404).send({ ok: false, message: "订单不存在" });
+    return { ok: true, ...snap };
   });
 }
