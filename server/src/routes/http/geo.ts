@@ -14,6 +14,14 @@ const pickupResolveSchema = z.object({
   withCandidates: z.coerce.number().optional(),
 });
 
+const pickupStaticMapSchema = z.object({
+  latitude: z.coerce.number().finite(),
+  longitude: z.coerce.number().finite(),
+  zoom: z.coerce.number().finite().optional(),
+  width: z.coerce.number().int().positive().max(800).optional(),
+  height: z.coerce.number().int().positive().max(800).optional(),
+});
+
 /** 前端 GPS 逆地理：返回中文省市区（不使用 IP）。 */
 export function registerGeoRoutes(app: FastifyInstance, deps?: Pick<HttpRouteDeps, "ridePickupService">): void {
   app.get("/geo/reverse", async (request, reply) => {
@@ -59,12 +67,41 @@ export function registerGeoRoutes(app: FastifyInstance, deps?: Pick<HttpRouteDep
     };
   });
 
+  /**
+   * 打车选点地图卡的底图（滴图 maps_static_map）。
+   * 滴图 MCP 不提供瓦片服务，聊天卡用静态地图 + 客户端图钉实现拖选：
+   * 停手后客户端按新中心重新请求本接口。
+   */
+  app.get("/geo/ride-pickup/static-map", async (request, reply) => {
+    const service = deps?.ridePickupService;
+    if (!service) {
+      return reply.code(503).send({ ok: false, message: "上车点服务未装配" });
+    }
+    const parsed = pickupStaticMapSchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
+    }
+    const { latitude, longitude, zoom, width, height } = parsed.data;
+    const url = await service.staticMap(
+      latitude,
+      longitude,
+      zoom ?? 16,
+      width ?? 720,
+      height ?? 408,
+    );
+    if (!url) {
+      return reply.code(502).send({ ok: false, message: "滴图静态地图暂不可用" });
+    }
+    return { ok: true, url };
+  });
+
   app.get("/geo", async () => ({
     domain: "geo",
     endpoints: [
       "/geo/reverse?latitude=&longitude=",
       "/geo/ride-pickup/resolve?latitude=&longitude=&withCandidates=1",
+      "/geo/ride-pickup/static-map?latitude=&longitude=&zoom=&width=&height=",
     ],
-    note: "GPS 逆地理（不使用 IP 定位）；上车点解析走滴图 MCP",
+    note: "GPS 逆地理（不使用 IP 定位）；上车点解析与底图走滴图 MCP",
   }));
 }

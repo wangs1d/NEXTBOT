@@ -150,6 +150,29 @@ function dedupePoints(points: RidePickupPoint[]): RidePickupPoint[] {
   return out;
 }
 
+/** 静态地图工具返回的是图片 URL（可能包在 JSON / content 文本里）。 */
+function findImageUrl(node: unknown, depth = 0): string | null {
+  if (depth > 6) return null;
+  if (typeof node === "string") {
+    const m = node.match(/https?:\/\/[^\s"'<>\\]+/);
+    return m ? m[0] : null;
+  }
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      const hit = findImageUrl(item, depth + 1);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  if (!isRecord(node)) return null;
+  if (typeof node.url === "string" && /^https?:\/\//.test(node.url)) return node.url;
+  for (const value of Object.values(node)) {
+    const hit = findImageUrl(value, depth + 1);
+    if (hit) return hit;
+  }
+  return null;
+}
+
 export class RidePickupService {
   constructor(private readonly mcp: McpClientService | null) {}
 
@@ -211,6 +234,35 @@ export class RidePickupService {
   }
 
   /**
+   * 静态地图（maps_static_map）——聊天卡片的真实底图。
+   *
+   * 滴图 MCP 只提供静态图（无瓦片服务）。用单点标记把地图锚定在当前中心
+   * （标记会被客户端图钉盖住），宽度/高度/zoom 由客户端按卡片尺寸请求。
+   */
+  async staticMap(lat: number, lng: number, zoom: number, width: number, height: number): Promise<string | null> {
+    const z = Math.min(20, Math.max(4, Math.round(zoom)));
+    const w = Math.min(800, Math.max(200, Math.round(width)));
+    const h = Math.min(800, Math.max(200, Math.round(height)));
+    const anchor = `${lng.toFixed(6)},${lat.toFixed(6)}`;
+    const byMarker = await this.call("maps_static_map", {
+      markers: anchor,
+      width: w,
+      height: h,
+      zoom: z,
+    });
+    const markerUrl = byMarker == null ? null : findImageUrl(byMarker);
+    if (markerUrl) return markerUrl;
+    // 个别 key 不接受 marker 时，用近乎重合的两点路径兜底（路径不可见）。
+    const byPath = await this.call("maps_static_map", {
+      paths: `${anchor};${(lng + 0.000015).toFixed(6)},${(lat + 0.000015).toFixed(6)}`,
+      width: w,
+      height: h,
+      zoom: z,
+    });
+    return byPath == null ? null : findImageUrl(byPath);
+  }
+
+  /**
    * 中心点周边推荐上车点（maps_place_around）。
    *
    * 公交站/地铁站是确定性上车点，比「附近任意 POI」更适合作为预选；
@@ -245,7 +297,9 @@ export class RidePickupService {
 
   /**
    * 弹卡所需的完整上下文：目的地坐标 + 初始中心 + 预选上车点 + 推荐点。
-   * 客户端定位优先作为中心；没有定位时用目的地坐标兜底（至少地图不是空白）。
+   * 有 GPS：中心/预选/周边全走滴图 MCP（regeocode + place_around）。
+   * 没有 GPS：只用目的地坐标做初始中心，不硬编码城市、也不把目的地当成
+   * 上车点——预选留空，等用户拖动地图自己选。
    */
   async buildPlan(input: {
     dropoff: string;
@@ -253,10 +307,9 @@ export class RidePickupService {
     location?: { lat: number; lng: number } | null;
   }): Promise<RidePickupPlan> {
     const destPromise = this.resolveDestination(input.dropoff, input.city);
-    const hasLocation = !!input.location;
-    const center = input.location ? { lat: input.location.lat, lng: input.location.lng } : null;
 
-    if (center) {
+    if (input.location) {
+      const center = { lat: input.location.lat, lng: input.location.lng };
       const [dest, pickup, candidates] = await Promise.all([
         destPromise,
         this.regeocode(center.lat, center.lng),
@@ -266,21 +319,13 @@ export class RidePickupService {
     }
 
     const dest = await destPromise;
-    const fallbackCenter = dest ? { lat: dest.lat, lng: dest.lng } : null;
-    if (!fallbackCenter) {
-      return { dropoff: input.dropoff, city: input.city, dest, center: null, pickup: null, candidates: [] };
-    }
-    const [pickup, candidates] = await Promise.all([
-      this.regeocode(fallbackCenter.lat, fallbackCenter.lng),
-      this.nearbyPickups(fallbackCenter.lat, fallbackCenter.lng),
-    ]);
     return {
       dropoff: input.dropoff,
       city: input.city,
       dest,
-      center: fallbackCenter,
-      pickup,
-      candidates,
+      center: dest ? { lat: dest.lat, lng: dest.lng } : null,
+      pickup: null,
+      candidates: [],
     };
   }
 }

@@ -100,12 +100,9 @@ export function createRidePickupHandler(service: RidePickupService): ToolHandler
     }
 
     const plan = await service.buildPlan({ dropoff, city, location });
+    // 不返回 summary：开场话术交给模型按上下文生成，避免把固定句子写死进回执。
     return {
       ok: true,
-      summary:
-        plan.dest || plan.center
-          ? `已生成上车点地图卡（目的地：${dropoff}）`
-          : `已生成上车点地图卡（暂未解析出「${dropoff}」坐标，地图以当前位置为中心）`,
       ...plan,
       mcpAvailable: service.availability().ok,
     };
