@@ -151,6 +151,10 @@ dependencies {
     // 高德定位 SDK（2026-11-18）：GPS + WiFi + 基站 + 传感器融合，设备精度上限。
     // 只有 AmapLocationPlugin 直接使用；未配置 key 时 SDK 不会被初始化。
     implementation("com.amap.api:location:6.4.9")
+
+    // 支付宝 App 支付 SDK（官方 Maven Central 发布）：额度充值时若已安装支付宝，
+    // 直接唤起原生收银台，不再跳系统浏览器。仅 Android 原生层使用。
+    implementation("com.alipay.sdk:alipaysdk-android:15.8.42@aar")
 }
 
 flutter {

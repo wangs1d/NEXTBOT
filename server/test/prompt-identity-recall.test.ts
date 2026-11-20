@@ -8,6 +8,9 @@
  *   - 结构化事实块（T2 问法命中 → 只注入命中字段；T2 命中时不再补语义 top3）
  *   - USER_PROFILE.md 门控（身份字段只跟事实块；自由文本按 query 词面过滤）
  *   - 用户理解档案（onlyMatched：无命中零注入）
+ *
+ * 读侧唯一出口：以上候选块统一由 ContextCompiler 编译进【当前状态】，
+ * 断言落在 memoryCurrentState（userFacts/userUnderstanding 已被清空）。
  */
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -120,22 +123,16 @@ async function withAssembledMemory(
 test("问年龄：只召回年龄（+称呼恒带），不连带姓名/住址/生日/兴趣", async () => {
   await withAssembledMemory(async (assemble) => {
     const m = assemble("我几岁了");
-    const facts = dataLines(m.userFacts);
+    const facts = dataLines(m.memoryCurrentState);
     assert.match(facts, /年龄：20岁/);
     assert.match(facts, /称呼：大哥/);
     assert.doesNotMatch(facts, /王铭川/);
     assert.doesNotMatch(facts, /九华苑/);
     assert.doesNotMatch(facts, /生日/);
     assert.doesNotMatch(facts, /考驾照/);
-
-    const profile = m.userProfileSummary ?? "";
-    assert.doesNotMatch(profile, /王铭川/);
-    assert.doesNotMatch(profile, /九华苑/);
-    assert.doesNotMatch(profile, /生日/);
-    assert.doesNotMatch(profile, /游泳/);
-    assert.doesNotMatch(profile, /回复偏好/);
-
-    // 没有「年龄」理解主题 → 理解档案零注入
+    assert.doesNotMatch(facts, /游泳|回复偏好/);
+    // 候选块被编译器消费，不再有第二个注入位
+    assert.equal(m.userFacts, undefined);
     assert.equal(m.userUnderstanding, undefined);
   });
 });
@@ -143,33 +140,32 @@ test("问年龄：只召回年龄（+称呼恒带），不连带姓名/住址/�
 test("问名字：只召回姓名（+称呼），不连带年龄/住址/生日", async () => {
   await withAssembledMemory(async (assemble) => {
     const m = assemble("记得我叫什么吗");
-    const facts = dataLines(m.userFacts);
+    const facts = dataLines(m.memoryCurrentState);
     assert.match(facts, /姓名：王铭川/);
     assert.match(facts, /称呼：大哥/);
     assert.doesNotMatch(facts, /年龄/);
     assert.doesNotMatch(facts, /九华苑/);
     assert.doesNotMatch(facts, /生日/);
-    assert.doesNotMatch(m.userProfileSummary ?? "", /九华苑/);
-    assert.doesNotMatch(m.userProfileSummary ?? "", /游泳/);
+    assert.doesNotMatch(facts, /游泳/);
   });
 });
 
 test("问生日：只召回生日；问称呼：只召回称呼", async () => {
   await withAssembledMemory(async (assemble) => {
     const birthday = assemble("我的生日是什么时候");
-    assert.match(dataLines(birthday.userFacts), /生日：6月18/);
-    assert.doesNotMatch(dataLines(birthday.userFacts), /王铭川|20岁|九华苑/);
+    assert.match(dataLines(birthday.memoryCurrentState), /生日：6月18/);
+    assert.doesNotMatch(dataLines(birthday.memoryCurrentState), /王铭川|20岁|九华苑/);
 
     const appellation = assemble("你叫我什么");
-    assert.match(dataLines(appellation.userFacts), /称呼：大哥/);
-    assert.doesNotMatch(dataLines(appellation.userFacts), /王铭川|年龄|九华苑|生日/);
+    assert.match(dataLines(appellation.memoryCurrentState), /称呼：大哥/);
+    assert.doesNotMatch(dataLines(appellation.memoryCurrentState), /王铭川|年龄|九华苑|生日/);
   });
 });
 
 test("同轮问多项：两个问法都命中时按需给两项", async () => {
   await withAssembledMemory(async (assemble) => {
     const m = assemble("我叫什么，几岁了");
-    const facts = dataLines(m.userFacts);
+    const facts = dataLines(m.memoryCurrentState);
     assert.match(facts, /姓名：王铭川/);
     assert.match(facts, /年龄：20岁/);
     assert.doesNotMatch(facts, /九华苑|生日/);
@@ -179,12 +175,10 @@ test("同轮问多项：两个问法都命中时按需给两项", async () => {
 test("问居住地：理解档案只渲染命中的居住地话题", async () => {
   await withAssembledMemory(async (assemble) => {
     const m = assemble("我现在住哪");
-    assert.match(dataLines(m.userFacts), /居住地：贵州兴义下午屯九华苑/);
-    assert.doesNotMatch(dataLines(m.userFacts), /王铭川|年龄|生日/);
+    const facts = dataLines(m.memoryCurrentState);
+    assert.match(facts, /居住地：贵州兴义下午屯九华苑/);
+    assert.doesNotMatch(facts, /王铭川|年龄|生日/);
     // 理解档案只保留 居住地 话题，不带 老婆
-    if (m.userUnderstanding) {
-      assert.match(m.userUnderstanding, /居住地/);
-      assert.doesNotMatch(m.userUnderstanding, /老婆/);
-    }
+    assert.doesNotMatch(facts, /老婆/);
   });
 });

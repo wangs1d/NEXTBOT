@@ -101,6 +101,13 @@ test("B1 单行判定：逐字对话行 / 协议残留命中，事实行不命�
   assert.equal(isPollutedMemoryLine("- [2026/10/08 22:07] 用户明说要记住的事"), false, "关键钉行不动");
 });
 
+test("B1b 委派协议残留：委派子 Agent 处理前缀行命中（2026-11-20 增补）", () => {
+  // 生产实证：session_epitome.preferences 存过「委派子 Agent 处理：还有我的生日是6月18」
+  assert.equal(isPollutedMemoryLine("委派子 Agent 处理：还有我的生日是6月18"), true);
+  assert.equal(isPollutedMemoryLine("委派子Agent处理:记得我叫什么吗"), true);
+  assert.equal(isPollutedMemoryLine("[11:15] Agent: 委派子 Agent 处理：帮我打车"), true);
+});
+
 test("B2 块级净化：脏行剔除、事实行原样（含绝对时间标签）", () => {
   const r = sanitizeMemoryLinesForPrompt(DIRTY_SUMMARY);
   assert.ok(r.dropped >= 5, `应剔除 5 行以上，实际 ${r.dropped}`);

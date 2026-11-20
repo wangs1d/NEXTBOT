@@ -1,25 +1,17 @@
-import { randomUUID } from "crypto";
-import type { ToolRegistry } from "../../tools/tool-registry.js";
-import { resolveActorId } from "../../agent/actor-id.js";
 import { IntelligentReminderService } from "./intelligent-reminder-service.js";
 import { PopupReminderHandler } from "./popup-reminder-handler.js";
 import { PhoneCallHandler } from "./phone-call-handler.js";
 import { UserResponsePersistenceService } from "./user-response-persistence.js";
 import type {
-  ReminderConfig,
   ReminderInstance,
   ReminderLevel,
-  PopupReminderConfig,
-  PhoneCallConfig,
 } from "./types.js";
 import type { VirtualPhoneService } from "../virtual-phone-service.js";
 import type { VoiceCapabilityService } from "../voice-capability-service.js";
 import type { VoiceDialogueService } from "../voice-dialogue/voice-dialogue-service.js";
 import type { PhoneBridgeCoordinator } from "../phone-bridge-coordinator.js";
-import type { ToolContext } from "../../tools/tool-registry.js";
 
 export interface IntelligentReminderSystemDeps {
-  toolRegistry: ToolRegistry;
   virtualPhoneService: VirtualPhoneService;
   phoneBridgeCoordinator?: PhoneBridgeCoordinator;
   voiceDialogueService: VoiceDialogueService;
@@ -302,7 +294,6 @@ export function createIntelligentReminderSystem(deps: IntelligentReminderSystemD
     },
   );
 
-  registerIntelligentReminderTools(deps, reminderService, userResponsePersistence);
 
   return {
     reminderService,
@@ -310,262 +301,6 @@ export function createIntelligentReminderSystem(deps: IntelligentReminderSystemD
     phoneHandler,
     userResponsePersistence,
   };
-}
-
-function registerIntelligentReminderTools(
-  deps: IntelligentReminderSystemDeps,
-  service: IntelligentReminderService,
-  persistence: UserResponsePersistenceService,
-): void {
-  const registry = deps.toolRegistry;
-  registry.register("reminder.create", async (input: Record<string, unknown>, context: ToolContext) => {
-    const actorId = resolveActorId(context);
-
-    const title = String(input.title ?? "").trim();
-    const message = String(input.message ?? "").trim();
-    const priority = (String(input.priority ?? "medium").trim() as ReminderConfig["priority"]);
-    const requestedInitialLevel =
-      input.initialLevel == null ? null : (String(input.initialLevel).trim() as ReminderLevel);
-    const maxLevel = input.maxLevel ? (String(input.maxLevel).trim() as ReminderLevel) : undefined;
-
-    if (!title || !message) {
-      return { ok: false, error: "请提供标题（title）和内容（message）" };
-    }
-
-    if (!["low", "medium", "high", "urgent"].includes(priority)) {
-      return { ok: false, error: "优先级必须是 low、medium、high 或 urgent" };
-    }
-
-    if (requestedInitialLevel && !["popup", "phone_call"].includes(requestedInitialLevel)) {
-      return { ok: false, error: "初始级别必须是 popup 或 phone_call" };
-    }
-
-    const recommendedLevel = await service.getRecommendedLevel(actorId, priority);
-
-    let config: ReminderConfig & {
-      popupConfig?: PopupReminderConfig;
-      phoneConfig?: PhoneCallConfig;
-    } = {
-      id: randomUUID(),
-      title,
-      message,
-      priority,
-      initialLevel: requestedInitialLevel ?? recommendedLevel,
-      maxLevel,
-      autoSelectInitialLevel: requestedInitialLevel == null,
-      scheduledAt:
-        typeof input.scheduledAt === "string" || typeof input.scheduledAt === "number"
-          ? new Date(input.scheduledAt)
-          : new Date(),
-      metadata: {
-        userId: actorId,
-        actorId,
-        ...(input.metadata ?? {}),
-      },
-    };
-
-    if (input.popupConfig) {
-      config.popupConfig = input.popupConfig as PopupReminderConfig;
-    }
-
-    if (input.phoneConfig) {
-      config.phoneConfig = input.phoneConfig as PhoneCallConfig;
-    }
-
-    const instance = await service.createReminder(config);
-
-    // 不再创建后立即触发；提醒应仅由外部调度器在 scheduledAt 到达时触发
-    // 避免用户设置提醒时立刻收到电话
-
-    return {
-      ok: true,
-      reminderId: instance.config.id,
-      currentLevel: instance.currentLevel,
-      status: instance.status,
-      message: `已创建提醒"${title}"，当前使用${getLevelLabel(instance.currentLevel)}方式`,
-    };
-  });
-
-  registry.register("reminder.trigger", async (input: Record<string, unknown>, _context: ToolContext) => {
-    const reminderId = String(input.reminderId ?? "").trim();
-    if (!reminderId) {
-      return { ok: false, error: "请提供提醒 ID（reminderId）" };
-    }
-
-    const instance = await service.triggerReminder(reminderId);
-    if (!instance) {
-      return { ok: false, error: "未找到该提醒或提醒状态不允许触发" };
-    }
-
-    return {
-      ok: true,
-      reminderId: instance.config.id,
-      currentLevel: instance.currentLevel,
-      status: instance.status,
-      message: `已触发提醒，使用${getLevelLabel(instance.currentLevel)}方式`,
-    };
-  });
-
-  registry.register("reminder.acknowledge", async (input: Record<string, unknown>, context: ToolContext) => {
-    const actorId = resolveActorId(context);
-    const reminderId = String(input.reminderId ?? "").trim();
-
-    if (!reminderId) {
-      return { ok: false, error: "请提供提醒 ID（reminderId）" };
-    }
-
-    const instanceBeforeAck = service.getReminder(reminderId);
-    const instance = await service.acknowledgeReminder(reminderId, actorId);
-    if (!instance) {
-      return { ok: false, error: "未找到该提醒或提醒状态不允许确认" };
-    }
-
-    if (instanceBeforeAck) {
-      const responseTimeMs =
-        instanceBeforeAck.startedAt?.getTime()
-          ? Date.now() - instanceBeforeAck.startedAt.getTime()
-          : 0;
-
-      await persistence.recordResponse({
-        userId: actorId,
-        instance: instanceBeforeAck,
-        responded: true,
-        responseTimeMs,
-        feedback: input.feedback as "positive" | "negative" | "neutral" | undefined,
-      });
-      deps.onContactOutcome?.({
-        userId: actorId,
-        channel: instanceBeforeAck.currentLevel,
-        responded: true,
-        responseTimeMs,
-        feedback: input.feedback as "positive" | "negative" | "neutral" | undefined,
-        quietHours: isQuietHours(new Date()),
-      });
-    }
-
-    return {
-      ok: true,
-      reminderId: instance.config.id,
-      status: instance.status,
-      message: `已确认提醒"${instance.config.title}"`,
-    };
-  });
-
-  registry.register("reminder.cancel", async (input: Record<string, unknown>, _context: ToolContext) => {
-    const reminderId = String(input.reminderId ?? "").trim();
-    if (!reminderId) {
-      return { ok: false, error: "请提供提醒 ID（reminderId）" };
-    }
-
-    const success = service.cancelReminder(reminderId);
-    if (!success) {
-      return { ok: false, error: "无法取消该提醒（可能已完成或不存在）" };
-    }
-
-    return {
-      ok: true,
-      reminderId,
-      message: "已取消提醒",
-    };
-  });
-
-  registry.register("reminder.get_status", async (input: Record<string, unknown>, _context: ToolContext) => {
-    const reminderId = String(input.reminderId ?? "").trim();
-    if (!reminderId) {
-      return { ok: false, error: "请提供提醒 ID（reminderId）" };
-    }
-
-    const instance = service.getReminder(reminderId);
-    if (!instance) {
-      return { ok: false, error: "未找到该提醒" };
-    }
-
-    return {
-      ok: true,
-      reminder: {
-        id: instance.config.id,
-        title: instance.config.title,
-        status: instance.status,
-        currentLevel: instance.currentLevel,
-        escalationCount: instance.escalationCount,
-        createdAt: instance.createdAt,
-        startedAt: instance.startedAt,
-        acknowledgedAt: instance.acknowledgedAt,
-      },
-    };
-  });
-
-  registry.register("reminder.list_active", async (_input: Record<string, unknown>, _context: ToolContext) => {
-    const activeReminders = service.getActiveReminders();
-
-    return {
-      ok: true,
-      count: activeReminders.length,
-      reminders: activeReminders.map((r) => ({
-        id: r.config.id,
-        title: r.config.title,
-        status: r.status,
-        currentLevel: r.currentLevel,
-        priority: r.config.priority,
-      })),
-    };
-  });
-
-  // reminder.escalate 已随升级链斩断一并移除（2026-11-05 定调）：
-  // 电话触达仅保留 reminder.create 的 initialLevel="phone_call" 显式指定。
-
-  registry.register("reminder.get_user_stats", async (input: Record<string, unknown>, context: ToolContext) => {
-    const actorId = resolveActorId(context);
-    const analytics = await persistence.getUserAnalytics(actorId);
-
-    if (!analytics) {
-      return {
-        ok: true,
-        exists: false,
-        message: "该用户暂无响应数据",
-      };
-    }
-
-    return {
-      ok: true,
-      exists: true,
-      analytics: {
-        totalReminders: analytics.totalReminders,
-        totalResponses: analytics.totalResponses,
-        responseRate: Math.round(analytics.responseRate * 100) / 100,
-        averageResponseTimeMs: Math.round(analytics.averageResponseTimeMs),
-        ignoreRate: Math.round(analytics.ignoreRate * 100) / 100,
-        preferredLevel: analytics.preferredLevel,
-        lastResponseAt: analytics.lastResponseAt,
-        levelDistribution: analytics.levelDistribution,
-      },
-    };
-  });
-
-  registry.register("reminder.get_response_history", async (input: Record<string, unknown>, context: ToolContext) => {
-    const actorId = resolveActorId(context);
-    const limit = Number(input.limit ?? 20);
-
-    const recentResponses = persistence.getRecentResponses(actorId, limit);
-
-    return {
-      ok: true,
-      count: recentResponses.length,
-      responses: recentResponses.map((r) => ({
-        id: r.id,
-        reminderTitle: r.reminderTitle,
-        level: r.level,
-        priority: r.priority,
-        triggeredAt: r.triggeredAt,
-        respondedAt: r.respondedAt,
-        responseTimeMs: r.responseTimeMs,
-        responded: r.responded,
-        escalationCount: r.escalationCount,
-        finalLevel: r.finalLevel,
-        userFeedback: r.userFeedback,
-      })),
-    };
-  });
 }
 
 function isQuietHours(now = new Date()): boolean {

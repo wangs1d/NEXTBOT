@@ -13,8 +13,6 @@ const ALL_READY_ENV: Record<string, string> = {
   SEARCH_API_KEY: "test-key",
   OPENAI_API_KEY: "test-key",
   LUCKIN_MCP_TOKEN: "test-token",
-  MEITUAN_AI_HUB_TOKEN: "test-token",
-  MEITUAN_AI_HUB_SKILL_ID: "test-skill",
   DIDI_MCP_KEY: "test-key",
   HA_BASE_URL: "http://ha.test",
   HA_TOKEN: "test-token",

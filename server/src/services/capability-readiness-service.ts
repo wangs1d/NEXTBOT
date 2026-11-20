@@ -133,19 +133,6 @@ const CAPABILITY_ENTRIES: CapabilityEntry[] = [
     ],
   },
   {
-    id: "meituan_errand",
-    label: "美团跑腿",
-    description: "帮买帮送跑腿下单",
-    experimental: true,
-    groups: [
-      {
-        allOf: ["MEITUAN_AI_HUB_TOKEN", "MEITUAN_AI_HUB_SKILL_ID"],
-        required: true,
-        hint: "配置 MEITUAN_AI_HUB_TOKEN 与 MEITUAN_AI_HUB_SKILL_ID",
-      },
-    ],
-  },
-  {
     id: "shopping_payment",
     label: "购物与代付",
     description: "商品比价、代下单、扫码代付（带护栏限额）",

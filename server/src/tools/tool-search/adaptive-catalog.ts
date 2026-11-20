@@ -883,11 +883,9 @@ function inferLatencyMs(domain: string, resourceType: ResourceType): number {
     budget: 14,
     shopping: 18,
     self: 12,
-    reminder: 16,
     agent: 19,
     wallet: 13,
     aip: 26,
-    desktop: 27,
     world: 28,
     travel: 22,
     mcp: 30,
@@ -897,7 +895,7 @@ function inferLatencyMs(domain: string, resourceType: ResourceType): number {
 
 function looksLikeSessionSkill(entry: DeferredToolEntry): boolean {
   const name = entry.registryName;
-  if (/^(agent|aip|browser|calendar|clock|desktop|fetch|info|phone|search|shopping|wallet|weather|world)\b/.test(name)) {
+  if (/^(agent|aip|browser|calendar|clock|fetch|info|phone|search|shopping|wallet|weather|world)\b/.test(name)) {
     return false;
   }
   const text = `${getFunction(entry.tool)?.description ?? ""} ${entry.searchText}`.toLowerCase();
@@ -970,8 +968,6 @@ function inferCapabilities(
     capabilities.add("browser.navigate");
     capabilities.add("browser.read");
   }
-  if (name.includes("automation")) capabilities.add("desktop.automation");
-  if (name.includes("screenshot")) capabilities.add("desktop.screenshot");
   if (name.startsWith("mcp.")) capabilities.add("mcp.general");
 
   capabilities.add(cleanCapability(name));
@@ -1102,10 +1098,9 @@ function domainsFromQuery(query: string): string[] {
     [/\bweb\b|\bbrowser\b|\burl\b|\bpage\b|\bsite\b|\blink\b/, ["browser", "search"]],
     [/\bsearch\b|\bgoogle\b|\bquery\b|\bnews\b/, ["search"]],
     [/\bweather\b|\bforecast\b|\btemperature\b/, ["weather"]],
-    [/\bcalendar\b|\bschedule\b|\bmeeting\b|\bremind\b|\btodo\b|\btasks?\b/, ["calendar", "reminder"]],
+    [/\bcalendar\b|\bschedule\b|\bmeeting\b|\bremind\b|\btodo\b|\btasks?\b/, ["calendar"]],
     [/\bphone\b|\bcall\b|\bmessage\b|\bsms\b|\bdial\b/, ["phone"]],
     [/\bwallet\b|\bbalance\b|\btransaction\b|\bpayment\b/, ["wallet"]],
-    [/\bdesktop\b|\bshell\b|\bscreenshot\b|\bautomation\b|\bwindow\b/, ["desktop"]],
     [/\bskill\b|\bcapabilit(?:y|ies)\b|\bcustom\b|\btools?\b|\bcan you\b/, ["agent", "self"]],
     [/\bworld\b|\bregistry\b|\bagent\b/, ["world", "agent"]],
   ];
@@ -1129,7 +1124,6 @@ function inferDomainGroups(domains: string[], resourceType: ResourceType): strin
         groups.add("information");
         break;
       case "calendar":
-      case "reminder":
       case "self":
       case "travel":
       case "notes":
@@ -1149,7 +1143,6 @@ function inferDomainGroups(domains: string[], resourceType: ResourceType): strin
       case "shopping":
         groups.add("commerce");
         break;
-      case "desktop":
       case "device":
       case "smart_home":
         groups.add("execution");
@@ -1289,7 +1282,7 @@ function tryFastPathIntent(query: string): ParsedIntent | null {
     return { intent: "余额查询", domain_candidates: ["wallet"], primary_capability: "wallet.query", confidence: 0.92, query_constraints: ro, param_extract: {}, is_compound_task: false, sub_intents: [] };
   }
   if (/\bremind\b|\btodo\b|\btasks?\b|\b提醒\b|\b待办\b/.test(q)) {
-    return { intent: "待办查询", domain_candidates: ["reminder", "calendar"], primary_capability: "reminder.query", confidence: 0.88, query_constraints: ro, param_extract: {}, is_compound_task: false, sub_intents: [] };
+    return { intent: "待办查询", domain_candidates: ["calendar"], primary_capability: "calendar.query", confidence: 0.88, query_constraints: ro, param_extract: {}, is_compound_task: false, sub_intents: [] };
   }
   if (/\bphone\b|\bcall\b|\b打电话\b|\b电话\b|\b手机\b/.test(q)) {
     return { intent: "电话查询", domain_candidates: ["phone"], primary_capability: "phone.query", confidence: 0.9, query_constraints: rw, param_extract: {}, is_compound_task: false, sub_intents: [] };
@@ -1364,9 +1357,7 @@ function namespaceToDomain(namespace: string): string {
     browser: "browser",
     calendar: "calendar",
     clock: "clock",
-    desktop: "desktop",
     phone: "phone",
-    reminder: "reminder",
     shopping: "shopping",
     wallet: "wallet",
     weather: "weather",

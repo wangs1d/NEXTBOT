@@ -19,3 +19,8 @@
 -keep class com.autonavi.** { *; }
 -dontwarn com.amap.api.**
 -dontwarn com.autonavi.**
+
+# 支付宝 App 支付 SDK（2026-11-19）：收银台/结果回调依赖反射与内部 Activity，
+# release 开启 minify 后必须整体保留，否则支付结果无法回传。
+-keep class com.alipay.** { *; }
+-dontwarn com.alipay.**

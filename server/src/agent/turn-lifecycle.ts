@@ -3,7 +3,7 @@ import type { UserPersonalizationService } from "../services/user-personalizatio
 import type { NarrativeMemoryPort } from "../services/narrative-memory-port.js";
 import type { TaskExecutionPlan } from "./plan-execute-loop.js";
 import { getAgentRuntimeConfig } from "./agent-runtime-config.js";
-import { detectMemorySignals, selectHotPathMemoryLines } from "./memory-signal.js";
+import { detectMemorySignals } from "./memory-signal.js";
 import type { TurnUnderstanding } from "./task-router.js";
 import { getShortTermMemoryConfig } from "../services/short-term-memory-config.js";
 import { getDailyDigestService } from "../services/daily-digest-service.js";
@@ -261,11 +261,7 @@ export class TurnLifecycle {
       priorityLines: signal.isHighSignal ? signal.extractLines : undefined,
     });
 
-    if (this.deps.agentMemorySyncService && this.deps.shortTermMemoryGateway && input.sessionId) {
-      const mission = this.deps.shortTermMemoryGateway.getTaskState(input.sessionId).conversationMemory?.currentMission ?? null;
-      this.deps.agentMemorySyncService.setCurrentMission(input.actorId, mission);
-    }
-
+    
     if (signal.isHighSignal) {
       // 高信号原子行的两个去向（对齐 Mem0 async_mode / LangMem hot+background）：
       // ① 冷路径：全部候选进整理队列（consolidation.submitCandidate → 夜间去重合并）
@@ -279,6 +275,7 @@ export class TurnLifecycle {
       // ISO 时间戳（appendMemorySummaryLine 统一盖）。行内容是干净原子事实，
       // 不带 [fast-path] 内部标记。承诺板已下线，回执不会再生成为待办，
       // 热路径无条件启用（无 kill switch）。
+      // 白天只入候选队列，不直写 KV/画像/事件表——统一由夜间编译器裁决落库。
       this.ingestFastPath(
         input.actorId,
         signal.extractLines,
@@ -286,29 +283,6 @@ export class TurnLifecycle {
         inferMemoryTopic(input.userText),
         provenance,
       );
-      if (this.deps.agentMemorySyncService) {
-        const hotFacts = selectHotPathMemoryLines(signal.extractLines);
-        if (hotFacts.length > 0) {
-          void (async () => {
-            for (const fact of hotFacts) {
-              const decision = await decideMemoryWrite(fact, {
-                actorId: input.actorId,
-                source: "chat:hot_path",
-                userText: input.userText,
-                assistantText: full,
-                heuristicHint: "remember",
-              });
-              if (decision.decision !== "remember" && decision.decision !== "overwrite") continue;
-              this.deps.agentMemorySyncService?.appendMemorySummaryLine(
-                input.actorId,
-                fact,
-                inferMemoryTopic(input.userText),
-                "TurnLifecycle",
-              );
-            }
-          })().catch(() => {});
-        }
-      }
     }
 
     const deferArchive =

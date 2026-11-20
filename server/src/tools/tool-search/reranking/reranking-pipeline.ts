@@ -223,7 +223,7 @@ function businessScore(
  * Python 原型扫 name+description+tags 全文——但描述常含「查询已创建的日程」这类
  * 引用写动作的措辞，会把 calendar.list_tasks 误判为写工具。这里收窄到
  * name + capability（结构化信号）：calendar.list_tasks 的能力是 list/query，
- * care.set_important_date 的能力是 set——语义精确，误杀为零。
+ * calendar.create 的能力是 create——语义精确，误杀为零。
  */
 function isLikelyWriteResource(candidate: HybridRetrievedResource): boolean {
   const level1 = candidate.resource.level1;

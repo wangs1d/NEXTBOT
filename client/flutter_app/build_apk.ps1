@@ -105,7 +105,18 @@ foreach ($f in @($registrant, $pluginsList)) {
 }
 
 flutter build apk --release @dartDefines
-if ($LASTEXITCODE -ne 0) { throw "flutter build 失败" }
+if ($LASTEXITCODE -ne 0) {
+  # 并发 flutter test/run 会在构建中途把 dev 插件（integration_test）写回共享 registrant，
+  # release 的 javac 随即报「程序包 dev.flutter.plugins.integration_test 不存在」。
+  # 删除后重跑一次，release 构建会按 release 规则重写干净的注册器。
+  $poisoned = (Test-Path -LiteralPath $registrant) -and
+    (Select-String -LiteralPath $registrant -Pattern 'integration_test' -Quiet)
+  if (-not $poisoned) { throw "flutter build 失败" }
+  Write-Warning "registrant 混入 dev 插件（integration_test），清理后重试一次"
+  try { [System.IO.File]::Delete($registrant) } catch { Write-Warning "清理失败: $registrant" }
+  flutter build apk --release @dartDefines
+  if ($LASTEXITCODE -ne 0) { throw "flutter build 失败" }
+}
 
 $src = Join-Path $PSScriptRoot "build\app\outputs\flutter-apk\app-release.apk"
 if (-not (Test-Path $src)) { throw "构建产物不存在: $src" }

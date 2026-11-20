@@ -1,14 +1,13 @@
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
 import { BROWSER_SANDBOX_RESTRICTED_CHAT_TOOLS } from "../tools/browser-session-chat-tools.js";
-import { DESKTOP_VISUAL_CHAT_TOOL_DEFINITIONS } from "../tools/desktop-visual-chat-tools.js";
 import { PHONE_BRIDGE_CHAT_TOOL_DEFINITIONS } from "../tools/phone-bridge-chat-tools.js";
 
 /**
  * 客户端 `chat.user_message.agentAccessMode`。
  *
- * 历史上曾区分 `sandbox` / `full` 两档权限：沙箱下屏蔽 desktop.visual.*、
- * phone.* 等高权限工具。现已废弃沙箱模式，
+ * 历史上曾区分 `sandbox` / `full` 两档权限：沙箱下屏蔽 phone.* 等高权限工具。
+ * 现已废弃沙箱模式，
  * Agent 始终以最高权限运行；保留联合类型与 `parseAgentAccessMode` 仅用于
  * 兼容旧客户端仍会发送 `"sandbox"` 字段的线上协议。
  */
@@ -38,27 +37,10 @@ export function isToolAllowedInAccessMode(
   return true;
 }
 
-/** 电脑桥接在线时可用的桌面工具（手机↔PC 通信路径）。 */
-export const DESKTOP_BRIDGE_TOOL_NAMES = new Set<string>([
-  "desktop.visual.screenshot",
-  "desktop.visual.run_task",
-]);
-
 export type ChatToolsAccessContext = {
-  /** 与手机相同 userId 的电脑桥接 WebSocket 是否在线 */
-  desktopBridgeOnline?: boolean;
   /** 与当前 actorId 对应的手机桥接 WebSocket 是否在线 */
   phoneBridgeOnline?: boolean;
 };
-
-export function isDesktopBridgeToolName(toolName: string): boolean {
-  return DESKTOP_BRIDGE_TOOL_NAMES.has(toolName);
-}
-
-/** 桥接在线时向模型补发的桌面工具定义。 */
-export function getDesktopBridgeChatTools(): ChatCompletionTool[] {
-  return [...DESKTOP_VISUAL_CHAT_TOOL_DEFINITIONS];
-}
 
 /** 手机桥接在线时可用的手机工具。 */
 export const PHONE_BRIDGE_TOOL_NAMES = new Set<string>([
@@ -82,12 +64,9 @@ export function getPhoneBridgeChatTools(): ChatCompletionTool[] {
   return [...PHONE_BRIDGE_CHAT_TOOL_DEFINITIONS];
 }
 
-/** 完全访问时应补发给模型的工具定义（含 desktop.visual.* 等高权限工具）。 */
+/** 完全访问时应补发给模型的工具定义。 */
 export function getSandboxRestrictedChatTools(): ChatCompletionTool[] {
-  return [
-    ...DESKTOP_VISUAL_CHAT_TOOL_DEFINITIONS,
-    ...BROWSER_SANDBOX_RESTRICTED_CHAT_TOOLS,
-  ];
+  return [...BROWSER_SANDBOX_RESTRICTED_CHAT_TOOLS];
 }
 
 function chatToolRegistryName(tool: ChatCompletionTool): string | undefined {
@@ -96,9 +75,6 @@ function chatToolRegistryName(tool: ChatCompletionTool): string | undefined {
 
 /** 工具调用被拒的提示文案。沙箱已废弃，仅剩桥接未在线的提示。 */
 export function sandboxDeniedToolMessage(toolName: string): string {
-  if (isDesktopBridgeToolName(toolName)) {
-    return `无法调用「${toolName}」：电脑桥接未在线。请在本机运行 desktop-visual 桥接（userId 与手机一致），并保持连接。`;
-  }
   if (isPhoneBridgeToolName(toolName)) {
     return `无法调用「${toolName}」：手机桥接未在线。请在手机端 App 保持登录并启用桥接连接。`;
   }
@@ -144,30 +120,10 @@ export function buildAgentAccessModeSystemSuffix(
   _mode: AgentAccessMode,
   ctx?: ChatToolsAccessContext,
 ): string {
-  if (ctx?.desktopBridgeOnline && ctx?.phoneBridgeOnline) {
-    return `
-
-${AGENT_ACCESS_MODE_SYSTEM_MARKER} · 完全访问 + 电脑桥接 + 手机桥接（均在线）
-Agent 已开启完全访问，可调用 desktop.visual.screenshot / desktop.visual.run_task、远程控制真实手机（phone.*）等高权限工具。
-电脑桥接与手机桥接均已在线，涉及用户手机的操作（查电量、定位、响铃、同步短信/通话记录等）请优先调用 phone.* 工具。
-远程拨打电话（phone，action=call）属敏感操作：拨打前必须在对话中向用户确认被叫号码与意图，未经确认不得调用。
-执行转账、真实消费、桌面自动化、远程拍照等敏感操作前仍须征得用户明确同意。`;
-  }
-
-  if (ctx?.desktopBridgeOnline) {
-    return `
-
-${AGENT_ACCESS_MODE_SYSTEM_MARKER} · 完全访问 + 电脑桥接（在线）
-可调用桌面操控等高权限工具。
-电脑桥接已在线（与手机同 userId）。
-执行转账、真实消费等敏感操作前须征得用户明确同意。`;
-  }
-
   if (ctx?.phoneBridgeOnline) {
     return `
 
 ${AGENT_ACCESS_MODE_SYSTEM_MARKER} · 完全访问 + 手机桥接（在线）
-Agent 已开启完全访问，可调用 desktop.visual.*、phone.* 等高权限工具。
 用户真实手机已连接，涉及用户手机的操作请优先调用 phone.* 工具（电量、通知、定位、响铃、短信、通话记录等）。
 远程拨打电话（phone，action=call）属敏感操作：拨打前必须在对话中向用户确认被叫号码与意图，未经确认不得调用。
 执行转账、真实消费、远程拍照等敏感操作前仍须征得用户明确同意。`;
@@ -176,7 +132,7 @@ Agent 已开启完全访问，可调用 desktop.visual.*、phone.* 等高权限�
   return `
 
 ${AGENT_ACCESS_MODE_SYSTEM_MARKER} · 完全访问（已开启）
-可调用桌面操控、远程控制真实手机（phone.*）等高权限工具。
+可远程控制真实手机（phone.*）等高权限工具。
 执行转账、真实消费等敏感操作前仍须征得用户明确同意。`;
 }
 
@@ -185,12 +141,6 @@ export function buildAgentAccessModePromptLine(
   _mode: AgentAccessMode,
   ctx?: ChatToolsAccessContext,
 ): string {
-  if (ctx?.desktopBridgeOnline && ctx?.phoneBridgeOnline) {
-    return "【本轮权限】完全访问 + 电脑桥接 + 手机桥接在线：desktop.visual.* 与 phone.* 均可用。";
-  }
-  if (ctx?.desktopBridgeOnline) {
-    return "【本轮权限】完全访问 + 电脑桥接在线：desktop.visual.screenshot / run_task 可用；截屏请调用 screenshot。";
-  }
   if (ctx?.phoneBridgeOnline) {
     return "【本轮权限】完全访问 + 手机桥接在线：phone.* 远程控制真实手机可用。";
   }

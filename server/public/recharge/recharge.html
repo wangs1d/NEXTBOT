@@ -794,7 +794,7 @@
     var btn = $('payBtn');
     btn.disabled = true;
     setMsg(payMsg, '正在创建订单…');
-    api('/api/recharge/orders', { body: { amount: amt } }).then(function (r) {
+    api('/api/recharge/payments', { body: { amount: amt } }).then(function (r) {
       var d = r.data || {};
       if (r.status === 401) {
         setMsg(payMsg, '登录状态已失效，请重新登录', 'err');

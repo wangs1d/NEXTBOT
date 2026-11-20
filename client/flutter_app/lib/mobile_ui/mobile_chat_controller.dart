@@ -318,6 +318,24 @@ class MobileChatController extends ChangeNotifier {
   /// 最近一帧对应的动作名（open/click/type/scroll/wait_for/screenshot）。
   String? browserPreviewAction;
 
+  /// 最后一帧到达后多久自动熄灭（毫秒）。
+  ///
+  /// 2026-11-19 用户要求：「浏览器框要到最后信息给出再关闭，不要一 handoff
+  /// 就关」。服务的显式 `action=end` 帧是主关闭信号；这个无帧 TTL 只是兜底
+  /// （连接半断、服务端没来得及补 end 时不至于永久挂着一个死窗口）。
+  ///
+  /// 2026-11-20：4.5s 太短——留驻等扫码的登录页画面本就静止，帧间隔放宽到
+  /// 数秒，且用户中途发消息时旧回合收口，稍一停顿窗口就没了。兜底拉长到
+  /// 60s，真正关闭靠服务端页面释放时推的 end 帧。
+  static const Duration _browserPreviewIdleTtl = Duration(seconds: 60);
+  Timer? _browserPreviewIdleTimer;
+
+  /// 仍在推流的浏览器会话 id（服务端每张页面一个）。
+  ///
+  /// 关闭按会话计：多平台登录时几家登录页同时留驻，先登录成功的那家收起
+  /// 自己的流不能把还开着的另一家一起关掉。
+  final Set<String> _browserPreviewSessions = <String>{};
+
   /// 右上角悬浮窗是否可见：浏览器任务进行中且未被用户手动关掉。
   bool get browserPreviewVisible =>
       _browserTaskActive && !_browserPreviewDismissed;
@@ -362,6 +380,9 @@ class MobileChatController extends ChangeNotifier {
     if (t == "shopping.compare") {
       final String action =
           input is Map ? (input["action"]?.toString().trim().toLowerCase() ?? "") : "";
+      // 缺省（模型不填 action）就是真去开页面比价：不点亮会让整轮比价
+      // 完全没有画面（用户以为「浏览器没启动」）。只有 watch_* 是纯本地。
+      if (action.isEmpty) return true;
       return action == "prices" || action == "research";
     }
     if (_cloudBrowserShoppingTools.contains(t)) return true;
@@ -375,20 +396,56 @@ class MobileChatController extends ChangeNotifier {
   /// [action] 有两种来源：具体动作名（open/click/type/…，随动作回执推）和
   /// "stream"（CDP screencast 连续帧）。stream 帧只更新画面，动作短句保留
   /// 最近一个真实动作——标题条永远描述「在做哪一步」而不是「在推流」。
+  ///
+  /// "end"（2026-11-20）：服务端页面真正释放时补发，按 browserSessionId 摘掉
+  /// 对应会话；最后一个会话结束才熄灭悬浮窗——多平台同时留驻时不会被先结束
+  /// 的那一家提前关掉。
   void _handleBrowserPreview(Map<String, dynamic> payload) {
+    final String action = payload["action"]?.toString() ?? "";
+    final String sid = payload["browserSessionId"]?.toString().trim() ?? "";
+    if (action == "end") {
+      if (sid.isNotEmpty) {
+        _browserPreviewSessions.remove(sid);
+        if (_browserPreviewSessions.isNotEmpty) {
+          _armBrowserPreviewIdleTtl();
+          notifyListeners();
+          return;
+        }
+      } else {
+        _browserPreviewSessions.clear();
+      }
+      _extinguishBrowserPreview();
+      return;
+    }
     final String img = payload["imageBase64"]?.toString() ?? "";
     if (img.isEmpty) return;
     browserPreviewImage = img;
     browserPreviewUrl = payload["url"]?.toString();
-    final String action = payload["action"]?.toString() ?? "";
     if (action.isNotEmpty && action != "stream") browserPreviewAction = action;
+    // 新会话重新点亮（用户此前点 × 关掉后，只有新任务能再弹出来）；
+    // 同一会话的后续帧不覆盖用户的关闭决定。
+    final bool newSession = sid.isNotEmpty && !_browserPreviewSessions.contains(sid);
+    if (sid.isNotEmpty) _browserPreviewSessions.add(sid);
     _browserTaskActive = true;
-    _browserPreviewDismissed = false;
+    if (newSession) _browserPreviewDismissed = false;
+    _armBrowserPreviewIdleTtl();
     notifyListeners();
   }
 
-  /// 熄灭浏览器悬浮窗（任务收口/出错统一走这里）。
+  /// 兜底熄灭：连续 [_browserPreviewIdleTtl] 没有新帧才算任务真的结束。
+  void _armBrowserPreviewIdleTtl() {
+    _browserPreviewIdleTimer?.cancel();
+    _browserPreviewIdleTimer = Timer(_browserPreviewIdleTtl, () {
+      _browserPreviewIdleTimer = null;
+      _extinguishBrowserPreview();
+    });
+  }
+
+  /// 熄灭浏览器悬浮窗（无帧兜底 / 用户手动关 / 全部会话结束）。
   void _extinguishBrowserPreview() {
+    _browserPreviewIdleTimer?.cancel();
+    _browserPreviewIdleTimer = null;
+    _browserPreviewSessions.clear();
     if (!_browserTaskActive && !_browserPreviewDismissed) return;
     _browserTaskActive = false;
     _browserPreviewDismissed = false;
@@ -497,7 +554,10 @@ class MobileChatController extends ChangeNotifier {
   // 有停顿，而不是第一泡打字机、第二泡瞬发。
 
   /// 两条揭示泡之间的最小间隔。
-  static const Duration _bubbleRevealGap = Duration(milliseconds: 600);
+  // 逐条弹的节奏（2026-11-19 用户：「要一条一条弹出，不要一下全部发送」）：
+  // 工具轮收口时两条信息常在 done 帧同时到，600ms 在真机上几乎看不出先后；
+  // 拉到 850ms 才有「一句话说完再接下一句」的对话感。
+  static const Duration _bubbleRevealGap = Duration(milliseconds: 850);
 
   /// 待揭示泡队列条目：泡 id + 所属 trace + 落屏目标会话（中途切会话时
   /// 泡仍落回它自己的线程，不窜到当前激活会话）。
@@ -550,8 +610,9 @@ class MobileChatController extends ChangeNotifier {
     t.deliveryStallTimer = null;
     t.deliveryStallNotified = false;
     t.resetActivity();
-    // 本轮收口/出错：浏览器悬浮窗一并熄灭（下一个浏览器任务会重新点亮）。
-    _extinguishBrowserPreview();
+    // 注意（2026-11-19）：这里**不再**熄灭浏览器悬浮窗。工具轮收口时登录页
+    // 往往还停在浏览器里等用户扫码（服务端继续推流），一收口就关会让用户
+    // 在扫码期间看不到任何画面。改为「无帧 4.5s 自动熄灭」。
   }
 
   /// 离线补发进行中闸（防 ws_connected 风暴期间并发 flush 乱序重复发送）。
@@ -1055,6 +1116,8 @@ class MobileChatController extends ChangeNotifier {
     final String text = raw.trim();
     final bool hasFrames = visionFrames != null && visionFrames.isNotEmpty;
     if (text.isEmpty && !hasFrames) return null;
+    // 新消息一发出就撤掉旧轮次的接续建议（过期会诱导误点）。
+    _clearStaleFollowUps();
     // 旅游规划（2026-11-14 手机端根修）：命中规划意图或已在规划会话中，
     // 直接在当前聊天流里推进 plan-session 问答流，不跳转规划页、不发 WS。
     if (!hasFrames && !isSideChatActive) {
@@ -1524,6 +1587,10 @@ class MobileChatController extends ChangeNotifier {
       case "agent.voice.speak":
         // 底层 voice.speak 工具触发的即时播报：轻量事件，只出声不建卡。
         _playEventTts(payload);
+      case "agent.voice.message":
+        // 底层 voice.send_message 工具触发的语音条（微信式可重播气泡）。
+        // 手机端唯一 owner：落主线程消息列表 + 本地历史，实时出现在对话流。
+        _handleVoiceMessageEvent(payload);
       case "identity_renamed":
         // 对话中用户给 agent 取名：服务端统一改名管道（账号 + agent.name KV
         // + prefs 三处同写）成功后广播，顶栏胶囊当场更新，无需重进应用。
@@ -1927,6 +1994,58 @@ class MobileChatController extends ChangeNotifier {
     }
     _mainThreadMessages.add(proactive);
     _persist(proactive);
+    notifyListeners();
+  }
+
+  /// 语音条落地（agent.voice.message，与桌面 main.dart:2244 同构）。
+  ///
+  /// 服务端推来的 payload：messageId / text / transcript / mediaUrl / durationMs /
+  /// skippedReason。有 mediaUrl 落 contentType=audio + audio 附件（渲染可重播气泡）；
+  /// 无 mediaUrl（TTS 失败降级）落纯文本消息，让用户至少看见内容。
+  void _handleVoiceMessageEvent(Map<String, dynamic> payload) {
+    final String messageId = payload["messageId"]?.toString() ??
+        "voice-${DateTime.now().microsecondsSinceEpoch}";
+    final String text = payload["text"]?.toString() ?? "";
+    final String transcript = payload["transcript"]?.toString() ?? text;
+    final String? mediaUrl = payload["mediaUrl"]?.toString();
+    final int durationMs = (payload["durationMs"] as num?)?.toInt() ?? 0;
+    final String? skippedReason = payload["skippedReason"]?.toString();
+
+    // 去重：同 messageId 已在任意线程则不重复入列（重连/补投安全）。
+    if (_sessionMessages.values.any(
+        (list) => list.any((m) => m.messageId == messageId))) {
+      return;
+    }
+
+    final List<MessageAttachment> attachments = <MessageAttachment>[];
+    if (mediaUrl != null && mediaUrl.isNotEmpty) {
+      attachments.add(MessageAttachment(
+        type: MessageAttachmentType.audio,
+        url: mediaUrl,
+        durationMs: durationMs,
+        transcript: transcript.isEmpty ? null : transcript,
+        mimeType: "audio/mpeg",
+      ));
+    }
+    final bool hasAudio = attachments.isNotEmpty;
+    final ChatMessage voiceMsg = ChatMessage(
+      messageId: messageId,
+      sessionId: _mainSessionKey,
+      role: "assistant",
+      text: hasAudio
+          ? ""
+          : (transcript.isNotEmpty
+              ? transcript
+              : (skippedReason?.isNotEmpty == true
+                  ? "语音消息生成失败：$skippedReason"
+                  : "语音消息生成失败")),
+      timestamp: DateTime.now(),
+      contentType: hasAudio ? "audio" : "text",
+      durationMs: hasAudio && durationMs > 0 ? durationMs : null,
+      attachments: attachments,
+    );
+    _mainThreadMessages.add(voiceMsg);
+    _persist(voiceMsg);
     notifyListeners();
   }
 
@@ -2468,6 +2587,16 @@ class MobileChatController extends ChangeNotifier {
     return list.isEmpty ? null : list;
   }
 
+  /// 接续建议只对最新一轮有效：新消息发出即撤掉旧建议——它们以助手小泡
+  /// 形态挂在旧消息下面，留着会诱导重复点击过期建议。
+  void _clearStaleFollowUps() {
+    final List<ChatMessage> list = messages;
+    for (int i = 0; i < list.length; i++) {
+      if (list[i].followUpPrompts == null) continue;
+      list[i] = list[i].copyWith(clearFollowUps: true);
+    }
+  }
+
   void _finalizeReply(Map<String, dynamic> payload, String threadKey) {
     final _ThreadTurnState t = _turnOf(threadKey);
     final List<ChatMessage> list = _sessionMessages.putIfAbsent(
@@ -2867,6 +2996,7 @@ class MobileChatController extends ChangeNotifier {
     _clockWatchTimer?.cancel();
     _errorHintClearTimer?.cancel();
     _revealTimer?.cancel();
+    _browserPreviewIdleTimer?.cancel();
     for (final _ThreadTurnState t in _turnStates.values) {
       t.deliveryStallTimer?.cancel();
       t.deliveryStallTimer = null;

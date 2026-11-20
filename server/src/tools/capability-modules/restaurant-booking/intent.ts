@@ -2,7 +2,7 @@
  * restaurant.* 工具意图元数据 + 关键词分类映射。
  *
  * 边界区分：
- *   - meituan.create_order / shopping.order.place（外卖/购物）
+ *   - shopping.order.place（外卖/购物）
  *   - home_service.*（上门家政）
  *   - travel.search-poi（旅行 POI 探索，非订座）
  */

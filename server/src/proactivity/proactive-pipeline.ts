@@ -87,6 +87,37 @@ export type ProactivePipelineDeps = {
    * 按 verdict 决定是否消费。未注入 = 退化为原行为（既有单测不受影响）。
    */
   discovery?: DiscoveryLayer;
+  /**
+   * 离线信箱（2026-11-19）：social 层提案在两端都离线时落一条站内信，
+   * 不 push、不响铃，用户下次打开 App 可见。
+   *
+   * 为什么恢复这条链路：此前（2026-10-14）为了「站内信只承载平台消息」删掉了它，
+   * 结果是**用户不在电脑前 = 主动性彻底消失**——而主动感恰恰最常发生在人离开时。
+   * 落库后即出队（markDelivered），重连不再补推，避免同一句话出现两遍。
+   */
+  offlineInbox?: {
+    send(input: {
+      actorId: string;
+      title: string;
+      body: string;
+      kind?: string;
+      importance?: "low" | "normal" | "high" | "critical";
+      messageId?: string;
+    }): Promise<unknown>;
+  };
+  /**
+   * 社交提案的期望效用择时（ReachDecisionService.decide 的薄包装，2026-11-19）：
+   * 让「用户是不是正忙、这类消息他还愿不愿意看」进入投递前的最后一道判断，
+   * 而不只是靠静默/对话中/离线三个粗维度。
+   *
+   * 只在 verdict=delivered 且 tier=social 时调用；返回 null = 放行。
+   * drop 转 silenced（留痕可解释），defer/batch 转 deferred（等 pause 再投）。
+   * 装配层用 PROACTIVITY_REACH_GATE=0 一键关。
+   */
+  reachGate?: (p: ProactiveProposal) => {
+    action: "send_now" | "defer" | "batch" | "drop";
+    reason: string;
+  } | null;
 };
 
 /** 正反馈 outcome 集合（自适应冷却的方向判定） */
@@ -94,6 +125,8 @@ const POSITIVE = new Set<ProactiveOutcome>(["accepted", "replied", "snoozed"]);
 
 /** 离线推送重试退避（推送失败后 5min 再试，防 provider 连打；成功即出队不会重复推） */
 const OFFLINE_PUSH_RETRY_MS = 5 * 60_000;
+/** 离线落信箱失败的重试退避（同上） */
+const OFFLINE_INBOX_RETRY_MS = 5 * 60_000;
 
 /** 离线挂起重仲裁退避序列：首次挂起不退避（重连后下一次 flush 即达），此后逐级
  * 拉长封顶 30min——否则设备长期离线时同一提案每 30s 被重新仲裁一次（实测运行
@@ -101,6 +134,16 @@ const OFFLINE_PUSH_RETRY_MS = 5 * 60_000;
 const OFFLINE_REDECIDE_BACKOFF_MS = [60_000, 5 * 60_000, 15 * 60_000, 30 * 60_000];
 /** 单提案重裁决硬上限：超过即放弃（过期作废语义，原因已留痕） */
 const MAX_REDECISIONS = 200;
+
+/** reachGate 判「时机不对」后的重判间隔（等用户从专注里出来，不急着立刻再问） */
+const REACH_GATE_RETRY_MS = 20 * 60_000;
+/** 同一提案最多被 reachGate 延后几次（防「永远等时机」把消息饿死） */
+const REACH_MAX_DEFERS = 4;
+
+/** 未回复自动结算窗口：social 消息发出后这么久没有任何对话，按「忽略」记负样本 */
+const UNANSWERED_WINDOW_MS = 6 * 60 * 60_000;
+/** 自动结算扫描间隔（避免每 30s flush 都遍历一遍 outcomes） */
+const UNANSWERED_SWEEP_MS = 30 * 60_000;
 
 export class ProactivePipeline {
   private readonly store: ProposalStore;
@@ -110,6 +153,10 @@ export class ProactivePipeline {
   private pushSeq = 0;
   /** dedupKey → 重裁决次数（deferred 类；投递/出队即清零） */
   private readonly redecides = new Map<string, number>();
+  /** dedupKey → 被 reachGate 延后的次数（防「永远等时机」饿死消息） */
+  private readonly reachDefers = new Map<string, number>();
+  /** 上次未回复结算扫描时刻（UNANSWERED_SWEEP_MS 节流） */
+  private lastUnansweredSweepAt = 0;
 
   constructor(private readonly deps: ProactivePipelineDeps) {
     this.store = new ProposalStore(`${deps.dataPath}/proposals.json`);
@@ -211,9 +258,39 @@ export class ProactivePipeline {
     // 运行期僵尸清理（2026-11-12）：启动清理只覆盖重启，长驻进程内 defer-forever
     // 的挂起提案靠这里每轮兜底（48h 超龄 + 无 firedAt 才丢，补推提案豁免）。
     this.store.pruneStale(now);
+    // 未回复结算（2026-11-19）：social 消息发出后长期无声 → 记「忽略」负样本，
+    // 让 noteOutcome 的自适应冷却真的学到「这类话他不看」。忽略是主要负样本。
+    this.sweepUnanswered(now);
     for (const p of this.store.listPending()) {
       if ((p.deliverAfter ?? 0) <= now) this.decide(p, now);
     }
+  }
+
+  /**
+   * 未回复自动结算：delivered 的 social 提案，超过窗口仍没有任何对话 → ignored；
+   * 期间用户说过话 → replied（宽松判定：主动消息通常就是引子，用户接着说话即算接住）。
+   *
+   * 只处理 tier=social：must 是用户点名要的事，处理完没回话不该被当成忽略。
+   * 这是客户端没上报反馈时唯一的学习信号，否则 agent 永远不知道自己烦不烦人。
+   */
+  sweepUnanswered(now = Date.now()): number {
+    if (now - this.lastUnansweredSweepAt < UNANSWERED_SWEEP_MS) return 0;
+    this.lastUnansweredSweepAt = now;
+    let settled = 0;
+    for (const r of this.deps.outcomes.recent(200)) {
+      if (r.outcome !== "delivered") continue;
+      if (r.tier !== "social") continue;
+      if (now - r.at < UNANSWERED_WINDOW_MS) continue;
+      const lastConv = this.deps.lastConversationAt?.(r.actorId) ?? null;
+      const replied = lastConv !== null && lastConv > r.at;
+      this.deps.outcomes.record({ ...r, outcome: replied ? "replied" : "ignored", at: now });
+      this.deps.governor.noteOutcome(r.kind, replied);
+      settled += 1;
+      console.log(
+        `[ProactivePipeline] 未回复结算 kind=${r.kind} actor=${r.actorId} → ${replied ? "replied" : "ignored"}`,
+      );
+    }
+    return settled;
   }
 
   /** 客户端回传触达结果 → 落库 + 自适应冷却（负反馈即时惩罚；接受率>0.6 回升） */
@@ -358,7 +435,8 @@ export class ProactivePipeline {
             kind: p.kind,
             channel: "mobile_push",
             outcome: "delivered",
-            at: Date.now(),
+            at: clock(),
+            tier: p.tier,
             ...(topicKeyOfProposal(p) ? { topic: topicKeyOfProposal(p) } : {}),
           });
           console.log(`[ProactivePipeline] 离线推送已送达 kind=${p.kind} provider=${result.provider} actor=${p.actorId}`);
@@ -369,8 +447,49 @@ export class ProactivePipeline {
       return;
     }
 
-    // ② 无推送通道（或非必达层）：维持挂起语义——保留待发区等重连直推，
-    //    不落站内信（站内信不承载聊天式提醒，2026-10-14 用户定调删除该链路）。
+    // ② social 层：落离线信箱（不 push、不响铃），用户下次打开 App 可见。
+    //    2026-11-19 恢复这条链路（10-14 曾为「站内信只承载平台消息」整体删除）：
+    //    结果是「用户不在电脑前 = 主动性消失」，而主动感最常发生在人离开的时候。
+    //    落库后即出队，重连不再补推——同一句话出现两遍比没出现更伤。
+    const inbox = this.deps.offlineInbox;
+    if (inbox && p.tier === "social") {
+      this.store.reschedule(p.dedupKey, clock() + OFFLINE_INBOX_RETRY_MS);
+      const deliveryId = `di_${clock().toString(36)}_${(this.pushSeq++).toString(36)}`;
+      void inbox
+        .send({
+          actorId: p.actorId,
+          title: p.title || "助手",
+          body: String(p.directText ?? p.summary),
+          kind: `proactive:${p.kind}`,
+          importance: p.importance === "critical" || p.importance === "high" ? "high" : "normal",
+          // 幂等键：同一条提案重试不会在信箱里长出第二条
+          messageId: `proactive:${p.dedupKey}`,
+        })
+        .then(() => {
+          if (!this.store.take(p.dedupKey)) return; // 已被 WS 重连直投抢先
+          this.store.markDelivered(p.dedupKey, clock());
+          if (this.deps.discovery && p.findingFingerprints?.length) {
+            this.deps.discovery.settle(p.findingFingerprints, "delivered");
+          }
+          this.deps.outcomes.record({
+            deliveryId,
+            actorId: p.actorId,
+            kind: p.kind,
+            channel: "offline_inbox",
+            outcome: "delivered",
+            at: clock(),
+            tier: p.tier,
+            ...(topicKeyOfProposal(p) ? { topic: topicKeyOfProposal(p) } : {}),
+          });
+          console.log(`[ProactivePipeline] 离线落信箱 kind=${p.kind} actor=${p.actorId}`);
+        })
+        .catch((err) => {
+          console.log(`[ProactivePipeline] 离线落信箱失败（保留待发区重试）kind=${p.kind}: ${err}`);
+        });
+      return;
+    }
+
+    // ③ 其余（must 但无推送通道）：维持挂起语义——保留待发区等重连直推。
   }
 
   /**
@@ -499,7 +618,7 @@ export class ProactivePipeline {
 
   /** 仲裁并执行（提案已在待发区内；delivered 出队投递，deferred 更新时刻，其余出队） */
   private decide(p: ProactiveProposal, at?: number): ArbitrationDecision {
-    const decision = arbitrate(p, this.buildContext(p, at));
+    const decision = this.applyReachGate(p, arbitrate(p, this.buildContext(p, at)), at);
     this.store.logDecision(decision);
     if (decision.verdict !== "deferred") this.redecides.delete(p.dedupKey);
     // 提案最终去向 → 共享发现层预留结算：delivered=消费 / pending=维持预留（等真投递）/ dropped=释放
@@ -573,6 +692,64 @@ export class ProactivePipeline {
   }
 
   /**
+   * 社交提案的最后一道路径判断（2026-11-19）：把期望效用决策接进管道。
+   *
+   * 为什么放在仲裁之后：arbiter 管的是「硬约束」（静默/离线/对话中/频控），
+   * 这里管「软分寸」——用户此刻多忙、这类消息他还愿不愿意看。
+   * 两者是乘法关系，不是替代关系。
+   *
+   * 防饿死：同一提案最多被延后 REACH_MAX_DEFERS 次，之后强制放行——
+   * 「一直觉得时机不对」最后变成「永远不说」是比打扰更糟的失灵。
+   */
+  private applyReachGate(
+    p: ProactiveProposal,
+    decision: ArbitrationDecision,
+    at?: number,
+  ): ArbitrationDecision {
+    if (decision.verdict !== "delivered") return decision;
+    if (p.tier !== "social") return decision;
+    // 元反馈类不能过这道闸：它是「少提这类？」的收口，被抑制掉用户就没法表达不满了
+    if (p.source === "topic_dismiss") return decision;
+    if (!this.deps.reachGate) return decision;
+
+    let gate: { action: "send_now" | "defer" | "batch" | "drop"; reason: string } | null = null;
+    try {
+      gate = this.deps.reachGate(p);
+    } catch (err) {
+      // 决策层异常绝不能吞掉消息：回退到「仲裁怎么说就怎么做」
+      console.log(`[ProactivePipeline] reachGate 异常（放行）kind=${p.kind}: ${err}`);
+      return decision;
+    }
+    if (!gate || gate.action === "send_now") {
+      this.reachDefers.delete(p.dedupKey);
+      return decision;
+    }
+
+    const defers = this.reachDefers.get(p.dedupKey) ?? 0;
+    if (defers >= REACH_MAX_DEFERS) {
+      this.reachDefers.delete(p.dedupKey);
+      return {
+        ...decision,
+        reasonChain: [...decision.reasonChain, `reach_gate:forced_send(已延后${defers}次)`],
+      };
+    }
+    this.reachDefers.set(p.dedupKey, defers + 1);
+    const now = at ?? this.deps.nowFn?.() ?? Date.now();
+    const chain = [...decision.reasonChain, `reach_gate:${gate.action}:${gate.reason}`];
+
+    if (gate.action === "drop") {
+      return { proposal: p, verdict: "silenced", reasonChain: chain };
+    }
+    // defer / batch：管道层没有聚合出口，batch 一律按「等会儿再说」处理
+    return {
+      proposal: p,
+      verdict: "deferred",
+      reasonChain: chain,
+      deliverAfter: now + REACH_GATE_RETRY_MS,
+    };
+  }
+
+  /**
    * 执行投递：directText 直推全部在线设备（电脑端 + 手机端 fan-out）；无 directText 走
    * speak 兜底（装配层 → hub 直达车道模板直投，零 LLM）。投递失败（两端都不在线）
    * 返回 false，由 decide 改判重试——预算计数与 outcome 都只在真正送达后记录。
@@ -590,10 +767,12 @@ export class ProactivePipeline {
         kind: p.kind,
         channel: "in_app",
         outcome: "delivered",
-        at: Date.now(),
+        // 用注入时钟：未回复结算按 now-r.at 算年龄，混用真实时间会让窗口判定失效
+        at: this.deps.nowFn?.() ?? Date.now(),
+        tier: p.tier,
         ...(topicKeyOfProposal(p) ? { topic: topicKeyOfProposal(p) } : {}),
       });
-      if (p.tier === "social") this.deps.governor.record(p.actorId, p.kind);
+      if (p.tier === "social") this.deps.governor.record(p.actorId, p.kind, undefined, "social");
       // critical 提案挂起升级链（送达 ≠ 被看到；fire-and-forget 不影响投递主链路）
       if (p.importance === "critical" && this.deps.escalate) {
         try {
@@ -623,8 +802,12 @@ export class ProactivePipeline {
       inConversation: presence === "active" && last !== null && now - last <= IN_CONVERSATION_WINDOW_MS,
       isSuppressed: (actorId, kind, text) => this.deps.suppression.isSuppressed(actorId, kind, text),
       // 用户活跃（在设备前）时告知频控：静默时段的低打扰消息不算惊扰（见 arbitrate）
+      // tier=social：走社交类独立日预算（不和事务类抢额度，见 FrequencyGovernor）
       socialCanTrigger: (actorId, kind, importance) =>
-        this.deps.governor.canTrigger(actorId, kind, importance, undefined, { awake: presence === "active" }),
+        this.deps.governor.canTrigger(actorId, kind, importance, undefined, {
+          awake: presence === "active",
+          tier: "social",
+        }),
     };
   }
 

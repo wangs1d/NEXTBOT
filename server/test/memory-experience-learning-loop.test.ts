@@ -106,22 +106,22 @@ test("BrainCenter routes tool interaction feedback into experience learning", as
 test("tool ranking can down-rank cautious namespaces learned from failures", () => {
   const plan = resolveChatToolPlanForStream("open something", {
     chatToolsBuiltin: [
-      makeTool("desktop.open"),
-      makeTool("info.search"),
-      makeTool("calendar.list"),
+      makeTool("world.link"),
+      makeTool("world"),
+      makeTool("web_search"),
     ],
     chatToolsExtra: [],
     toolExposureProfile: "full",
     toolRankingHint: {
-      cautiousNamespaces: ["desktop"],
+      cautiousNamespaces: ["world"],
     },
   });
 
   const names = plan.visibleTools.map((tool) =>
     tool.type === "function" ? tool.function.name : "",
   );
-  const firstDesktopIndex = names.findIndex((name) => name.startsWith("desktop."));
-  const lastNonDesktopIndex = names.findLastIndex((name) => !name.startsWith("desktop."));
+  const firstDesktopIndex = names.findIndex((name) => name.startsWith("world"));
+  const lastNonDesktopIndex = names.findLastIndex((name) => !name.startsWith("world"));
   assert.ok(firstDesktopIndex > lastNonDesktopIndex);
 });
 

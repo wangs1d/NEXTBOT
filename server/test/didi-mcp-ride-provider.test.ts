@@ -261,6 +261,74 @@ test("didi-mcp - search：粗标签检索失败时回退客户端 GPS 坐标，�
   assert.equal(est?.args.from_lng, "104.060000");
 });
 
+test("didi-mcp - search：生产端点格式（品类代码 + 无价列表行去重 + city 缺失回退）", async () => {
+  const estimateText = [
+    "可用车型及对应product_category：",
+    "1. 惊喜特价 (product_category: 191)",
+    "2. 特惠快车 (product_category: 201)",
+    "3. 快车 (product_category: 1)",
+    "执行规则：必须询问用户选择哪种车型，不能自动选择",
+    "【用户显示内容】",
+    "网约车价格预估结果：",
+    "1. 惊喜特价: 约 14 元 (品类代码: 191)",
+    "2. 特惠快车: 约 25 元, 券后约16元 (品类代码: 201)",
+    "3. 快车: 约 27 元 (品类代码: 1)",
+    "5. 专车: 约 49 元 (品类代码: 8)",
+    "",
+    "预估流程ID: 0a8d08aa6afec753a29f813aec255402",
+  ].join("\n");
+  const fake = new FakeMcp(
+    [{ alias: "didi", url: "https://mcp.didichuxing.com/mcp-servers?key=k" }],
+    {
+      maps_textsearch: {
+        ok: true,
+        result: {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify([
+                {
+                  display_name: "菁华园(九里堤北路)-西南2门",
+                  address: "金牛区九里堤街道九里堤北路6号",
+                  city: "成都市",
+                  location: { lng: 104.054, lat: 30.705709 },
+                },
+              ]),
+            },
+          ],
+        },
+      },
+      taxi_estimate: { ok: true, result: { content: [{ type: "text", text: estimateText }] } },
+    },
+  );
+  const provider = new DidiMcpRideProvider(asMcp(fake));
+  // 模型没传 city → provider 应回退 ctx.location.city 补上（生产端点无 city 直接 400）
+  const ctx = { ...PROVIDER_CTX, location: { latitude: 30.7, longitude: 104.05, city: "成都市" } as never };
+  const result = await provider.search(
+    { ...SEARCH_QUERY, city: null },
+    ctx,
+  );
+  assert.equal(result.ok, true, JSON.stringify(result).slice(0, 300));
+  const searchCalls = fake.calls.filter((c) => c.tool === "maps_textsearch");
+  for (const c of searchCalls) assert.equal(c.args.city, "成都市");
+  // 起点名取生产端点的 display_name
+  const est = fake.calls.find((c) => c.tool === "taxi_estimate");
+  assert.match(String(est?.args.from_name), /菁华园/);
+
+  // 同车型去重 + 价格取「约 N 元」明细行（不是无价列表行）
+  const { options } = result as { ok: true; options: Array<Record<string, unknown>> };
+  const categories = options.map((o) => (o.extra as Record<string, unknown>).productCategory);
+  assert.equal(new Set(categories).size, categories.length, "同车型只保留一条");
+  const special = options.find((o) => o.title.includes("惊喜特价"));
+  assert.ok(special, "应有惊喜特价");
+  assert.equal(special.amountCny, 14);
+  const coupon = options.find((o) => o.title.includes("特惠快车"));
+  assert.equal(coupon?.amountCny, 25);
+  const limo = options.find((o) => o.title.includes("专车"));
+  assert.equal(limo?.amountCny, 49);
+  assert.equal((limo!.extra as Record<string, unknown>).estimateTraceId, "0a8d08aa6afec753a29f813aec255402");
+});
+
 test("didi-mcp - search 诚实边界：估价文本解析不出车型/流程ID 时不造假", async () => {
   const fake = new FakeMcp(
     [{ alias: "didi", url: "https://mcp.didichuxing.com/mcp-servers-sandbox?key=k" }],

@@ -2,7 +2,7 @@
  * home_service.* 工具意图元数据 + 关键词分类映射。
  *
  * 边界区分：
- *   - shopping.order.* / meituan.create_order（实物购物/跑腿，非上门服务）
+ *   - shopping.order.*（实物购物，非上门服务）
  *   - restaurant.*（餐厅到店用餐）
  *   - smart_home.*（自有设备控制）
  */

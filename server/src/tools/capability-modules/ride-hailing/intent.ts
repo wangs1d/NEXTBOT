@@ -1,8 +1,11 @@
 /**
  * ride_hailing.* 工具意图元数据 + 关键词分类映射。
  *
+ * 2026-11-20 起模型面是复合入口 `ride_hailing`（action 分流），原细分名仍保留
+ * 执行器；前缀用裸名以同时覆盖复合名与历史细分名。
+ *
  * 边界区分（negativeAliases / negativeExamples）：
- *   - meituan.create_order / shopping.order.*（跑腿代买/电商购物，非网约车）
+ *   - shopping.order.*（电商购物，非网约车）
  *   - travel.compute-route / travel.departure-advice（路线查询/出发建议，不下单）
  *   - wallet.*（记账）
  */
@@ -10,7 +13,7 @@ import type { ToolIntentRule } from "../../tool-search/intent-metadata.js";
 
 export const RIDE_HAILING_INTENT_RULES: ToolIntentRule[] = [
   {
-    prefix: "ride_hailing.",
+    prefix: "ride_hailing",
     metadata: {
       aliases: [
         "ride", "ride hailing", "taxi", "cab", "call a cab", "book a ride", "uber", "didi",

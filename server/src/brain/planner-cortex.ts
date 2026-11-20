@@ -122,7 +122,7 @@ function builtinPlan(goal: string): PlanResult {
       id: "s3",
       title: "执行操作",
       description: "执行用户要求的操作",
-      expectedTools: ["desktop.run_preset", "desktop.open"],
+      expectedTools: [],
       status: "pending",
     });
   }

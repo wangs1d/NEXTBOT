@@ -43,7 +43,7 @@ export type SessionIdentityInput = {
   claimedUserId?: string | null;
   /** 客户端在 payload 里自报的 sessionId（旧包只报这个）。 */
   claimedSessionId?: string | null;
-  /** desktopBridge / phoneBridge 通道：身份由桥接注册流程负责。 */
+  /** phoneBridge 通道：身份由桥接注册流程负责。 */
   isBridgeChannel?: boolean;
   /**
    * 逃生开关（`WS_TRUST_PAYLOAD_ACCOUNT_IDENTITY=1`，默认关）：

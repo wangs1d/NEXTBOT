@@ -8,6 +8,7 @@ import type { PaymentService } from "../../services/payment-service.js";
 import type { BookingService } from "../../services/booking/booking-service.js";
 import { BROWSER_SESSION_SITES } from "../../services/browser-session-sites.js";
 import { buildToolCard } from "../../services/tool-card-registry.js";
+import { regeocodeViaDidi } from "../../services/ride-pickup-candidates.js";
 import { getUnifiedPaymentService } from "../../payments/unified-payment-service.js";
 
 /**
@@ -37,6 +38,12 @@ export type CardActionDeps = {
   shoppingOrderService?: ShoppingOrderService | null;
   /** 支付服务（可选）：payment.pay.check 卡内确认用，未装配时如实报错 */
   paymentService?: PaymentService | null;
+  /**
+   * 滴滴 MCP client（可选，2026-11-20）：ride.pickup.select 里
+   * maps_regeocode（自定义点命名）+ maps_direction_driving（驾车路线）
+   * 都走它；未装配时这两项降级（标签用「自定义上车点」、无路线行）。
+   */
+  mcpClientService?: import("../../services/mcp-client-service.js").McpClientService | null;
   /**
    * 比价服务（可选，2026-11-13 P1）：登录卡上的「跳过这家 / 重新出码 /
    * 继续比价」都靠它续跑那一轮被登录闸门挂起的比价。未装配时这几个动作
@@ -107,7 +114,7 @@ function platformLabelOf(id: string): string {
  */
 function buildMultiLoginCard(opts: {
   platforms: string[];
-  qrItems: Array<{ platform: string; platformLabel: string; qrImage: string; qrLink?: string; qrLinkFallback?: string }>;
+  qrItems: Array<{ platform: string; platformLabel: string; qrImage: string; issuedAt?: number; qrLink?: string; qrLinkFallback?: string }>;
   title: string;
   note: string;
   primaryLabel: string;
@@ -173,9 +180,9 @@ async function refreshLoginQrs(
   toolContext: ToolContext,
   platforms: string[],
   query: string,
-): Promise<Array<{ platform: string; platformLabel: string; qrImage: string; qrLink?: string; qrLinkFallback?: string }>> {
+): Promise<Array<{ platform: string; platformLabel: string; qrImage: string; issuedAt?: number; qrLink?: string; qrLinkFallback?: string }>> {
   if (platforms.length === 0) return [];
-  let fresh: Array<{ platform: string; label: string; imageUrl: string; qrLink?: string; qrLinkFallback?: string }> = [];
+  let fresh: Array<{ platform: string; label: string; imageUrl: string; qrLink?: string; qrLinkFallback?: string; issuedAt: number }> = [];
   try {
     fresh = await shoppingService.captureBatchLoginQrs(toolContext, platforms, query);
   } catch {
@@ -187,6 +194,7 @@ async function refreshLoginQrs(
     fresh.map((f) => ({
       platform: f.platform,
       imageUrl: f.imageUrl,
+      issuedAt: f.issuedAt,
       ...(f.qrLink ? { qrLink: f.qrLink } : {}),
       ...(f.qrLinkFallback ? { qrLinkFallback: f.qrLinkFallback } : {}),
     })),
@@ -195,6 +203,7 @@ async function refreshLoginQrs(
     platform: f.platform,
     platformLabel: f.label,
     qrImage: f.imageUrl,
+    issuedAt: f.issuedAt,
     ...(f.qrLink ? { qrLink: f.qrLink } : {}),
     ...(f.qrLinkFallback ? { qrLinkFallback: f.qrLinkFallback } : {}),
   }));
@@ -328,6 +337,70 @@ export async function handleCardActionEvent(
 
   try {
     switch (payload.actionId) {
+      // 上车点选择卡（2026-11-19）→ 带坐标/名称重新报价，就地换成 ride_quote
+      // 选车型卡。全程零模型轮次：选点卡 → 报价卡 → ride.book.prepare → 确认卡。
+      case "ride.pickup.select": {
+        const booking = deps.bookingService as NonNullable<typeof deps.bookingService>;
+        const dropoff = str(data.dropoff);
+        if (!dropoff) {
+          send({ ok: false, error: "缺少目的地上下文，请重新发起打车" });
+          return true;
+        }
+        const lat = num(data.lat);
+        const lng = num(data.lng);
+        const pickup = str(data.pickup);
+        if (lat == null || lng == null) {
+          send({ ok: false, error: "没有拿到上车点坐标，请在卡上重新选一次" });
+          return true;
+        }
+        const city = str(data.city);
+        const scheduleAt = str(data.scheduleAt);
+        const provider = str(data.provider);
+        // 自定义点命名（2026-11-20）：滴图 maps_regeocode 把坐标反查成
+        // 真实地名（如「黔西南州卫生健康局」），报价卡/确认卡不再显示坐标。
+        // 顺带兜 city：无定位路径下卡片可能没带 city，regeo 的 county/city
+        // 刚好补上 textsearch 的必填城市，避免「无法定位目的地」。
+        let pickupLabel = pickup || "自定义上车点";
+        let resolvedCity = city;
+        const mcp = deps.mcpClientService ?? null;
+        if (mcp) {
+          const place = await regeocodeViaDidi(mcp, lng, lat);
+          if (place) {
+            if (!pickup || pickup === "自定义上车点") {
+              if (place.name) pickupLabel = place.name;
+            }
+            if (!resolvedCity) resolvedCity = place.city || place.county || "";
+          }
+        }
+        const result = await booking.search(toolContext, "ride", {
+          city: resolvedCity || undefined,
+          scheduleAt: scheduleAt || null,
+          params: {
+            dropoff,
+            pickup: pickupLabel,
+            pickupCoords: { lat, lng },
+          },
+        }, provider || undefined);
+        if (!result.ok) {
+          send({ ok: false, error: str(result.error) || "这个上车点没报上价，换个近一点的试试" });
+          return true;
+        }
+        // 与 quote handler 同构：报价上下文预埋进 ride_quote 卡，
+        // 「就选这个」动作回传 ride.book.prepare 时原样带走。
+        // route / rideAppLink 由 provider 报价成功时已带在 result 里。
+        const card = buildToolCard("ride_hailing.quote", {
+          ...result,
+          rideRequest: {
+            pickup: pickupLabel,
+            dropoff,
+            ...(resolvedCity ? { city: resolvedCity } : {}),
+            ...(scheduleAt ? { scheduleAt } : {}),
+          },
+        });
+        send(card ? { ok: true, card } : { ok: false, error: "报价卡生成失败，请重试" });
+        return true;
+      }
+
       // 叫车选择卡 → 阶段一：重新报价定位车型、校验限额、铸造确认 token，
       // 把这张卡换成统一确认卡（与购物同款 shopping_confirm）。
       case "ride.book.prepare": {
@@ -685,6 +758,10 @@ export async function handleCardActionEvent(
             platform: p,
             platformLabel: platformLabelOf(p),
             qrImage: q?.qrImage ?? "",
+            // 重出码的这家带新时刻（客户端倒计时重置）；沿用的旧码保留原时刻
+            ...(q && "issuedAt" in q && typeof q.issuedAt === "number"
+              ? { issuedAt: q.issuedAt }
+              : {}),
             ...(q?.qrLink ? { qrLink: q.qrLink } : {}),
             ...(q?.qrLinkFallback ? { qrLinkFallback: q.qrLinkFallback } : {}),
           };
@@ -743,6 +820,10 @@ export async function handleCardActionEvent(
             platform: p,
             platformLabel: platformLabelOf(p),
             qrImage: q?.qrImage ?? "",
+            // 重出码的这家带新时刻（客户端倒计时重置）；沿用的旧码保留原时刻
+            ...(q && "issuedAt" in q && typeof q.issuedAt === "number"
+              ? { issuedAt: q.issuedAt }
+              : {}),
             ...(q?.qrLink ? { qrLink: q.qrLink } : {}),
             ...(q?.qrLinkFallback ? { qrLinkFallback: q.qrLinkFallback } : {}),
           };

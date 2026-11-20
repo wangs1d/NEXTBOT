@@ -40,7 +40,7 @@ const TRUTHFULNESS_SYSTEM_SUFFIX = `
 // 前导话直穿气泡（真机截图 4 泡事故）。现在只保留**位置**的强制调用（工具描述与之一致），
 // 时间统一以【当前时间】块为准（2026-10-07 用户拍板：每轮注入，工具查时间又慢又费 token）。
 const CLOCK_TOOL_SYSTEM_SUFFIX =
-  "\n\n【时钟与位置】时间以每轮注入的【当前时间】块为准，直接推算，不必调用工具；用户询问所在城市/当前位置时必须调用 clock.get_user_location。禁止使用 IP 或训练数据臆测位置。";
+  "\n\n【时钟与位置】时间以每轮注入的【当前时间】块为准，直接推算，不必调用工具；位置优先以每轮注入的【用户位置】块为准，直接作答，不必调用工具；仅当上下文没有位置信息、或用户明确要求重新定位时才调用 clock.get_user_location。禁止使用 IP 或训练数据臆测位置。";
 
 // 2026-11-18 根修：触发条件从「领域清单」改为「断言类型」——不再枚举哪些话题
 // 要搜（永远列不全），而是要求凡要落笔具体属性就必须有本轮回执。领域清单只留
@@ -182,7 +182,6 @@ export type FinalizeChatSystemPromptOpts = {
   masterSubAgentDelegate?: boolean;
   /** 来自 `chat.user_message.agentAccessMode`；沙箱已废弃，恒为 full */
   agentAccessMode?: AgentAccessMode;
-  desktopBridgeOnline?: boolean;
   phoneBridgeOnline?: boolean;
   /**
    * RuntimeKernel minimal 模式控制位：true 时跳过身份/时间戳说明/工具规则类后缀，
@@ -192,7 +191,7 @@ export type FinalizeChatSystemPromptOpts = {
    *
    * minimal 模式仍保留：
    * - 事实可靠性约束（不可跳过）
-   * - 访问权限说明（agentAccessMode/desktopBridgeOnline/phoneBridgeOnline）
+   * - 访问权限说明（agentAccessMode/phoneBridgeOnline）
    *
    * functionalSuffixes=false 可进一步剥离访问权限说明（仅用于极致节省场景，不推荐生产）。
    */
@@ -226,7 +225,6 @@ export function finalizeChatSystemPrompt(
     out = appendTruthfulnessSystemSuffix(out);
     // 保留访问权限说明
     out = appendAgentAccessModeSystemSuffix(out, parseAgentAccessMode(opts?.agentAccessMode), {
-      desktopBridgeOnline: opts?.desktopBridgeOnline,
       phoneBridgeOnline: opts?.phoneBridgeOnline,
     });
     return out;
@@ -239,7 +237,6 @@ export function finalizeChatSystemPrompt(
   // 与 tool schema 的 description 逐句同义（search_web 三份、当前时间五份、天气卡三份），
   // 是「同一语义多处定义」的主要来源。工具怎么用只在 schema 里说一次。
   out = appendAgentAccessModeSystemSuffix(out, parseAgentAccessMode(opts?.agentAccessMode), {
-    desktopBridgeOnline: opts?.desktopBridgeOnline,
     phoneBridgeOnline: opts?.phoneBridgeOnline,
   });
   return out;
@@ -276,11 +273,8 @@ export function appendAgentToolCallingSystemSuffix(systemContent: string): strin
  * 人格唯一来源是 soul-store，不走 KV。
  */
 export const DEFAULT_AGENT_PROMPT_MEMORY_KEYS = [
-  "memory_summary",
-  "memory_current_mission",
   "memory_commitments",
   "memory_open_loops",
-  "session_recap",
   // 2026-11-12：user_profile 已从 KV 移除——画像唯一权威是 USER_PROFILE.md，
   // 由 UserPersonalizationService 读取后进入【用户长期画像】块。
   // 保留 KV 副本会与文件版互为陈旧源（实测两处逐字节相同、各自可写）。
@@ -313,18 +307,6 @@ export function resolvePromptMemoryKeys(): string[] | null {
 /** @deprecated 使用 {@link resolvePromptMemoryKeys} */
 export function parsePromptMemoryKeysFromEnv(): string[] | null {
   return resolvePromptMemoryKeys();
-}
-
-function promptMemorySummaryMaxChars(): number {
-  const raw = process.env.AGENT_PROMPT_MEMORY_SUMMARY_MAX_CHARS?.trim();
-  const n = raw ? Number.parseInt(raw, 10) : 600;
-  return Number.isFinite(n) && n > 200 ? n : 600;
-}
-
-function promptMemorySummaryMaxLines(): number {
-  const raw = process.env.AGENT_PROMPT_MEMORY_SUMMARY_MAX_LINES?.trim();
-  const n = raw ? Number.parseInt(raw, 10) : 4;
-  return Number.isFinite(n) && n > 3 ? n : 4;
 }
 
 const TIMESTAMP_RE = /\[(\d{4}-\d{2}-\d{2}T[\d:.]+Z?)\]/;
@@ -499,24 +481,8 @@ export function sliceMemoryEntriesToPromptContext(
 ): AgentPromptMemoryContext {
   const str = (v: unknown): string => formatKvValueForPrompt(v);
 
-  // #2 废弃 all-in-one 大杂烩：memorySummary 只承载真正的 memory_summary 摘要，
-  // 不再把 facts/preferences/commitments/open_loops 等拼进同一串（那正是记忆模糊/串台的源）。
-  // 这些字段已各自独立注入，避免重复 + 跨话题串扰。
-  const maxChars = promptMemorySummaryMaxChars();
-  let memorySummary: string | undefined;
-  // 注入卫生（2026-10-23）：存量 KV 里混着「[11:15] Agent: …」这类无日期逐字对话行与
-  // RENDER_HINT 残留，一旦注入就是"新对话把上次对话算进去"。读完即净化，存储不动。
-  const rawSummary = sanitizeMemoryLinesForPrompt(str(entries["memory_summary"])).text;
-  if (rawSummary) {
-    // #5 主题×时间分桶召回：优先本话题桶，再补全局与最近跨主题，收敛跨话题串台
-    const sorted = recallMemorySummaryByTopic(rawSummary, maxChars, promptMemorySummaryMaxLines(), userQuery, {
-      minRelevance: 0.3,
-    });
-    memorySummary = sorted;
-  }
-  if (memorySummary && memorySummary.length > maxChars) {
-    memorySummary = `…（较早记录已截断）\n${memorySummary.slice(-maxChars)}`;
-  }
+  // memory_summary 已下线（2026-11-20）：不再从 KV 摘要槽注入。当前状态由
+  // ContextCompiler 从 structured_facts / 理解档案 / 画像编译，历史由事件层召回。
   // memory_current_mission 不再产出 promptMemory.memoryCurrentMission 字段：
   // prompt-assembler 从不渲染它（死路），KV mission 经 taskContext 一路注入生效。
   //
@@ -544,18 +510,11 @@ export function sliceMemoryEntriesToPromptContext(
     userQuery,
     { minRelevance: 0.45, fallbackOnEmpty: false },
   );
-  const sessionRecap = sortAndTruncateMemoryLines(
-    sanitizeMemoryLinesForPrompt(str(entries["session_recap"])).text,
-    400,
-    3,
-    userQuery,
-  );
-
+  // session_recap 是账号级追加槽（2026-10-24 的承诺今天仍能被读到），
+  // 已整体下线：会话回顾由 STM 的会话级原文/情景记忆承担，跨会话不再拼接。
   const out: AgentPromptMemoryContext = {};
-  if (memorySummary) out.memorySummary = memorySummary;
   if (memoryCommitments) out.memoryCommitments = memoryCommitments;
   if (memoryOpenLoops) out.memoryOpenLoops = memoryOpenLoops;
-  if (sessionRecap) out.sessionRecap = sessionRecap;
   return out;
 }
 

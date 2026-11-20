@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { AlipaySdk } from "alipay-sdk";
-import type { AlipaySdkCommonResult, IPageExecuteParams } from "alipay-sdk";
+import type { AlipaySdkCommonResult, IPageExecuteParams, IRequestParams } from "alipay-sdk";
 import { loadWebpayConfig, type WebpayConfig } from "../../config/webpay-config.js";
 import { amountEquals, centsToAmount, parseAmountToCents } from "./webpay-amount.js";
 import { getWebpayStore, type WebpayOrderRow, type WebpayRefundRow } from "./webpay-store.js";
@@ -22,10 +22,12 @@ export class WebpayNotConfiguredError extends Error {
 
 export interface WebpayCreateResult {
   outTradeNo: string;
-  /** 电脑端收银台：自动提交表单 HTML（wap 模式为空串） */
+  /** 电脑端收银台：自动提交表单 HTML（wap / app 模式为空串） */
   paymentHtml: string;
-  /** 手机端收银台：带签名的跳转地址（page 模式为 undefined） */
+  /** 手机浏览器收银台：带签名的跳转地址（page / app 模式为 undefined） */
   paymentUrl?: string;
+  /** App 支付：交给支付宝客户端 SDK 的签名订单串（page / wap 模式为 undefined） */
+  orderStr?: string;
 }
 
 export interface WebpayQueryResult {
@@ -87,17 +89,17 @@ export class WebpayService {
    * 下单：本地签名，无网络请求。
    *
    * - page（默认）：alipay.trade.page.pay，生成自动提交表单 HTML（电脑端）；
-   * - wap：alipay.trade.wap.pay，生成带签名的收银台跳转地址（手机端必须走这条，
-   *   电脑收银台在手机浏览器里无法完成付款）。
+   * - wap：alipay.trade.wap.pay，生成带签名的收银台跳转地址（手机浏览器）；
+   * - app：alipay.trade.app.pay，生成给支付宝客户端 SDK 的签名订单串（已装支付宝）。
    *
-   * 两种模式共用同一张本地订单与同一套查单/通知/对账逻辑。
+   * 三种模式共用同一张本地订单与同一套查单/通知/对账逻辑。
    */
   createOrder(input: {
     amount: unknown;
     subject: unknown;
     accountId?: string;
     returnUrl?: string;
-    payMode?: "page" | "wap";
+    payMode?: "page" | "wap" | "app";
   }): WebpayCreateResult {
     const config = this.requireConfig();
     const cents = parseAmountToCents(input.amount);
@@ -129,6 +131,22 @@ export class WebpayService {
     });
 
     const returnUrl = input.returnUrl?.trim() || `${config.baseUrl}/webpay/return`;
+    if (input.payMode === "app") {
+      // App 支付不生成跳转页：返回签名订单串，由客户端支付宝 SDK 唤起收银台。
+      const appParams: IRequestParams = {
+        ...(config.notifyUrl ? { notifyUrl: config.notifyUrl } : {}),
+        bizContent: {
+          out_trade_no: outTradeNo,
+          total_amount: totalAmount,
+          subject,
+          product_code: "QUICK_MSECURITY_PAY",
+          timeout_express: "15m",
+        },
+      };
+      const orderStr = this.sdkFor(config).sdkExecute("alipay.trade.app.pay", appParams);
+      if (!orderStr.includes("alipay.trade.app.pay")) throw new Error("支付宝未返回可用的 App 支付订单串");
+      return { outTradeNo, paymentHtml: "", orderStr };
+    }
     if (input.payMode === "wap") {
       const wapParams: IPageExecuteParams = {
         returnUrl,

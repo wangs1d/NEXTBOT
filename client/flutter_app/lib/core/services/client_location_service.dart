@@ -112,6 +112,8 @@ class ClientLocationService {
   // 的口径一致，避免二次偏移。
   static const MethodChannel _amapChannel =
       MethodChannel("private_ai_agent/amap_location");
+  /// 与 KeepAlivePlugin 共用桥：原生「始终允许」定位设置页深链。
+  static const MethodChannel _keepAliveChannel = MethodChannel("nextbot/keep_alive");
   /// 一旦确定不可用（无 key / 插件缺失）就本进程内不再尝试，避免每次定位都付一次失败开销。
   static bool _amapUsable = true;
   /// `null` 尚未选择；`true`/`false` 用户已选择。
@@ -204,6 +206,50 @@ class ClientLocationService {
       }
     }
     return permission;
+  }
+
+  /// 手机端进主壳首次询问：直接请求系统定位权限（使用期间），不再经应用内
+  /// 卡片弹窗（2026-11-19 删除）。返回 true/false = 系统对本次请求给出的真实
+  /// 答复；返回 null = 本次没能问到（定位服务未开 / 请求未受理 / 插件异常），
+  /// 调用方不得把它记成用户拒绝。
+  static Future<bool?> requestSystemLocationPermission() async {
+    try {
+      if (!await Geolocator.isLocationServiceEnabled()) {
+        return null;
+      }
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      if (permission == LocationPermission.whileInUse ||
+          permission == LocationPermission.always) {
+        return true;
+      }
+      if (permission == LocationPermission.denied ||
+          permission == LocationPermission.deniedForever) {
+        return false;
+      }
+      // undetermined / restricted / disabled：弹窗没起来，不算用户否决
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 引导用户开启「始终允许」（2026-11-20）：Android 12+ 原生深链直达本应用的
+  /// 「位置权限」单页（那一页里就有「允许所有时间」，比应用详情页少点 3 层）；
+  /// Android 10-11 原生回退应用详情页。返回 false = 深链不可用（低版本/异常），
+  /// 调用方兜底 [ensureAlwaysPermission]（API ≤30 的二级弹窗里有「始终允许」，
+  /// iOS 走系统的 Always 升级框）。最终授权必须用户手动确认，无程序化通道。
+  static Future<bool> openAlwaysLocationSettings() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return false;
+    try {
+      return await _keepAliveChannel
+              .invokeMethod<bool>("openAlwaysLocationSettings") ??
+          false;
+    } on Exception {
+      return false;
+    }
   }
 
   static bool get isResidentTrackingActive => _residentSub != null;
@@ -356,7 +402,11 @@ class ClientLocationService {
   static Future<ClientLocationPayload?> _fetchAgentReplyCoords() async {
     if (_locationConsent != true) {
       final bool? consent = await getLocationConsent();
-      if (consent != true) return null;
+      // 2026-11-19 根修（「开了系统权限还说看不见」）：只有**显式拒绝**（false）
+      // 才在这里拦截。consent == null（从未在 App 内弹窗选择）不再直接掐死——
+      // 用户在系统设置里授予了定位权限本身就是意图表达，放行交给下面的
+      // 系统权限检查裁定：权限在就正常定位，不在照样回 null。
+      if (consent == false) return null;
     }
     final LocationPermission permission = await _ensurePermission();
     if (permission == LocationPermission.denied ||

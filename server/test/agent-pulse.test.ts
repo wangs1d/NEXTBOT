@@ -12,6 +12,7 @@ import { test } from "node:test";
 import {
   AgentPulseService,
   buildPulsePrompt,
+  extractRapport,
   isPriceNews,
   pulseSignature,
   sanitizePulseMessage,
@@ -300,4 +301,214 @@ test("agent pulse: 此刻状态与最近对话进 prompt（状态段 + 已知勿
   const bare = buildPulsePrompt(new Date("2026-10-25T14:00:00"), mkAggregate());
   assert.ok(!bare.includes("【用户此刻状态】"));
   assert.ok(!bare.includes("【最近对话摘录"));
+});
+
+// ─── 关系时钟（2026-11-19 主动性重构 P0）──────────────────────────
+// 旧行为：材料全空就 no_material，等于「没事发生就永不开口」。
+// 新行为：隔得够久 + 时段合适，给一次「想想要不要说句话」的机会（NOP 仍合法）。
+
+function emptyAggregate(overrides: Partial<PulseAggregate> = {}): PulseAggregate {
+  return { tasks: [], unread: [], goals: [], interests: [], goalLine: null, ...overrides };
+}
+
+test("关系时钟：无材料但 6h+ 没聊、白天 → 仍然评审并开口", async () => {
+  const h = mkHarness({ now: new Date("2026-11-19T14:00:00") });
+  h.setAggregate(emptyAggregate({ idleMinutes: 7 * 60 }));
+  h.setLlm("你昨天说想找的那本书我看到了，要不要发你？");
+  const r = await h.svc.check();
+  assert.equal(r.ran, true, "空材料也要走到 LLM");
+  assert.equal(r.reason, "sent");
+  assert.equal(h.submitted.length, 1);
+  assert.ok(h.llmCalls[0].includes("【距上次对话】7 小时"), "距上次对话是社交开口的事实依据");
+  assert.equal(h.submitted[0].tier, "social");
+});
+
+test("关系时钟：材料为空且没聊够 6h → 不评审（不打扰）", async () => {
+  const h = mkHarness({ now: new Date("2026-11-19T14:00:00") });
+  h.setAggregate(emptyAggregate({ idleMinutes: 2 * 60 }));
+  const r = await h.svc.check();
+  assert.equal(r.reason, "no_material");
+  assert.equal(h.llmCalls.length, 0);
+});
+
+test("关系时钟：时段外（凌晨 3 点）→ 不评审", async () => {
+  const h = mkHarness({ now: new Date("2026-11-19T03:00:00") });
+  h.setAggregate(emptyAggregate({ idleMinutes: 9 * 60 }));
+  const r = await h.svc.check();
+  assert.equal(r.reason, "no_material");
+  assert.equal(h.llmCalls.length, 0);
+});
+
+test("关系时钟：从没聊过（idle=null）→ 不主动冷启动", async () => {
+  const h = mkHarness({ now: new Date("2026-11-19T14:00:00") });
+  h.setAggregate(emptyAggregate({ idleMinutes: null }));
+  const r = await h.svc.check();
+  assert.equal(r.reason, "no_material");
+  assert.equal(h.llmCalls.length, 0);
+});
+
+test("关系时钟：4h 内第二次无材料评审被节流，4h 后恢复", async () => {
+  const h = mkHarness({ now: new Date("2026-11-19T09:00:00") });
+  h.setAggregate(emptyAggregate({ idleMinutes: 8 * 60 }));
+  h.setLlm("NOP");
+  const r1 = await h.svc.check();
+  assert.equal(r1.ran, true, "第一次放行（NOP 也算评审过）");
+
+  h.setNow(new Date("2026-11-19T10:00:00"));
+  const r2 = await h.svc.check();
+  assert.equal(r2.reason, "no_material", "1h 内不重复烧 token");
+
+  h.setNow(new Date("2026-11-19T13:30:00"));
+  const r3 = await h.svc.check();
+  assert.equal(r3.ran, true, "满 4h 后再次给机会");
+  assert.equal(h.llmCalls.length, 2);
+});
+
+test("关系时钟：有材料且刚聊过 → 仍按材料指纹去重（不额外打扰）", async () => {
+  const h = mkHarness({ now: new Date("2026-11-19T14:00:00") });
+  h.setAggregate(mkAggregate({ idleMinutes: 2 * 60 }));
+  h.setLlm("NOP");
+  await h.svc.check();
+  const r2 = await h.svc.check();
+  assert.equal(r2.reason, "unchanged", "刚聊过时，材料没变就不重评");
+});
+
+test("关系时钟：有材料但恒久没变、又 7h 没聊 → 社交补位评审一次", async () => {
+  const h = mkHarness({ now: new Date("2026-11-19T10:00:00") });
+  h.setAggregate(mkAggregate({ idleMinutes: 7 * 60 }));
+  h.setLlm("NOP");
+  await h.svc.check();
+  h.setNow(new Date("2026-11-19T14:30:00"));
+  const r2 = await h.svc.check();
+  assert.equal(r2.reason, "nop", "材料没变但关系时钟到了，给一次机会");
+  assert.ok(h.llmCalls[1]?.includes("这次没有新材料"), "社交补位有专门的提示");
+});
+
+test("关系时钟：社交路径的 dedupKey 带时间桶，不被空材料恒定指纹吞掉", async () => {
+  const h = mkHarness({ now: new Date("2026-11-19T09:00:00") });
+  h.setAggregate(emptyAggregate({ idleMinutes: 8 * 60 }));
+  h.setLlm("早，今天想干点什么？");
+  await h.svc.check();
+  const first = h.submitted[0].dedupKey;
+
+  h.setNow(new Date("2026-11-19T14:00:00"));
+  await h.svc.check();
+  const second = h.submitted[1]?.dedupKey;
+  assert.ok(second, "第二次也能提交");
+  assert.notEqual(second, first, "不同时间桶 → 不同去重键");
+  assert.ok(second!.includes("social"));
+});
+
+test("关系时钟：prompt 明确三档开口理由与锚点硬要求", () => {
+  const prompt = buildPulsePrompt(
+    new Date("2026-11-19T14:00:00"),
+    emptyAggregate({ idleMinutes: 7 * 60 }),
+  );
+  assert.ok(prompt.includes("A 有事"));
+  assert.ok(prompt.includes("B 接话"));
+  assert.ok(prompt.includes("C 观察"));
+  assert.ok(prompt.includes("禁止「在吗」"), "空泛问候被明确禁止");
+  assert.ok(prompt.includes("【距上次对话】"));
+});
+
+// ─── 观察素材：位置 / 活动 / 情绪（2026-11-19）────────────────────
+// 用户定调：闲聊不该是「降温了记得穿衣服」这种叮嘱，而是「你在外面？去哪儿」
+// 这种基于真实观测的搭话。
+
+test("观察素材进 prompt：位置 + 活动 + 情绪各自成段", () => {
+  const prompt = buildPulsePrompt(
+    new Date("2026-11-19T16:00:00"),
+    emptyAggregate({
+      idleMinutes: 400,
+      place: { kind: "other", label: "健身房", city: "兴义", updatedMinutesAgo: 8 },
+      activity: "walking",
+      mood: "stressed",
+    }),
+  );
+  assert.ok(prompt.includes("【他此刻在哪】健身房 · 兴义 · 8 分钟前的位置"));
+  assert.ok(prompt.includes("【他在动吗】在走路"));
+  assert.ok(prompt.includes("【他最近的状态】压力大"));
+  assert.ok(prompt.includes("「你在外面呢？这是去哪儿」"), "给出观察式示范");
+  assert.ok(prompt.includes("不是叮嘱"), "明确排除叮嘱式");
+  assert.ok(prompt.includes("不是播报"), "明确排除播报式");
+});
+
+test("观察素材：unknown 地点 / neutral 情绪不出空段", () => {
+  const prompt = buildPulsePrompt(
+    new Date("2026-11-19T16:00:00"),
+    emptyAggregate({
+      idleMinutes: 400,
+      place: { kind: "unknown" },
+      activity: "unknown",
+      mood: null,
+    }),
+  );
+  assert.ok(!prompt.includes("【他此刻在哪】"));
+  assert.ok(!prompt.includes("【他在动吗】"));
+  // 固定指令里出现「【他最近的状态】情绪低…」这句，所以断言具体取值不在材料段
+  assert.ok(!prompt.includes("【他最近的状态】情绪偏低"));
+  assert.ok(!prompt.includes("【他最近的状态】状态不错"));
+});
+
+test("观察素材：在家/在公司用兜底称谓，没有 label 也能说人话", () => {
+  const home = buildPulsePrompt(
+    new Date("2026-11-19T16:00:00"),
+    emptyAggregate({ idleMinutes: 400, place: { kind: "home" }, activity: "still" }),
+  );
+  assert.ok(home.includes("【他此刻在哪】家"));
+  assert.ok(home.includes("【他在动吗】待着没动"));
+});
+
+test("观察素材：情绪低时要求收着说，不自顾自唠", () => {
+  const prompt = buildPulsePrompt(
+    new Date("2026-11-19T16:00:00"),
+    emptyAggregate({ idleMinutes: 400, mood: "negative" }),
+  );
+  assert.ok(prompt.includes("【他最近的状态】情绪偏低"));
+  assert.ok(prompt.includes("C 类收着说"), "低情绪时闲聊不硬聊");
+});
+
+// ─── 画像素材：闲聊的锚点（2026-11-19）────────────────────────────
+
+test("extractRapport: 只取头像短事实，过滤敏感字段与长段落", () => {
+  const profile = [
+    "# 用户画像",
+    "## 基本信息",
+    "- 称呼：王哥",
+    "- 城市：黔西南兴义",
+    "- 职业：前端工程师",
+    "- 手机号：13800000000",
+    "- 备注：这是一个非常长的描述".repeat(1) + "，".repeat(0) + "x".repeat(60),
+    "## 闲聊",
+    "他最近在弄一个球形机器人项目，还提到过想学做饭。",
+  ].join("\n");
+  const out = extractRapport(profile);
+  assert.ok(out.some((l) => l.includes("称呼：王哥")), "基础事实保留");
+  assert.ok(out.some((l) => l.includes("城市")), "地理锚点保留");
+  assert.ok(!out.some((l) => l.includes("手机号")), "敏感字段必须过滤");
+  assert.ok(out.every((l) => l.length <= 44), "每行有长度上限");
+  assert.ok(out.length <= 4, "最多 4 条");
+});
+
+test("extractRapport: 无画像/空画像 → 空数组（不占 prompt）", () => {
+  assert.deepEqual(extractRapport(undefined), []);
+  assert.deepEqual(extractRapport(""), []);
+  assert.deepEqual(extractRapport("# 空画像\n没有任何字段"), []);
+});
+
+test("画像进 prompt：闲聊素材有独立段落，且 C 类指明从画像找话头", () => {
+  const prompt = buildPulsePrompt(
+    new Date("2026-11-19T14:00:00"),
+    emptyAggregate({
+      idleMinutes: 7 * 60,
+      rapport: ["称呼：王哥", "城市：黔西南兴义", "职业：前端工程师"],
+    }),
+  );
+  assert.ok(prompt.includes("【你记得的他（闲聊时从这里找话头）】"), "画像段标头");
+  assert.ok(prompt.includes("称呼：王哥"));
+  assert.ok(prompt.includes("黔西南兴义"));
+  assert.ok(prompt.includes("改从【你记得的他】里找个具体话头"), "没有观测时用画像兜底话头");
+  // 空画像不出空段（注意：固定指令里也提到该段名，所以断言完整标头）
+  const bare = buildPulsePrompt(new Date("2026-11-19T14:00:00"), emptyAggregate({ idleMinutes: 7 * 60 }));
+  assert.ok(!bare.includes("【你记得的他（闲聊时从这里找话头）】"));
 });

@@ -12,8 +12,10 @@
  *     玩笑/粉丝式称呼不当真）；本库存「字面为真的字段值」。用户说
  *     "我的老婆是刘浩存"→ 理解档案记 fandom 理解，事实库不记任何字段；
  *     用户说"我叫张三"→ 理解档案记 literal 理解，事实库记 称呼=张三。
- *   - nightly UserFactStore（JSON）是夜间批量提炼的巩固产物；本库是
- *     对话内的实时更新通道（统一抽取同一次 LLM 的产物，写钩子直落）。
+ *   - 夜间提炼的长尾事实（认不出标准字段的稳定偏好/背景）也落本库，
+ *     以 category=`tail:<kind>` 标记：同一个库、同一套 supersede 与容量
+ *     规则，但**不参与字段寻址、不渲染进档案块**（getTailFacts 单独取）。
+ *     legacy UserFactStore JSON 只剩只读读取口（存量迁移前）。
  *
  * 运行语义（与理解档案同构，复用其成熟模式）：
  *   - 主键 = actor + entity + 归一化字段；同字段新值生效即旧值入「演变历史」
@@ -32,6 +34,7 @@ import { assertMemoryWriter } from "../memory/memory-authority.js";
 import { isEphemeralActorId } from "../agent/actor-id.js";
 import { isStructuredFactsEnabled } from "./env.js";
 import { openAgenticSqlite } from "./sqlite-store.js";
+import { tokenize } from "../services/memory-record-utils.js";
 
 /**
  * 事实时态（2026-10-19 时间锚定）：
@@ -127,6 +130,8 @@ export interface ApplyFactInput {
   validTo?: string | null;
   /** 观察时间（用户说出这句话的时刻），缺省取当前时刻 */
   observedAt?: string | null;
+  /** 类目覆盖（缺省按字段名推导 taxonomy）；长尾事实传 `tail:<kind>`。 */
+  category?: string | null;
 }
 
 /** 未生效原因（changed=false 时可能非空，供上层日志/诊断） */
@@ -273,6 +278,30 @@ export function isProfileField(field: string): boolean {
   return canonical !== "" && PROFILE_FIELDS.includes(canonical);
 }
 
+/**
+ * 长尾事实（夜间提炼、认不出标准档案字段的稳定偏好/背景）。
+ *
+ * 它们是事实，但**不是档案字段**：不参与字段寻址、不渲染进档案块、不占
+ * 档案容量。此前存在 user-facts JSON 库里，与 structured_facts 形成两个
+ * 「事实的家」；现在统一落本库，用 category 前缀 `tail:<kind>` 区分——
+ * 同一个库、同一套 supersede/容量规则，只有一个写入口。
+ */
+export const TAIL_CATEGORY_PREFIX = "tail:";
+export type TailFactKind = "preference" | "identity" | "constraint" | "fact";
+
+export function tailCategoryFor(kind: TailFactKind | string): string {
+  return `${TAIL_CATEGORY_PREFIX}${kind}`;
+}
+
+export function isTailCategory(category: string | null | undefined): boolean {
+  return typeof category === "string" && category.startsWith(TAIL_CATEGORY_PREFIX);
+}
+
+export function tailKindOf(category: string | null | undefined): TailFactKind | null {
+  if (!isTailCategory(category)) return null;
+  return (category as string).slice(TAIL_CATEGORY_PREFIX.length) as TailFactKind;
+}
+
 let uidSeq = 0;
 function nextFactId(): string {
   uidSeq = (uidSeq + 1) % 100000;
@@ -282,6 +311,18 @@ function nextFactId(): string {
 const MAX_ACTIVE_FACTS = 120;
 /** 历史行上限（含 past 陈述与 superseded 旧值），防追踪链无限膨胀 */
 const MAX_HISTORICAL_FACTS = 400;
+/** 长尾事实容量（与档案容量互不挤占） */
+const MAX_TAIL_FACTS = 200;
+
+/** 长尾召回的通用词元：几乎出现在每条长尾 value 里，命中它们不代表相关。 */
+const TAIL_STOP_TOKENS = new Set(["用户", "自己", "我的", "你的", "可以", "现在", "进行"]);
+
+/** 字面比较用：去掉标点与空白，保留字符本身（"京东、拼多多" ≡ "京东拼多多"）。 */
+function comparableText(text: string): string {
+  return (text ?? "")
+    .replace(/[\s，。！？、；：""''「」『』（）()\[\]【】~～·,.;:!?'"]+/g, "")
+    .trim();
+}
 
 /**
  * 置信度闸参数（2026-10-19）：
@@ -394,12 +435,12 @@ export function inferValidRange(
 export class StructuredFactStore {
   private readonly db: SqliteDatabase;
   /**
-   * 实体物化副作用（P0，2026-10-20 生活模型接线）：每次写入一个非 user 主体的事实时
-   * 回调一次，供 LifeModelStore 旁路 upsert life_entities（同一 LLM 产物，零新增调用）。
-   * 由 create-app-services 装配注入；未注入时为 null（纯事实库行为不变）。
+   * 事实写入后的副作用钩子（装配层注入，只有一个）：实体物化与长尾事实入认知图
+   * 都由它分发。判重/置信度/时态裁决都在这张表里做完，副作用只看到最终落库的那条，
+   * 不会出现「同一个事实被两条旁路各处理一次」。
    */
-  private entityObserver:
-    | ((actorId: string, entity: string, seenAt: string, sourceRef: string | null) => void)
+  private factObserver:
+    | ((fact: StructuredFact, input: ApplyFactInput, changed: boolean) => void)
     | null = null;
 
   constructor(db?: SqliteDatabase) {
@@ -529,6 +570,8 @@ export class StructuredFactStore {
     const value = input.value?.trim().replace(/\s+/g, " ");
     if (!actorId || !field || !value || value.length > 80) return null;
     if (isEphemeralActorId(actorId)) return null;
+    // 长尾不得占用档案字段名：同字段会触发 latest-wins 把权威值顶掉。
+    if (isTailCategory(input.category) && PROFILE_FIELDS.includes(field)) return null;
 
     const temporal: FactTemporality =
       input.temporal === "past" ? "past" : input.temporal === "upcoming" ? "upcoming" : "current";
@@ -554,7 +597,7 @@ export class StructuredFactStore {
 
       const same = actives.find((r) => r.value === value);
 
-      // ── 未来态通道（计划，不是事实）：只登记"用户说要做"，绝不改现状 ──
+      // ── 未来态通道（计划，不是事实）：只登记"用户说要做了"，绝不改现状 ──
       // 2026-10-19 证据门：计划到期也**不会**自动变成"已发生"——无证据的断言
       // 就是错误记忆。确认只能来自用户复述或位置证据（confirmPlan*）。
       if (temporal === "upcoming") {
@@ -598,6 +641,7 @@ export class StructuredFactStore {
           validFrom,
           validTo,
           at: now,
+          category: input.category,
         });
         // 同一字段只保留最新的一条计划（旧计划是"说过但不作数了"）
         this.db
@@ -661,6 +705,7 @@ export class StructuredFactStore {
           validFrom,
           validTo,
           at: now,
+          category: input.category,
         });
         this.enforceHistoricalCapacity(actorId);
         return {
@@ -725,6 +770,7 @@ export class StructuredFactStore {
         validFrom,
         validTo,
         at: now,
+        category: input.category,
       });
       for (const old of actives) {
         // 旧的现状行补一个区间终点（= 新值生效时刻的日期），as-of 查询才有边界
@@ -743,22 +789,23 @@ export class StructuredFactStore {
       return { changed: true, fact: toFact(inserted), previous: actives.map(toFact).reverse() };
     });
     const result = run();
-    // 实体物化（P0）：非 user 主体写事实时旁路通知生活模型建/更新实体节点。
-    if (result && this.entityObserver && entity !== "user") {
+    if (result && isTailCategory(result.fact.category)) this.enforceTailCapacity(actorId);
+    // 写后副作用统一从这里分发（实体物化 + 长尾事实入认知图），裁决条件留在消费方。
+    if (result && this.factObserver) {
       try {
-        this.entityObserver(actorId, entity, result.fact.updatedAt, input.sourceRef ?? null);
+        this.factObserver(result.fact, input, result.changed);
       } catch (err) {
-        console.log(`[structured-facts] 实体物化回调失败（忽略）: ${err}`);
+        console.log(`[structured-facts] 事实副作用回调失败（忽略）: ${err}`);
       }
     }
     return result;
   }
 
-  /** 注入实体物化副作用（装配层接线；LifeModelStore.upsertEntity 的薄封装）。 */
-  setEntityObserver(
-    cb: ((actorId: string, entity: string, seenAt: string, sourceRef: string | null) => void) | null,
+  /** 注入写后副作用（装配层接线；未注入时纯事实库行为不变）。 */
+  setFactObserver(
+    cb: ((fact: StructuredFact, input: ApplyFactInput, changed: boolean) => void) | null,
   ): void {
-    this.entityObserver = cb;
+    this.factObserver = cb;
   }
 
   /** 某 actor 出现过的全部非 user 事实主体（实体物化迁移用，幂等）。 */
@@ -840,6 +887,7 @@ export class StructuredFactStore {
     validFrom?: string | null;
     validTo?: string | null;
     at: string;
+    category?: string | null;
   }): string {
     const id = nextFactId();
     this.db
@@ -856,7 +904,7 @@ export class StructuredFactStore {
         args.entity,
         args.field,
         args.value,
-        taxonomyTagFor(args.field),
+        args.category || taxonomyTagFor(args.field),
         args.confidence,
         args.sourceRef ?? null,
         args.status,
@@ -875,12 +923,13 @@ export class StructuredFactStore {
     return this.db.prepare(`SELECT * FROM structured_facts WHERE id = ?`).get(id) as FactRow;
   }
 
-  /** 容量上限：淘汰最久未更新的 active 事实（防字段爆炸，历史行不动） */
+  /** 档案容量：淘汰最久未更新的 active 档案事实（长尾事实单独计数，互不挤占） */
   private enforceCapacity(actorId: string): void {
     const row = this.db
       .prepare(
         `SELECT COUNT(*) AS n FROM structured_facts
-         WHERE actor_id = ? AND status = 'active'`,
+         WHERE actor_id = ? AND status = 'active'
+           AND (category IS NULL OR category NOT LIKE 'tail:%')`,
       )
       .get(actorId) as { n: number };
     if (row.n <= MAX_ACTIVE_FACTS) return;
@@ -888,9 +937,32 @@ export class StructuredFactStore {
       .prepare(
         `SELECT id FROM structured_facts
          WHERE actor_id = ? AND status = 'active'
+           AND (category IS NULL OR category NOT LIKE 'tail:%')
          ORDER BY updated_at ASC LIMIT ?`,
       )
       .all(actorId, row.n - MAX_ACTIVE_FACTS) as Array<{ id: string }>;
+    const del = this.db.prepare(
+      `DELETE FROM structured_facts WHERE id = ? AND status = 'active'`,
+    );
+    for (const s of stale) del.run(s.id);
+  }
+
+  /** 长尾容量：按最近更新保留 MAX_TAIL_FACTS 条。 */
+  private enforceTailCapacity(actorId: string): void {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS n FROM structured_facts
+         WHERE actor_id = ? AND status = 'active' AND category LIKE 'tail:%'`,
+      )
+      .get(actorId) as { n: number };
+    if (row.n <= MAX_TAIL_FACTS) return;
+    const stale = this.db
+      .prepare(
+        `SELECT id FROM structured_facts
+         WHERE actor_id = ? AND status = 'active' AND category LIKE 'tail:%'
+         ORDER BY updated_at ASC LIMIT ?`,
+      )
+      .all(actorId, row.n - MAX_TAIL_FACTS) as Array<{ id: string }>;
     const del = this.db.prepare(
       `DELETE FROM structured_facts WHERE id = ? AND status = 'active'`,
     );
@@ -919,16 +991,39 @@ export class StructuredFactStore {
     for (const s of stale) del.run(s.id);
   }
 
+  /**
+   * 活跃**档案**事实（不含长尾）。长尾走 getTailFacts——它没有确定的字段名，
+   * 不能参与字段寻址、不能渲染进档案块，也不应混进画像/报表的字段清单。
+   */
   getActiveFacts(actorId: string, entity = "user"): StructuredFact[] {
     if (!actorId) return [];
     const rows = this.db
       .prepare(
         `SELECT * FROM structured_facts
          WHERE actor_id = ? AND entity = ? AND status = 'active'
+           AND (category IS NULL OR category NOT LIKE 'tail:%')
          ORDER BY updated_at DESC`,
       )
       .all(actorId, entity) as FactRow[];
     return rows.map(toFact);
+  }
+
+  /** 活跃长尾事实（category=tail:<kind>），按最近更新排序。 */
+  getTailFacts(
+    actorId: string,
+    opts?: { kind?: TailFactKind; entity?: string; limit?: number },
+  ): StructuredFact[] {
+    if (!actorId) return [];
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM structured_facts
+         WHERE actor_id = ? AND entity = ? AND status = 'active' AND category LIKE 'tail:%'
+         ORDER BY updated_at DESC`,
+      )
+      .all(actorId, opts?.entity ?? "user") as FactRow[];
+    let out = rows.map(toFact);
+    if (opts?.kind) out = out.filter((f) => tailKindOf(f.category) === opts.kind);
+    return typeof opts?.limit === "number" ? out.slice(0, opts.limit) : out;
   }
 
   /**
@@ -964,7 +1059,8 @@ export class StructuredFactStore {
     const row = this.db
       .prepare(
         `SELECT * FROM structured_facts
-         WHERE actor_id = ? AND entity = ? AND field = ? AND status = 'active'`,
+         WHERE actor_id = ? AND entity = ? AND field = ? AND status = 'active'
+           AND (category IS NULL OR category NOT LIKE 'tail:%')`,
       )
       .get(actorId, entity, f) as FactRow | undefined;
     return row ? toFact(row) : null;
@@ -1263,6 +1359,62 @@ export class StructuredFactStore {
       const v = f.value?.trim();
       return !!v && v.length >= 2 && v.length <= 20 && !/^\d+$/.test(v) && t.includes(v);
     });
+  }
+
+  /**
+   * 长尾事实的话题召回：长尾没有确定字段名，不能按字段寻址，按「原话里出现
+   * 该条目」判定——归一化后字面包含 subject，或 bigram 覆盖率过半且至少两个
+   * 词元命中（治「在京东、拼多多…」这类 subject 去标点后字面不连续的写法）。
+   * 只返回强相关条目，宁缺毋滥：泛化 query（今天天气）与偏好库无交集。
+   */
+  matchTailFactsInText(actorId: string, text: string, entity = "user", limit = 3): StructuredFact[] {
+    const t = text?.trim();
+    if (!actorId || !t) return [];
+    const qNorm = comparableText(t);
+    const qTokens = new Set(tokenize(t).filter((tok) => !TAIL_STOP_TOKENS.has(tok)));
+    if (!qNorm || qTokens.size === 0) return [];
+    const scored: Array<{ fact: StructuredFact; score: number }> = [];
+    for (const f of this.getTailFacts(actorId, { entity })) {
+      const fieldNorm = comparableText(f.field);
+      const literal = fieldNorm.length >= 2 && qNorm.includes(fieldNorm);
+      const factTokens = new Set(
+        tokenize(`${f.field} ${f.value}`).filter((tok) => !TAIL_STOP_TOKENS.has(tok)),
+      );
+      let matched = 0;
+      for (const tok of qTokens) if (factTokens.has(tok)) matched += 1;
+      const denom = Math.min(qTokens.size, factTokens.size);
+      const overlap = denom > 0 ? matched / denom : 0;
+      if (!literal && !(matched >= 2 && overlap >= 0.5)) continue;
+      scored.push({ fact: f, score: literal ? 1 + overlap : overlap });
+    }
+    const picked: StructuredFact[] = [];
+    for (const { fact } of scored.sort(
+      (a, b) => b.score - a.score || b.fact.updatedAt.localeCompare(a.fact.updatedAt),
+    )) {
+      picked.push(fact);
+      if (picked.length >= limit) break;
+    }
+    return picked;
+  }
+
+  /**
+   * 长尾召回块（按需回忆候选源；空返回 undefined 零注入）。
+   * 头部声明这是「过去的偏好，不是本轮指令」，防止模型把召回当成新要求。
+   */
+  renderTailRecallBlock(actorId: string, text: string, entity = "user"): string | undefined {
+    const hits = this.matchTailFactsInText(actorId, text, entity);
+    if (hits.length === 0) return undefined;
+    const day = (iso: string | null | undefined): string =>
+      iso ? iso.slice(5, 10).replace("-", "/") : "";
+    return [
+      "【相关长尾记忆】",
+      "（用户过去表达过的偏好/习惯，只因与当前话题相关而带出；不是本轮指令）",
+      ...hits.map((f) => {
+        const value = f.value.length > 120 ? `${f.value.slice(0, 120)}…` : f.value;
+        const recorded = day(f.updatedAt);
+        return `- ${value}${recorded ? `（${recorded} 记录）` : ""}`;
+      }),
+    ].join("\n");
   }
 
   /** 某当前值的演变历史（沿 superseded_by 链回溯，最新在前，limit 条） */

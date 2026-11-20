@@ -5,6 +5,11 @@
         <!-- Show a splash screen on the activity. Automatically removed when
              the Flutter engine draws its first frame -->
         <item name="android:windowBackground">@drawable/launch_background</item>
+        <!-- 启动期系统栏也压成启动底色：Theme.Light 默认亮状态栏（深色图标），
+             进 Flutter 后 edge-to-edge 变透明+亮图标，顶部会闪一条亮带。 -->
+        <item name="android:statusBarColor">@color/boot_background</item>
+        <item name="android:navigationBarColor">@color/boot_background</item>
+        <item name="android:windowLightStatusBar">false</item>
         <!-- Android 12+ 系统 SplashScreen：不展示应用图标那一层。
              图标位换成透明占位、动画时长归零、底色与 N 光扫一致，
              点开应用只允许出现之后的 N 动画（BootAnimation）。 -->
@@ -21,8 +26,12 @@
     <style name="NormalTheme" parent="@android:style/Theme.Light.NoTitleBar">
         <!-- 与系统启动画面/LaunchTheme 同底色（#161616）：引擎启动到 Flutter
              首帧之间窗口背景走本主题，浅色系统下 ?android:colorBackground 是
-             白底，首帧慢（首次安装 DEX 优化+着色器编译）时会白→黑硬切闪跳。 -->
+             白底，首帧慢（首次安装 DEX 优化+着色器编译）时会白→黑硬切闪跳。
+             系统栏口径与 LaunchTheme 相同（见上）。 -->
         <item name="android:windowBackground">@color/boot_background</item>
+        <item name="android:statusBarColor">@color/boot_background</item>
+        <item name="android:navigationBarColor">@color/boot_background</item>
+        <item name="android:windowLightStatusBar">false</item>
     </style>
 
     <!-- 手机桥接拨号确认窗：半透明全屏，覆盖在当前界面之上 -->

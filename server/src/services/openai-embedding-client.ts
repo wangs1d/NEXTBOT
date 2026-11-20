@@ -12,6 +12,7 @@ import { createHash } from "node:crypto";
 
 import { isPlaceholderApiKey } from "../config/api-key-validator.js";
 import { getLocalEmbeddingEndpoint } from "../agentic-memory/local-embedding/local-embedding-endpoint.js";
+import { getToolSearchConfig } from "../tools/tool-search/env.js";
 
 export type EmbeddingEndpoint = {
   baseUrl: string;
@@ -81,13 +82,20 @@ export function resolveEmbeddingModel(): string {
  * 的端点请显式配 OPENAI_EMBEDDINGS_URL。
  */
 export function resolveEmbeddingEndpoint(): EmbeddingEndpoint | null {
-  // 本地内置引擎优先：模型/维度/鉴权自成一体，与远端配置解耦
-  const local = getLocalEmbeddingEndpoint();
-  if (local) return { baseUrl: local.baseUrl, apiKey: local.apiKey, model: local.model };
+  // 本地内置引擎优先：模型/维度/鉴权自成一体，与远端配置解耦。
+  // 2026-11-20：显式 AGENT_TOOL_EMBEDDING_PROVIDER=openai 时跳过本地——
+  // ECS 2vCPU 上本地宿主启动期不稳（code=1），此类部署直接走远端。
+  if (getToolSearchConfig().embeddingProvider === "openai") {
+    const local = getLocalEmbeddingEndpoint();
+    void local;
+  } else {
+    const local = getLocalEmbeddingEndpoint();
+    if (local) return { baseUrl: local.baseUrl, apiKey: local.apiKey, model: local.model };
+  }
 
   const apiKey =
     process.env.AGENT_EMBEDDING_API_KEY?.trim() ||
-    process.env.OPENAI_API_KEY?.trim() ||
+    process.env.AGENT_TOOL_SEARCH_EMBEDDING_API_KEY?.trim() ||
     "";
   const model = resolveEmbeddingModel();
 
@@ -182,7 +190,7 @@ export async function fetchOpenAiCompatibleEmbedding(opts: {
   const ep = resolveEmbeddingEndpoint();
 
   // 未显式传 baseUrl 且没有可用的 Embedding 端点：直接抛错，避免拿聊天 Key 去打
-  // api.openai.com 浪费时间（401 / 超时）。
+  // api.openai.com 直连（已于 2026-11-20 删除该兜底）。
   if (!opts.baseUrl && !ep) {
     throw new Error(
       "embeddings: no compatible endpoint; 可配置 AGENT_EMBEDDING_BASE_URL + AGENT_EMBEDDING_API_KEY " +
@@ -193,8 +201,14 @@ export async function fetchOpenAiCompatibleEmbedding(opts: {
   const base =
     opts.baseUrl?.replace(/\/$/, "") ??
     ep?.baseUrl ??
-    process.env.OPENAI_EMBEDDINGS_URL?.replace(/\/$/, "") ??
-    "https://api.openai.com/v1/embeddings";
+    process.env.OPENAI_EMBEDDINGS_URL?.replace(/\/$/, "");
+  if (!base) {
+    throw new Error(
+      "embeddings: 未配置远端端点（OpenAI 官方兜底已于 2026-11-20 删除）；" +
+        "请配置 AGENT_EMBEDDING_BASE_URL（如 https://api.siliconflow.cn/v1）+ AGENT_EMBEDDING_API_KEY，" +
+        "或启用本地内置向量引擎",
+    );
+  }
   const apiKey = opts.apiKey ?? ep?.apiKey ?? "";
   if (!apiKey) {
     throw new Error("embeddings: no API key configured");
@@ -235,8 +249,13 @@ export async function fetchOpenAiCompatibleEmbeddings(opts: {
   const base =
     opts.baseUrl?.replace(/\/$/, "") ??
     ep?.baseUrl ??
-    process.env.OPENAI_EMBEDDINGS_URL?.replace(/\/$/, "") ??
-    "https://api.openai.com/v1/embeddings";
+    process.env.OPENAI_EMBEDDINGS_URL?.replace(/\/$/, "");
+  if (!base) {
+    throw new Error(
+      "embeddings: 未配置远端端点（OpenAI 官方兜底已于 2026-11-20 删除）；" +
+        "请配置 AGENT_EMBEDDING_BASE_URL + AGENT_EMBEDDING_API_KEY，或启用本地内置向量引擎",
+    );
+  }
   const apiKey = opts.apiKey ?? ep?.apiKey ?? "";
   if (!apiKey) {
     throw new Error("embeddings: no API key configured");

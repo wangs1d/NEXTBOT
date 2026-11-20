@@ -14,7 +14,7 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
  *   - shared_browser.*：用户眼前的浏览器，适合需要用户登录态或用户在看的操作
  *     （如帮用户在已登录的电商/订票站查订单、填表），页面即时可见可接管
  *
- * 走 deferred（BM25 索引），不进 CORE_TOOL_LIBRARY。
+ * 走 deferred（延迟目录）：。
  */
 export const SHARED_BROWSER_CHAT_TOOLS: ChatCompletionTool[] = [
   {

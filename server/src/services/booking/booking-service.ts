@@ -46,7 +46,7 @@ import type { ScheduleBookingBridge } from "../schedule-booking-bridge.js";
 
 export type BookingServiceResult =
   | { ok: true; summary: string } & Record<string, unknown>
-  | { ok: false; error: string; retryable?: boolean };
+  | { ok: false; error: string; retryable?: boolean; code?: string };
 
 const DOMAIN_LABELS: Record<BookingDomain, string> = {
   ride: "网约车",
@@ -203,6 +203,7 @@ export class BookingService {
       .filter((p) => p.key !== provider.key && !p.availability().ok)
       .map((p) => `${p.label} 不可用：${p.availability().reason ?? "未知"}`);
 
+    const valueExtras = result as { route?: unknown; rideAppLink?: string };
     return {
       ok: true,
       summary: `「${DOMAIN_LABELS[domain]}」${provider.label} 返回 ${result.options.length} 个选项`,
@@ -210,6 +211,9 @@ export class BookingService {
       providerLabel: provider.label,
       options: result.options,
       note: result.note,
+      // 加值信息透传（2026-11-20）：滴滴报价的驾车路线 + App 深链 → ride_quote 卡
+      ...(valueExtras.route ? { route: valueExtras.route } : {}),
+      ...(valueExtras.rideAppLink ? { rideAppLink: valueExtras.rideAppLink } : {}),
       otherProviderNotes: availabilityNotes.length > 0 ? availabilityNotes : undefined,
     };
   }

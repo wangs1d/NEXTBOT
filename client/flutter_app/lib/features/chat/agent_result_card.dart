@@ -25,6 +25,7 @@ import "media_gallery.dart";
 import "morning_briefing_card.dart";
 import "reminder_confirm_card.dart";
 import "ride_quote_card.dart";
+import "ride_pickup_card.dart";
 import "travel_guide_select_card.dart";
 import "media_thumbnail.dart";
 
@@ -165,6 +166,22 @@ class AgentResultCard extends StatelessWidget {
             payload: rawRide is Map
                 ? <String, dynamic>{
                     for (final MapEntry<Object?, Object?> e in rawRide.entries)
+                      e.key.toString(): e.value,
+                  }
+                : const <String, dynamic>{},
+            onUserAction: onUserAction,
+            cardData: data,
+          );
+        }
+        case "ride_pickup": {
+          // 上车点选择卡（2026-11-19）：起点没着落时服务端推卡，用户点候选
+          // 或拖地图选点后经 ride.pickup.select 直接续报价，零文字追问。
+          final Object? rawPickup = data.extra?["ridePickup"];
+          return RidePickupCard(
+            cs: cs,
+            payload: rawPickup is Map
+                ? <String, dynamic>{
+                    for (final MapEntry<Object?, Object?> e in rawPickup.entries)
                       e.key.toString(): e.value,
                   }
                 : const <String, dynamic>{},

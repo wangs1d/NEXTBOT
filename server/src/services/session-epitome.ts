@@ -19,6 +19,7 @@
 
 import type { MemoryItem } from "../brain/types.js";
 import { AGENT_COMMITMENT_RE, MEMORY_EXPLICIT_RE } from "../agent/memory-signal.js";
+import { isPollutedMemoryLine } from "../agent/memory-line-hygiene.js";
 import { contentTokenSet, normalizeMemoryLine, tokenOverlapRatio } from "./memory-record-utils.js";
 
 export type EpitomeEntryKind = "open_loop" | "commitment" | "preference";
@@ -103,6 +104,11 @@ export function classifyEpitomeLine(line: string): EpitomeEntryKind | null {
     if (t.startsWith("[用户要求记住]")) return "preference";
     return "preference";
   }
+  // 写入侧行体检（2026-11-20 根修）：协议残留 / 逐字对话行不进 epitome。
+  // 此前只有注入侧（memory-line-hygiene）兜底，「委派子 Agent 处理：」这类
+  // 结构性残留从写入侧漏进长期库，存量脏行由此产生。判定全部是结构性
+  // （协议标记 / 角色前缀），不做语言层猜测。
+  if (isPollutedMemoryLine(t)) return null;
   // Agent 承诺优先于请求：承诺行常含"提醒/安排/设置"等与请求重合的词
   // （如"已为你设置提醒"），必须先判承诺，否则会被请求规则截胡。
   if (AGENT_COMMITMENT_RE.test(t)) return "commitment";
@@ -206,6 +212,40 @@ function parseStored(value: unknown): StoredEpitomeSnapshot | null {
 }
 
 /**
+ * 存量清洗（2026-11-20 根修）：KV 里的历史脏行（写入侧洞补上之前入库的）
+ * 读取时剔除并回写。与 memory-line-hygiene 同哲学：判据全部结构性
+ * （协议残留 / 角色前缀行），不做语言层猜测，无命中时字节恒定。
+ */
+function sanitizeStoredSnapshot(stored: StoredEpitomeSnapshot): StoredEpitomeSnapshot {
+  const baseKeep = (e: EpitomeEntry): boolean => {
+    const t = typeof e?.text === "string" ? e.text.trim() : "";
+    if (!t) return false;
+    // 结构化前缀行（含 [Agent 承诺/结论] commitment）是合法形态，豁免污染判定
+    if (/^\[(?:用户要求记住|用户偏好|用户事实|Agent 承诺\/结论|关键钉)\]/.test(t)) return true;
+    if (isPollutedMemoryLine(t)) return false;
+    return true;
+  };
+  const filterList = (
+    list: EpitomeEntry[],
+    keep: (e: EpitomeEntry) => boolean,
+  ): EpitomeEntry[] | null => {
+    const out = list.filter(keep);
+    return out.length === list.length ? null : out;
+  };
+  const openLoops = filterList(stored.openLoops, baseKeep);
+  const commitments = filterList(stored.commitments, baseKeep);
+  const preferences = filterList(stored.preferences, baseKeep);
+  if (openLoops === null && commitments === null && preferences === null) return stored;
+  return {
+    openLoops: openLoops ?? stored.openLoops,
+    commitments: commitments ?? stored.commitments,
+    preferences: preferences ?? stored.preferences,
+    updatedAt: stored.updatedAt,
+    revision: stored.revision,
+  };
+}
+
+/**
  * 跨会话开放环路存储：进程内 per-actor 缓存 + KV 懒加载持久化。
  * 纯逻辑可单测；KvLike 可注入 mock。
  *
@@ -239,8 +279,11 @@ export class SessionEpitomeStore {
         /* KV 读取失败使用空快照 */
       }
     }
-    this.cache.set(actorId, snapshot);
-    return snapshot;
+    // 存量清洗：剔除写入侧洞产生的历史脏行；有剔除即回写 KV（revision 由 persist 自增）
+    const cleaned = sanitizeStoredSnapshot(snapshot);
+    this.cache.set(actorId, cleaned);
+    if (cleaned !== snapshot) this.persist(actorId);
+    return cleaned;
   }
 
   private persist(actorId: string): void {

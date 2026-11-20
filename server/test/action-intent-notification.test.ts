@@ -223,7 +223,7 @@ test("ask_first 提案给的是批准/拒绝（真的拍板），不是告知类
   assert.equal(actions[1].actionId, NOTIFY_ACTION.decline);
 });
 
-test("通知栏按钮不超过 3 个（Android 折叠区现实）", () => {
+test("并排按钮最多 2 个（2026-11-19 用户拍板，原为 3）", () => {
   const proposal: ProactiveProposal = {
     proposalId: "p3",
     actorId: "user-a",
@@ -237,7 +237,36 @@ test("通知栏按钮不超过 3 个（Android 折叠区现实）", () => {
     createdAt: 0,
     source: "test",
   };
-  assert.ok(buildNotifyActions(proposal).length <= 3);
+  assert.ok(buildNotifyActions(proposal).length <= 2);
+  assert.equal(buildNotifyActions(proposal).length, 2, "默认告知类也只给收下/稍后两项");
+});
+
+test("提案自带选项优先：文案随内容生成，且仍受两项上限 + 真执行器映射", () => {
+  const proposal: ProactiveProposal = {
+    proposalId: "p4",
+    actorId: "user-a",
+    kind: "morning_brief",
+    tier: "social",
+    importance: "low",
+    dedupKey: "k4",
+    title: "晨间简报",
+    summary: "摘要",
+    evidence: [],
+    createdAt: 0,
+    source: "test",
+    notifyOptions: [
+      { action: "acknowledge", label: "去看看消息" },
+      { action: "snooze", label: "稍后再说" },
+      { action: "dismiss", label: "不用了" }, // 第三项应被上限砍掉
+      { action: "acknowledge", label: "  " }, // 空文案应被丢弃
+    ],
+  };
+  const actions = buildNotifyActions(proposal);
+  assert.equal(actions.length, 2, "最多两项");
+  assert.equal(actions[0].actionId, NOTIFY_ACTION.acknowledge);
+  assert.equal(actions[0].label, "去看看消息", "文案来自提案内容，不是硬编码");
+  assert.equal(actions[1].actionId, NOTIFY_ACTION.snooze);
+  assert.equal(actions[1].label, "稍后再说");
 });
 
 test("HTTP 端点：execute 走完验签→执行→幂等，且篡改 token 被拒", async () => {

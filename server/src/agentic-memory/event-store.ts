@@ -188,6 +188,47 @@ export class EventMemoryStore {
     write(record);
   }
 
+  /** 当天已落事件数（硬上限 20 的计数口径，按 actor + event_time 自然日）。 */
+  countEventsOnDay(actorId: string, dayPrefix: string): number {
+    const variants = actorIdVariants(actorId);
+    if (variants.length === 0) return 0;
+    const row = this.db
+      .prepare(
+        `SELECT count(*) AS n FROM memory_events
+         WHERE actor_id IN (${variants.map(() => "?").join(",")}) AND event_time >= ? AND event_time < ?`,
+      )
+      .get(...variants, `${dayPrefix}T00:00:00`, `${dayPrefix}T99`) as { n: number } | undefined;
+    return Number(row?.n ?? 0);
+  }
+
+  /** 同一天、同类型、同首要实体的事件已存在 → 合并（不重复落行）。 */
+  hasSameDayEvent(actorId: string, kind: string, entity: string, dayPrefix: string): boolean {
+    const variants = actorIdVariants(actorId);
+    if (variants.length === 0) return false;
+    const row = this.db
+      .prepare(
+        `SELECT 1 AS hit FROM memory_events
+         WHERE actor_id IN (${variants.map(() => "?").join(",")})
+           AND kind = ? AND event_time >= ? AND event_time < ?
+           AND EXISTS (SELECT 1 FROM json_each(memory_events.entities_json) WHERE value LIKE ?)
+         LIMIT 1`,
+      )
+      .get(...variants, kind, `${dayPrefix}T00:00:00`, `${dayPrefix}T99`, `%${entity}%`) as
+      | { hit: number }
+      | undefined;
+    return Boolean(row);
+  }
+
+  /** 清理过期 ephemeral 事件（索引与事件行同删；原文仍由 WAL 保留）。 */
+  pruneEphemeral(beforeIso: string): number {
+    return this.db
+      .prepare(
+        `DELETE FROM memory_events
+         WHERE event_time < ? AND json_extract(payload_json, '$.tier') = 'ephemeral'`,
+      )
+      .run(beforeIso).changes;
+  }
+
   /** 轮结束写事件：构造 + 幂等落库，返回落库记录。 */
   recordTurn(input: TurnEventInput): MemoryEventRecord {
     const record = buildTurnEvent(input);
@@ -409,13 +450,30 @@ export function resetEventMemoryStoreForTest(): void {
 }
 
 /**
- * 轮结束写事件（唯一入口）：开关关闭时不写；任何异常只记日志，
- * 绝不影响回复与 WAL。返回落库事件（供 LTM 派生条目记录来源）。
+ * 轮结束写事件（生产唯一入口）：只落「真事」，纯闲聊轮（kind=chat_turn，
+ * 无工具/无实体/无动作）不写——此前 97% 的事件行是聊天记录，把事件层
+ * 稀释成第二份 WAL，还让衰减/召回口径互相打架。闲聊原文由 WAL/journal/STM
+ * 承载，事件层只回答「我做过什么」。
+ * 开关关闭时不写；任何异常只记日志，绝不影响回复与 WAL。
+ * 返回落库事件（供 LTM 派生条目记录来源）。
  */
 export function recordTurnEventSafely(input: TurnEventInput): MemoryEventRecord | null {
   if (!isEventMemoryEnabled()) return null;
   try {
-    return getEventMemoryStore()?.recordTurn(input) ?? null;
+    const record = buildTurnEvent(input);
+    if (record.kind === "chat_turn") return null;
+    const store = getEventMemoryStore();
+    if (!store) return null;
+    // 事件硬约束：每天 ≤20；同类型+同实体同日只留首条（合并）。
+    const day = record.eventTime.slice(0, 10);
+    if (store.countEventsOnDay(record.actorId, day) >= 20) return null;
+    const primaryEntity = record.entities[0];
+    if (primaryEntity && store.hasSameDayEvent(record.actorId, record.kind, primaryEntity, day)) {
+      return null;
+    }
+    store.pruneEphemeral(new Date(Date.now() - 72 * 3_600_000).toISOString());
+    store.upsertEvent(record);
+    return record;
   } catch (err) {
     console.warn(
       "[event-memory] 事件写入失败（忽略）:",

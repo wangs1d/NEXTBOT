@@ -6,7 +6,7 @@
  * （祝福要在当天早上就发出，挪到夜里就晚了），因此两处都要读同一份
  * important_dates KV、走同一套 7 天窗口口径——收敛到本模块，避免两套窗口漂移。
  *
- * 数据来源：care.set_important_date 写入的 KV `important_dates`
+ * 数据来源：KV `important_dates`
  * （记录结构与 care-reminder-tools.ts 的 ImportantDateRecord 对齐）。
  */
 

@@ -646,21 +646,8 @@ export class ShortTermMemoryGatewayService {
     if (recentContext.length && (includeTaskScopedMemory || isTopicFollowUp || focus.preserveRecentContext)) {
       lines.push(`recent-context: ${recentContext.join(" || ")}`);
     }
-    if (memory?.currentMission && includeTaskScopedMemory) {
-      lines.push(`current-mission: ${memory.currentMission}`);
-    }
-    if (memory?.preferences.length) {
-      lines.push(`session-preferences: ${memory.preferences.join(" || ")}`);
-    }
-    if (memory?.facts.length) {
-      lines.push(`session-facts: ${memory.facts.join(" || ")}`);
-    }
-    if (memory?.openLoops.length && includeTaskScopedMemory) {
-      lines.push(`open-loops: ${memory.openLoops.join(" || ")}`);
-    }
-    if (memory?.agentCommitments.length && includeTaskScopedMemory) {
-      lines.push(`agent-commitments: ${memory.agentCommitments.join(" || ")}`);
-    }
+    // 偏好/事实/未闭环/承诺/mission 槽不再注入：当前状态由 ContextCompiler 统一
+    // 从权威库编译，STM 只承担原文窗口、当前任务与未答问句。
 
     // ---- 会话情景记忆注入（去硬截断）----
     // 仅在「延续/指代/回忆/短追问」轮次按需灌回命中的原文（episodic-context）：

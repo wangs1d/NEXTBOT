@@ -428,3 +428,142 @@ test("分泡：表格前的引子独立成泡，表格不被并进散文", async
   const tableBubble = bubbles.find((b) => b.text.includes("|---|"));
   assert.ok(tableBubble, "表格在自己的泡里");
 });
+
+// ---------------------------------------------------------------------------
+// 结构闭合切点（2026-11-20）：切点只落在所有结构都已闭合的位置
+// ---------------------------------------------------------------------------
+
+const SCREENSHOT_TEXT = [
+  "先说结论：**这件事的关键不在价格，而在时间窗口。**",
+  "",
+  "## 🧭 先看事实",
+  "",
+  "1. 价格已经回落。",
+  "2. 时间窗口只剩两周。",
+  "3. 团队还在原地打转。",
+  "",
+  "所以别在价格上纠结。",
+].join("\n");
+
+test("结构闭合：截图回归——加粗不再被句号拦腰切断，不再出现只含 ** 的泡", async () => {
+  const { seg, bubbles, enable } = createBubbleRecorder();
+  enable();
+  // 逐字喂，模拟真实流式
+  for (const ch of SCREENSHOT_TEXT) {
+    seg.feed(ch);
+  }
+  await seg.chain;
+  await seg.flushFinal();
+  const texts = bubbles.map((b) => b.text);
+  assert.ok(!texts.some((t) => t.trim() === "**"), `不应有只含 ** 的泡：${JSON.stringify(texts)}`);
+  const bold = bubbles.find((b) => b.text.includes("这件事的关键不在价格"));
+  assert.ok(bold, "加粗句必须成泡");
+  assert.ok(
+    bold!.text.includes("**这件事的关键不在价格，而在时间窗口。**"),
+    "加粗标记成对留在同一泡（句号在加粗内也不切断）",
+  );
+  for (const t of texts) {
+    const marks = t.split("**").length - 1;
+    assert.equal(marks % 2, 0, `泡内 ** 必须成对：${JSON.stringify(t)}`);
+    assert.ok(!/^#{1,6}\s+\S+$/.test(t.trim()), `标题不能单独成泡：${JSON.stringify(t)}`);
+  }
+  const listBubble = bubbles.find((b) => b.text.includes("价格已经回落"));
+  assert.ok(listBubble, "列表留在标题泡里");
+  assert.ok(listBubble!.text.includes("团队还在原地打转"), "有序列表不因流式分块被切开");
+});
+
+test("结构闭合：逐字喂入且每字等分发（真实流式粒度）结构与节奏不变", async () => {
+  const { seg, bubbles, enable } = createBubbleRecorder();
+  enable();
+  for (const ch of SCREENSHOT_TEXT) {
+    seg.feed(ch);
+    await seg.chain;
+  }
+  await seg.flushFinal();
+  const texts = bubbles.map((b) => b.text);
+  assert.ok(!texts.some((t) => t.trim() === "**"), `不应有纯 ** 泡：${JSON.stringify(texts)}`);
+  assert.ok(
+    !texts.some((t) => /^#{1,6}\s+\S+$/.test(t.trim())),
+    `标题不能单独成泡：${JSON.stringify(texts)}`,
+  );
+  const listBubble = bubbles.find((b) => b.text.includes("价格已经回落"));
+  assert.ok(listBubble && listBubble.text.includes("团队还在原地打转"), "列表整块成泡");
+});
+
+test("结构闭合：逐字喂入时表格不被流式分块撕开", async () => {
+  const { seg, bubbles, enable } = createBubbleRecorder();
+  enable();
+  for (const ch of `收盘数据：\n${MARKET_TABLE}\n整体跌得比较重。`) {
+    seg.feed(ch);
+  }
+  await seg.chain;
+  await seg.flushFinal();
+  const tableBubbles = bubbles.filter((b) => b.text.includes("|---|"));
+  assert.equal(tableBubbles.length, 1, `表格只出现在一个泡：${JSON.stringify(bubbles.map((b) => b.text))}`);
+  assert.ok(tableBubbles[0].text.includes("标普500"), "逐字喂入时表格末行仍在同泡");
+});
+
+test("结构闭合：标题与正文段同泡，换行不把标题单独切出去", async () => {
+  const { seg, bubbles, enable } = createBubbleRecorder();
+  enable();
+  seg.feed("## 结论\n先给结论：整体还行，但有两个点要留意。");
+  await seg.chain;
+  await seg.flushFinal();
+  assert.ok(bubbles.length >= 1);
+  assert.ok(bubbles[0].text.startsWith("## 结论"), "标题留在首泡");
+  assert.ok(bubbles[0].text.includes("有两个点要留意"), "标题与正文同泡");
+});
+
+test("结构闭合：代码块原子——整块成泡，块内空行与句号不切", async () => {
+  const { seg, bubbles, enable } = createBubbleRecorder();
+  enable();
+  const code = [
+    "这里是改法：",
+    "",
+    "```ts",
+    "const a = 1;",
+    "",
+    'console.log("好了。");',
+    "```",
+    "",
+    "照这个改就行。",
+  ].join("\n");
+  for (const ch of code) seg.feed(ch);
+  await seg.chain;
+  await seg.flushFinal();
+  const codeBubble = bubbles.find((b) => b.text.includes("```ts"));
+  assert.ok(codeBubble, "代码块成泡");
+  assert.ok(codeBubble!.text.includes('console.log("好了。");'), "块内句号不切");
+  assert.ok(codeBubble!.text.includes("const a = 1;") && codeBubble!.text.includes("\n\n"), "块内空行保留");
+  const fenceMarks = codeBubble!.text.split("```").length - 1;
+  assert.equal(fenceMarks, 2, "围栏成对留在同一泡");
+  for (const b of bubbles) {
+    assert.notEqual(b.text.trim(), "```ts", "围栏行不单独成泡");
+  }
+});
+
+test("结构闭合：列表块原子——连续列表项不逐行成泡", async () => {
+  const { seg, bubbles, enable } = createBubbleRecorder();
+  enable();
+  seg.feed("- 价格已经回落。\n- 时间窗口只剩两周。\n- 团队还在原地打转。\n\n结论如上。");
+  await seg.chain;
+  await seg.flushFinal();
+  const listBubble = bubbles.find((b) => b.text.includes("价格已经回落"));
+  assert.ok(listBubble, "列表成泡");
+  assert.ok(listBubble!.text.includes("团队还在原地打转"), "三个列表项在同一泡");
+  for (const b of bubbles) {
+    const items = b.text.split("\n").filter((l) => /^- /.test(l.trim()));
+    assert.ok(items.length === 0 || items.length >= 3, `列表不残缺：${JSON.stringify(b.text)}`);
+  }
+});
+
+test("结构闭合：未闭合的 ** 在 EOF 前不切，整段兜底成一个完整泡", async () => {
+  const { seg, bubbles, enable } = createBubbleRecorder();
+  enable();
+  seg.feed("这句**没有收尾。还有下文。");
+  await seg.chain;
+  await seg.flushFinal();
+  assert.equal(bubbles.length, 1, "未闭合跨度内没有合法切点");
+  assert.ok(bubbles[0].text.includes("没有收尾") && bubbles[0].text.includes("还有下文"));
+});
+

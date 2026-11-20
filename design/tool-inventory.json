@@ -1,0 +1,258 @@
+{
+ "generatedAt": "2026-11-20T08:11:10.331Z",
+ "resident": {
+  "chat": [
+   "clock.get_user_location",
+   "web_search",
+   "web_fetch",
+   "agent",
+   "brain.recall",
+   "obs_recall",
+   "calendar",
+   "phone",
+   "world.link",
+   "profile.update",
+   "ride_hailing.quote",
+   "ride_hailing.book",
+   "task.dispatch",
+   "task.status",
+   "task.cancel"
+  ],
+  "task": [
+   "clock.get_user_location",
+   "web_search",
+   "web_fetch",
+   "agent",
+   "brain.recall",
+   "obs_recall",
+   "calendar",
+   "world.link",
+   "task.dispatch",
+   "task.status",
+   "task.cancel",
+   "perception.overview",
+   "browser.session.list",
+   "desktop.visual.screenshot",
+   "code.run",
+   "code.write_file",
+   "code.read_file",
+   "tool_discover"
+  ]
+ },
+ "domains": [
+  {
+   "domain": "agent_browser",
+   "label": "Agent 虚拟浏览器（通用网页多步操作）",
+   "tools": [
+    "agent_browser"
+   ]
+  },
+  {
+   "domain": "code_sandbox",
+   "label": "代码执行沙盒（python / node）",
+   "tools": [
+    "code.run",
+    "code.shell",
+    "code.list_files",
+    "code.read_file",
+    "code.workspace_map",
+    "code.write_file"
+   ]
+  },
+  {
+   "domain": "email_sms",
+   "label": "邮件/短信主动发送",
+   "tools": [
+    "email.send",
+    "sms.send"
+   ]
+  },
+  {
+   "domain": "file_doc",
+   "label": "文件/文档处理（read/write/parse/export）",
+   "tools": [
+    "file.read_text",
+    "file.write_text",
+    "file.parse_pdf",
+    "file.parse_office",
+    "file.export_format"
+   ]
+  },
+  {
+   "domain": "finance_deep",
+   "label": "财务深度能力",
+   "tools": [
+    "finance.import_transactions",
+    "finance.analyze_spending",
+    "finance.set_budget",
+    "finance.get_budget_status",
+    "finance.reconcile",
+    "finance.categorize",
+    "finance.export_report",
+    "finance.list_subscriptions",
+    "finance.confirm_subscription",
+    "finance.update_subscription",
+    "finance.cancel_subscription",
+    "finance.savings_summary",
+    "finance.add_bill",
+    "finance.list_bills",
+    "finance.update_bill",
+    "finance.pay_bill",
+    "finance.bills.sync_now",
+    "finance.bills.auto_fetch"
+   ]
+  },
+  {
+   "domain": "goal_planning",
+   "label": "计划推进（长期目标拆步+自主推进+动态重排）",
+   "tools": [
+    "goal.plan.create",
+    "goal.plan.list",
+    "goal.plan.advance",
+    "goal.plan.step",
+    "goal.plan.replan",
+    "goal.plan.abandon"
+   ]
+  },
+  {
+   "domain": "home_services",
+   "label": "家政/本地生活预订（统一预订抽象层）",
+   "tools": [
+    "home_service.search",
+    "home_service.book",
+    "home_service.status",
+    "home_service.reschedule",
+    "home_service.cancel"
+   ]
+  },
+  {
+   "domain": "image_gen",
+   "label": "图像生成（text-to-image）",
+   "tools": [
+    "image.generate"
+   ]
+  },
+  {
+   "domain": "media_music",
+   "label": "媒体音乐播放控制",
+   "tools": [
+    "media.search",
+    "media.play",
+    "media.pause",
+    "media.resume",
+    "media.stop",
+    "media.now_playing",
+    "media.login_status"
+   ]
+  },
+  {
+   "domain": "memory_governance",
+   "label": "记忆治理（定向遗忘 + 行为审计 + 事件回忆）",
+   "tools": [
+    "memory.forget",
+    "activity.timeline",
+    "memory.recall",
+    "profile.update"
+   ]
+  },
+  {
+   "domain": "phone_call",
+   "label": "电话代办（代拨真实电话：预约/确认/回电）",
+   "tools": [
+    "phone_call.prepare",
+    "phone_call.start",
+    "phone_call.status",
+    "phone_call.finish",
+    "phone_call.list",
+    "phone_call.cancel"
+   ]
+  },
+  {
+   "domain": "restaurant_booking",
+   "label": "餐厅预订（统一预订抽象层）",
+   "tools": [
+    "restaurant.search",
+    "restaurant.book",
+    "restaurant.status",
+    "restaurant.cancel"
+   ]
+  },
+  {
+   "domain": "ride_hailing",
+   "label": "打车/网约车（统一预订抽象层）",
+   "tools": [
+    "ride_hailing.quote",
+    "ride_hailing.book",
+    "ride_hailing.status",
+    "ride_hailing.cancel"
+   ]
+  },
+  {
+   "domain": "shared_browser",
+   "label": "共用浏览器（用户与 Agent 共用客户端浏览器）",
+   "tools": [
+    "shared_browser.navigate",
+    "shared_browser.control",
+    "shared_browser.click",
+    "shared_browser.type",
+    "shared_browser.scroll",
+    "shared_browser.read_page",
+    "shared_browser.export_state",
+    "shared_browser.trusted"
+   ]
+  },
+  {
+   "domain": "shopping_compare",
+   "label": "购物比价（跨平台同款比价 + 降价监控 + 保险/服务调研对比）",
+   "tools": [
+    "shopping.compare"
+   ]
+  },
+  {
+   "domain": "shopping_order",
+   "label": "购物/下单（后台无头浏览器代用户下单）",
+   "tools": [
+    "shopping.order.search",
+    "shopping.order.place",
+    "shopping.order.track",
+    "shopping.order.cancel",
+    "shopping.order.list",
+    "shopping.pay.submit",
+    "shopping.pay.check"
+   ]
+  },
+  {
+   "domain": "social_outreach",
+   "label": "社交主动出击（外部平台）",
+   "tools": [
+    "social.post",
+    "social.comment",
+    "social.repost",
+    "social.like",
+    "social.get_feed",
+    "social.search_posts"
+   ]
+  },
+  {
+   "domain": "task_plan",
+   "label": "任务计划（会话内多步 + 长期目标统一入口）",
+   "tools": [
+    "plan.write",
+    "plan.set_status",
+    "plan.replan",
+    "plan.read"
+   ]
+  },
+  {
+   "domain": "travel_booking",
+   "label": "机票/火车票/酒店预订（统一预订抽象层 + 多源报价比价）",
+   "tools": [
+    "travel_booking.search",
+    "travel_booking.book",
+    "travel_booking.status",
+    "travel_booking.cancel",
+    "travel_booking.refund"
+   ]
+  }
+ ]
+}

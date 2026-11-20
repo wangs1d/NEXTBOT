@@ -248,21 +248,6 @@ export function registerWebTools(
     };
   });
 
-  // Backward compatibility: keep historical aliases on built-in path.
-  toolRegistry.register("info.search", async (input) => {
-    const query = String(input.query ?? "").trim();
-    const limit = toBoundedLimit(input.limit, 12);
-    if (!query) return { items: [] };
-    const items = await infoHubService.search(query, limit);
-    return { items };
-  });
-
-  toolRegistry.register("info.read_webpage", async (input) => {
-    const url = String(input.url ?? "").trim();
-    if (!url) return { title: "", content: "", summary: "url 不能为空" };
-    return infoHubService.readWebpage(url);
-  });
-
   toolRegistry.register("info.inspect_webpage", async (input) => {
     const url = String(input.url ?? "").trim();
     if (!url) return { title: "", summary: "url 不能为空", contentPreview: "", links: [], sameHostLinks: [] };

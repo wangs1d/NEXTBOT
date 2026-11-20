@@ -27,10 +27,8 @@ test("分类器：新功能四条线落对生活域与风险", () => {
   // 既有工具抽查
   assert.equal(classifyFeatureByName("alipay.submit-payment").risk, "spend");
   assert.equal(classifyFeatureByName("sms.send").risk, "outbound");
-  assert.equal(classifyFeatureByName("wallet.transfer").risk, "spend");
   assert.equal(classifyFeatureByName("clock.get_current_time").domain, "system");
   assert.equal(classifyFeatureByName("calendar.create_task").domain, "work");
-  assert.equal(classifyFeatureByName("meituan.create_order").domain, "dining");
   // 只读工具必须压过家族前缀的 spend/outbound（2026-09-28 根修：高危闸曾误拦），
   // 每个家族补一只代表，防止回退成前缀默认值
   assert.equal(classifyFeatureByName("social.get_feed").risk, "read");

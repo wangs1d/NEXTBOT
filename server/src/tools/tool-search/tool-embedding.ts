@@ -65,7 +65,6 @@ function getCachePath(): string {
 function getApiKey(): string | null {
   return (
     process.env.AGENT_TOOL_SEARCH_EMBEDDING_API_KEY?.trim() ||
-    process.env.OPENAI_API_KEY?.trim() ||
     process.env.AGENT_EMBEDDING_API_KEY?.trim() ||
     null
   );
@@ -243,7 +242,7 @@ export async function ensureToolEmbeddings(
       }
     }
 
-    // ── provider 2：OpenAI 兼容 API（批量 8 并发）──
+    // ── provider 2：远端 OpenAI 兼容端点（SiliconFlow 等，须显式配 base；api.openai.com 兜底已删除）──
     if (remaining.length > 0 && useOpenai) {
       const apiKey = getApiKey()!;
       const CONCURRENCY = 8;

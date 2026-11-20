@@ -75,7 +75,6 @@ export function registerCapabilityQueryTools(
     }
 
     const accessLine = buildAgentAccessModePromptLine(parseAgentAccessMode(context.agentAccessMode), {
-      desktopBridgeOnline: context.desktopBridgeOnline,
       phoneBridgeOnline: context.phoneBridgeOnline,
     });
     if (accessLine) {

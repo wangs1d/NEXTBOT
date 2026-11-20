@@ -57,9 +57,15 @@ test("注册表：越权写入一律抛错（恒为严格模式，无灰度开�
     /越权写入/,
   );
   assert.doesNotThrow(() => assertMemoryWriter("memory_summary", "AgentMemorySyncService"));
-  // 登记过的生产者放行
-  assert.doesNotThrow(() => assertMemoryWriter("memory_summary", "MemoryManagerService"));
-  assert.doesNotThrow(() => assertMemoryWriter("memory_summary", "TurnLifecycle"));
+  // 摘要槽已退役：旧整理器/热路径不再是合法生产者
+  assert.throws(
+    () => assertMemoryWriter("memory_summary", "MemoryManagerService"),
+    /越权写入/,
+  );
+  assert.throws(
+    () => assertMemoryWriter("memory_summary", "TurnLifecycle"),
+    /越权写入/,
+  );
   // 档案字段槽位：登记的写者放行，未登记的拦下
   assert.doesNotThrow(() => assertMemoryWriter("structured_facts", "UnifiedExtractionHook"));
   assert.throws(
@@ -68,7 +74,7 @@ test("注册表：越权写入一律抛错（恒为严格模式，无灰度开�
   );
 });
 
-test("写入：任务型句子只进 memory_summary，不进偏好/事实/未闭环槽", async () => {
+test("写入：摘要槽已下线，任务型句子不再落 KV", async () => {
   const svc = new AgentMemorySyncService(tempFile("sync.json"));
   svc.appendMemorySummaryLine(ACTOR, "用户在为小米 18 Pro 比价，纠结性价比，后续还要再看看", "phone");
   svc.appendMemorySummaryLine(ACTOR, "别再提小米 18 Pro 比价的事了", "phone");
@@ -81,27 +87,15 @@ test("写入：任务型句子只进 memory_summary，不进偏好/事实/未闭
     "memory_commitments",
     "memory_open_loops",
   ]);
-  const summary = String(snap.entries.memory_summary ?? "");
-  assert.match(summary, /小米 18 Pro 比价/);
-  for (const key of ["memory_preferences", "memory_facts", "memory_commitments", "memory_open_loops"]) {
-    assert.equal(snap.entries[key], undefined, `${key} 不应再被写入（应只有权威源持有）`);
+  for (const key of [
+    "memory_summary",
+    "memory_preferences",
+    "memory_facts",
+    "memory_commitments",
+    "memory_open_loops",
+  ]) {
+    assert.equal(snap.entries[key], undefined, `${key} 不应再被写入（权威源另持）`);
   }
-});
-
-test("并发：追加与整串重写不丢行", async () => {
-  const svc = new AgentMemorySyncService(tempFile("sync.json"));
-  svc.appendMemorySummaryLine(ACTOR, "用户称呼是王哥", "profile");
-
-  // 模拟整理器在追加进行中的整串重写
-  const replace = svc.replaceSummaryLines(ACTOR, (cur) => ({ summary: cur.summary, forgotten: cur.forgotten }));
-  svc.appendMemorySummaryLine(ACTOR, "用户在兴义", "profile");
-  svc.appendMemorySummaryLine(ACTOR, "用户在做独立开发", "profile");
-  await Promise.all([replace, svc.flush()]);
-
-  const summary = String(svc.getSnapshot(ACTOR, ["memory_summary"]).entries.memory_summary ?? "");
-  assert.match(summary, /王哥/);
-  assert.match(summary, /兴义/);
-  assert.match(summary, /独立开发/);
 });
 
 test("画像：只投影到 USER_PROFILE.md，不再写 KV user_profile 副本", async () => {
@@ -158,7 +152,7 @@ test("注入：prompt 不再从 KV user_profile 拉取画像", () => {
   assert.equal(ctx.userProfile, undefined, "画像应由 USER_PROFILE.md 投影，不得走 KV 副本");
 });
 
-test("注入：memory_summary 仍是长期记忆的读取来源", () => {
+test("注入：memory_summary 不再进入 prompt 上下文", () => {
   const ctx = sliceMemoryEntriesToPromptContext(
     {
       memory_summary:
@@ -166,7 +160,7 @@ test("注入：memory_summary 仍是长期记忆的读取来源", () => {
     },
     "小米那个怎么样了",
   );
-  assert.match(ctx.memorySummary ?? "", /小米 18 Pro/);
+  assert.equal(ctx.memorySummary, undefined);
 });
 
 test("待办块：逾期优先、带截止日、最多 3 条", async () => {

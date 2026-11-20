@@ -127,7 +127,7 @@ export type EveningDigestDeps = {
    */
   ddlRadar?: DdlRadarLike | null;
   /**
-   * 重要日子存储（2026-11-04 迁入）：读 care.set_important_date 写入的
+   * 重要日子存储：读 important_dates KV 中的
    * important_dates KV。未注入 = 不做该块。
    */
   importantDaysStore?: ImportantDaysStoreLike;

@@ -180,7 +180,7 @@
       sub.textContent = '请从充值页重新发起支付。';
       return;
     }
-    fetch('/api/recharge/orders/' + encodeURIComponent(outTradeNo), { credentials: 'same-origin' })
+    fetch('/api/recharge/payments/' + encodeURIComponent(outTradeNo), { credentials: 'same-origin' })
       .then(function (res) {
         return res.json().catch(function () { return {}; }).then(function (data) {
           return { status: res.status, data: data };

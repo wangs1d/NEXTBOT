@@ -17,9 +17,10 @@ enum _AuthMode {
 
 /// 手机端登录页：黑白极简落地页 + 弹出小卡片完成邮箱验证。
 ///
-/// 视觉（方案 C2 设计稿）：纯黑背景、顶部双层白色光晕、左上角 NEXTBOT
-/// 品牌位（下缀白色呼吸短线）、中段大字「欢迎回来 / 登录以继续」、
-/// 白色胶囊主按钮沉底；整页无彩色元素（错误提示除外）。
+/// 视觉（方案 C2 设计稿）：近黑背景（#161616，与系统启动画面/NormalTheme
+/// 同色——纯黑 #000000 会在首帧产生一次灰→黑硬切闪跳，2026-11-19 对齐）、
+/// 顶部双层白色光晕、左上角 NEXTBOT 品牌位（下缀白色呼吸短线）、中段大字
+/// 「欢迎回来 / 登录以继续」、白色胶囊主按钮沉底；整页无彩色元素（错误提示除外）。
 ///
 /// 交互（2026-11 拆分登录/注册）：落地页主按钮进**登录**，「没有账号？注册」
 /// 进**注册**。同一个卡片按模式渲染不同字段：
@@ -86,7 +87,8 @@ class _MobileLoginPageState extends State<MobileLoginPage>
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.black,
+      // 与启动画面/NormalTheme 同色（#161616）：首帧不再有灰→黑硬切闪跳
+      backgroundColor: const Color(0xFF161616),
       body: Stack(
         children: <Widget>[
           // 双层白色光晕：顶部主光 + 右上补光（黑底上清晰可感）

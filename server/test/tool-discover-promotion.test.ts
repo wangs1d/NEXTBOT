@@ -354,33 +354,4 @@ describe("延迟目录 discover 转正（假 client 端到端）", () => {
     assert.equal(executed[0]?.name, "agent_browser");
   });
 
-  test("tool_search 只回名字、未下发 schema 时不转正", async () => {
-    const { client, requests } = makeFakeClient([
-      [
-        toolCallChunk(0, "call_s", "tool_search", JSON.stringify({ query: "跨平台比价" })),
-        chunkFinishToolCalls(),
-      ],
-      [contentChunk("先不下单，需要你确认。", "stop")],
-    ]);
-
-    await streamCompletionWithTools(
-      client as never,
-      "test-model",
-      [...baseMessages()],
-      () => {},
-      makeCtx([]),
-      {
-        maxRounds: 2,
-        tools: [CORE_TOOL],
-        toolSearchSourceTools: SOURCE_TOOLS,
-        audit: { stage: "main_chat_tools", sessionId: "test-search-no-schema" },
-      },
-    );
-
-    const wave2 = toolNamesOf(requests[1]);
-    assert.ok(
-      !wave2.includes("shopping_compare"),
-      `未下发 schema 的 search 不应转正（实际 ${JSON.stringify(wave2)}）`,
-    );
-  });
 });

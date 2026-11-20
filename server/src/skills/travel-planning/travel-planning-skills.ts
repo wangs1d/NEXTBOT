@@ -792,7 +792,7 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
         "算两点之间的交通方式、耗时与距离（高德驾车含实时路况、短距自动按步行；起点可省略=按用户实时定位，用户没说从哪出发时别反问，直接调用）。" +
         "交通方式可显式指定（mode=walking/driving），不指定按距离自动选，不足 1.5 公里走步行。" +
         "适用表达：「从A到B多远/多久」「我这到XX多远」「走过去还是打车」「现在出发几点到」「两个景点之间怎么走」。" +
-        "边界：要「几点出门」（结合天气与到达时间倒推）用 travel.departure-advice；叫车报价用 ride_hailing.quote；" +
+        "边界：要「几点出门」（结合天气与到达时间倒推）用 travel.departure-advice；叫车报价用 ride_hailing（action=quote）；" +
         "行程内逐段交通由 travel.plan-itinerary 自动排。" +
         "坐标串用「经度,纬度」，写成「纬度,经度」会自动纠正。",
       kind: "builtin",
@@ -1003,7 +1003,7 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
       description:
         "用户对接驳提醒（高铁/航班到站前询问是否预约滴滴）作出答复后，把答复落盘。" +
         "用户明确说需要接驳/要叫车 → accepted=true；明确拒绝/自己安排 → accepted=false。" +
-        "落盘后若 accepted=true，继续调用 ride_hailing.quote → ride_hailing.book 真实下单" +
+        "落盘后若 accepted=true，继续调用 ride_hailing（action=quote）→ ride_hailing（action=book）真实下单" +
         "（scheduleAt 用票面到达时刻；起点=到达车站/机场，终点=行程酒店）。",
       kind: "builtin",
       tags: ["travel", "接驳", "滴滴", "pickup", "transfer"],
@@ -1032,7 +1032,7 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
       return {
         ok: true,
         hint: accepted
-          ? "已记录需要接驳。现在继续 ride_hailing.quote（起点=到达车站/机场，终点=行程酒店，scheduleAt=票面到达时刻），用户确认选项后 ride_hailing.book 下单"
+          ? "已记录需要接驳。现在继续 ride_hailing（action=quote，起点=到达车站/机场，终点=行程酒店，scheduleAt=票面到达时刻），用户确认选项后 ride_hailing（action=book）下单"
           : "已记录不需要接驳，后续该段行程不再提醒",
       };
     },

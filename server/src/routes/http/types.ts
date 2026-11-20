@@ -35,7 +35,6 @@ import type { ImageGenerationService } from "../../services/image-generation-ser
 import type { PictureKitRegistry } from "../../services/picture-kit-registry.js";
 import type { FileProcessingService } from "../../services/file-processing-service.js";
 import type { VirtualPhoneService } from "../../services/virtual-phone-service.js";
-import type { DesktopBridgeCoordinator } from "../../services/desktop-bridge-coordinator.js";
 import type { PhoneBridgeCoordinator } from "../../services/phone-bridge-coordinator.js";
 import type { WechatClawBindingService } from "../../services/wechat-claw-binding-service.js";
 import type { WechatClawBridgeService } from "../../services/wechat-claw-bridge-service.js";
@@ -120,7 +119,6 @@ export type HttpRouteDeps = {
   pictureKits: PictureKitRegistry;
   /** 文件/文档处理服务（file.read_text 等工具 + 静态拉流共用） */
   fileProcessingService: FileProcessingService;
-  desktopBridgeCoordinator: DesktopBridgeCoordinator;
   phoneBridgeCoordinator: PhoneBridgeCoordinator;
   wechatClawBindingService: WechatClawBindingService;
   wechatClawBridgeService: WechatClawBridgeService;
@@ -216,6 +214,8 @@ export type HttpRouteDeps = {
   attentionStore?: import("../../proactivity/attention-store.js").AttentionStore;
   /** 分级触达路由（矩阵路由 + 升级计时；未注入时 /api/attention 不挂载） */
   reachRouter?: import("../../proactivity/reach-router.js").ReachRouter;
+  /** 期望效用触达决策层（未注入时 /api/reach/* 诊断端点不挂载） */
+  reachDecisionService?: import("../../proactivity/reach-decision-service.js").ReachDecisionService;
   /** Agent Brain Center —— 大脑中心外观（BRAIN_CENTER_ENABLED=0 时为 null） */
   brainCenter?: BrainCenter | null;
   /** Agent Body Center —— 身体中心外观（未启用时为 null） */

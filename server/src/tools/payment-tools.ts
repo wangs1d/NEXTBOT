@@ -208,24 +208,4 @@ export function registerPaymentTools(
       actorId,
     };
   });
-
-  registry.register("payment.mock_complete", async (input, context) => {
-    const actorId = resolveActorId({ userId: context.userId, sessionId: context.sessionId });
-
-    const outTradeNo = String(input.outTradeNo ?? "").trim();
-    if (!outTradeNo) {
-      throw new Error("缺少订单号 (outTradeNo)");
-    }
-
-    const success = paymentService.mockCompletePayment(outTradeNo);
-    if (!success) {
-      throw new Error(`未找到模拟订单：${outTradeNo}`);
-    }
-
-    return {
-      summary: "模拟支付成功",
-      outTradeNo,
-      actorId,
-    };
-  });
 }

@@ -1,40 +1,8 @@
-import { getDataDir } from "../config/data-dir.js";
 import type { NarrativeMemoryPort } from "./narrative-memory-port.js";
 import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
 import { getNightlyMemoryTaskService } from "./nightly-memory-task-service.js";
 import { getDailyJournalService, DailyJournalService } from "./daily-journal-service.js";
-import { join } from "node:path";
 import { RetentionMap, retentionMaxEntries } from "./resource-pool.js";
-import { writeJsonAtomic } from "../storage/atomic-json.js";
-import { dedupeMemoryLines, limitLinesByChars, memoryDecayFactor, semanticFingerprint } from "./memory-record-utils.js";
-import {
-  KV_BUCKET_BY_TIER,
-  TIER_BY_KV_BUCKET,
-  refreshMemoryLineTimestamp,
-  restoreAction,
-  retentionThresholds,
-  tierForScore,
-  type KvRetentionBucket,
-} from "../memory/retention-policy.js";
-import { emotionalSalience, inferEmotionFromText } from "./emotion-memory.js";
-import { getShortTermMemoryGatewayService } from "./short-term-memory-gateway.js";
-import { fetchOpenAiCompatibleEmbedding, resolveEmbeddingModel } from "./openai-embedding-client.js";
-
-/**
- * 真向量 cosine 相似度（替代 human-like-memory 里的假 cosineLikeScore）。
- * 用于 forgotten 行的 embedding 语义匹配。
- */
-function cosineSimilarity(a: number[], b: number[]): number {
-  if (a.length !== b.length || a.length === 0) return 0;
-  let dot = 0, normA = 0, normB = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
-  }
-  const denom = Math.sqrt(normA) * Math.sqrt(normB);
-  return denom === 0 ? 0 : dot / denom;
-}
 
 export type MemoryManagerConfig = {
   enabled: boolean;
@@ -56,15 +24,6 @@ export type MemoryConsolidationResult = {
   fadedCount: number;
 };
 
-export type UserProfileSnapshot = {
-  preferences: Record<string, string[]>;
-  frequentTopics: string[];
-  recentIntentions: string[];
-  riskFlags: string[];
-  lastUpdated: string;
-  version: number;
-};
-
 const DEFAULT_CONFIG: MemoryManagerConfig = {
   enabled: true,
   consolidationIntervalMs: 10 * 60 * 1000,
@@ -72,11 +31,9 @@ const DEFAULT_CONFIG: MemoryManagerConfig = {
   profileUpdateThreshold: 3,
   // 单窗口长会话在线固化：白天 pending queue 积累 ≥15 条立即触发整理
   onlineConsolidationThreshold: 15,
-  // 日间在线巩固开关（2026-09-12 token 治理）：默认关闭——LLM 评分（scoreLinesWithLlm）
+  // 日间在线巩固开关（2026-09-12 token 治理）：默认关闭——LLM 评分
   // 只在夜间 dreaming（consolidateNow 由 nightly-memory-task 触发）执行一次。
-  // 白天 journal 行持续累积，当日事实由 journalRecall/STM 直接进 prompt，不依赖
-  // memory_summary 刷新；日间整理对 agent 当天可见性没有增量收益，只产生
-  // 全量 16k 字符重复评分开销。置 1 恢复旧的日间在线巩固行为。
+  // 置 1 恢复旧的日间在线巩固行为。
   dayConsolidationEnabled: false,
 };
 
@@ -110,21 +67,14 @@ function loadConfig(): MemoryManagerConfig {
   };
 }
 
-function formatRelativeAgeLabel(ageHours: number): string {
-  if (ageHours < 1) return "just now";
-  if (ageHours < 24) return `${Math.floor(ageHours)}h ago`;
-  if (ageHours < 24 * 7) return `${Math.floor(ageHours / 24)}d ago`;
-  if (ageHours < 24 * 30) return `${Math.floor(ageHours / (24 * 7))}w ago`;
-  return `${Math.floor(ageHours / (24 * 30))}mo ago`;
-}
-
-function stripTimestampPrefix(line: string): string {
-  return line.replace(/^\[[^\]]+\]\s*/, "").trim();
-}
-
-/** 整理器注入用的「当日待整理」包裹标记行：提示结构，不是记忆内容，不许落进 KV。 */
-const PENDING_MARKER_LINE_RE = /^\[\s*\/?\s*当日待整理[^\]]*\]\s*$/;
-
+/**
+ * 记忆管理器（生命周期门面）。
+ *
+ * KV 摘要槽（memory_summary / forgotten）已下线：白天只追加 L0 原文与候选，
+ * 编译统一由夜间编译（NightlyMemoryTaskService + 编译账本）完成，当前状态由
+ * ContextCompiler 从权威库重建。这里只保留触发启发（轮数/空闲）与生命周期，
+ * 不再承担任何摘要读写。
+ */
 export class MemoryManagerService {
   private readonly config: MemoryManagerConfig;
   private readonly consolidationTimers = new Map<string, NodeJS.Timeout>();
@@ -133,17 +83,10 @@ export class MemoryManagerService {
     maxEntries: retainMax("MEMORY_RETAIN_TURN_COUNTER_MAX", 2000),
     idleMs: 24 * 60 * 60 * 1000,
   });
-  // per-actor 常驻快照：原先是无上限 Map，历史打过的 actor 永远留在内存里；
-  // 2G 机器上会单调涨到 OOM。改挂资源池有界缓存：超时空闲淘汰 + LRU 上限，
-  // 淘汰只损失一次磁盘重读（快照本就持久化在 data 目录），不丢数据。
-  private readonly pendingProfiles = new RetentionMap<UserProfileSnapshot>("pendingProfiles", {
-    maxEntries: retainMax("MEMORY_RETAIN_PENDING_PROFILES_MAX", 64),
-    idleMs: 30 * 60 * 1000,
-  });
 
   constructor(
-    private readonly narrativeMemory: NarrativeMemoryPort | null,
-    private readonly memorySync: AgentMemorySyncService | null,
+    _narrativeMemory: NarrativeMemoryPort | null,
+    _memorySync: AgentMemorySyncService | null,
     config?: Partial<MemoryManagerConfig>,
     /** 当日 journal 来源（可注入便于测试）；缺省用全局单例 */
     journal?: DailyJournalService | null,
@@ -152,19 +95,19 @@ export class MemoryManagerService {
     this.journal = journal ?? null;
   }
 
+  /** 注入的 journal 服务（可测性 DI）；null 时用全局单例 */
+  private readonly journal: DailyJournalService | null;
+
   /** 当日待整理内容的唯一来源：注入的 journal 服务或全局单例 */
   private resolveJournal(): DailyJournalService | null {
     return this.journal ?? getDailyJournalService();
   }
 
-  onTurnCompleted(actorId: string, sessionId: string | undefined, userText: string, assistantText: string): void {
+  onTurnCompleted(actorId: string, _sessionId: string | undefined, _userText: string, _assistantText: string): void {
     if (!this.config.enabled) return;
 
-    // 记忆架构收敛（2026-08）：白天不再实时回喂长期记忆图，也不再在内存里
-    // 自建「当日待整理队列」——原始轮次由 TurnFinalizer 统一落盘 DailyJournal，
-    // 整理时（consolidateNow）直接读 journal，消除同批原始数据的第二份存储。
-    // 这里只维护「今日轮数」计数器，供在线固化阈值判断。
-
+    // 原始轮次由 TurnFinalizer 统一落盘 DailyJournal；这里只维护今日轮数，
+    // 供在线固化阈值判断。
     const prev = this.turnCounters.get(actorId) ?? 0;
     const next = prev + 1;
     this.turnCounters.set(actorId, next);
@@ -180,25 +123,11 @@ export class MemoryManagerService {
     const nightlyService = getNightlyMemoryTaskService();
     const shouldDefer = nightlyService?.shouldDeferConsolidation() ?? false;
     if (shouldDefer) {
-      // P1-2 单窗口长会话在线固化：白天不再无限期 defer。
-      // 原策略：白天只积累 pending queue，整理要等 30min idle 或夜间 dreaming
-      //   → 单窗口长会话（用户一直在线聊）当天记忆始终得不到整理，
-      //     session recap 滚动压缩会丢细节，长期记忆滞后一整天。
-      // 新策略：当日轮数超过 onlineConsolidationThreshold（默认 15 轮）
-      //   时立即触发一次在线整理（LLM 评分 + 去重 + 写回 memory_summary），
-      //   长会话每 ~15 轮巩固一次，"整理记忆能力"在会话中真实被使用。
-      // 2026-09-12 token 治理：日间在线巩固默认关闭（dayConsolidationEnabled），
-      //   整理/评分收敛到夜间 dreaming 一次；当日事实仍经 journalRecall/STM 进 prompt。
       const pendingCount = this.getTodayTurnCount(actorId);
       if (this.config.dayConsolidationEnabled && pendingCount >= this.config.onlineConsolidationThreshold) {
-        console.log(
-          `[MemoryManager] Day mode: today turns ${pendingCount} ≥ ${this.config.onlineConsolidationThreshold}，触发单窗口在线固化 for ${actorId}`,
-        );
         void this.tryIdleConsolidation(actorId).catch(() => {
           /* 在线固化失败静默，等待夜间兜底 */
         });
-      } else {
-        console.log(`[MemoryManager] Day mode: deferring consolidation for ${actorId} (turns: ${next}, today turns: ${pendingCount})`);
       }
       return;
     }
@@ -212,13 +141,9 @@ export class MemoryManagerService {
     }
   }
 
-  /** 注入的 journal 服务（可测性 DI）；null 时用全局单例 */
-  private readonly journal: DailyJournalService | null;
-
   /**
    * 今日轮数计数器（actorId → { day, count }）：仅用于在线固化阈值判断。
-   * 原始轮次内容统一由 DailyJournal 落盘（TurnFinalizer 触发），整理时直接读
-   * journal——不再在内存里重复存一份原始对话（原 dailyPendingQueues 已删除）。
+   * 原始轮次内容统一由 DailyJournal 落盘（TurnFinalizer 触发）。
    */
   private dailyTurnCounters = new RetentionMap<{ day: string; count: number }>(
     "dailyTurnCounters",
@@ -228,24 +153,12 @@ export class MemoryManagerService {
     },
   );
 
-  /** journal 行消费游标（actorId → { day, lines }）：记录本日已被 consolidateNow 消费的行数 */
-  private journalConsumeCursor = new RetentionMap<{ day: string; lines: number }>(
-    "journalConsumeCursor",
-    {
-      maxEntries: retainMax("MEMORY_RETAIN_JOURNAL_CURSOR_MAX", 256),
-      idleMs: 24 * 60 * 60 * 1000,
-    },
-  );
-
-  /**
-   * 获取今天的日 key（YYYY-MM-DD，基于 Asia/Shanghai 时区）。
-   */
   private getTodayDayKey(): string {
     const fmt = new Intl.DateTimeFormat("en-CA", {
       timeZone: "Asia/Shanghai",
       year: "numeric", month: "2-digit", day: "2-digit",
     });
-    return fmt.format(new Date()); // 输出 YYYY-MM-DD
+    return fmt.format(new Date());
   }
 
   private getTodayTurnCount(actorId: string): number {
@@ -254,95 +167,10 @@ export class MemoryManagerService {
     return entry && entry.day === today ? entry.count : 0;
   }
 
-  private static readonly STOP_WORDS = new Set([
-    "的", "了", "是", "在", "我", "你", "他", "她", "它", "们", "这", "那", "有", "不", "就",
-    "都", "也", "还", "又", "要", "会", "能", "把", "给", "让", "被", "和", "与", "或", "但",
-    "今天", "昨天", "明天", "现在", "之前", "以后", "可以", "什么", "怎么", "为什么",
-    "the", "a", "an", "is", "are", "was", "were", "i", "you", "he", "she", "it", "we", "they",
-    "this", "that", "do", "does", "did", "will", "would", "can", "could", "should",
-  ]);
-
-  private extractTopicWords(text: string): string[] {
-    // 简单分词：英文按词 + 中文按 2-gram 滑动窗口，过滤停用词和短词
-    const words: string[] = [];
-    // 英文词
-    const enMatches = text.toLowerCase().match(/[a-z]{3,}/g) ?? [];
-    for (const w of enMatches) {
-      if (!MemoryManagerService.STOP_WORDS.has(w)) words.push(w);
-    }
-    // 中文：先提取连续中文片段，再做 2-gram 滑动窗口
-    // 这样"我买的股票涨了"会切出"我买"、"买的"、"的股"、"股票"、"票涨"、"涨了"
-    // 高频共现的"股票"能被正确统计
-    const chineseSegments = text.match(/[\u4e00-\u9fa5]+/g) ?? [];
-    for (const seg of chineseSegments) {
-      // 整段（2-6 字）作为主题候选
-      if (seg.length >= 2 && seg.length <= 6 && !MemoryManagerService.STOP_WORDS.has(seg)) {
-        words.push(seg.toLowerCase());
-      }
-      // 2-gram 滑动窗口（捕获共同子串）
-      for (let i = 0; i < seg.length - 1; i++) {
-        const gram = seg.substring(i, i + 2);
-        if (!MemoryManagerService.STOP_WORDS.has(gram)) {
-          words.push(gram.toLowerCase());
-        }
-      }
-    }
-    return words;
-  }
-
-  /**
-   * 消费当日 journal 行（自游标起），返回供 LLM 整理的文本与用户侧文本。
-   * journal 行不删除（夜间固化同用），靠游标记录已消费位置，跨天自动重置。
-   */
-  private async consumeTodayJournalLines(
-    actorId: string,
-  ): Promise<{ text: string; userText: string }> {
-    const today = this.getTodayDayKey();
-    const cursor = this.journalConsumeCursor.get(actorId);
-    const from = cursor && cursor.day === today ? cursor.lines : 0;
-
-    const hits =
-      (await this.resolveJournal()?.readTodayLines(actorId).catch(() => [])) ?? [];
-    this.journalConsumeCursor.set(actorId, { day: today, lines: Math.max(from, hits.length) });
-
-    // 事件行（工具结果）只走 LTM 固化，不进 KV 增量摘要：价格/天气这类
-    // 一次性结果留在 memory_summary 会常驻 prompt。
-    const consumed = hits.slice(from).filter((h) => h.source !== "event");
-    if (consumed.length === 0) return { text: "", userText: "" };
-
-    const formatRole = (role: string): string =>
-      role === "user" ? "用户" : role === "assistant" ? "Agent" : role;
-    const text = consumed
-      .map((h) => `[${h.time}] ${formatRole(h.role)}: ${h.text}`)
-      .join("\n");
-    // 话题频次统计只用用户侧行（U/fact/prefer 行在 readTodayLines 中归为 user/fact），
-    // 避免 assistant 文本污染词频
-    const userText = consumed
-      .filter((h) => h.role === "user" || h.role === "fact")
-      .map((h) => h.text)
-      .join("\n");
-    return { text, userText };
-  }
-
-  /**
-   * 获取当天 top N 高频话题词（用于 consolidate 加分）。
-   * 从本次消费的 journal 用户侧行即时统计，只返回出现 >=2 次的词，按频次降序。
-   */
-  private getTopDailyTopics(userText: string, topN = 5): string[] {
-    if (!userText) return [];
-    const freq = new Map<string, number>();
-    for (const w of this.extractTopicWords(userText)) {
-      freq.set(w, (freq.get(w) ?? 0) + 1);
-    }
-    return [...freq.entries()]
-      .filter(([, count]) => count >= 2)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, topN)
-      .map(([word]) => word);
-  }
-
   async consolidateNow(actorId: string): Promise<MemoryConsolidationResult> {
-    const result: MemoryConsolidationResult = {
+    // 摘要槽已下线：白天只追加 L0 原文与候选，整理统一由夜间编译完成。
+    this.turnCounters.set(actorId, 0);
+    return {
       entriesMerged: 0,
       entriesRemoved: 0,
       summaryUpdated: false,
@@ -350,261 +178,6 @@ export class MemoryManagerService {
       rememberedCount: 0,
       fadedCount: 0,
     };
-
-    if (!this.memorySync) return result;
-
-    try {
-      const { revision, entries } = this.memorySync.getSnapshot(actorId, [
-        "memory_summary",
-        "memory_summary_forgotten",
-      ]);
-      let raw = typeof entries.memory_summary === "string" ? entries.memory_summary : "";
-
-      // 缺口 2 修复 → journal 统一来源：当天待整理内容直接读当日 journal 行
-      // （自上次消费游标起），前置到语料顶部，确保 dreaming/在线固化优先整理当天内容。
-      // 原实现自建 RAM 队列存一份原始轮次，与 DailyJournal 双写同批数据，已删除。
-      const dailyPending = await this.consumeTodayJournalLines(actorId);
-      const pendingLines = dailyPending.text.split("\n").filter((line) => line.trim().length > 0);
-      if (pendingLines.length > 0) {
-        raw = `${pendingLines.join("\n")}\n${raw}`;
-        console.log(`[MemoryManager] consolidateNow: 并入当日 journal 行 ${pendingLines.length} 条到 ${actorId}`);
-      }
-
-      if (!raw || raw.length < 50) return result;
-      const forgottenRaw =
-        typeof entries.memory_summary_forgotten === "string"
-          ? entries.memory_summary_forgotten
-          : "";
-
-      const storedLines = raw.split("\n").filter((line) => line.trim().length > 0);
-      // 待整理标记行是整理器的提示结构，不是记忆内容：历史上曾随语料写回 KV，
-      // 这里连存量一起清除（清掉的行计入 entriesMerged，触发写回把存储洗干净）。
-      const lines = storedLines.filter((line) => !PENDING_MARKER_LINE_RE.test(line));
-      const droppedMarkerLines = storedLines.length - lines.length;
-      if (lines.length <= 2 && droppedMarkerLines === 0) return result;
-
-      const consolidated = this.deduplicateLines(lines);
-      result.entriesMerged = storedLines.length - consolidated.length;
-
-      // 建议 3：取当天高频话题词，传给评分函数给"用户重复问过的话题"加分
-      const topTopics = this.getTopDailyTopics(dailyPending.userText);
-      if (topTopics.length > 0) {
-        console.log(`[MemoryManager] consolidateNow: 当天高频话题加分 ${topTopics.length} 词 → ${actorId}`);
-      }
-      const retention = await this.evaluateMemoryRetention(consolidated, forgottenRaw, topTopics);
-      result.entriesRemoved = retention.forgotten.length;
-      result.rememberedCount = retention.remembered.length;
-      result.fadedCount = retention.faded.length;
-
-      if (result.entriesMerged > 0 || result.entriesRemoved > 0) {
-        // 2026-11-12 单一写者：摘要整串重写不再是本模块 applyPatch 覆盖，
-        // 而是交给 AgentMemorySyncService（memory.summary 的 owner）执行
-        // 读-改-写重试——避免与 append 路径并发时 CAS 失败被静默丢弃。
-        result.summaryUpdated = await this.memorySync.replaceSummaryLines(
-          actorId,
-          () => ({
-            summary: [...retention.remembered, ...retention.faded],
-            forgotten: [...retention.forgottenArchive, ...retention.forgotten],
-          }),
-          "MemoryManagerService",
-        );
-      }
-    } catch {
-      /* fire-and-forget */
-    }
-
-    await this.synthesizeProfile(actorId);
-    // 夜间重放/强化不再走 dream:* ingest（那是逐行 LLM 抽取的重复开销）；
-    // 记忆图的重放/合并/提级由 narrative.runSleepConsolidation 确定性完成。
-    // 画像维护不放这里：画像由对话内统一抽取（LLM 一次调用捎带 profileOps）
-    // 确定性落位写入；mem0/扣子等主流做法同样不在记忆整理阶段整文重写画像，
-    // 否则每轮整理都会重复调用一次大模型。
-    this.turnCounters.set(actorId, 0);
-    return result;
-  }
-
-  /**
-   * forgotten 自动恢复：把命中的 forgotten 行移回 memory_summary。
-   *
-   * 场景：recall 命中 memory_summary_forgotten 中的行且与当前 query 相关时调用。
-   * 实现：由 memory.summary 的 owner（AgentMemorySyncService）原子读-改-写，
-   * 把指定行从 forgotten 移到 summary（去重）。
-   *
-   * 2026-11-13（统一恢复动作）：恢复策略来自 memory/retention-policy.ts ——
-   * forgotten 桶 = cold 档，恢复即「升一档」到 warm（落回 summary 桶）。
-   * 同时**刷新行首时间戳**：此前恢复只搬行不换时间戳，而行龄取自行首的
-   * `[ISO 时间戳]`，于是被恢复的行下一轮整理立刻又被遗忘——恢复等于没做。
-   */
-  async restoreForgottenLines(actorId: string, lines: string[]): Promise<void> {
-    if (!this.memorySync || lines.length === 0) return;
-    try {
-      // 单一写者：同样交给 owner 执行读-改-写，不再自行 applyPatch 覆盖。
-      const action = restoreAction(TIER_BY_KV_BUCKET.forgotten);
-      const nowIso = new Date().toISOString();
-      await this.memorySync.replaceSummaryLines(
-        actorId,
-        (current) => {
-          const inSummary = new Set(current.summary.map((l) => l.trim()));
-          const restoredNow = lines.filter((l) => {
-            const t = l.trim();
-            return t && !inSummary.has(t);
-          });
-          const matched = new Set(lines.map((l) => l.trim()).filter(Boolean));
-          return {
-            summary: [
-              ...current.summary,
-              ...restoredNow.map((l) =>
-                action?.refreshTimestamp ? refreshMemoryLineTimestamp(l, nowIso) : l,
-              ),
-            ],
-            forgotten: current.forgotten.filter((l) => !matched.has(l.trim())),
-          };
-        },
-        "MemoryManagerService",
-      );
-      console.log(`[MemoryManager] forgotten 自动恢复: ${lines.length} 行尝试移回 memory_summary (${actorId})`);
-    } catch (err) {
-      console.log(`[MemoryManager] restoreForgottenLines 失败: ${err}`);
-    }
-  }
-
-  /**
-   * forgotten 行 embedding 缓存：key = 行文本指纹，value = 向量。
-   * 30 分钟过期，避免 forgotten 内容变化后用旧向量。
-   */
-  private forgottenEmbeddingCache = new RetentionMap<{ vector: number[]; ts: number }>(
-    "forgottenEmbeddingCache",
-    {
-      maxEntries: retainMax("MEMORY_RETAIN_FORGOTTEN_EMBED_MAX", 512),
-      idleMs: 30 * 60 * 1000,
-    },
-  );
-  private static readonly FORGOTTEN_EMBEDDING_TTL_MS = 30 * 60 * 1000;
-  private static readonly FORGOTTEN_SEMANTIC_THRESHOLD = 0.7;
-
-  /**
-   * 语义化 forgotten 召回（零 LLM）：
-   * 1. 路径 A（首选）：embedding cosine 相似度 > 0.7
-   * 2. 路径 B（降级）：关键词子串匹配（embedding 不可用或无命中时）
-   * 检索阶段不调用 LLM——召回在每轮对话主链路上，按轮次付费的语义判断
-   * 属架构性滥用（主流记忆系统只用向量/关键词检索）。
-   * 返回与 query 语义相关的 forgotten 行（最多 5 条）。
-   */
-  async recallForgottenSemantic(actorId: string, query: string): Promise<string[]> {
-    if (!this.memorySync) return [];
-    try {
-      const { entries } = this.memorySync.getSnapshot(actorId, ["memory_summary_forgotten"]);
-      const forgottenRaw = entries.memory_summary_forgotten;
-      if (typeof forgottenRaw !== "string" || !forgottenRaw.trim()) return [];
-
-      const forgottenLines = forgottenRaw.split("\n").filter((l) => l.trim());
-      if (forgottenLines.length === 0) return [];
-
-      // 路径 A：embedding 语义检索（必须用 Embedding 专用 key，对话 LLM key 会 401）
-      const apiKey =
-        process.env.AGENT_EMBEDDING_API_KEY?.trim() || process.env.OPENAI_API_KEY?.trim();
-      const embeddingModel = resolveEmbeddingModel();
-      if (apiKey) {
-        const embeddingHits = await this.recallForgottenByEmbedding(
-          query, forgottenLines, apiKey, embeddingModel,
-        );
-        if (embeddingHits.length > 0) {
-          console.log(`[MemoryManager] forgotten embedding 召回 ${embeddingHits.length} 行 (${actorId})`);
-          return embeddingHits;
-        }
-      }
-
-      // 路径 B：embedding 不可用或无命中 → 关键词匹配兜底（零 LLM）
-      return this.recallForgottenByKeyword(query, forgottenLines);
-    } catch (err) {
-      console.log(`[MemoryManager] recallForgottenSemantic 失败: ${err}`);
-      return [];
-    }
-  }
-
-  /** 路径 A：embedding cosine 相似度检索 */
-  private async recallForgottenByEmbedding(
-    query: string,
-    lines: string[],
-    apiKey: string,
-    model: string,
-  ): Promise<string[]> {
-    try {
-      const queryVec = await fetchOpenAiCompatibleEmbedding({ apiKey, model, input: query });
-      const now = Date.now();
-      const scored: { line: string; sim: number }[] = [];
-
-      for (const line of lines) {
-        // 查缓存
-        const cacheKey = semanticFingerprint(line) || line.slice(0, 64);
-        const cached = this.forgottenEmbeddingCache.get(cacheKey);
-        let vec: number[];
-        if (cached && now - cached.ts < MemoryManagerService.FORGOTTEN_EMBEDDING_TTL_MS) {
-          vec = cached.vector;
-        } else {
-          const r = await fetchOpenAiCompatibleEmbedding({ apiKey, model, input: line });
-          vec = r.vector;
-          this.forgottenEmbeddingCache.set(cacheKey, { vector: vec, ts: now });
-        }
-        const sim = cosineSimilarity(queryVec.vector, vec);
-        if (sim >= MemoryManagerService.FORGOTTEN_SEMANTIC_THRESHOLD) {
-          scored.push({ line, sim });
-        }
-      }
-
-      return scored.sort((a, b) => b.sim - a.sim).slice(0, 5).map((s) => s.line);
-    } catch (err) {
-      console.log(`[MemoryManager] recallForgottenByEmbedding 失败: ${err}`);
-      return [];
-    }
-  }
-
-  /** 路径 B：关键词子串匹配（embedding 不可用/无命中时的确定性兜底） */
-  private recallForgottenByKeyword(query: string, lines: string[]): string[] {
-    // 中文用 2-gram 滑动窗口切分（"我想喝咖啡" → "我想"、"想喝"、"喝咖"、"咖啡"）
-    // 避免整句被当成一个词导致子串匹配失败
-    const queryWords: string[] = [];
-    const segments = query.split(/[\s,，。！？!?\n]+/).filter((s) => s.trim());
-    for (const seg of segments) {
-      if (seg.length >= 2 && seg.length <= 4) {
-        queryWords.push(seg.toLowerCase());
-      } else if (seg.length > 4) {
-        // 长句用 2-gram 切分
-        for (let i = 0; i < seg.length - 1; i++) {
-          queryWords.push(seg.substring(i, i + 2).toLowerCase());
-        }
-      }
-    }
-    if (queryWords.length === 0) return [];
-    return lines
-      .filter((line) => {
-        const lower = line.toLowerCase();
-        return queryWords.some((w) => lower.includes(w));
-      })
-      .slice(0, 5);
-  }
-
-  getUserProfile(actorId: string): UserProfileSnapshot | null {
-    return this.pendingProfiles.get(actorId) ?? null;
-  }
-
-  getProfileForPrompt(actorId: string): string | null {
-    const profile = this.pendingProfiles.get(actorId);
-    if (!profile || Object.keys(profile.preferences).length === 0) return null;
-
-    const parts: string[] = ["【用户长期画像 — 后台记忆管理服务自动生成】"];
-    if (profile.frequentTopics.length > 0) {
-      parts.push(`高频话题: ${profile.frequentTopics.join("、")}`);
-    }
-    for (const [key, values] of Object.entries(profile.preferences)) {
-      if (values.length > 0) {
-        parts.push(`${key}: ${values.join("；")}`);
-      }
-    }
-    if (profile.recentIntentions.length > 0) {
-      parts.push(`近期意图: ${profile.recentIntentions.join("、")}`);
-    }
-    return parts.join("\n");
   }
 
   async shutdown(): Promise<void> {
@@ -628,243 +201,21 @@ export class MemoryManagerService {
   }
 
   /**
-   * 白天 idle 轻量整理：用户离开 30min+ 后，即使白天也触发一次记忆整理。
-   * 仿人：人类发呆/午休时也会无意识整理近期记忆，不必等到深度睡眠。
-   * 以当日 journal 实际内容为门槛（轮数计数器只是触发启发），无可整理内容直接跳过。
+   * 白天 idle 轻量整理触发：以当日 journal 实际内容为门槛（轮数计数器只是
+   * 触发启发），无可整理内容直接跳过。
    */
   async tryIdleConsolidation(actorId: string): Promise<boolean> {
-    // 2026-09-12 token 治理：日间 idle 整理默认关闭（brain-stem idle sweep 等
-    // 调用方在此统一被拦），LLM 评分只留夜间 dreaming。置
-    // AGENT_MEMORY_DAY_CONSOLIDATION=1 恢复日间整理。
+    // 日间在线巩固默认关闭，LLM 评分只留夜间 dreaming。
     if (!this.config.dayConsolidationEnabled) return false;
     const hits =
       (await this.resolveJournal()?.readTodayLines(actorId).catch(() => [])) ?? [];
     if (hits.length === 0) return false;
-
-    console.log(
-      `[MemoryManager] Daytime idle consolidation for ${actorId} (${hits.length} journal lines)`,
-    );
     try {
       await this.consolidateNow(actorId);
       return true;
-    } catch (err) {
-      console.error(`[MemoryManager] Idle consolidation failed for ${actorId}:`, err);
+    } catch {
       return false;
     }
-  }
-
-  private deduplicateLines(lines: string[]): string[] {
-    return dedupeMemoryLines(lines, { preferLatest: true });
-  }
-
-  private isHighValueEntry(line: string): boolean {
-    const highValuePatterns = [
-      /\[用户要求记住\]/,
-      /\[Agent 承诺\/结论\]/,
-      /\[fast-path\]/,
-      /用户画像/,
-      /偏好|喜欢|讨厌|禁忌|生日|纪念日|重要/i,
-      /世界账户|购买技能/,
-    ];
-    return highValuePatterns.some((pattern) => pattern.test(line));
-  }
-
-  private async evaluateMemoryRetention(
-    lines: string[],
-    forgottenRaw: string,
-    topTopics: string[] = [],
-  ): Promise<{
-    remembered: string[];
-    faded: string[];
-    forgotten: string[];
-    forgottenArchive: string[];
-  }> {
-    const now = Date.now();
-    // 确定性语义分：时间衰减 + 高价值信号正则（夜间零 LLM）。
-    // 原实现把整份 memory_summary 交给 LLM 逐行评分，一次就是上万输入 token，
-    // 且每晚对每个历史 actor 重跑；留存判定并不需要语义模型——衰减曲线和
-    // 高价值信号已能覆盖"稳定偏好/事实留下、寒暄淡出"的需求。
-    const semanticScores = lines.map((line) => this.heuristicSemanticScore(line));
-    const scored = lines.map((line, index) => ({
-      line,
-      ...this.scoreMemoryLine(line, now, semanticScores[index] ?? 0.5, topTopics),
-    }));
-
-    // 档位判定统一走 retention policy（2026-11-13）：KV 三档与认知图五档
-    // 现在共用同一组阈值与同一套「档位 ↔ 存储字段」映射——此前两边各写
-    // 一份阈值，同一段记忆在 KV 还热着、在认知图已经降档。
-    const thresholds = retentionThresholds();
-    const bucketOf = (score: number): KvRetentionBucket =>
-      KV_BUCKET_BY_TIER[tierForScore(score, thresholds)];
-
-    const remembered = scored
-      .filter((item) => bucketOf(item.score) === "remembered")
-      .sort((a, b) => b.score - a.score || b.ts - a.ts)
-      .slice(0, 32)
-      .map((item) => item.line);
-
-    const faded = scored
-      .filter((item) => bucketOf(item.score) === "faded")
-      .sort((a, b) => b.score - a.score || b.ts - a.ts)
-      .slice(0, 24)
-      .map((item) => item.line);
-
-    const forgotten = scored
-      .filter((item) => bucketOf(item.score) === "forgotten")
-      .map((item) => item.line)
-      .slice(0, 32);
-
-    const forgottenArchive = dedupeMemoryLines(
-      [
-        ...(forgottenRaw ? forgottenRaw.split("\n").filter(Boolean) : []),
-        ...forgotten,
-      ],
-      { preferLatest: true },
-    );
-
-    return { remembered, faded, forgotten, forgottenArchive };
-  }
-
-  private scoreMemoryLine(line: string, now: number, semanticScore: number, topTopics: string[] = []): { score: number; ts: number } {
-    const match = line.match(/\[(\d{4}-\d{2}-\d{2}T[\d:.]+Z?)\]/);
-    const ts = match?.[1] ? Date.parse(match[1]) : now;
-    const safeTs = Number.isFinite(ts) ? ts : now;
-    const ageHours = Math.max(0, (now - safeTs) / 3_600_000);
-
-    // P2 统一遗忘曲线：与情景日志/长期节点/读侧梯度共用 memoryDecayFactor，
-    // 并叠加情绪显著性——高光/至暗行衰减更慢。
-    // 2026-11-13：移除原先单独传入的 halfLifeDays=4·ln2（≈2.77 天，等价旧 96h
-    // 指数时间常数）。那一档让 KV 摘要的保鲜期只有认知图/读侧梯度的四成——同
-    // 一段记忆在 KV 还活着、在认知图已经淡出，正是「口径分裂」本身。现统一到
-    // 全局半衰期常量（memoryDecayFactor 内部不再接受覆盖参数）。
-    const emotion = inferEmotionFromText(line);
-    const decay = memoryDecayFactor({
-      ageDays: ageHours / 24,
-      emotionalSalience: emotionalSalience(emotion),
-    });
-    let score = decay;
-    score += semanticScore * 0.8;
-    if (line.includes("【关系线程】")) score += 0.45;
-    if (this.isHighValueEntry(line)) score += 1.15;
-    if (/\[fast-path\]|\[Agent 承诺\/结论\]/.test(line)) score += 0.6;
-    if (/记住|偏好|喜欢|讨厌|禁忌|生日|纪念|重要/.test(line)) score += 0.4;
-    if (/股票|买入|卖出|仓位|止损|止盈|工作|加班|夜里|健康|家人|提醒/.test(line)) score += 0.25;
-    // 建议 3：用户当天重复提到的话题加分（最多 +0.3）
-    if (topTopics.length > 0) {
-      const lower = line.toLowerCase();
-      const hitCount = topTopics.filter((t) => lower.includes(t.toLowerCase())).length;
-      if (hitCount > 0) score += Math.min(0.3, hitCount * 0.15);
-    }
-    if (ageHours <= 6) score += 0.28;
-    else if (ageHours <= 24) score += 0.18;
-    else if (ageHours >= 24 * 14) score -= 0.12;
-    if (ageHours > 168) score -= this.isHighValueEntry(line) ? 0.06 : 0.22;
-
-    return { score, ts: safeTs };
-  }
-
-  private async synthesizeProfile(actorId: string): Promise<void> {
-    if (!this.memorySync) return;
-
-    try {
-      const { entries } = this.memorySync.getSnapshot(actorId, ["memory_summary"]);
-      const raw = typeof entries.memory_summary === "string" ? entries.memory_summary : "";
-      if (!raw || raw.length < 100) return;
-
-      const profile = this.extractProfileFromRaw(raw);
-      profile.version = (this.pendingProfiles.get(actorId)?.version ?? 0) + 1;
-      profile.lastUpdated = new Date().toISOString();
-      this.pendingProfiles.set(actorId, profile);
-
-      if (this.narrativeMemory && Object.keys(profile.preferences).length > 0) {
-        const profileText = this.formatProfileAsText(profile);
-        await this.narrativeMemory
-          .ingest(actorId, profileText, "memory:user_profile", { highSignal: true })
-          .catch(() => {});
-      }
-    } catch {
-      /* fire-and-forget */
-    }
-  }
-
-  private heuristicSemanticScore(line: string): number {
-    let score = 0.35;
-    if (this.isHighValueEntry(line)) score += 0.3;
-    if (/\[fast-path\]|\[Agent 承诺\/结论\]/.test(line)) score += 0.15;
-    if (/偏好|喜欢|讨厌|禁忌|生日|纪念|提醒|决定|计划|习惯/.test(line)) score += 0.2;
-    if (semanticFingerprint(line).split(" ").length >= 4) score += 0.05;
-    return Math.min(1, score);
-  }
-
-  private extractProfileFromRaw(raw: string): UserProfileSnapshot {
-    const profile: UserProfileSnapshot = {
-      preferences: {},
-      frequentTopics: [],
-      recentIntentions: [],
-      riskFlags: [],
-      lastUpdated: "",
-      version: 0,
-    };
-
-    const topicCounts = new Map<string, number>();
-    const intentionPatterns = /(我会|我想|计划|打算|准备|要)([^。\n]{2,30})/g;
-    const preferencePatterns = /(喜欢|讨厌|不喜欢|偏好|习惯|经常|总是|从不|不要|别)([^。\n]{2,40})/g;
-    const riskPatterns = /(大额|密码|删除|注销|授权|转账|可疑|异常|防盗|诈骗|钓鱼)/g;
-
-    let match: RegExpExecArray | null;
-    while ((match = intentionPatterns.exec(raw)) !== null) {
-      const intention = `${match[1]}${match[2]}`;
-      profile.recentIntentions.push(intention.slice(0, 60));
-      const topic = this.extractTopic(intention);
-      topicCounts.set(topic, (topicCounts.get(topic) ?? 0) + 1);
-    }
-
-    while ((match = preferencePatterns.exec(raw)) !== null) {
-      const category = match[1];
-      const value = match[2].trim();
-      if (!profile.preferences[category]) profile.preferences[category] = [];
-      if (!profile.preferences[category].includes(value)) {
-        profile.preferences[category].push(value.slice(0, 80));
-      }
-      const topic = this.extractTopic(value);
-      topicCounts.set(topic, (topicCounts.get(topic) ?? 0) + 1);
-    }
-
-    while ((match = riskPatterns.exec(raw)) !== null) {
-      const flag = match[1].trim();
-      if (!profile.riskFlags.includes(flag)) {
-        profile.riskFlags.push(flag);
-      }
-    }
-
-    profile.frequentTopics = [...topicCounts.entries()]
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 8)
-      .map(([topic]) => topic);
-
-    profile.recentIntentions = [...new Set(profile.recentIntentions)].slice(-6);
-    profile.riskFlags = [...new Set(profile.riskFlags)].slice(-5);
-
-    return profile;
-  }
-
-  private extractTopic(text: string): string {
-    const keywords = text.match(/[\u4e00-\u9fff]{2,}/g);
-    if (keywords && keywords.length > 0) return keywords[0];
-    return text.split(/[\s，。！？、]/)[0]?.trim().slice(0, 10) ?? "general";
-  }
-
-  private formatProfileAsText(profile: UserProfileSnapshot): string {
-    const parts: string[] = [`用户画像 v${profile.version} (${profile.lastUpdated})`];
-    if (profile.frequentTopics.length > 0) {
-      parts.push(`关注领域: ${profile.frequentTopics.join("、")}`);
-    }
-    for (const [category, values] of Object.entries(profile.preferences)) {
-      if (values.length > 0) {
-        parts.push(`${category}: ${values.slice(0, 3).join("；")}`);
-      }
-    }
-    return parts.join("\n");
   }
 }
 

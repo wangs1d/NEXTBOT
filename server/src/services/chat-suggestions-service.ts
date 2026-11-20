@@ -95,7 +95,7 @@ const SUGGESTION_POOL: SuggestionPoolEntry[] = [
     tag: "日程",
     prompt: "帮我记个日程，周六上午十点去牙医",
     usedPrompt: "帮我看看这周的日程，找个空档加个安排",
-    toolSignals: ["calendar.", "reminder."],
+    toolSignals: ["calendar."],
     interestKey: "planning",
     interestWeight: 1.2,
     core: true,

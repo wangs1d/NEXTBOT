@@ -87,7 +87,6 @@ async function main(): Promise<void> {
   const skillDocs = [
     join(process.cwd(), "src", "skills", "wallet-management", "SKILL.md"),
     join(process.cwd(), "src", "skills", "virtual-phone", "SKILL.md"),
-    join(process.cwd(), "src", "skills", "study-notes", "SKILL.md"),
   ].filter((p) => existsSync(p));
   let beforeS2 = 0;
   let afterS2 = 0;

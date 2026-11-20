@@ -13,7 +13,6 @@ import { recordPreloadExecution } from "../../tools/tool-search/preload-feedback
 
 export type ToolExecutionAccess = {
   agentAccessMode?: AgentAccessMode;
-  desktopBridgeOnline?: boolean;
   phoneBridgeOnline?: boolean;
   /** 按需位置：位置类工具（weather.get_local 等）在缺少经纬度时可向客户端请求实时 GPS */
   requestLocation?: (
@@ -23,7 +22,7 @@ export type ToolExecutionAccess = {
   /** 最近已知位置（内存缓存 → 本地位置历史），带 ageMs；实时 GPS 拿不到时的兜底 */
   getLastKnownLocation?: () => KnownLocation | null;
   /** 中途推送媒体卡（购物登录/支付二维码等）：聊天主路径由 WS 层装配 */
-  pushMediaCards?: (cards: ToolMediaCard[]) => void;
+  pushMediaCards?: (cards: ToolMediaCard[]) => boolean | void;
   /** Agent 浏览器工作预览帧（agent_browser 无头执行时推页面截图）：聊天主路径装配 */
   pushBrowserPreview?: (frame: {
     sessionId: string;
@@ -149,7 +148,6 @@ export class ToolContextFactory {
       clientIp: base.clientIp,
       clientLocation: base.clientLocation,
       agentAccessMode: base.access?.agentAccessMode,
-      desktopBridgeOnline: base.access?.desktopBridgeOnline,
       phoneBridgeOnline: base.access?.phoneBridgeOnline,
       // 按需位置：透传 locationCoordinator 的 requestLocation，天气等位置类工具
       // 在缺少经纬度时才能向客户端下发 agent.location_request 请求实时 GPS。

@@ -507,3 +507,116 @@ test("端到端：'我叫张三'→'我叫李四' 实时更新姓名字段并保
     assert.equal(store.getActiveFacts("user-1").length, 1);
   });
 });
+
+// ============================================================
+// 6. 长尾事实（category=tail:<kind>）：同库不同道
+// ============================================================
+
+test("tail: 落库后只出现在 getTailFacts，不冒充档案字段", async () => {
+  await withStore(async (store) => {
+    store.applyFact({
+      actorId: "user-1",
+      field: "自助餐",
+      value: "用户喜欢自助餐",
+      confidence: 0.7,
+      category: "tail:preference",
+    });
+
+    const tails = store.getTailFacts("user-1");
+    assert.equal(tails.length, 1);
+    assert.equal(tails[0]!.value, "用户喜欢自助餐");
+
+    // 档案面：不算字段、不进档案块、不参与问句寻址
+    assert.equal(store.getActiveFacts("user-1").length, 0);
+    assert.equal(store.getFact("user-1", "自助餐"), null);
+    assert.equal(store.renderForPrompt("user-1"), null);
+    assert.deepEqual(store.matchFactsInText("user-1", "我喜欢吃自助餐"), []);
+  });
+});
+
+test("tail: 同 subject 换值 latest-wins，不累积；档案字段名被拒收", async () => {
+  await withStore(async (store) => {
+    const input = {
+      actorId: "user-1",
+      field: "咖啡",
+      confidence: 0.7,
+      category: "tail:preference",
+    };
+    store.applyFact({ ...input, value: "用户喜欢喝拿铁" });
+    store.applyFact({ ...input, value: "用户喜欢喝美式" });
+
+    const tails = store.getTailFacts("user-1", { kind: "preference" });
+    assert.equal(tails.length, 1);
+    assert.equal(tails[0]!.value, "用户喜欢喝美式");
+
+    // 长尾不得占用档案字段名（否则 latest-wins 会顶掉权威值）
+    assert.equal(
+      store.applyFact({
+        actorId: "user-1",
+        field: "职业",
+        value: "用户好像做后端的",
+        category: "tail:fact",
+      }),
+      null,
+    );
+    assert.equal(store.getTailFacts("user-1").length, 1);
+  });
+});
+
+test("tail 召回：话题强相关才带出，同义副本只留一条，日常问句零注入", async () => {
+  await withStore(async (store) => {
+    store.applyFact({
+      actorId: "user-1",
+      field: "刘浩存",
+      value: "用户喜欢刘浩存，称其为「老婆」并关注其影视作品动态",
+      category: "tail:preference",
+    });
+    store.applyFact({
+      actorId: "user-1",
+      field: "自助餐",
+      value: "用户喜欢自助餐",
+      category: "tail:preference",
+    });
+
+    const hit = store.renderTailRecallBlock("user-1", "刘浩存最近有什么新片");
+    assert.ok(hit);
+    const lines = hit!.split("\n").filter((l) => l.startsWith("- "));
+    assert.equal(lines.length, 1, "同义副本不应占两行");
+    assert.match(lines[0]!, /刘浩存/);
+
+    assert.ok(store.renderTailRecallBlock("user-1", "自助餐"));
+    assert.equal(store.renderTailRecallBlock("user-1", "明天北京天气怎么样"), undefined);
+    assert.equal(store.renderTailRecallBlock("user-1", "帮我设个九点闹钟"), undefined);
+  });
+});
+
+test("tail 写入：同一条重复提及只确认不新增行；不同措辞不再猜同义", async () => {
+  await withStore(async (store) => {
+    const value = "用户喜欢刘浩存，称其为「老婆」并关注其影视作品动态";
+    const first = store.applyFact({
+      actorId: "user-1",
+      field: "刘浩存",
+      value,
+      category: "tail:preference",
+    });
+    const again = store.applyFact({
+      actorId: "user-1",
+      field: "刘浩存",
+      value,
+      category: "tail:preference",
+    });
+    assert.ok(first?.changed);
+    assert.equal(again?.changed, false, "同值重复只 touch");
+    assert.equal(store.getTailFacts("user-1").length, 1);
+
+    // 换说法写第二条 = 各存一行：库里不做同义猜测，措辞统一是抽取侧的责任
+    const paraphrase = store.applyFact({
+      actorId: "user-1",
+      field: "用户称刘浩存为自己的老婆",
+      value: "用户称刘浩存为自己的「老婆」，喜欢刘浩存",
+      category: "tail:fact",
+    });
+    assert.equal(paraphrase?.changed, true);
+    assert.equal(store.getTailFacts("user-1").length, 2);
+  });
+});

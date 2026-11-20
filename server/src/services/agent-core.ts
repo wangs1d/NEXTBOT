@@ -17,8 +17,6 @@ import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
 import type { ToolMediaCard, ToolRegistry } from "../tools/tool-registry.js";
 import type { VirtualPhoneService } from "./virtual-phone-service.js";
 import type { ScheduleTaskService } from "./schedule-task-service.js";
-import type { DesktopBridgeCoordinator } from "./desktop-bridge-coordinator.js";
-import { isLocalDesktopVisualEnabledFromEnv } from "./desktop-visual-subprocess.js";
 import type { PhoneBridgeCoordinator } from "./phone-bridge-coordinator.js";
 import type { LocationCoordinator } from "./location-coordinator.js";
 import type { ActorContextService } from "./actor-context-service.js";
@@ -90,20 +88,7 @@ function getForegroundChatToolWhitelist(userText?: string): ChatCompletionTool[]
     ];
     return _foregroundToolWhitelist;
   })();
-  // 能力域关键词确定性注入（2026-09-19）：轻量模型不会主动 tool_discover，
-  // 用户提到「经期/SOS/紧急联系人」等话题时把对应能力域 schema 并入本轮白名单，
-  // 否则女性关怀等新域在话面上不可达（见 selectForegroundCapabilityToolAdditions 注释）。
-  const additions = selectForegroundCapabilityToolAdditions(userText);
-  if (additions.length === 0) return base;
-  const known = new Set(
-    base.map((tool) => (tool.type === "function" ? tool.function.name : undefined)),
-  );
-  return [
-    ...base,
-    ...additions.filter(
-      (tool) => tool.type === "function" && !known.has(tool.function.name),
-    ),
-  ];
+  return base;
 }
 
 /**
@@ -175,10 +160,7 @@ import {
 } from "../external-model/lane-tool-sets.js";
 import { getPromotedToolNames } from "../tools/tool-search/tool-promotion.js";
 import { toolsInDomain } from "../tools/tool-search/tool-category.js";
-import {
-  getBuiltinAgentChatTools,
-  selectForegroundCapabilityToolAdditions,
-} from "../external-model/openai-compatible-tool-loop.js";
+import { getBuiltinAgentChatTools } from "../external-model/openai-compatible-tool-loop.js";
 import { receiptProducesCard } from "./receipt-card-projection.js";
 import { isVoiceMode } from "../proactivity/voice-mode-state.js";
 import { describeMemoryAge, semanticFingerprint } from "./memory-record-utils.js";
@@ -303,7 +285,7 @@ export type HandleUserMessageOptions = {
    * 工具执行中途向聊天流推送媒体卡片（如购物登录/支付二维码）。
    * WS 聊天主路径装配（chat.media_ready 挂到当前流式回复）；程序化调用方缺省为空。
    */
-  pushMediaCards?: (cards: ToolMediaCard[]) => void;
+  pushMediaCards?: (cards: ToolMediaCard[]) => boolean | void;
   /**
    * Agent 浏览器工作预览帧（2026-11-12）：agent_browser 无头执行每步后推页面
    * 截图（agent.browser.preview 事件）。WS 聊天主路径装配；程序化调用方缺省为空。
@@ -381,7 +363,6 @@ export class AgentCore {
    * 用户对话轮优先走 actor 绑定的自有 provider，无绑定回落运营方 externalChat。
    */
   private actorModelBindings: ActorModelBindingStore | null = null;
-  private desktopBridgeCoordinator: DesktopBridgeCoordinator | null = null;
   private phoneBridgeCoordinator: PhoneBridgeCoordinator | null = null;
   private locationCoordinator: LocationCoordinator | null = null;
   private locationHistory: LocationHistoryService | null = null;
@@ -457,11 +438,6 @@ export class AgentCore {
       // 已删除。任务面唯一引擎 = 工具循环（波内一次性规划 + 并行工具 + 出口自检续波），
       // 显式 plan 调用仅在 AGENT_PLAN_EXECUTE_LOOP 开启时叠加（见 runStandardLlmPath）。
     }
-  }
-
-  /** 在 bootstrap 注册桌面桥接后注入，用于按轮检测电脑是否在线。 */
-  setDesktopBridgeCoordinator(coordinator: DesktopBridgeCoordinator): void {
-    this.desktopBridgeCoordinator = coordinator;
   }
 
   /** 注入按 actor 的用户自有模型绑定仓（云端连接版 BYOK；bootstrap 装配）。 */
@@ -607,10 +583,6 @@ export class AgentCore {
     }
   }
 
-  private desktopBridgeOnlineFor(actorId: string): boolean {
-    return this.desktopBridgeCoordinator?.hasExecutor(actorId) ?? false;
-  }
-
   private phoneBridgeOnlineFor(actorId: string): boolean {
     return this.phoneBridgeCoordinator?.hasExecutor(actorId) ?? false;
   }
@@ -618,10 +590,9 @@ export class AgentCore {
   private streamAccessFields(
     actorId: string,
     opts?: HandleUserMessageOptions,
-  ): { agentAccessMode: AgentAccessMode; desktopBridgeOnline: boolean; phoneBridgeOnline: boolean } {
+  ): { agentAccessMode: AgentAccessMode; phoneBridgeOnline: boolean } {
     return {
       agentAccessMode: parseAgentAccessMode(opts?.agentAccessMode),
-      desktopBridgeOnline: this.desktopBridgeOnlineFor(actorId),
       phoneBridgeOnline: this.phoneBridgeOnlineFor(actorId),
     };
   }
@@ -1119,9 +1090,7 @@ export class AgentCore {
     try {
       let result: AgentReply;
 
-      // 2026-08-29 桌面自动化特判已删除：桌面任务与一切任务轮统一走
-      // plan-and-execute（desktop.visual.run_task / desktop.run_preset 等工具
-      // 在 complex 全量工具目录内，长链路 UI 操作由工具内部的多轮执行承担）。
+      // 一切任务轮统一走 plan-and-execute。
 
 if (route.plane === "task") {
         // 任务面（2026-09-08 异步收尾改造，2026-09-09 复杂度门控）：真后台派发只留给
@@ -1467,7 +1436,7 @@ if (route.plane === "task") {
       clientLocation?: ClientLocationWire;
       agentAccessMode?: AgentAccessMode;
       /** 中途推卡：购物等长工具把二维码即时呈现给用户（聊天主路径装配） */
-      pushMediaCards?: (cards: ToolMediaCard[]) => void;
+      pushMediaCards?: (cards: ToolMediaCard[]) => boolean | void;
       /** Agent 浏览器预览帧（agent_browser 无头执行时推页面截图） */
       pushBrowserPreview?: (frame: {
         sessionId: string;
@@ -1513,7 +1482,6 @@ if (route.plane === "task") {
       clientIp: opts?.clientIp,
       clientLocation: opts?.clientLocation,
       agentAccessMode: opts?.agentAccessMode,
-      desktopBridgeOnline: this.desktopBridgeOnlineFor(actorId),
       phoneBridgeOnline: this.phoneBridgeOnlineFor(actorId),
       // 按需位置：自主任务/日程触发的工具（如天气）缺经纬度时也能向客户端请求实时 GPS
       requestLocation: (reason, locOpts) =>
@@ -1735,7 +1703,7 @@ if (route.plane === "task") {
     opts: HandleUserMessageOptions | undefined,
     narrativeRecall: string | undefined,
     personalization: PersonalizationPromptSlice,
-    access: { agentAccessMode: AgentAccessMode; desktopBridgeOnline: boolean; phoneBridgeOnline: boolean },
+    access: { agentAccessMode: AgentAccessMode; phoneBridgeOnline: boolean },
     sessionId: string,
     shortTermTurn: ShortTermTurnContext,
     workingMemorySummary: string | undefined,
@@ -1750,7 +1718,6 @@ if (route.plane === "task") {
       clientIp: opts?.clientIp,
       clientLocation: opts?.clientLocation,
       agentAccessMode: access.agentAccessMode,
-      desktopBridgeOnline: access.desktopBridgeOnline,
       phoneBridgeOnline: access.phoneBridgeOnline,
       toolRankingHint: this.toolPolicyResolver.resolveRankingHint(actorId),
       visionFrames: opts?.visionFrames,
@@ -2025,7 +1992,6 @@ if (route.plane === "task") {
         source: "runStandardLlmPath",
         access: {
           agentAccessMode: ctx.orchestrateToolCtx?.agentAccessMode,
-          desktopBridgeOnline: ctx.orchestrateToolCtx?.desktopBridgeOnline,
           phoneBridgeOnline: ctx.orchestrateToolCtx?.phoneBridgeOnline,
           // 按需位置：位置类工具（weather.get_local 等）在缺少经纬度时可向客户端请求实时 GPS。
           requestLocation: (reason, locOpts) =>
@@ -2035,7 +2001,7 @@ if (route.plane === "task") {
               locOpts,
             ) ?? Promise.resolve(null),
           getLastKnownLocation: () => this.locationCoordinator?.getLastKnown(actorId) ?? null,
-          // 中途推卡：购物等长工具把二维码即时呈现给用户（聊天主路径装配）
+              // 中途推卡：购物等长工具把二维码即时呈现给用户（聊天主路径装配）
           pushMediaCards: opts?.pushMediaCards,
           // 浏览器预览帧：agent_browser 无头执行时推页面截图（手机悬浮窗画面源）
           pushBrowserPreview: opts?.pushBrowserPreview,
@@ -2612,19 +2578,12 @@ if (route.plane === "task") {
           TASK_CANCEL_TOOL_DEFINITION,
           PERCEPTION_OVERVIEW_TOOL_DEFINITION,
         ]);
-        // 桌面桥明确离线且本机视觉执行体不可用时，desktop.* 是"必然执行失败的工具"
-        // （见 resolve-chat-tools dropOfflineDesktopTools 同款规则），从 Core 剔除。
-        const desktopOffline =
-          ctx.orchestrateToolCtx?.desktopBridgeOnline === false && !isLocalDesktopVisualEnabledFromEnv();
         // 显式禁网轮（2026-09-23）：task Core 同样剥离联网检索族；延迟目录
         // 语料（corpus）一并过滤，防 tool_discover 把搜索工具召回回来绕过开关。
         const webForbidden = ctx.webSearchForbidden === true;
-        const coreFiltered = (desktopOffline
-          ? coreTools.filter(
-              (d) => d.type !== "function" || !/^desktop\./.test(d.function?.name ?? ""),
-            )
-          : coreTools
-        ).filter((d) => !webForbidden || filterWebSearchTools([d]).length === 0);
+        const coreFiltered = coreTools.filter(
+          (d) => !webForbidden || filterWebSearchTools([d]).length === 0,
+        );
         const coreNames = new Set(
           coreFiltered
             .map((d) => (d.type === "function" ? d.function?.name : ""))
@@ -2734,7 +2693,6 @@ if (route.plane === "task") {
                     }
                   : {}),
               agentAccessMode: ctx.orchestrateToolCtx?.agentAccessMode,
-              desktopBridgeOnline: ctx.orchestrateToolCtx?.desktopBridgeOnline,
               phoneBridgeOnline: ctx.orchestrateToolCtx?.phoneBridgeOnline,
               ...(provider.id === "moonshot-kimi" ? { disableThinking: true } : {}),
             }
@@ -2744,7 +2702,7 @@ if (route.plane === "task") {
       // 任务面（complex，one-shot 引擎）：工具循环 + 出口自检续波。
       //
       // 工具意图升级（2026-09-11 根修）：模型在无工具轮次用 DSML 文本形式发起
-      // 工具调用（如对话面轮次想调 desktop.visual.screenshot）时，provider 非工具
+      // 工具调用（如对话面轮次想调某个延迟目录工具）时，provider 非工具
       // 分支提取出调用但无执行器，抛 ToolIntentWithoutToolsError。此处捕获并升级
       // 到任务面重跑同一句消息——与下方两个出口闸同构；重跑走任务面（mode=task）
       // 不再进本 catch，天然只触发一次。

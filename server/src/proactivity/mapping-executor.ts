@@ -10,7 +10,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import type { ProactiveImportance } from "./pipeline-types.js";
+import type { ProactiveImportance, ProposalNotifyOption } from "./pipeline-types.js";
 import type { AttentionUrgency } from "./arbiter-v2.js";
 import type { BoardLayerName, WorldBoard } from "./world-board.js";
 
@@ -35,6 +35,11 @@ export type AttentionEvent = {
   salience: "high" | "medium" | "low";
   /** ask_first 提案的确认按钮文案（如承诺代催） */
   confirmLabel?: string;
+  /**
+   * 自带「需要你拍板」按钮（2026-11-19 按内容动态生成）：规则按本条真实数据
+   * 声明最多两项，提案构造处透传到 ProactiveProposal.notifyOptions。
+   */
+  notifyOptions?: ProposalNotifyOption[];
   /** 事件背景（呼叫场景喂给对话 LLM 的上下文；模板事件可为空） */
   summary?: string;
   /** 提案保质期 ms（如临日会议提醒在会议开始后即无意义） */

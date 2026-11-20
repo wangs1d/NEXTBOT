@@ -31,7 +31,6 @@ import { getDailyDigestService } from "../services/daily-digest-service.js";
 import { getConversationTimelineService } from "../services/conversation-timeline.js";
 import { getTaskPlanStore, taskPlanKey } from "./task-plan-store.js";
 import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
-import { getMemoryManagerService } from "../services/memory-manager-service.js";
 import { gateProfileMarkdownForPrompt, stripProfileFactDuplicateLines } from "../services/user-personalization/profile-fact-authority.js";
 import { getGlobalMemoryInventory } from "../brain/memory-inventory.js";
 import type { TurnUnderstanding } from "./task-router.js";
@@ -42,6 +41,7 @@ import type {
 } from "../external-model/types.js";
 import type { PersonalizationPromptSlice } from "../services/user-personalization/user-personalization-service.js";
 import { dedupeMemoryLines, semanticFingerprint } from "../services/memory-record-utils.js";
+import { compileMemoryContext } from "./memory-context-compiler.js";
 import { markInjectedMemory } from "../services/memory-echo-guard.js";
 import type { ShortTermMemoryGatewayService } from "../services/short-term-memory-gateway.js";
 import { redactSensitiveText } from "../utils/redact.js";
@@ -78,14 +78,9 @@ function buildFollowUpAnchorFromUnderstanding(
 // `PromptContextBuilder.setTimezoneProvider` 从 Actor 情境快照结构化读取。
 
 /**
- * 【运行环境】块（2026-10-07）：用户此刻从哪类设备发消息（WS 连接自报 platform）。
- * 手机端=小屏移动场景：回复短、别发大段排版/表格；但**不**因为人在手机旁就放弃
- * 电脑远控——手机上同样能调 desktop.* 工具代用户操作他那台已配对的电脑
- * （2026-10-09 改：原句「涉及电脑端才能做的事就直说稍后在电脑上办」会压制远控，
- * 用户人在外面正是最需要手机遥控电脑的时候）。
- * 电脑端=桌面场景：可正常交付卡片/多段内容；但端型不改变聊天节奏——
- * 2026-11-10 对齐手机端：闲聊仍短句拆条，只有明确要整体交付才展开
- * （原版只说「可正常交付」被模型读成长文许可，桌面端出现汇报腔长篇）。
+ * 【运行环境】块：用户此刻从哪类设备发消息（WS 连接自报 platform）。
+ * 手机端=小屏移动场景：回复短、别发大段排版/表格，数据类内容仍用紧凑表格。
+ * 电脑端=桌面场景：可正常交付卡片/多段内容；端型不改变聊天节奏，闲聊仍短句拆条。
  * 缺省（未登记/旧客户端/程序化调用）不注入——模型按对话语境自行判断，避免错误标注。
  */
 export function buildDeviceEnvironmentBlock(
@@ -101,13 +96,7 @@ export function buildDeviceEnvironmentBlock(
       "撞到登录墙会把二维码推到聊天，用户扫码后继续），不要用 web_search（action=web）凑答案；" +
       "通用网页浏览用 agent_browser（action=open/click/type/extract_text/...，同样在服务端远端浏览器执行，结果与截图会回到聊天）；" +
       "用户给了链接或要求打开某网站时，直接调用 agent_browser(action=\"open\", url=...)，不要只查工具描述就放弃。" +
-      "不要调用 shared_browser.*，也不要让用户去打开客户端「常用工具 → 浏览器」。" +
-      "涉及电脑才能做的事，别让用户自己去电脑上点——你具备电脑远控能力，可直接调用 " +
-      "desktop.* 工具（如 desktop.visual.screenshot 截图、desktop.open 打开程序/网页/文件、" +
-      "desktop.uia_query 看界面元素、desktop.run_input 键鼠操作、desktop.run_automation 控件操作、" +
-      "desktop.window 切窗口、desktop.clipboard 剪贴板）在用户那台已配对的电脑上代他执行。" +
-      "只有确实需要用户本人站到电脑前动手（插拔设备、物理接触等）时才让他过去；" +
-      "那台电脑未在线或未配对时直说没连上，不要假装已经办了。"
+      "不要调用 shared_browser.*，也不要让用户去打开客户端「常用工具 → 浏览器」。"
     );
   }
   if (deviceClass === "desktop") {
@@ -215,56 +204,6 @@ function compactSchemaField(text: string, maxChars: number): string {
   if (!trimmed) return "";
   if (trimmed.length <= maxChars) return trimmed;
   return `${trimmed.slice(0, Math.max(0, maxChars - 3)).trimEnd()}...`;
-}
-
-/**
- * 自由文本画像摘要按本轮 query 行级门控（2026-11-18 根修）。
- *
- * memoryManager 的派生摘要（高频话题/偏好/近期意图）此前整块追加进
- * 【用户长期画像】——问年龄时它把"喜欢刘浩存/关注旅游"等一起摊出来，
- * 是「问一个字段、顺带全报」的残余通道。这里只保留与用户原话有 2-gram /
- * 英文词重叠的行；无重叠行一律不注入。query 为空时保持原样（首轮/程序调用）。
- */
-function gateFreeTextLinesForQuery(text: string | undefined, query: string): string | undefined {
-  const trimmed = text?.trim();
-  if (!trimmed) return undefined;
-  const q = query.replace(/\s+/g, "").toLowerCase();
-  if (!q) return trimmed;
-  const grams = new Set<string>();
-  for (let i = 0; i + 2 <= q.length; i++) grams.add(q.slice(i, i + 2));
-  for (const term of q.match(/[a-z0-9]{3,}/g) ?? []) grams.add(term);
-  const kept = trimmed.split("\n").filter((line) => {
-    const lower = line.toLowerCase();
-    for (const gram of grams) {
-      if (lower.includes(gram)) return true;
-    }
-    return false;
-  });
-  return kept.length > 0 ? kept.join("\n") : undefined;
-}
-
-/**
- * 文件画像 + memoryManager 派生摘要合并（2026-09-29 互斥改合并）：
- * 文件画像（LLM 抽取的当前事实）为主位；派生摘要与画像不重复的行追加在后。
- * 产物进稳定层【用户长期画像】，吃 prefix cache——画像只在真变更时断一次缓存。
- */
-export function mergeUserProfilePromptSources(
-  fileProfile: string | undefined,
-  managerSummary: string | undefined,
-): string | undefined {
-  if (!fileProfile) return managerSummary;
-  if (!managerSummary) return fileProfile;
-  const fileLines = new Set(
-    fileProfile
-      .split("\n")
-      .map((l) => l.trim())
-      .filter(Boolean),
-  );
-  const extraLines = managerSummary
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l && !fileLines.has(l));
-  return extraLines.length > 0 ? `${fileProfile}\n${extraLines.join("\n")}` : fileProfile;
 }
 
 function splitPromptLines(block: string | undefined): string[] {
@@ -381,7 +320,7 @@ export type BuildPromptContextInput = {
   interruptedContext?: string;
   userLocation?: string;
   /**
-   * 发送消息的设备类别（2026-10-07）：desktop | mobile。WS 连接自报，
+   * 发送消息的设备类别：desktop | mobile。WS 连接自报，
    * 注入【运行环境】块让模型感知手机/电脑（手机端短回复、不引导桌面操作）。
    * 缺省（程序化调用方/旧客户端）不注入。
    */
@@ -473,7 +412,6 @@ function pickPromptContextLayers(memory: AgentPromptMemoryContext): PromptContex
       key === "memoryFacts" ||
       key === "memoryCommitments" ||
       key === "memoryOpenLoops" ||
-      key === "sessionRecap" ||
       key === "relationshipGuidance" ||
       key === "skillIndex"
     ) {
@@ -642,7 +580,6 @@ export class PromptContextBuilder {
     const turnUnderstanding = input.understanding;
     const followUpTurn = turnUnderstanding?.isFollowUp === true;
     const digestService = getDailyDigestService();
-    const memoryManager = getMemoryManagerService();
 
     // KV 长期字段读路径：按轮召回（sliceMemoryEntriesToPromptContext 内做相关度
     // 过滤，命中制、无命中零注入）。这里只决定"取哪些键"——取本轮真会渲染的键，
@@ -673,11 +610,7 @@ export class PromptContextBuilder {
           fromKv.memoryCommitments = undefined;
         }
       }
-      const kvCurrentMission = compactPromptBlock(formatKvValueForPrompt(entries["memory_current_mission"]), 240);
-      if (kvCurrentMission) {
-        fromKv.taskContext = [`current-mission-from-memory: ${kvCurrentMission}`].join("\n");
       }
-    }
 
     const agentCaps = config.memoryPrompt.agentCapsInPrompt
       ? buildAgentBehaviorPrompt()
@@ -696,8 +629,6 @@ export class PromptContextBuilder {
       followUpTurn || !userText
         ? undefined
         : digestService.getRelevantPromptDigest(input.actorId, userText);
-    const userProfileFromManager =
-      memoryManager?.getProfileForPrompt(input.actorId) ?? undefined;
     // P2-1 元认知：同步读记忆目录缓存（cognize 阶段刷新，60s TTL；未命中为空串跳过注入）
     const memoryInventorySummary = compactPromptBlock(
       getGlobalMemoryInventory()?.getCachedSummary(input.actorId) ?? "",
@@ -789,13 +720,8 @@ export class PromptContextBuilder {
       turnUnderstanding?.scheduleQuery === true ? 700 : 400,
     );
     const compactTravelState = compactPromptBlock(travelState, 300);
-    const userProfileFromManagerCompact = gateFreeTextLinesForQuery(userProfileFromManager, userText);
-    // 2026-09-29 互斥改合并：文件画像（LLM 抽取的当前事实）升稳定层【用户长期画像】主位，
-    // manager 派生摘要非重复行追加；原互斥（manager 存在即弃文件画像）导致画像被挤掉。
-    const userProfileSummary = mergeUserProfilePromptSources(
-      rawUserProfile,
-      userProfileFromManagerCompact,
-    );
+    // 画像唯一权威：USER_PROFILE.md 投影（manager 派生摘要通道已随 KV 摘要槽下线）。
+    const userProfileSummary = rawUserProfile;
     // 手机端对话式首启引导（2026-11-07）优先：账号级状态机给出「该接哪一步」
     // 的意图（只给状态，不教措辞），跑完自动消失。引导未激活时回退到原来的
     // 冷启动破冰提示（画像空 + 会话首轮，双重门控，零常驻成本）。
@@ -894,7 +820,6 @@ export class PromptContextBuilder {
     }
 
     const seenMemory = new Set<string>();
-    const dedupedMemorySummary = dedupePromptBlock(fromKv.memorySummary, seenMemory);
     const dedupedNarrativeRecall = dedupePromptBlock(narrativeRecall, seenMemory);
     const dedupedDailyDigest = dedupePromptBlock(compactDailyDigest, seenMemory);
     // 对话时间线事实：首次对话/累计轮次/最近对话（ConversationTimelineService，
@@ -906,10 +831,6 @@ export class PromptContextBuilder {
     } catch (err) {
       console.log(`[PromptContextBuilder] 时间线注入失败（忽略）: ${err}`);
     }
-    fromKv = {
-      ...fromKv,
-      ...(dedupedMemorySummary ? { memorySummary: dedupedMemorySummary } : { memorySummary: undefined }),
-    };
 
     // 用户理解档案块：agent 对用户理解的结构化沉淀（store 里的当前档案，不是历史
     // 召回），内容不由本轮 query 决定 → 留稳定层 MEMORY 带；本轮命中的话题
@@ -962,9 +883,22 @@ export class PromptContextBuilder {
     let eventRecallBlock: string | undefined;
     if (input.plane === "chat") {
       try {
-        eventRecallBlock = buildEventRecallBlock(input.actorId, userText);
+        eventRecallBlock = buildEventRecallBlock(input.actorId, userText, input.understanding);
       } catch (err) {
         console.log(`[PromptContextBuilder] 事件回忆注入失败（忽略）: ${err}`);
+      }
+    }
+
+    // 长尾事实召回（structured_facts tail:*）：用户过去表达过的偏好/习惯，
+    // 仅在与本轮话题强相关时带出；定位是往事背景，不是本轮指令。
+    let tailFactsRecallBlock: string | undefined;
+    if (input.plane === "chat") {
+      try {
+        tailFactsRecallBlock =
+          getMemoryComponents().factStore?.renderTailRecallBlock(input.actorId, userText) ??
+          undefined;
+      } catch (err) {
+        console.log(`[PromptContextBuilder] 长尾事实召回失败（忽略）: ${err}`);
       }
     }
 
@@ -1011,6 +945,7 @@ export class PromptContextBuilder {
         ? { narrativeRecall: dedupedNarrativeRecall }
         : {}),
       ...(eventRecallBlock ? { eventRecall: eventRecallBlock } : {}),
+      ...(tailFactsRecallBlock ? { tailFactsRecall: tailFactsRecallBlock } : {}),
       // 工作记忆 / 最近对话回顾：独立块，不参与跨字段语义去重（结构化上下文，非召回条目）
       ...(workingMemorySummary ? { workingMemorySummary } : {}),
       ...(recentConversationHistory ? { recentConversationHistory } : {}),
@@ -1077,39 +1012,39 @@ export class PromptContextBuilder {
       }
     }
 
-    // 恒带字段保真（2026-11-13）：称呼这类「每轮都要用」的字段，必须在最终
-    // prompt 里至少出现一次。上面的去重已保证「只在另一块确实渲染时才删」，
-    // 这里再加一道断言式检查——万一将来渲染逻辑变了，这里立刻暴露，
-    // 而不是让 Agent 悄悄喊错人（或干脆不称呼）。
+    // 读侧唯一裁决：跨块去重 + 全局预算。各 builder 只负责生产候选，
+    // 是否最终进 prompt 由编译器按权威序统一决定（超预算整块丢弃）。
+    const compiled = compileMemoryContext(promptMemory);
+    if (compiled.dedupedLines > 0 || compiled.droppedFields.length > 0) {
+      console.log(
+        `[mem-compile] actor=${input.actorId} deduped=${compiled.dedupedLines} ` +
+          `dropped=[${compiled.droppedFields.join(",")}] chars=${compiled.chars}/${compiled.budgetChars}`,
+      );
+    }
+    const finalMemory = compiled.memory;
+
+    // 恒带字段保真：称呼这类「每轮都要用」的字段必须在最终 prompt 里至少出现
+    // 一次。校验对象只能是编译后的注入位——候选块本身不进 prompt。
     this.checkResidentProfileFields(
-      promptMemory,
+      finalMemory,
       facts.injectedValues,
-      facts.stableBlock,
+      finalMemory.memoryCurrentState,
     );
 
     // 防召回循环：登记本轮实际注入的记忆条目。写入整合链路
     // （memory-consolidation-service）会据此过滤"模型复述注入记忆"产生的
     // 回声候选——注入回上下文的内容不再被提取为新记忆（OpenClaw 2.0 同款结构）。
     try {
-      markInjectedMemory(input.actorId, promptMemory.userUnderstanding);
-      markInjectedMemory(input.actorId, promptMemory.userFacts);
-      markInjectedMemory(input.actorId, promptMemory.lifeRelations);
-      markInjectedMemory(input.actorId, promptMemory.narrativeRecall);
-      markInjectedMemory(input.actorId, promptMemory.memorySummary);
-      markInjectedMemory(input.actorId, promptMemory.memoryPreferences);
-      markInjectedMemory(input.actorId, promptMemory.memoryFacts);
-      markInjectedMemory(input.actorId, promptMemory.memoryCommitments);
-      markInjectedMemory(input.actorId, promptMemory.memoryOpenLoops);
-      markInjectedMemory(input.actorId, promptMemory.sessionRecap);
-      markInjectedMemory(input.actorId, promptMemory.userProfile);
-      markInjectedMemory(input.actorId, promptMemory.userProfileSummary);
-      markInjectedMemory(input.actorId, promptMemory.dailyDigest);
+      markInjectedMemory(input.actorId, finalMemory.memoryCurrentState);
+      markInjectedMemory(input.actorId, finalMemory.memoryPending);
+      markInjectedMemory(input.actorId, finalMemory.memoryRecall);
+      markInjectedMemory(input.actorId, finalMemory.dailyDigest);
     } catch (err) {
       console.log(`[PromptContextBuilder] 注入记忆登记失败（忽略）: ${err}`);
     }
 
     // 注入 prompt 前对 memory/facts 等用户内容字段做 PII 脱敏（手机号/邮箱/IP/身份证/银行卡）
-    return this.redactMemoryFields(promptMemory);
+    return this.redactMemoryFields(finalMemory);
   }
 
   /**
@@ -1341,6 +1276,9 @@ export class PromptContextBuilder {
       v ? redactSensitiveText(v) : undefined;
     return {
       ...ctx,
+      memoryCurrentState: redact(ctx.memoryCurrentState),
+      memoryPending: redact(ctx.memoryPending),
+      memoryRecall: redact(ctx.memoryRecall),
       memorySummary: redact(ctx.memorySummary),
       memoryFacts: redact(ctx.memoryFacts),
       userFacts: redact(ctx.userFacts),
@@ -1354,7 +1292,6 @@ export class PromptContextBuilder {
       userProfile: redact(ctx.userProfile),
       taskContext: redact(ctx.taskContext),
       travelState: redact(ctx.travelState),
-      sessionRecap: redact(ctx.sessionRecap),
       workingMemorySummary: redact(ctx.workingMemorySummary),
       recentConversationHistory: redact(ctx.recentConversationHistory),
       journalRecall: redact(ctx.journalRecall),
@@ -1364,6 +1301,9 @@ export class PromptContextBuilder {
   private hasMemoryContent(memory: AgentPromptMemoryContext): boolean {
     return (
       Boolean(memory.persona) ||
+      Boolean(memory.memoryCurrentState) ||
+      Boolean(memory.memoryPending) ||
+      Boolean(memory.memoryRecall) ||
       Boolean(memory.memorySummary) ||
       Boolean(memory.agentCaps) ||
       Boolean(memory.narrativeRecall) ||
@@ -1372,7 +1312,6 @@ export class PromptContextBuilder {
       Boolean(memory.memoryFacts) ||
       Boolean(memory.memoryCommitments) ||
       Boolean(memory.memoryOpenLoops) ||
-      Boolean(memory.sessionRecap) ||
       Boolean(memory.interruptedContext) ||
       Boolean(memory.userLocation) ||
       Boolean(memory.taskContext) ||

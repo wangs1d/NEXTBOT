@@ -5,7 +5,6 @@ import {
   UnifiedClientEventType,
   UnifiedServerEventType,
 } from "@nextbot/agent-world";
-import { PROTOCOL_UNIFIED_TOOL_NAMES } from "../../tools/protocol-unified-tools.js";
 import { isBootPending } from "../../bootstrap/boot-readiness.js";
 import { buildThinkingBudgetHealth } from "../../external-model/thinking-policy.js";
 import type { HttpRouteDeps } from "./types.js";
@@ -67,7 +66,6 @@ export function registerSystemRoutes(
       version: UNIFIED_PROTOCOL_VERSION,
       wsClientEvents: Object.values(UnifiedClientEventType),
       wsServerEvents: Object.values(UnifiedServerEventType),
-      tools: [...PROTOCOL_UNIFIED_TOOL_NAMES],
       http: {
         quotaPath: "/protocol/unified/quota",
         memoryPath: "/protocol/unified/memory",

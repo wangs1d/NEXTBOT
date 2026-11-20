@@ -178,21 +178,14 @@ export function formatUserLocationLabel(info: UserGeoInfo): string {
   return "未知";
 }
 
-/** 定位精度的人读描述：设备没给精度就不编，给了就如实带上。 */
-function formatAccuracy(accuracyMeters?: number): string {
-  if (accuracyMeters == null || !Number.isFinite(accuracyMeters) || accuracyMeters <= 0) return "";
-  return `±${Math.round(accuracyMeters)} 米`;
-}
-
 export async function resolveUserLocationPrompt(ctx?: ClientGeoContext): Promise<string | undefined> {
   const info = await resolveUserGeo(ctx);
   if (!info) return undefined;
   const label = formatUserLocationLabel(info);
   if (!label || label === "未知") return undefined;
-  const accuracy = formatAccuracy(info.accuracyMeters);
   const coordNote =
     info.latitude != null && info.longitude != null
-      ? `（GPS ${info.latitude.toFixed(6)}, ${info.longitude.toFixed(6)}${accuracy ? `，精度 ${accuracy}` : ""}）`
+      ? `（GPS ${info.latitude.toFixed(6)}, ${info.longitude.toFixed(6)}）`
       : "";
   // 精确位置块（2026-11-14）：只给省市区等于「大概在哪」，街区/小区/地标必须一起给出，
   // 模型才有材料回答「我现在在哪」而不是「你在某某市」。地标距离也如实标注。
@@ -209,12 +202,11 @@ export async function resolveUserLocationPrompt(ctx?: ClientGeoContext): Promise
   // 才是用户屏幕上的钟，位置块声称的时区一旦与时钟块不同，模型就会选错。
   // 「禁止反问」约束（2026-07-29 反问 bug 的根治位）：位置是系统后台注入的背景，
   // 措辞必须压制 LLM 把它当话题向用户确认（"你是不是在 XX"）。
+  // 精度不在 prompt 中表达（2026-11-19）：精度数字只作链路内部信号（围栏/距离门控），
+  // 不在提示里引导模型报「定位精度」——用户问「我在哪」时不需要精确度量词。
   lines.push(
     "此为系统后台注入的定位背景（前端 GPS + 逆地理编码），回答位置/天气类问题时必须直接以此为准：" +
       "用户问「我在哪」时答到上面的街道/门牌/地标这一级，不要只回答城市或区县；" +
-      (accuracy
-        ? `精度不足时如实说明范围（当前 ${accuracy}）。`
-        : "没有精度数据时不要声称精确到米。") +
       "【当前位置】只代表此刻所在，不等于家/公司等常驻地点；用户问家/公司所在地时必须调用 place 工具按需查询，" +
       "不要用本块的城市/区县代替，也不要凭记忆猜城市。" +
       "禁止向用户反问或确认所在位置，也不要主动提及本条来源，不要向用户展示坐标数字。",

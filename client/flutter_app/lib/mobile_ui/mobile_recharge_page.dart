@@ -3,13 +3,14 @@ import "dart:async";
 import "package:flutter/material.dart";
 import "package:url_launcher/url_launcher.dart";
 
+import "../core/services/alipay_pay_service.dart";
 import "../core/services/recharge_api.dart";
 import "mobile_theme.dart";
 
 /// 手机端「额度充值」页。
 ///
-/// 与官网充值页的区别：这里直接用 App 已登录的 access token 调
-/// `/api/recharge/app/*`，不再跳浏览器重新做邮箱验证码登录；金额选择、
+/// 与官网充值页的区别：这里直接用 App 已登录的 access token 调统一支付接口
+/// `/api/recharge/payments`，不再跳浏览器重新做邮箱验证码登录；金额选择、
 /// 余额展示、支付结果轮询都在 App 内完成，只有最后一步支付宝付款交给
 /// 系统浏览器/支付宝 App（复用同一套 webpay 下单与记账服务）。
 class MobileRechargePage extends StatefulWidget {
@@ -35,6 +36,11 @@ class _MobileRechargePageState extends State<MobileRechargePage>
 
   int? _selectedPreset = 100;
   bool _customSelected = false;
+
+  /// 当前选中的支付方式（支付宝 / 微信）。
+  String _provider = "alipay";
+  RechargeProviders _providers =
+      const RechargeProviders(alipay: true, wechat: false);
 
   bool _submitting = false;
   bool _waiting = false;
@@ -74,7 +80,12 @@ class _MobileRechargePageState extends State<MobileRechargePage>
         _loadError = null;
       });
     }
-    final RechargeResult<RechargeAccount> r = await _api.fetchAccount();
+    final Future<RechargeResult<RechargeAccount>> accountFuture =
+        _api.fetchAccount();
+    final Future<RechargeResult<RechargeProviders>> providersFuture =
+        _api.fetchProviders();
+    final RechargeResult<RechargeAccount> r = await accountFuture;
+    final RechargeResult<RechargeProviders> providers = await providersFuture;
     if (!mounted) return;
     setState(() {
       if (r.ok && r.data != null) {
@@ -82,6 +93,17 @@ class _MobileRechargePageState extends State<MobileRechargePage>
         _loadError = null;
       } else if (!silent) {
         _loadError = r.message ?? "额度余额加载失败";
+      }
+      if (!silent && providers.ok && providers.data != null) {
+        _providers = providers.data!;
+        // 默认通道不可用时自动切到可用通道（当前只有支付宝可用）。
+        if (!_providerEnabled) {
+          if (_providers.alipay) {
+            _provider = "alipay";
+          } else if (_providers.wechat) {
+            _provider = "wechat";
+          }
+        }
       }
       if (!silent) _loading = false;
     });
@@ -102,12 +124,16 @@ class _MobileRechargePageState extends State<MobileRechargePage>
     return value == null ? "0.00" : value.toStringAsFixed(2);
   }
 
+  bool get _providerEnabled =>
+      _provider == "wechat" ? _providers.wechat : _providers.alipay;
+
   bool get _canPay =>
       !_loading &&
       _loadError == null &&
       !_submitting &&
       !_waiting &&
-      _amountValid;
+      _amountValid &&
+      _providerEnabled;
 
   void _selectPreset(int value) {
     setState(() {
@@ -126,6 +152,10 @@ class _MobileRechargePageState extends State<MobileRechargePage>
 
   Future<void> _pay() async {
     if (!_canPay) return;
+    if (_provider != "alipay") {
+      setState(() => _payMessage = "微信支付暂未开通，请使用支付宝");
+      return;
+    }
     FocusScope.of(context).unfocus();
     setState(() {
       _submitting = true;
@@ -133,7 +163,10 @@ class _MobileRechargePageState extends State<MobileRechargePage>
       _payMessage = null;
     });
 
-    final RechargeResult<RechargeOrder> r = await _api.createOrder(_amount);
+    // 已安装支付宝 → 走 App 原生收银台；未安装/非 Android → 浏览器 wap 收银台。
+    final bool hasAlipayApp = await AlipayPayService.isInstalled();
+    final RechargeResult<RechargeOrder> r =
+        await _api.createOrder(_amount, payMode: hasAlipayApp ? "app" : "wap");
     if (!mounted) return;
     if (!r.ok || r.data == null) {
       setState(() {
@@ -144,6 +177,36 @@ class _MobileRechargePageState extends State<MobileRechargePage>
     }
 
     final RechargeOrder order = r.data!;
+    if (hasAlipayApp) {
+      final String? orderStr = order.orderStr;
+      if (orderStr == null || orderStr.isEmpty) {
+        setState(() {
+          _submitting = false;
+          _payMessage = "支付宝订单生成失败，请稍后重试";
+        });
+        return;
+      }
+      final AlipayPayResult payResult = await AlipayPayService.pay(orderStr);
+      if (!mounted) return;
+      if (payResult.success || payResult.pending) {
+        setState(() {
+          _submitting = false;
+          _waiting = true;
+          _orderNo = order.outTradeNo;
+          _payMessage = payResult.success
+              ? "支付已完成，正在确认到账…"
+              : "支付结果确认中，请稍候…";
+        });
+        _startPolling();
+      } else {
+        setState(() {
+          _submitting = false;
+          _payMessage = payResult.displayMessage;
+        });
+      }
+      return;
+    }
+
     final String? url = order.paymentUrl;
     if (url == null || url.isEmpty) {
       setState(() {
@@ -342,7 +405,7 @@ class _MobileRechargePageState extends State<MobileRechargePage>
           if (_payMessage != null) _message(p),
           const SizedBox(height: 14),
           Text(
-            "支付在支付宝完成，成功后额度自动到账。未安装支付宝时，可在收银台选择浏览器付款。",
+            "已安装支付宝时直接唤起支付宝收银台；未安装则打开浏览器付款。支付成功后额度自动到账。",
             textAlign: TextAlign.center,
             style: TextStyle(color: p.textMuted, fontSize: 12, height: 1.6),
           ),
@@ -393,61 +456,42 @@ class _MobileRechargePageState extends State<MobileRechargePage>
     );
   }
 
+  void _selectProvider(String provider) {
+    setState(() {
+      _provider = provider;
+      _payMessage = null;
+    });
+  }
+
   Widget _methodCard(MobilePalette p) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       decoration: BoxDecoration(
         color: p.surface,
         borderRadius: BorderRadius.circular(14),
         border: Border.all(color: p.divider),
       ),
-      child: Row(
+      clipBehavior: Clip.antiAlias,
+      child: Column(
         children: <Widget>[
-          Container(
-            width: 34,
-            height: 34,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: const Color(0xFF1677FF),
-              borderRadius: BorderRadius.circular(9),
-            ),
-            child: const Text(
-              "支",
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 17,
-                fontWeight: FontWeight.w700,
-                height: 1,
-              ),
-            ),
+          _PaymentMethodTile(
+            mark: const _AlipayMark(),
+            title: "支付宝",
+            subtitle: _providers.alipay ? "拉起支付宝 App 收银台" : "支付通道未配置",
+            selected: _provider == "alipay",
+            enabled: _providers.alipay,
+            disabledText: "未配置",
+            onTap: _providers.alipay ? () => _selectProvider("alipay") : null,
           ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                Text(
-                  "支付宝",
-                  style: TextStyle(
-                    color: p.textPrimary,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  "ALIPAY",
-                  style: TextStyle(
-                    color: p.textMuted,
-                    fontSize: 10,
-                    fontWeight: FontWeight.w600,
-                    letterSpacing: 1.6,
-                  ),
-                ),
-              ],
-            ),
+          Divider(height: 1, indent: 14, endIndent: 14, color: p.divider),
+          _PaymentMethodTile(
+            mark: const _WechatMark(),
+            title: "微信支付",
+            subtitle: _providers.wechat ? "拉起微信完成付款" : "商户未开通",
+            selected: _provider == "wechat",
+            enabled: _providers.wechat,
+            disabledText: "未开通",
+            onTap: _providers.wechat ? () => _selectProvider("wechat") : null,
           ),
-          const Icon(Icons.check_circle, size: 20, color: Color(0xFF34C759)),
         ],
       ),
     );
@@ -578,3 +622,135 @@ class _AmountChip extends StatelessWidget {
     );
   }
 }
+
+/// 收银台里的单个支付方式行：选中态/未开通态都在这一处收口。
+class _PaymentMethodTile extends StatelessWidget {
+  const _PaymentMethodTile({
+    required this.mark,
+    required this.title,
+    required this.subtitle,
+    required this.selected,
+    required this.enabled,
+    required this.disabledText,
+    required this.onTap,
+  });
+
+  final Widget mark;
+  final String title;
+  final String subtitle;
+  final bool selected;
+  final bool enabled;
+  final String disabledText;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final MobilePalette p = MobileTheme.of(context);
+    return Opacity(
+      opacity: enabled ? 1 : 0.55,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          child: Row(
+            children: <Widget>[
+              mark,
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(
+                      title,
+                      style: TextStyle(
+                        color: p.textPrimary,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      subtitle,
+                      style: TextStyle(color: p.textMuted, fontSize: 12),
+                    ),
+                  ],
+                ),
+              ),
+              if (!enabled)
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: p.background,
+                    borderRadius: BorderRadius.circular(999),
+                    border: Border.all(color: p.divider),
+                  ),
+                  child: Text(
+                    disabledText,
+                    style: TextStyle(color: p.textMuted, fontSize: 12),
+                  ),
+                )
+              else if (selected)
+                Icon(Icons.check_circle, size: 20, color: p.accent)
+              else
+                Icon(Icons.radio_button_unchecked, size: 20, color: p.textMuted),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AlipayMark extends StatelessWidget {
+  const _AlipayMark();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 34,
+      height: 34,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: const Color(0xFF1677FF),
+        borderRadius: BorderRadius.circular(9),
+      ),
+      child: const Text(
+        "支",
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: 17,
+          fontWeight: FontWeight.w700,
+          height: 1,
+        ),
+      ),
+    );
+  }
+}
+
+class _WechatMark extends StatelessWidget {
+  const _WechatMark();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 34,
+      height: 34,
+      alignment: Alignment.center,
+      decoration: BoxDecoration(
+        color: const Color(0xFF07C160),
+        borderRadius: BorderRadius.circular(9),
+      ),
+      child: const Text(
+        "微",
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: 17,
+          fontWeight: FontWeight.w700,
+          height: 1,
+        ),
+      ),
+    );
+  }
+}
+

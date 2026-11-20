@@ -114,7 +114,6 @@ export function renderToolStatusLine(
     hasPrefix(tool, [
       "search_web",
       "deep_search",
-      "info.search",
       "internet.",
       "desktop.web_search",
     ])
@@ -174,9 +173,6 @@ export function renderToolStatusLine(
   // ── 日程 / 提醒 ──
   if (hasPrefix(tool, ["calendar"])) {
     return title ? `我在排「${title}」` : null;
-  }
-  if (hasPrefix(tool, ["reminder."])) {
-    return title ? `我设个「${title}」的提醒` : null;
   }
 
   // ── 沟通 ──

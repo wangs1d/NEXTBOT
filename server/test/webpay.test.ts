@@ -176,6 +176,17 @@ describe("下单", () => {
     assert.equal(order.status, "pending");
     assert.equal(order.totalAmount, "0.01");
   });
+  it("app 模式返回客户端 SDK 签名订单串（不生成跳转页）", () => {
+    const result = service.createOrder({
+      amount: "0.01",
+      subject: "App 充值",
+      payMode: "app",
+    });
+    assert.equal(result.paymentHtml, "");
+    assert.match(String(result.orderStr), /alipay\.trade\.app\.pay/);
+    assert.match(String(result.orderStr), /QUICK_MSECURITY_PAY/);
+    assert.match(String(result.orderStr), /sign=/);
+  });
   it("非法金额与空标题被拒绝", () => {
     assert.throws(() => service.createOrder({ amount: "0", subject: "x" }));
     assert.throws(() => service.createOrder({ amount: "1.001", subject: "x" }));

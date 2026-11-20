@@ -1071,6 +1071,20 @@ export class UserPersonalizationService {
     return toEmotionState(this.readState(actorId, EMOTION_STATE_KEY));
   }
 
+  /**
+   * 主动消息用的最近情绪快照（只读、零副作用，2026-11-19）。
+   *
+   * 只暴露 mood 一个标签，不把整段 toneGuidance 塞给 pulse——主动消息的语气由
+   * SpeechHub 统一管，这里只需要知道「他现在情绪低不低」来决定闲聊要不要收着。
+   */
+  getRecentMood(actorId: string): "positive" | "neutral" | "negative" | "stressed" {
+    try {
+      return dominantRecentEmotion(this.loadEmotionState(actorId).recent);
+    } catch {
+      return "neutral";
+    }
+  }
+
   private loadFactStore(actorId: string) {
     return toFactStore(this.readState(actorId, USER_PROFILE_FACTS_KEY));
   }

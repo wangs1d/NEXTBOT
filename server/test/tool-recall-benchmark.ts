@@ -121,14 +121,11 @@ const CASES: Case[] = [
   { domain: "voice", query: "把这段话念出来", expected: ["voice.speak"] },
   { domain: "phone", query: "给张三打个电话", expected: ["phone.dial"] },
   { domain: "phone", query: "看看我手机还有多少电", expected: ["phone.battery"] },
-  { domain: "budget", query: "这个月餐饮预算还剩多少", expected: ["budget.calculate"] },
   { domain: "shopping", query: "双十一买什么耳机性价比高帮我看看", expected: ["shopping.suggest"] },
   { domain: "commitment", query: "记一下我答应了下周三前把报告交了", expected: ["commitment.create"] },
   { domain: "geofence", query: "到家的时候提醒我拿快递", expected: ["geofence"] },
-  { domain: "care", query: "我妈生日是哪天来着", expected: ["care.get_important_dates"] },
   { domain: "interest", query: "帮我一直盯着这个话题有新消息就告诉我", expected: ["interest.manage"] },
   { domain: "embodiment", query: "让化身走到屏幕左边去", expected: ["embodiment.move"] },
-  { domain: "desktop", query: "帮我打开Steam", expected: ["desktop.open"] },
   // ── 多意图（子句切分域多数票） ──
   { domain: "travel+weather", query: "帮我规划去成都的行程，顺便看下那边天气", expected: ["travel.plan-itinerary"] },
   // ── 噪声对照组（after 预载必须为空） ──

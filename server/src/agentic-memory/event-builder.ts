@@ -12,6 +12,9 @@ import { getEventMaxToolTraces, getEventSummaryMaxChars } from "./env.js";
 
 export type EventStatus = "ok" | "empty" | "failed" | "partial" | "invalid";
 
+/** 事件档位：ephemeral 只做短期检索，normal 进常规层，salient 可进画像候选。 */
+export type EventTier = "ephemeral" | "normal" | "salient";
+
 export type EventToolTrace = {
   toolName: string;
   input: Record<string, unknown>;
@@ -65,7 +68,7 @@ const KIND_RULES: Array<[RegExp, string]> = [
   [/^clock\./, "clock_query"],
   [/^(email|sms)\./, "message"],
   [/^phone\./, "phone_call"],
-  [/^(ride_hailing|ride)\./, "ride"],
+  [/^(ride_hailing|ride)(\.|$)/, "ride"],
   [/^health\./, "health"],
   [/^ledger\.|^finance\./, "finance"],
 ];
@@ -73,7 +76,6 @@ const KIND_RULES: Array<[RegExp, string]> = [
 /** 元工具/支撑管线不改变「这轮做过什么」的判定（与 tool-loop 的实质工具同口径）。 */
 const META_TOOLS = new Set<string>([
   "tool_discover",
-  "tool_search",
   "tool.list",
   "tool.describe",
   "skill.list",
@@ -399,6 +401,44 @@ function buildToolPayload(traces: EventToolTrace[]): Record<string, unknown> {
   return payload;
 }
 
+/** 一次性查询类结果：检索价值短，72h 后由写入侧清理（原文仍在 WAL）。 */
+const EPHEMERAL_KINDS = new Set(["weather_query", "web_search", "clock_query", "media"]);
+/** 计划/承诺/交易类：构成用户生活轨迹，允许进入长期抽象与画像候选。 */
+const SALIENT_KINDS = new Set([
+  "schedule_write",
+  "travel_plan",
+  "finance",
+  "order",
+  "message",
+  "phone_call",
+]);
+const EXPLICIT_REMEMBER_RE = /记住|记一下|帮我记|别忘了|别忘记/;
+
+function deriveTier(kind: string, userText: string): EventTier {
+  if (EXPLICIT_REMEMBER_RE.test(userText)) return "salient";
+  if (SALIENT_KINDS.has(kind)) return "salient";
+  if (EPHEMERAL_KINDS.has(kind)) return "ephemeral";
+  return "normal";
+}
+
+/** 规则打分（0~1）：证据条数/实体/结果状态/档位，同输入恒等，零 LLM。 */
+function scoreEvent(
+  tier: EventTier,
+  status: EventStatus,
+  traces: EventToolTrace[],
+  entities: string[],
+): number {
+  let score = 0.3;
+  if (traces.length > 0) score += 0.15;
+  if (traces.length > 1) score += 0.1;
+  if (entities.length > 0) score += 0.2;
+  if (status === "ok") score += 0.15;
+  if (status === "partial") score += 0.05;
+  if (tier === "salient") score += 0.1;
+  if (tier === "ephemeral") score -= 0.1;
+  return Math.max(0, Math.min(1, Number(score.toFixed(2))));
+}
+
 /** djb2：无 messageId 时的稳定哈希键。 */
 function hashKey(value: string): string {
   let hash = 5381;
@@ -420,6 +460,11 @@ export function buildTurnEvent(input: TurnEventInput): MemoryEventRecord {
   const payload = buildToolPayload(traces);
   const suspectPrice = kind === "price_compare" && isSuspectPriceCompare(traces);
   if (suspectPrice) payload.suspect = "accessory";
+  const status: EventStatus = suspectPrice ? "invalid" : deriveStatus(traces);
+  const entities = extractEntities(input.userText, traces, payload);
+  const tier = deriveTier(kind, input.userText);
+  payload.tier = tier;
+  payload.salience = scoreEvent(tier, status, traces, entities);
   return {
     id: buildEventId(input.actorId, input.messageId, input.ts, input.userText),
     actorId: input.actorId,
@@ -428,10 +473,10 @@ export function buildTurnEvent(input: TurnEventInput): MemoryEventRecord {
     eventTime: input.ts,
     recordedAt: new Date().toISOString(),
     kind,
-    status: suspectPrice ? "invalid" : deriveStatus(traces),
+    status,
     userText: summarizeEventText(input.userText, maxChars),
     answerText: summarizeEventText(input.assistantText, maxChars),
-    entities: extractEntities(input.userText, traces, payload),
+    entities,
     payload,
     refs: {
       messageId: input.messageId ?? null,

@@ -28,6 +28,8 @@ test("dynamic mode strips stable prompt fields and keeps dynamic ones", () => {
   assert.equal(plan.toolExposureProfile, "scoped");
   assert.deepEqual(plan.pinnedToolNames, [
     "calendar",
+    "web_search",
+    "web_fetch",
     "search_web",
     "search_images",
     "search_videos",
@@ -81,7 +83,6 @@ test("scoped tool exposure keeps only the pinned tool suite", () => {
     toolExposureProfile: plan.toolExposureProfile,
     pinnedToolNames: plan.pinnedToolNames,
     agentAccessMode: "sandbox",
-    desktopBridgeOnline: false,
     phoneBridgeOnline: false,
   });
   const names = resolved.visibleTools
@@ -91,12 +92,8 @@ test("scoped tool exposure keeps only the pinned tool suite", () => {
 
   assert.deepEqual(names, [
     "calendar",
-    "fetch_web",
-    "search_images",
-    "search_videos",
-    "search_web",
-    "video.find",
-    "video.grab",
+    "web_fetch",
+    "web_search",
   ]);
 });
 
@@ -150,5 +147,4 @@ test("read-only tools in high-risk families pass the gate (2026-09-28 root fix)"
   assert.deepEqual(kernel.checkToolAction("social.search_posts"), { allowed: true });
   // 写/外发动作照旧拦
   assert.equal(kernel.checkToolAction("social.post").allowed, false);
-  assert.equal(kernel.checkToolAction("wallet.transfer").allowed, false);
 });

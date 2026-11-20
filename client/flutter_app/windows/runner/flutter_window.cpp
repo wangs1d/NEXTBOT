@@ -74,16 +74,6 @@ bool FlutterWindow::OnCreate() {
         HandleOverlayMethodCall(call, std::move(result));
       });
 
-  desktop_bridge_channel_ = std::make_unique<
-      flutter::MethodChannel<flutter::EncodableValue>>(
-      flutter_controller_->engine()->messenger(), "pai/desktop_bridge",
-      &flutter::StandardMethodCodec::GetInstance());
-
-  desktop_bridge_channel_->SetMethodCallHandler(
-      [this](const auto& call, auto result) {
-        HandleDesktopBridgeMethodCall(call, std::move(result));
-      });
-
   // 独立来电悬浮窗 MethodChannel —— pai/incoming_call
   incoming_call_channel_ = std::make_unique<
       flutter::MethodChannel<flutter::EncodableValue>>(
@@ -381,7 +371,6 @@ void FlutterWindow::OnDestroy() {
   window_titlebar_channel_.reset();
   overlay_window_.reset();
   overlay_channel_.reset();
-  desktop_bridge_channel_.reset();
   // 先关播放器（waveOutClose 会阻断后续音频线程回调），再释放 channel
   pcm_player_.reset();
   pcm_player_channel_.reset();
@@ -653,53 +642,6 @@ void FlutterWindow::HandleOverlayMethodCall(
   } else {
     result->NotImplemented();
   }
-}
-
-void FlutterWindow::HandleDesktopBridgeMethodCall(
-    const flutter::MethodCall<flutter::EncodableValue>& call,
-    std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
-  const std::string& method = call.method_name();
-
-  if (method == "captureScreen") {
-    std::optional<int> left, top, width, height;
-    const auto* args = std::get_if<flutter::EncodableMap>(call.arguments());
-    if (args) {
-      auto read_int = [&](const char* key) -> std::optional<int> {
-        auto it = args->find(flutter::EncodableValue(key));
-        if (it == args->end() || it->second.IsNull()) return std::nullopt;
-        return static_cast<int>(std::get<int64_t>(it->second));
-      };
-      left = read_int("left");
-      top = read_int("top");
-      width = read_int("width");
-      height = read_int("height");
-    }
-
-    auto cap = CaptureDesktopPng(left, top, width, height);
-    if (!cap || !cap->ok) {
-      flutter::EncodableMap err;
-      err[flutter::EncodableValue("ok")] = flutter::EncodableValue(false);
-      err[flutter::EncodableValue("error")] = flutter::EncodableValue(
-          cap ? cap->error : "capture failed");
-      result->Success(flutter::EncodableValue(err));
-      return;
-    }
-
-    flutter::EncodableMap ok;
-    ok[flutter::EncodableValue("ok")] = flutter::EncodableValue(true);
-    ok[flutter::EncodableValue("imageBase64")] =
-        flutter::EncodableValue(Base64Encode(cap->png_bytes));
-    ok[flutter::EncodableValue("mimeType")] =
-        flutter::EncodableValue("image/png");
-    ok[flutter::EncodableValue("width")] =
-        flutter::EncodableValue(static_cast<int64_t>(cap->width));
-    ok[flutter::EncodableValue("height")] =
-        flutter::EncodableValue(static_cast<int64_t>(cap->height));
-    result->Success(flutter::EncodableValue(ok));
-    return;
-  }
-
-  result->NotImplemented();
 }
 
 void FlutterWindow::HandleIncomingCallMethodCall(

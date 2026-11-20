@@ -68,8 +68,6 @@ export function fenceUntrustedToolContent(toolName: string, content: string): st
 /** 不进围栏的系统支撑工具（结果由系统自身构造，非外部数据）。 */
 const FENCE_SKIP_TOOLS: ReadonlySet<string> = new Set([
   "tool_discover",
-  "tool_search",
-  "tool_describe",
   "agent.query_capabilities",
   "obs_recall",
   "task.status",

@@ -1,8 +1,8 @@
 // prompt-assembler 分层契约测试（2026-09-23 缓存修复回归）。
 //
-// 背景：sessionRecap 曾被放在稳定层（假设"会话内不变"），但滚动 recap 随
-// thread 裁剪持续追加——稳定前缀每轮被打穿，工具循环 prefix cache 命中率
-// 实测仅 37%。契约：随对话轮增长的内容必须在动态层；稳定层跨轮逐字节相等。
+// 契约：随对话轮增长的内容必须在动态层；稳定层跨轮逐字节相等。
+// 账号级 sessionRecap 已下线，「会话回顾」不再存在——会话连续性由会话级
+// STM（workbench/最近对话/今日日志）承担。
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -14,20 +14,25 @@ function buildMemory(turn: number): AgentPromptMemoryContext {
   return {
     persona: "【人格】\n你是可靠的私人管家。",
     userFacts: "【用户事实库】\n所在城市：杭州",
-    memorySummary: "持久记忆：用户在做 NextBot 项目。",
-    // 滚动 recap：随轮追加（模拟 thread 裁剪后 recap 增行）
-    sessionRecap: `[session-recap] 第 ${turn} 轮前的摘要行。`,
     recentConversationHistory: `用户：第 ${turn} 轮消息`,
     currentTime: `2026-09-23 11:${String(10 + turn).padStart(2, "0")}`,
   } as AgentPromptMemoryContext;
 }
 
-test("sessionRecap 不进稳定层（随轮增长内容必须沉底）", () => {
+test("随轮增长的内容不进稳定层（短期上下文必须沉底）", () => {
   const { stableSystemPrompt, dynamicSystemPrompt } = assembleSystemPrompt("你是助理。", buildMemory(1));
-  assert.ok(!stableSystemPrompt.includes("session-recap"), "稳定层不得包含 sessionRecap");
-  assert.ok(!stableSystemPrompt.includes("持久记忆"), "【持久记忆】是按轮召回，不得进稳定层");
-  assert.ok(dynamicSystemPrompt?.includes("持久记忆"), "【持久记忆】在动态层");
-  assert.ok(dynamicSystemPrompt?.includes("会话回顾"), "sessionRecap 在动态层短期上下文家族");
+  assert.ok(!stableSystemPrompt.includes("会话回顾"), "账号级会话回顾已下线，不得出现在任何层");
+  assert.ok(dynamicSystemPrompt?.includes("最近对话"), "短期上下文家族在动态层");
+});
+
+test("memory_summary 已下线：即使旧数据残留也不注入【持久记忆】", () => {
+  const memory = {
+    ...buildMemory(1),
+    memorySummary: "持久记忆：用户在做 NextBot 项目。",
+  } as AgentPromptMemoryContext;
+  const { stableSystemPrompt, dynamicSystemPrompt } = assembleSystemPrompt("你是助理。", memory);
+  assert.ok(!stableSystemPrompt.includes("持久记忆"));
+  assert.ok(!dynamicSystemPrompt?.includes("持久记忆"));
 });
 
 test("事件回忆只进动态层（每轮随话题变）", () => {
@@ -47,7 +52,7 @@ test("跨轮稳定层逐字节相等（prefix cache 前提）", () => {
   assert.equal(
     t1.stableSystemPrompt,
     t2.stableSystemPrompt,
-    "仅 recap/时间变化的相邻两轮，稳定层必须逐字节相等",
+    "仅短期上下文/时间变化的相邻两轮，稳定层必须逐字节相等",
   );
   assert.notEqual(t1.fullSystemPrompt, t2.fullSystemPrompt, "动态层随轮变化（否则断言无意义）");
 });

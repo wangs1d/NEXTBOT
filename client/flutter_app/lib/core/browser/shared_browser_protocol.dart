@@ -152,7 +152,7 @@ String? resolveInputToUrl(String input) {
   return null;
 }
 
-/// 搜索词 → 搜索引擎 URL（Bing 中文，与 desktop.web_search 引擎选择一致）。
+/// 搜索词 → 搜索引擎 URL（Bing 中文，与服务端 web_search 引擎选择一致）。
 String searchUrlFor(String query) {
   return "https://cn.bing.com/search?q=${Uri.encodeQueryComponent(query)}";
 }

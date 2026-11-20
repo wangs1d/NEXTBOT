@@ -11,9 +11,16 @@ export type OutcomeRecord = {
   at: number;
   /** 话题键（2026-10-01：投递时从提案标题归一，话题级 dismiss 追踪用） */
   topic?: string;
+  /**
+   * 提案层级（2026-11-19）：未回复自动结算只对 social 层生效——
+   * must 是用户点名要的事，已处理但没回话不该被当成「忽略」拉长冷却。
+   * 旧记录无此字段，按 undefined 跳过。
+   */
+  tier?: "must" | "social";
 };
 
 const POSITIVE_OUTCOMES = new Set<ProactiveOutcome>(["accepted", "replied", "snoozed"]);
+const NEGATIVE_OUTCOMES = new Set<ProactiveOutcome>(["dismissed", "ignored"]);
 /** 已产生用户决策的 outcome（delivered/viewed 只是展示事实，不进时段画像） */
 const DECIDED_OUTCOMES = new Set<ProactiveOutcome>([
   "accepted",
@@ -66,6 +73,26 @@ export class OutcomeStore {
     if (recent.length < 5) return null;
     const positive = recent.filter((r) => POSITIVE_OUTCOMES.has(r.outcome)).length;
     return positive / recent.length;
+  }
+
+  /**
+   * 某 (actor, kind) 的已决策正/负反馈计数（供期望效用决策的 Beta 后验使用）。
+   * 与 acceptanceRate 同口径：delivered/viewed 不计入，只数用户真实决策。
+   */
+  outcomeCounts(
+    actorId: string,
+    kind: string,
+    withinMs = 7 * 24 * 60 * 60 * 1000,
+    now = Date.now(),
+  ): { positive: number; negative: number } {
+    let positive = 0;
+    let negative = 0;
+    for (const r of this.records) {
+      if (r.actorId !== actorId || r.kind !== kind || now - r.at > withinMs) continue;
+      if (POSITIVE_OUTCOMES.has(r.outcome)) positive += 1;
+      else if (NEGATIVE_OUTCOMES.has(r.outcome)) negative += 1;
+    }
+    return { positive, negative };
   }
 
   recent(limit = 30): OutcomeRecord[] {

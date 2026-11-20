@@ -45,7 +45,7 @@ export function readWechatClawBridgeConfig(env: NodeJS.ProcessEnv = process.env)
 
 /** 运维显式配置的默认归属；没配就是 null，调用方不许拿占位账号冒充真人。 */
 function explicitBridgeActorId(env: NodeJS.ProcessEnv): string | null {
-  return env.WECHAT_CLAW_BRIDGE_ACTOR_ID?.trim() || env.DESKTOP_BRIDGE_USER_ID?.trim() || null;
+  return env.WECHAT_CLAW_BRIDGE_ACTOR_ID?.trim() || null;
 }
 
 /**

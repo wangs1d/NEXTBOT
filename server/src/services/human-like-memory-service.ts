@@ -87,18 +87,27 @@ async function computeEmbedding(text: string): Promise<number[]> {
  * 从 vectorFingerprint 字段解析真向量。
  * 只有 JSON 序列化的向量数组才算有效；无向量节点返回 null（不参与语义分，
  * 由启动回填补齐，而不是拿文本指纹冒充向量）。
+ * 返回共享数组，调用方只读不改。
  */
+const VECTOR_PARSE_CACHE = new Map<string, number[] | null>();
+const VECTOR_PARSE_CACHE_MAX = 2000;
+
 function parseVectorFingerprint(fp: string): number[] | null {
   if (!fp || !fp.startsWith("[")) return null;
+  const cached = VECTOR_PARSE_CACHE.get(fp);
+  if (cached !== undefined) return cached;
+  let out: number[] | null = null;
   try {
     const parsed = JSON.parse(fp);
     if (Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === "number") {
-      return parsed as number[];
+      out = parsed as number[];
     }
   } catch {
     // 旧格式（非 JSON），降级到 null
   }
-  return null;
+  if (VECTOR_PARSE_CACHE.size >= VECTOR_PARSE_CACHE_MAX) VECTOR_PARSE_CACHE.clear();
+  VECTOR_PARSE_CACHE.set(fp, out);
+  return out;
 }
 
 /** 把真向量序列化为 vectorFingerprint 字段可存的字符串 */
@@ -1455,6 +1464,103 @@ export class HumanLikeMemoryService {
   }
 
   /**
+   * 长尾事实 → 认知图节点（零模型调用，幂等）。
+   *
+   * 存在的理由：联想扩散的种子与激活目标都是图节点，而长尾事实只活在
+   * structured_facts 里——「提到 A 想起用户的 A 偏好」在事实侧根本走不通。
+   * 这里把每条长尾事实作为一个用户断言落进图，交给同一条 ingest 通道做
+   * 指纹/近重复合并与建边，不另开第二套写入面。
+   *
+   * 已建过节点的直接跳过（不刷新时效）：事实长期没人召回就该跟着淡，
+   * 夜间扫描每次重复 re-ingest 等于把它永久续命。
+   */
+  async linkTailFactNodes(
+    actorId: string,
+    facts: ReadonlyArray<{
+      id: string;
+      value: string;
+      field?: string;
+      kind?: string | null;
+      confidence?: number | null;
+    }>,
+  ): Promise<{ linked: number; alreadyLinked: number; skipped: number }> {
+    let linked = 0;
+    let alreadyLinked = 0;
+    let skipped = 0;
+    for (const fact of facts) {
+      const summary = (fact.value ?? "").trim().replace(/\s+/g, " ");
+      if (!fact.id || summary.length < 6) {
+        skipped += 1;
+        continue;
+      }
+      const known = Object.values(this.store.nodes).some(
+        (node) =>
+          node.actorId === actorId &&
+          node.deletionStage !== "hard_deleted" &&
+          node.metadata?.tailFactId === fact.id,
+      );
+      if (known) {
+        alreadyLinked += 1;
+        continue;
+      }
+      try {
+        await this.ingest(actorId, summary, `tail-fact:${fact.id}`, {
+          context: "main",
+          metadata: {
+            tailFactId: fact.id,
+            tailKind: fact.kind ?? null,
+            tailField: fact.field ?? null,
+          },
+        });
+        linked += 1;
+      } catch (err) {
+        console.warn(`[HumanLikeMemory] 长尾事实建节点失败（跳过）fact=${fact.id}:`, err);
+        skipped += 1;
+      }
+    }
+    if (linked > 0) {
+      console.info(
+        `[HumanLikeMemory] 长尾事实入图 actor=${actorId} 新建=${linked} 已有=${alreadyLinked} 跳过=${skipped}`,
+      );
+    }
+    return { linked, alreadyLinked, skipped };
+  }
+
+  /**
+   * 存量孤立节点重连：只处理零边的活跃节点，按上限分批，供夜间收敛调用。
+   * 边的对称性由边 id（两端排序）保证，重连一个节点即同时给对端补上度。
+   */
+  async relinkIsolatedNodes(
+    actorId: string,
+    limit = 120,
+  ): Promise<{ relinked: number; remaining: number }> {
+    const degree = new Map<string, number>();
+    for (const edge of Object.values(this.store.edges)) {
+      if (edge.actorId !== actorId) continue;
+      degree.set(edge.from, (degree.get(edge.from) ?? 0) + 1);
+      degree.set(edge.to, (degree.get(edge.to) ?? 0) + 1);
+    }
+    const isolated = Object.values(this.store.nodes)
+      .filter(
+        (node) =>
+          node.actorId === actorId &&
+          node.deletionStage !== "hard_deleted" &&
+          !node.isArchived &&
+          !degree.get(node.id),
+      )
+      .sort((a, b) => String(b.lastAccessedAt ?? b.timestamp).localeCompare(String(a.lastAccessedAt ?? a.timestamp)));
+    for (const node of isolated.slice(0, limit)) this.rebuildLinksForNode(node);
+    const relinked = Math.min(isolated.length, limit);
+    if (relinked > 0) {
+      this.schedulePersist();
+      console.info(
+        `[HumanLikeMemory] 孤立节点重连 actor=${actorId} 重连=${relinked} 待收敛=${Math.max(0, isolated.length - relinked)}`,
+      );
+    }
+    return { relinked, remaining: Math.max(0, isolated.length - relinked) };
+  }
+
+  /**
    * 回写推理结论为新节点（供 MemoryInferenceEngine 高置信回写调用）。
    *
    * 设计要点：
@@ -1736,9 +1842,11 @@ export class HumanLikeMemoryService {
   }
 
   private rebuildLinksForNode(node: MemoryNodeRecord): void {
-    const candidates = Object.values(this.store.nodes)
-      .filter((item) => item.id !== node.id && item.actorId === node.actorId && item.deletionStage !== "hard_deleted")
-      .slice(-200);
+    // 候选不做「最近 N 个」截断：截断会让老记忆永远拿不到新边，实测主账号
+    // 103/647 节点零边——联想路对这些记忆结构性不可达。
+    const candidates = Object.values(this.store.nodes).filter(
+      (item) => item.id !== node.id && item.actorId === node.actorId && item.deletionStage !== "hard_deleted",
+    );
 
     for (const candidate of candidates) {
       const relationScore = computeSimilarity(node, candidate);

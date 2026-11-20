@@ -21,7 +21,6 @@ import type { ImageGenerationService } from "../../services/image-generation-ser
 import type { FileProcessingService } from "../../services/file-processing-service.js";
 import type { EmailSmsService } from "../../services/email-sms-service.js";
 import type { MediaMusicService } from "../../services/media-music-service.js";
-import type { HealthFitnessService } from "../../services/health-fitness-service.js";
 import type { FinanceDeepService } from "../../services/finance-deep-service.js";
 import type { SubscriptionAuditService } from "../../services/subscription-audit-service.js";
 import type { BillManagementService } from "../../services/bill-management-service.js";
@@ -34,8 +33,6 @@ import type { SharedBrowserCoordinator } from "../../services/shared-browser-coo
 import type { SharedBrowserCdpGateway } from "../../services/shared-browser/cdp-gateway.js";
 import type { PhoneCallCoordinator } from "../../services/phone-call-coordinator.js";
 import type { BookingService } from "../../services/booking/booking-service.js";
-import type { PeriodCareService } from "../../services/period-care-service.js";
-import type { SafetyGuardService } from "../../services/safety-guard-service.js";
 import type { ClientPushPort } from "../../ports/client-push-port.js";
 
 import {
@@ -58,21 +55,6 @@ import {
   MEDIA_MUSIC_INTENT_RULES,
   registerMediaMusicTools,
 } from "./media-music/index.js";
-import {
-  HEALTH_FITNESS_CHAT_TOOLS,
-  HEALTH_FITNESS_INTENT_RULES,
-  registerHealthFitnessTools,
-} from "./health-fitness/index.js";
-import {
-  PERIOD_CARE_CHAT_TOOLS,
-  PERIOD_CARE_INTENT_RULES,
-  registerPeriodCareTools,
-} from "./period-care/index.js";
-import {
-  SAFETY_GUARD_CHAT_TOOLS,
-  SAFETY_GUARD_INTENT_RULES,
-  registerSafetyGuardTools,
-} from "./safety-guard/index.js";
 import {
   FINANCE_DEEP_CHAT_TOOLS,
   FINANCE_DEEP_INTENT_RULES,
@@ -196,7 +178,6 @@ export interface CapabilityModuleDeps {
   mediaMusicService: MediaMusicService;
   /** media-music 模块需要 ws 推送播放控制事件给客户端 */
   wsConnectionRegistry: ClientPushPort;
-  healthFitnessService: HealthFitnessService;
   financeDeepService: FinanceDeepService;
   /** 订阅盘点服务（finance.list/confirm/update/cancel_subscription 工具与月报订阅段的数据源） */
   subscriptionAuditService: SubscriptionAuditService;
@@ -214,12 +195,10 @@ export interface CapabilityModuleDeps {
   sharedBrowserCdpGateway?: SharedBrowserCdpGateway;
   /** 统一预订编排服务（方案 A：网约车/家政/餐厅共用） */
   bookingService: BookingService;
+  /** 滴滴 MCP client（ride_pickup 选点卡的周边候选走滴图 maps_place_around；未装配时候选为空） */
+  mcpClientService?: import("../../services/mcp-client-service.js").McpClientService;
   /** 电话代办协调器（phone_call.*：真实外呼确认门/频控/状态机/结果回填） */
   phoneCallCoordinator: PhoneCallCoordinator;
-  /** 生理周期关怀（period.*：经期记录/预测/临近提醒，数据本地加密） */
-  periodCareService: PeriodCareService;
-  /** 安全守护（safety.*：紧急联系人/一键SOS/借口来电） */
-  safetyGuardService: SafetyGuardService;
   /** 图片能力套件(图库/美颜批图)，按 actor 分区在 data/pictures/<actorKey> */
   pictureKits: PictureKitRegistry;
   /**
@@ -312,24 +291,7 @@ export function buildCapabilityModules(deps: CapabilityModuleDeps): CapabilityMo
           "歌单", "曲目", "音频", "媒体", "播放器", "听歌",
         ],
       },
-    },
-    {
-      domain: "health_fitness",
-      label: "健康/运动数据接入",
-      chatTools: HEALTH_FITNESS_CHAT_TOOLS,
-      intentRules: HEALTH_FITNESS_INTENT_RULES,
-      register: (registry) => registerHealthFitnessTools(registry, { healthFitnessService: deps.healthFitnessService }),
-      category: {
-        name: "health_fitness",
-        keywords: [
-          "health", "fitness", "exercise", "workout", "step", "heart rate",
-          "sleep", "calorie", "weight", "metric", "goal",
-          "健康", "运动", "锻炼", "健身", "步数", "心率",
-          "睡眠", "卡路里", "体重", "指标", "目标",
-        ],
-      },
-    },
-    {
+    },    {
       domain: "finance_deep",
       label: "财务深度能力",
       chatTools: FINANCE_DEEP_CHAT_TOOLS,
@@ -416,7 +378,7 @@ export function buildCapabilityModules(deps: CapabilityModuleDeps): CapabilityMo
       label: "打车/网约车（统一预订抽象层）",
       chatTools: RIDE_HAILING_CHAT_TOOLS,
       intentRules: RIDE_HAILING_INTENT_RULES,
-      register: (registry) => registerRideHailingTools(registry, { bookingService: deps.bookingService }),
+      register: (registry) => registerRideHailingTools(registry, { bookingService: deps.bookingService, mcp: deps.mcpClientService }),
       category: RIDE_HAILING_CATEGORY_MAPPING,
     },
     {
@@ -443,35 +405,6 @@ export function buildCapabilityModules(deps: CapabilityModuleDeps): CapabilityMo
       intentRules: TRAVEL_BOOKING_INTENT_RULES,
       register: (registry) => registerTravelBookingTools(registry, { bookingService: deps.bookingService }),
       category: TRAVEL_BOOKING_CATEGORY_MAPPING,
-    },
-    {
-      domain: "period_care",
-      label: "生理周期关怀（经期记录/预测/临近提醒）",
-      chatTools: PERIOD_CARE_CHAT_TOOLS,
-      intentRules: PERIOD_CARE_INTENT_RULES,
-      register: (registry) => registerPeriodCareTools(registry, { periodCareService: deps.periodCareService }),
-      category: {
-        name: "period_care",
-        keywords: [
-          "period", "menstrual", "menstruation", "cycle", "pms", "cramps",
-          "月经", "例假", "大姨妈", "姨妈", "生理期", "经期", "痛经",
-        ],
-      },
-    },
-    {
-      domain: "safety_guard",
-      label: "安全守护（紧急联系人/一键SOS/借口来电）",
-      chatTools: SAFETY_GUARD_CHAT_TOOLS,
-      intentRules: SAFETY_GUARD_INTENT_RULES,
-      register: (registry) => registerSafetyGuardTools(registry, { safetyGuardService: deps.safetyGuardService }),
-      category: {
-        name: "safety_guard",
-        keywords: [
-          "sos", "emergency", "panic", "safety", "fake call", "call me", "excuse",
-          "救命", "求救", "紧急", "紧急联系人", "害怕", "危险",
-          "守护", "借口", "脱身", "给我打电话", "打个电话", "来个电话",
-        ],
-      },
     },
     // 电话代办：模块自带 PHONE_CALL_ENABLED 开关门控（关闭时 schema/执行器/intent 全空，
     // 对 LLM 不可见且无漂移），故直接复用 buildPhoneCallModule；开源版整族剔除（internalOnly）。

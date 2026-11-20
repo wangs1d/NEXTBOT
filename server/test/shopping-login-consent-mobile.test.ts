@@ -109,6 +109,9 @@ function makeFakeSocket() {
   return { socket, sent };
 }
 
+// 页面是桩（evaluate 恒 false），别让截码的「等渲染 / 轮询」白烧十几秒
+process.env.QR_CAPTURE_FAST = "1";
+
 test("无桌面桥：卡内扫码 → 同意卡 → 保存后统一授权 + Cookie 落库 + 免扫码", async () => {
   await withTempDataDir(async () => {
     const sessionService = new BrowserSessionService();

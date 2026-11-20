@@ -10,7 +10,7 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
  *   - code.read_file   读取工作目录文件
  *   - code.write_file  写入工作目录文件
  *
- * 走 deferred（BM25 索引），不进 CORE_TOOL_LIBRARY：
+ * 走 deferred（延迟目录）：
  *   1. LLM 不会每轮都跑代码，进核心会浪费 token
  *   2. 关键词触发（"运行代码" / "算一下" / "写个脚本"）时由 tool_discover 拉出
  *

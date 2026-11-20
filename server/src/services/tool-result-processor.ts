@@ -10,7 +10,6 @@ import {
   isSystemFrameText,
   stripInternalFrames,
 } from "../external-model/internal-frames.js";
-import { analyzeContentStructure, hasMarkdownTable } from "./render-hint-service.js";
 import { setMediaHidden } from "./library-meta.js";
 
 /** 摘要折叠字数阈值（与 content-summary-service / render-hint-service 保持一致：800。
@@ -844,19 +843,12 @@ export class ToolResultProcessor {
       /** 场景数据面（如 eveningDigest）：由持有数据的调用方注入 */
       renderPayloads?: Record<string, unknown>;
       /**
-       * 出口信封回传（2026-11-09）：done 装配要拿 meta.sceneId/preSceneIds
-       * 拼 wire 信封——singleBubble（禁分泡）的判据就在 sceneId 上。不回传
-       * 的话 done 帧从 finalText 重拼信封，场景信息丢失（实证：出口命中
-       * tomorrow_preview 而 wire meta.sceneId=none，气泡照拆不收口）。
-       * 2026-11-10 追加：bodyForm（markdown/fold = 长文整块呈现）与
-       * structuredBody（正文含 markdown 结构：表格/列表/板块标题）。
-       * done 据此把已分的绿泡收口成一条（用户定稿：markdown 内容不分泡，
-       * 纯聊天 plain 形态照常逐泡）。
+       * 出口信封回传：done 装配要拿 meta.sceneId/preSceneIds 拼 wire 信封——
+       * singleBubble（禁分泡）的判据就在 sceneId 上。不回传的话 done 帧从
+       * finalText 重拼信封，场景信息丢失。
        */
       onRenderEnvelope?: (envelope: {
         meta: { sceneId: string; failures: string[]; preSceneIds: string[] };
-        bodyForm?: string;
-        structuredBody?: boolean;
       }) => void;
     },
   ): string {
@@ -895,20 +887,8 @@ export class ToolResultProcessor {
       `[ToolResultProcessor] render: ${result.decision.reason} media=${opts?.mediaCardCount ?? 0}` +
         ` scene=${result.envelope.meta.sceneId} failures=${result.envelope.meta.failures.length}`,
     );
-    // markdown 整块判定（2026-11-10 用户定稿「markdown 内容不分泡」）：
-    // 出口形态是 markdown/fold（长文整块），或正文本身含 markdown 结构
-    // （表格 / ≥2 条列表 / 板块标题）——这类内容拆成碎泡难读，done 整块
-    // 收口。纯聊天（plain 短句分条）不命中，照常逐泡落屏。
-    const structuredBody =
-      result.decision.body.form === "markdown" ||
-      result.decision.body.form === "fold" ||
-      hasMarkdownTable(workingText) ||
-      analyzeContentStructure(workingText).listCount >= 2 ||
-      analyzeContentStructure(workingText).sectionCount >= 1;
     opts?.onRenderEnvelope?.({
       meta: result.envelope.meta,
-      bodyForm: result.decision.body.form,
-      structuredBody,
     });
     return result.text;
   }
@@ -1385,13 +1365,28 @@ export function extractMediaCards(
  * 媒体卡片去重（同一张图不重复展示）：按可展示地址（thumbnailUrl || mediaUrl）
  * 归一化去重，保留首次出现。多轮工具结果聚合时（search_images_batch 各维度、
  * 多次 search_images 调用）常出现相同图片被多次返回，这里统一收敛。
+ *
+ * **结构化卡不是"图"**（2026-11-19 真机事故）：购物登录卡（cardType=
+ * shopping_login）、支付二维码卡等 `type=card` 的卡片**没有 thumbnailUrl/
+ * mediaUrl**——二维码在 `extra.shopping.qrItems[i].qrImage` 里。原实现按空
+ * 地址判重必然把这类卡整张丢掉，于是「流式里推了一次、done 定稿时消失」，
+ * 用户收到「二维码已推到你聊天里」却一张都看不到。这里给无地址的卡改用
+ * 类型+标题的稳定键去重：同一次推的重复卡只留一张，不同的卡一张不少。
  */
 export function dedupMediaCards(cards: MediaCardItem[]): MediaCardItem[] {
   const seen = new Set<string>();
   const out: MediaCardItem[] = [];
   for (const c of cards) {
     const key = (c.thumbnailUrl || c.mediaUrl || "").trim();
-    if (!key || seen.has(key)) continue;
+    if (!key) {
+      const cardType = String((c as { cardType?: unknown }).cardType ?? "");
+      const structKey = `card:${c.type}:${cardType}:${String(c.title ?? "")}`;
+      if (seen.has(structKey)) continue;
+      seen.add(structKey);
+      out.push(c);
+      continue;
+    }
+    if (seen.has(key)) continue;
     seen.add(key);
     out.push(c);
   }

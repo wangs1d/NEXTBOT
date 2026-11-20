@@ -42,6 +42,14 @@ export type BillParcelIngestResult = {
   entries: BillParcelEntry[];
 };
 
+/** 命中回调的入参（抽到主动汇报模块复用，避免两处各写一份形状） */
+export type BillParcelMatchedInfo = {
+  actorId: string;
+  source: BillParcelSource;
+  match: BillParcelMatch;
+  entries: BillParcelEntry[];
+};
+
 export type BillParcelIngestDeps = {
   ledger: BillParcelLedger;
   /** 信号出口（SensorKernel feeder 闭包；为空则只落台账） */
@@ -60,12 +68,7 @@ export type BillParcelIngestDeps = {
    * 只在**新增**台账条目时触发（重复内容不再打扰）——这是天然的第一道去重。
    * 回调抛错不影响识别与落库（识别链路不能因为汇报失败而断）。
    */
-  onMatched?: (info: {
-    actorId: string;
-    source: BillParcelSource;
-    match: BillParcelMatch;
-    entries: BillParcelEntry[];
-  }) => void;
+  onMatched?: (info: BillParcelMatchedInfo) => void;
 };
 
 /** 上限：单条内容截断长度（与 SourceStore 实体索引上限对齐） */

@@ -1,7 +1,5 @@
 export type ToolSearchEnabledMode = "auto" | "on" | "off";
 
-export type ToolSearchBridgeMode = "merged" | "legacy";
-
 export type ToolSearchEmbeddingMode = "auto" | "on" | "off";
 
 /** 神经 embedding provider（docs/neural-retrieval-plan.md N1） */
@@ -15,12 +13,6 @@ function parseEnabledMode(raw: string | undefined): ToolSearchEnabledMode {
   if (v === "0" || v === "off" || v === "false" || v === "no") return "off";
   if (v === "1" || v === "on" || v === "true" || v === "yes") return "on";
   return "auto";
-}
-
-function parseBridgeMode(raw: string | undefined): ToolSearchBridgeMode {
-  const v = raw?.trim().toLowerCase();
-  if (v === "legacy" || v === "split" || v === "3") return "legacy";
-  return "merged";
 }
 
 function parseEmbeddingMode(raw: string | undefined): ToolSearchEmbeddingMode {
@@ -67,7 +59,6 @@ function buildToolSearchConfig() {
   return {
     // 2026-09-11：检索管线收敛为进程内 adaptive（Python tool-router 已删除）
     enabled: parseEnabledMode(process.env.AGENT_TOOL_SEARCH_ENABLED),
-    bridgeMode: parseBridgeMode(process.env.AGENT_TOOL_SEARCH_BRIDGE_MODE),
     thresholdPct: clampInt(process.env.AGENT_TOOL_SEARCH_THRESHOLD_PCT, 10, 0, 100),
     searchDefaultLimit: clampInt(process.env.AGENT_TOOL_SEARCH_DEFAULT_LIMIT, 5, 1, 50),
     maxSearchLimit: clampInt(process.env.AGENT_TOOL_SEARCH_MAX_LIMIT, 20, 1, 50),

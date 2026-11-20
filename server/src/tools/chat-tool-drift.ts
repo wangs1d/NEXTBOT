@@ -23,12 +23,10 @@ export interface ChatToolDriftReport {
 
 /**
  * schema-only 豁免：别名归一后仍不在注册表的 schema 名。
- * tool_search 桥接元工具的执行在 executeToolSearchBridge（不进 ToolRegistry）。
+ * tool_discover 桥接元工具的执行在 executeToolSearchBridge（不进 ToolRegistry）。
  */
 const SCHEMA_ONLY_ALLOWLIST = new Set<string>([
-  "tool_search",
   "tool_discover",
-  "tool_describe",
   // obs_recall 在 openai-compatible-tool-loop 循环层直接服务（ObservationPack 读回），不进 ToolRegistry
   "obs_recall",
 ]);

@@ -333,4 +333,41 @@ void main() {
     expect(launched, hasLength(1));
     expect(launched.first, startsWith("openapp.jdmobile://"));
   });
+
+  testWidgets("点码登录：没有深链的平台（无 scheme 表）显示「保存二维码」",
+      (WidgetTester tester) async {
+    final Map<String, dynamic> payload = <String, dynamic>{
+      "stage": "login",
+      "title": "登录大麦",
+      "platform": "damai",
+      "platformLabel": "大麦",
+      "qrImage": "",
+      "note": "扫码登录，完成后点下面的按钮",
+      "primaryLabel": "我扫好了",
+      "secondaryLabel": "先不比了",
+      "primaryAction": "shopping.login.check",
+      "secondaryAction": "local.dismiss",
+      "actions": <String, dynamic>{"platform": "damai"},
+    };
+    final AgentResultData cardData = AgentResultData.fromJson(<String, dynamic>{
+      "cardType": "shopping_login",
+      "extra": <String, dynamic>{"shopping": payload},
+    });
+
+    await tester.pumpWidget(
+      _host(
+        ShoppingLoginCard(
+          cs: ThemeData.light().colorScheme,
+          payload: payload,
+          cardData: cardData,
+          onUserAction: (AgentResultAction a,
+              {required AgentResultData cardData}) {},
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text("保存二维码"), findsOneWidget);
+    expect(find.text("点码登录"), findsNothing);
+  });
 }

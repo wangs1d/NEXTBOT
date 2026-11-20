@@ -1,6 +1,9 @@
 import "dart:async";
 
+import "package:flutter/foundation.dart" show defaultTargetPlatform, kIsWeb, TargetPlatform;
 import "package:flutter/material.dart";
+import "package:http/http.dart" as http;
+import "package:photo_manager/photo_manager.dart";
 import "package:url_launcher/url_launcher.dart";
 
 import "../../../core/config/media_url.dart";
@@ -50,9 +53,29 @@ class _ShoppingLoginCardState extends State<ShoppingLoginCard> {
   /// card.update 替换，State 随之销毁，计时器自然取消。
   Timer? _checkGuard;
 
+  /// 二维码有效期倒计时时钟（2026-11-20）。
+  ///
+  /// 平台登录码一般只有 2~5 分钟寿命；用户过一会儿再点「点码登录」，App 里
+  /// 只会说「二维码已失效」或干脆没反应——看起来像 App 坏了。这里按出码时刻
+  /// 秒级倒计时，临近失效（<25s）/已过期时点击改成「先换新码再跳」。
+  Timer? _qrClock;
+  int _nowMs = DateTime.now().millisecondsSinceEpoch;
+  static const int _qrTtlMs = 150000;
+  static const int _qrRefreshAheadMs = 25000;
+
+  @override
+  void initState() {
+    super.initState();
+    _qrClock = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      setState(() => _nowMs = DateTime.now().millisecondsSinceEpoch);
+    });
+  }
+
   @override
   void dispose() {
     _checkGuard?.cancel();
+    _qrClock?.cancel();
     super.dispose();
   }
 
@@ -139,18 +162,33 @@ class _ShoppingLoginCardState extends State<ShoppingLoginCard> {
   }
 
   /// 二维码失效：给某家（或全部）换一张新码。
+  ///
+  /// 换码要重新打开平台登录页，期间必须有反馈——否则用户点了「换新码」
+  /// 半天没动静，会以为按钮坏了。
   void _refreshQr(String platform) {
     _quickAct("shopping.login.refresh", <String, dynamic>{"platform": platform});
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text("正在重新出码…"),
+        duration: Duration(seconds: 3),
+      ),
+    );
   }
 
   /// 点码登录（2026-11-14）：服务端把二维码解码出内嵌 URL 并包装成 App 深链，
   /// 点一下直接拉起对应 App 走平台自己的登录确认页——省掉
   /// 「存图 → 开 App → 相册扫码」三步。深链打不开（没装 App / scheme 失效）
   /// 就退回原 URL（universal link 可能拉起，不行就系统浏览器），再不行提示扫码。
-  Future<void> _openAppLink(String? link, String? fallback, String platformLabel) async {
+  Future<void> _openAppLink(
+    String? link,
+    String? fallback,
+    String platformLabel, {
+    String? imageUrl,
+  }) async {
     final String target = (link ?? "").trim();
-    if (target.isEmpty) return;
     Future<bool> tryLaunch(String raw) async {
+      if (raw.isEmpty) return false;
       final Uri? uri = Uri.tryParse(raw);
       if (uri == null) return false;
       try {
@@ -163,16 +201,52 @@ class _ShoppingLoginCardState extends State<ShoppingLoginCard> {
 
     if (await tryLaunch(target)) return;
     final String fb = (fallback ?? "").trim();
-    if (fb.isNotEmpty && await tryLaunch(fb)) return;
+    if (await tryLaunch(fb)) return;
+
+    // 没有 App / 深链打不开（2026-11-19 用户要求）：直接帮用户把码存进相册，
+    // 省掉「截图/长按保存」这一步——他只需要打开对应 App 从相册扫。
+    final bool saved = await _saveQrToGallery(imageUrl);
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
-          "没能打开${platformLabel.isEmpty ? "对应" : platformLabel}App，请用 App 扫码登录",
+          saved
+              ? "没找到${platformLabel.isEmpty ? "对应" : platformLabel}App，二维码已存到相册，打开 App 从相册扫一下就行"
+              : "没能打开${platformLabel.isEmpty ? "对应" : platformLabel}App，请用 App 扫码登录",
         ),
-        duration: const Duration(seconds: 3),
+        duration: const Duration(seconds: 4),
       ),
     );
+  }
+
+  /// 把二维码写进系统相册（无 App 时的兜底路径）。
+  ///
+  /// 走带鉴权的请求取原图字节（`/agent/images/` 需要 Authorization，裸 URL
+  /// 下载会 401），再用 photo_manager 直接入库——不经过"先存文件再让用户去
+  /// 相册找"的两步。桌面端没有相册概念，直接返回 false 走扫码提示。
+  Future<bool> _saveQrToGallery(String? url) async {
+    final String raw = (url ?? "").trim();
+    if (raw.isEmpty) return false;
+    final bool mobile =
+        defaultTargetPlatform == TargetPlatform.android ||
+        defaultTargetPlatform == TargetPlatform.iOS;
+    if (kIsWeb || !mobile) return false;
+    try {
+      final http.Response resp = await http.get(
+        Uri.parse(MediaUrl.resolve(raw)),
+        headers: MediaUrl.headersFor(raw),
+      );
+      if (resp.statusCode < 200 || resp.statusCode >= 300 || resp.bodyBytes.isEmpty) {
+        return false;
+      }
+      await PhotoManager.editor.saveImage(
+        resp.bodyBytes,
+        filename: "nextbot-qr-${DateTime.now().millisecondsSinceEpoch}.png",
+      );
+      return true;
+    } catch (_) {
+      return false;
+    }
   }
 
   /// 待登录平台清单。
@@ -242,6 +316,18 @@ class _ShoppingLoginCardState extends State<ShoppingLoginCard> {
     final String singleQr = hasSingleQrItem
         ? shopStr(qrItems.first["qrImage"])
         : qr;
+    // 单家码的有效期（与多平台同一套 TTL 口径）
+    final int? singleIssuedAt = (singleItem["issuedAt"] as num?)?.toInt();
+    final bool singleHasAge = singleIssuedAt != null && _nowMs > 0;
+    final int singleLeftMs =
+        singleHasAge ? (singleIssuedAt + _qrTtlMs - _nowMs) : _qrTtlMs;
+    final bool singleExpired = singleHasAge && singleLeftMs <= 0;
+    final bool singleStale = singleHasAge && singleLeftMs <= _qrRefreshAheadMs;
+    final String singleAgeLabel = !singleHasAge
+        ? ""
+        : singleExpired
+            ? "二维码已过期"
+            : "码还剩 ${(singleLeftMs / 1000).round() ~/ 60}:${((singleLeftMs / 1000).round() % 60).toString().padLeft(2, "0")}，过期就点一下换新码";
     final List<Map<String, dynamic>> pendingRows = _pendingRows();
     final List<String> ready = _readyPlatforms();
     final String title = shopStr(p["title"]);
@@ -311,6 +397,11 @@ class _ShoppingLoginCardState extends State<ShoppingLoginCard> {
                         qrImage: shopStr(qrItems[i]["qrImage"]),
                         qrLink: shopStr(qrItems[i]["qrLink"]),
                         qrLinkFallback: shopStr(qrItems[i]["qrLinkFallback"]),
+                        issuedAt: (qrItems[i]["issuedAt"] as num?)?.toInt(),
+                        nowMs: _nowMs,
+                        ttlMs: _qrTtlMs,
+                        refreshAheadMs: _qrRefreshAheadMs,
+                        onRefresh: _refreshQr,
                         onSkip: _skipPlatform,
                         onOpenApp: _openAppLink,
                       ),
@@ -347,7 +438,26 @@ class _ShoppingLoginCardState extends State<ShoppingLoginCard> {
                       ),
                     ),
                   Center(
-                    child: Container(
+                    child: GestureDetector(
+                      // 过期/快过期先换码（旧码进 App 只会「已失效」）；
+                      // 否则直接唤起 App，没深链则存相册。
+                      onTap: singleQr.isEmpty
+                          ? null
+                          : () {
+                              if (singleStale) {
+                                _refreshQr(shopStr(singleItem["platform"]));
+                                return;
+                              }
+                              _openAppLink(
+                                shopStr(singleItem["qrLink"]),
+                                shopStr(singleItem["qrLinkFallback"]),
+                                shopStr(singleItem["platformLabel"]),
+                                imageUrl: singleQr,
+                              );
+                            },
+                      child: Stack(
+                      children: <Widget>[
+                      Container(
                       width: 220,
                       height: 220,
                       padding: const EdgeInsets.all(10),
@@ -371,8 +481,9 @@ class _ShoppingLoginCardState extends State<ShoppingLoginCard> {
                           : CachedMediaImage(
                               url: MediaUrl.resolve(singleQr),
                               fit: BoxFit.contain,
-                              // 二维码是黑白的，放大时别被插值糊掉边
-                              filterQuality: FilterQuality.high,
+                              // 二维码是黑白硬边图：最近邻缩放保住模块边界，
+                              // 插值会把细小模块糊成灰边（相册/截屏扫码识别不出来）
+                              filterQuality: FilterQuality.none,
                               errorBuilder: (_, __, ___) => Center(
                                 child: Text(
                                   "二维码加载失败",
@@ -384,25 +495,73 @@ class _ShoppingLoginCardState extends State<ShoppingLoginCard> {
                               ),
                             ),
                     ),
+                      if (singleExpired && singleQr.isNotEmpty)
+                        Positioned.fill(
+                          child: Container(
+                            decoration: BoxDecoration(
+                              color: Colors.white.withValues(alpha: 0.82),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            alignment: Alignment.center,
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: <Widget>[
+                                Icon(Icons.refresh_rounded,
+                                    size: 22, color: cs.onSurfaceVariant),
+                                const SizedBox(height: 5),
+                                Text(
+                                  "已过期\n点一下换新码",
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    height: 1.35,
+                                    color: cs.onSurfaceVariant,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
+                      ),
+                    ),
                   ),
-                  // 单家也要有「点码登录 / 跳过这家 / 重新出码」：否则用户只能
-                  // 回到对话里问一句，整条「登录完再统一交付」的链就断了。
-                  if (shopStr(singleItem["platform"]).isNotEmpty) ...<Widget>[
-                    const SizedBox(height: 8),
-                    // 点码登录（2026-11-14）：服务端给了深链才渲染；点了拉起
-                    // 对应 App 直接确认，不用相机扫码。
-                    if (shopStr(singleItem["qrLink"]).isNotEmpty)
-                      ShopMiniButton(
-                        cs: cs,
-                        label: "点码登录",
-                        onTap: () => _openAppLink(
-                          shopStr(singleItem["qrLink"]),
-                          shopStr(singleItem["qrLinkFallback"]),
-                          shopStr(singleItem["platformLabel"]),
+                  if (singleHasAge && (singleExpired || singleLeftMs <= 60000))
+                    Padding(
+                      padding: const EdgeInsets.only(top: 5),
+                      child: Text(
+                        singleAgeLabel,
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontSize: 9.5,
+                          color: singleExpired
+                              ? ShopTokens.warn
+                              : cs.onSurfaceVariant,
                         ),
                       ),
-                    if (shopStr(singleItem["qrLink"]).isNotEmpty)
-                      const SizedBox(height: 8),
+                    ),
+                  // 单家也要有「点码登录 / 保存二维码」入口：有深链就拉起 App，
+                  // 没有深链的平台（无 scheme 表）明确给「保存二维码」，
+                  // 不能只靠用户猜到去点码本身。
+                  if (shopStr(singleItem["platform"]).isNotEmpty) ...<Widget>[
+                    const SizedBox(height: 8),
+                    ShopMiniButton(
+                      cs: cs,
+                      label: singleStale
+                          ? "换一张新码"
+                          : shopStr(singleItem["qrLink"]).isNotEmpty
+                              ? "点码登录"
+                              : "保存二维码",
+                      onTap: singleStale
+                          ? () => _refreshQr(shopStr(singleItem["platform"]))
+                          : () => _openAppLink(
+                                shopStr(singleItem["qrLink"]),
+                                shopStr(singleItem["qrLinkFallback"]),
+                                shopStr(singleItem["platformLabel"]),
+                                imageUrl: singleQr,
+                              ),
+                    ),
+                    const SizedBox(height: 8),
                     Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: <Widget>[
@@ -468,12 +627,7 @@ class _ShoppingLoginCardState extends State<ShoppingLoginCard> {
               padding: const EdgeInsets.fromLTRB(14, 8, 14, 0),
               child: Row(
                 children: <Widget>[
-                  Expanded(
-                    child: Text(
-                      "码过期了？换一张新的",
-                      style: TextStyle(fontSize: 10.5, color: cs.onSurfaceVariant),
-                    ),
-                  ),
+                  const Spacer(),
                   ShopMiniButton(
                     cs: cs,
                     label: "重新出码",
@@ -603,6 +757,11 @@ class _MultiQrCell extends StatelessWidget {
     required this.qrImage,
     this.qrLink = "",
     this.qrLinkFallback = "",
+    this.issuedAt,
+    this.nowMs = 0,
+    this.ttlMs = 150000,
+    this.refreshAheadMs = 25000,
+    this.onRefresh,
     this.onSkip,
     this.onOpenApp,
   });
@@ -615,8 +774,35 @@ class _MultiQrCell extends StatelessWidget {
   final String qrLink;
   /// 深链打不开时退回的原 URL（通常为 https，浏览器/universal link 兜底）。
   final String qrLinkFallback;
+  /// 出码时刻（服务端 epoch ms）。null = 老卡/历史消息，不做倒计时。
+  final int? issuedAt;
+  /// 当前时刻（父级每秒 tick 传下来）。
+  final int nowMs;
+  final int ttlMs;
+  final int refreshAheadMs;
+  final void Function(String platform)? onRefresh;
   final void Function(String platform)? onSkip;
-  final Future<void> Function(String? link, String? fallback, String platformLabel)? onOpenApp;
+  final Future<void> Function(
+    String? link,
+    String? fallback,
+    String platformLabel, {
+    String? imageUrl,
+  })? onOpenApp;
+
+  bool get _hasAge => issuedAt != null && nowMs > 0;
+  int get _leftMs => _hasAge ? (issuedAt! + ttlMs - nowMs) : ttlMs;
+  bool get _expired => _hasAge && _leftMs <= 0;
+  bool get _stale => _hasAge && _leftMs <= refreshAheadMs;
+
+  /// 剩余时间文案（只在快过期/已过期时给，平时不打扰）。
+  String get _ageLabel {
+    if (!_hasAge) return "";
+    if (_expired) return "二维码已过期";
+    final int totalSec = (_leftMs / 1000).round();
+    final String mm = (totalSec ~/ 60).toString();
+    final String ss = (totalSec % 60).toString().padLeft(2, "0");
+    return "码还剩 $mm:$ss，过期就点一下换新码";
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -636,44 +822,108 @@ class _MultiQrCell extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 6),
-        // 二维码：白底衬托，深色卡面上也认得出来
-        Container(
-          width: 128,
-          height: 128,
-          padding: const EdgeInsets.all(8),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: cs.outline.withValues(alpha: 0.25)),
-          ),
-          child: qrImage.isEmpty
-              ? Center(
-                  child: Text(
-                    "没截到码",
-                    style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
-                  ),
-                )
-              : CachedMediaImage(
-                  url: MediaUrl.resolve(qrImage),
-                  fit: BoxFit.contain,
-                  // 二维码是黑白的，放大时别被插值糊掉边
-                  filterQuality: FilterQuality.high,
-                  errorBuilder: (_, __, ___) => Center(
-                    child: Text(
-                      "二维码加载失败",
-                      style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+        // 二维码：白底衬托，深色卡面上也认得出来。
+        //
+        // 点码登录（2026-11-19 用户要求）：**整块码本身可点**。用户看到码的
+        // 第一反应是去戳它，而不是去找下面那颗小按钮。点一下直接拉起对应
+        // App 确认登录，省掉「存图 → 开 App → 相册扫码 → 确认」四步；
+        // 扫码路径原样保留（没装 App / 深链失效时照样能扫）。
+        GestureDetector(
+          // 有深链 → 唤起 App；没深链（拼多多/解码失败）→ 也让它可点，
+          // 点击直接把码存进相册（2026-11-19「没有 App 的允许保存」）。
+          //
+          // 过期/快过期（2026-11-20）：先换新码，**不跳**。旧码进了 App 只会
+          // 提示「已失效」或毫无反应——用户会以为 App 坏了。
+          onTap: qrImage.isEmpty || onOpenApp == null
+              ? null
+              : () {
+                  if (_stale) {
+                    onRefresh?.call(platform);
+                    return;
+                  }
+                  onOpenApp!(qrLink, qrLinkFallback, label, imageUrl: qrImage);
+                },
+          child: Container(
+            width: 128,
+            height: 128,
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: cs.outline.withValues(alpha: 0.25)),
+            ),
+            child: Stack(
+              fit: StackFit.expand,
+              children: <Widget>[
+                qrImage.isEmpty
+                    ? Center(
+                        child: Text(
+                          "没截到码",
+                          style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+                        ),
+                      )
+                    : CachedMediaImage(
+                        url: MediaUrl.resolve(qrImage),
+                        fit: BoxFit.contain,
+                        // 同上：硬边码图用最近邻，别让缩放插值糊掉模块
+                        filterQuality: FilterQuality.none,
+                        errorBuilder: (_, __, ___) => Center(
+                          child: Text(
+                            "二维码加载失败",
+                            style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+                          ),
+                        ),
+                      ),
+                // 过期：盖一层并把码压暗（还能扫到旧码的人极少，但别直接销毁）
+                if (_expired && qrImage.isNotEmpty)
+                  Container(
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.82),
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    alignment: Alignment.center,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        Icon(Icons.refresh_rounded, size: 20, color: cs.onSurfaceVariant),
+                        const SizedBox(height: 4),
+                        Text(
+                          "已过期\n点一下换新码",
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            fontSize: 10.5,
+                            height: 1.35,
+                            color: cs.onSurfaceVariant,
+                          ),
+                        ),
+                      ],
                     ),
                   ),
-                ),
+              ],
+            ),
+          ),
         ),
+        // 只在快过期/已过期时提示（平时保持干净）
+        if (_hasAge && (_expired || _leftMs <= 60000))
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text(
+              _ageLabel,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 9.5,
+                color: _expired ? ShopTokens.warn : cs.onSurfaceVariant,
+              ),
+            ),
+          ),
         // 点码登录：点了直接拉起对应 App 确认登录（深链打不开时
         // 回调内部会退回 fallback 并提示扫码）。
-        if (qrLink.isNotEmpty && onOpenApp != null) ...<Widget>[
+        if (onOpenApp != null) ...<Widget>[
           const SizedBox(height: 6),
           ShopMiniButton(
             cs: cs,
-            label: "点码登录",
-            onTap: () => onOpenApp!(qrLink, qrLinkFallback, label),
+            label: qrLink.isNotEmpty ? "点码登录" : "保存二维码",
+            onTap: () => onOpenApp!(qrLink, qrLinkFallback, label, imageUrl: qrImage),
           ),
         ],
         if (onSkip != null) ...<Widget>[

@@ -7,7 +7,8 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { registerCalendarTools } from "../src/tools/calendar-tools.js";
-import { registerWatchTaskTools } from "../src/tools/watch-task-tools.js";
+import { registerWatchBoardTools } from "../src/tools/watch-board-tools.js";
+import { WatchBoard } from "../src/services/watch-board.js";
 import { ToolRegistry, type ToolContext } from "../src/tools/tool-registry.js";
 import { ScheduleConflictService } from "../src/services/schedule-conflict-service.js";
 import { ScheduleTaskService } from "../src/services/schedule-task-service.js";
@@ -38,12 +39,12 @@ test("e2e：对话建盯梢任务 → 消息命中 × 截止缺口 → 「设提
     const watchStore = new WatchTaskStore({ persistPath: join(dir, "w.json"), nowFn: () => NOW });
     const registry = new ToolRegistry();
     registerCalendarTools(registry, tasks, null as never, conflicts);
-    registerWatchTaskTools(registry, watchStore);
+    registerWatchBoardTools(registry, new WatchBoard({ topic: watchStore }));
 
-    // ① 对话：用户说"帮我盯着学校邮件，有选拔信息就告诉我" → LLM 调 watch.manage
+    // ① 对话：用户说"帮我盯着学校邮件，有选拔信息就告诉我" → LLM 调 watch.track
     const created = await registry.execute(
-      "watch.manage",
-      { action: "create", label: "学校邮件里的选拔信息", keywords: ["选拔", "报名", "截止"] },
+      "watch.track",
+      { action: "create", kind: "topic", target: "学校邮件里的选拔信息", keywords: ["选拔", "报名", "截止"] },
       ctx,
     );
     assert.equal(created.result.ok, true);
@@ -80,8 +81,8 @@ test("e2e：对话建盯梢任务 → 消息命中 × 截止缺口 → 「设提
 
     // ④ 对照：同一消息在任务暂停后不再触发
     const paused = await registry.execute(
-      "watch.manage",
-      { action: "pause", taskId: (created.result.taskId as string) },
+      "watch.track",
+      { action: "pause", watchId: (created.result.watchId as string) },
       ctx,
     );
     assert.equal(paused.result.ok, true);

@@ -151,7 +151,7 @@ export type MorningBriefingDeps = {
       }
     | null
   >;
-  /** 重要日子存储（读 care.set_important_date 写入的 important_dates KV；仅供当日命中祝福回调） */
+  /** 重要日子存储（读 important_dates KV；仅供当日命中祝福回调） */
   agentMemorySyncService?: ImportantDaysStoreLike;
   /**
    * 结构化事实库（用户称呼源）：与首启向导/聊天面同走 factStore 的「称呼」

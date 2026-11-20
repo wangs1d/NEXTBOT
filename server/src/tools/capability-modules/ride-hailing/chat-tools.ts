@@ -17,7 +17,6 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
  *   - BOOKING_MODE=mock（默认）为模拟 Provider，结果带 simulated=true，须如实告知
  *
  * 与相近能力的边界：
- *   - meituan.create_order：跑腿/代买，非网约车
  *   - travel.departure-advice：出发时间建议，不下单
  *   - travel.compute-route：路线距离查询
  *   - wallet.purchase：仅记账
@@ -32,10 +31,13 @@ export const RIDE_HAILING_CHAT_TOOLS: ChatCompletionTool[] = [
       description:
         "查询网约车车型与价格预估（经济/舒适/商务），供后续下单选择。\n" +
         "适用场景：用户说「帮我叫个车去机场」「打车去公司多少钱」「晚上八点叫车」。\n" +
-        "起点联动：pickup 缺省时自动取用户当前 GPS 定位（需客户端授权定位），也可传地址文本。\n" +
+        "调用时机（重要）：用户表达打车意图且给出目的地后**立即调用**，目的地抄用户原话。" +
+        "起点未指定时系统会自动推送「选上车点」卡（周边候选 + 地图选点）让用户点选确认，" +
+        "同名地点/起点歧义/当前位置都由这张卡解决——**禁止用文字追问起点、当前位置或目的地名歧义**。\n" +
+        "pickup：仅当用户明说了具体上车点才传地址文本（如「九华园1号门」）；缺省不传。\n" +
         "Provider：BOOKING_MODE=mock（默认）返回模拟报价（simulated=true，须如实告知用户）；" +
         "live 模式走滴滴官方 MCP（生产端点实时报价，需 DIDI_MCP_KEY）。\n" +
-        "与 travel.compute-route（纯路线查询）/ meituan.create_order（跑腿）的区别：本工具为叫车报价。",
+        "与 travel.compute-route（纯路线查询）的区别：本工具为叫车报价。",
       parameters: {
         type: "object",
         properties: {

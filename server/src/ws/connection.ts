@@ -52,7 +52,6 @@ import {
   buildTaskUpdateEnvelope,
   isTaskPlaneWsEventsEnabled,
 } from "../task-plane/task-events.js";
-import type { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
 import type { PhoneBridgeCoordinator, PhoneBridgeResult } from "../services/phone-bridge-coordinator.js";
 import type { PhoneCallCoordinator } from "../services/phone-call-coordinator.js";
 import type {
@@ -211,7 +210,6 @@ export type WsRouteDeps = {
   computeQuotaService: ComputeQuotaService;
   agentMemorySyncService: AgentMemorySyncService;
   unifiedIdempotencyService: UnifiedIdempotencyService;
-  desktopBridgeCoordinator: DesktopBridgeCoordinator;
   phoneBridgeCoordinator: PhoneBridgeCoordinator;
   /** 共用浏览器桥：用户与 Agent 共用客户端内嵌浏览器的动作转发通道 */
   sharedBrowserCoordinator: SharedBrowserCoordinator;
@@ -291,6 +289,8 @@ export type WsRouteDeps = {
    * （ride.book.prepare / ride.book.confirm → BookingService 两阶段确认）。
    */
   bookingService?: import("../services/booking/booking-service.js").BookingService | null;
+  /** 滴滴 MCP client（可选）：ride.pickup.select 的 regeo 命名 + 驾车路线 */
+  mcpClientService?: import("../services/mcp-client-service.js").McpClientService | null;
 };
 
 export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps): void {
@@ -309,7 +309,6 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     computeQuotaService,
     agentMemorySyncService,
     unifiedIdempotencyService,
-    desktopBridgeCoordinator,
     phoneBridgeCoordinator,
     sharedBrowserCoordinator,
     messageHubService,
@@ -331,6 +330,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     shoppingCompareService,
     paymentService,
     bookingService,
+    mcpClientService,
     agentAccountService,
     actorModelBindings,
     petReactionChat,
@@ -342,7 +342,6 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     deviceRegistry,
     auditService,
     phoneBridgeCoordinator,
-    desktopBridgeCoordinator,
     devicePairingService,
     log: {
       info: (msg, ctx) => app.log.info(ctx ?? {}, `[DeviceBus] ${msg}`),
@@ -368,13 +367,12 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
       const ws = socket as SocketWithHeartbeat;
       const openedAt = Date.now();
       let boundActorId: string | undefined;
-      let initAsDesktopBridge = false;
       let initAsPhoneBridge = false;
       const clientIp = getClientIp(request);
       // ─── 设备自绑定鉴权（ACCESS_AUTH_REQUIRED=1 时）：upgrade query token 预检 ───
       // 有效 → 预钉身份（session.init 时强制覆盖 userId）；无效 → 立即拒连；
       // 缺失 → 放行连接，等 session.init payload.token 兜底校验。
-      // desktopBridge / phoneBridge 通道走各自桥接 token 流程，不受此门影响。
+      // phoneBridge 通道走自己的桥接 token 流程，不受此门影响。
       const accessAuthServiceImpl = accessAuthService;
       const accessAuthActive = isAccessAuthRequired() && accessAuthServiceImpl != null;
       let accessAuthUserId: string | undefined;
@@ -470,7 +468,6 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             code,
             reason: reason ? reason.toString() : "",
             durationMs: Date.now() - openedAt,
-            desktopBridge: initAsDesktopBridge,
             phoneBridge: initAsPhoneBridge,
           },
           "WebSocket closed",
@@ -479,8 +476,6 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
         if (detached) {
           broadcastPartitionPresence(detached.partitionId);
         }
-        desktopBridgeCoordinator.unbindIfSocket(socket);
-        desktopBridgeCoordinator.cancelPendingForSocket(socket);
         locationCoordinator.unbindSocket(socket);
         if (boundActorId) {
           phoneBridgeCoordinator.unbindIfSocket(boundActorId, socket);
@@ -731,7 +726,6 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           const payload = event.payload as Record<string, unknown>;
           const sessionIdRaw = String(payload.sessionId ?? "").trim();
           const userIdRaw = payload.userId != null ? String(payload.userId).trim() : "";
-          const isDesktopBridgeChannel = payload.desktopBridge === true;
           const isPhoneBridgeChannel = payload.phoneBridge === true;
           // 客户端能力声明（2026-09-12）：mediaPlayback 等能力由客户端在聊天主通道的
           // session.init 里自报，媒体推送类工具据此决定「下发指令」还是「如实告知办不到」。
@@ -751,11 +745,10 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           // 无 token 时：只接受「本机安装标识」这类 guest 身份。账号形态身份必须
           // 有 token 证明，否则 IDENTITY_REQUIRED 拒连；什么都没报则 AUTH_REQUIRED
           // （强制模式）/ BAD_SESSION_INIT（宽松模式）——不再有兜底自报路径。
-          // 豁免通道（desktopBridge / phoneBridge）继续走各自桥接 token。
+          // 豁免通道（phoneBridge）继续走桥接 token。
           if (
             accessAuthServiceImpl &&
             !accessAuthUserId &&
-            !isDesktopBridgeChannel &&
             !isPhoneBridgeChannel
           ) {
             const initToken = typeof payload.token === "string" ? payload.token.trim() : "";
@@ -853,7 +846,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             verifiedTokenUserId: accessAuthUserId,
             claimedUserId: userIdRaw,
             claimedSessionId: sessionIdRaw,
-            isBridgeChannel: isDesktopBridgeChannel || isPhoneBridgeChannel,
+            isBridgeChannel: isPhoneBridgeChannel,
             trustPayloadAccountIdentity: trustsPayloadAccountIdentity(),
           });
           if (!identity.ok) {
@@ -928,7 +921,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           // 离线期间的主动轮次仍用用户自己的 key。安全门：仅聊天主通道接收；上送通道
           // 必须 TLS（wss，经 x-forwarded-proto / socket.encrypted 判定）；baseUrl 由
           // 绑定仓做 https 公网校验（SSRF 门）。
-          if (actorModelBindings && !isDesktopBridgeChannel && !isPhoneBridgeChannel) {
+          if (actorModelBindings && !isPhoneBridgeChannel) {
             const mpRaw = payload.modelProvider as Record<string, unknown> | undefined;
             if (mpRaw && typeof mpRaw === "object") {
               const mpBaseUrl = typeof mpRaw.baseUrl === "string" ? mpRaw.baseUrl.trim() : "";
@@ -967,38 +960,12 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
               }
             }
           }
-          if (!isDesktopBridgeChannel && !isPhoneBridgeChannel) {
+          if (!isPhoneBridgeChannel) {
             // 整表透传：任何 `true` 键即一项已声明能力，未声明的键在工具侧 fail-closed。
             declareClientCapabilities(actorId, declaredCapabilities);
             // 更新推送（2026-10-21）：上线即补推当前版本清单（发布期间离线的用户
             // 连上就知道；发布时的在线用户由清单变化广播覆盖，见 client-update-pusher）
             notifySessionInit(socket);
-          }
-          if (isDesktopBridgeChannel) {
-            if (!userIdRaw) {
-              socket.send(
-                JSON.stringify({
-                  type: ServerEventType.ErrorEvent,
-                  payload: {
-                    code: "DESKTOP_BRIDGE_USER_ID_REQUIRED",
-                    message: "与手机同一账号控制电脑时，session.init 须提供与手机相同的 userId（不可仅用 sessionId）",
-                  },
-                }),
-              );
-              return;
-            }
-            if (!desktopBridgeCoordinator.isBridgeFeatureEnabled()) {
-              socket.send(
-                JSON.stringify({
-                  type: ServerEventType.ErrorEvent,
-                  payload: {
-                    code: "DESKTOP_BRIDGE_DISABLED",
-                    message: "服务端未开启电脑桥接（设置 DESKTOP_BRIDGE_ENABLED=1 或 DESKTOP_BRIDGE_TOKEN）",
-                  },
-                }),
-              );
-              return;
-            }
           }
           if (isPhoneBridgeChannel) {
             if (!userIdRaw) {
@@ -1034,7 +1001,6 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           if (boundActorId && boundActorId !== actorId) {
             messageBatchProcessor.setClientProcessingUiActive(boundActorId, false);
           }
-          desktopBridgeCoordinator.unbindIfSocket(socket);
           if (boundActorId && boundActorId !== actorId) {
             phoneBridgeCoordinator.unbindIfSocket(boundActorId, socket);
           }
@@ -1045,11 +1011,10 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             sharedBrowserCoordinator.unbindIfSocket(boundActorId, socket);
           }
           boundActorId = actorId;
-          initAsDesktopBridge = isDesktopBridgeChannel;
           initAsPhoneBridge = isPhoneBridgeChannel;
           // 活跃打点：session.init = 应用启动/重连，是「最近活跃」最可靠的信号
           agentAccountService?.touchLastActive(actorId);
-          if (!isDesktopBridgeChannel && !isPhoneBridgeChannel) {
+          if (!isPhoneBridgeChannel) {
             const deviceClass = normalizeDeviceClass(payload.platform ?? payload.deviceClass);
             // 设备类别随连接登记（2026-09-18）：session.init 自报 platform，
             // critical 升级链据此区分电脑端/移动端触达；旧客户端缺省按桌面端处理
@@ -1129,14 +1094,6 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
                 }),
               );
             }
-          } else if (isDesktopBridgeChannel && !desktopBridgeCoordinator.requiresRegisterToken()) {
-            desktopBridgeCoordinator.bindExecutor(actorId, socket);
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.DesktopBridgeRegisterAck,
-                payload: { ok: true, actorId, mode: "userId" },
-              }),
-            );
           } else if (isPhoneBridgeChannel && !phoneBridgeCoordinator.requiresRegisterToken()) {
             const deviceInfo = parsePhoneDeviceInfo(payload);
             phoneBridgeCoordinator.bindExecutor(actorId, socket, deviceInfo);
@@ -1159,132 +1116,6 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             identitySource: identity.source,
             ...(identity.claimedActorId ? { claimedUserId: identity.claimedActorId } : {}),
             ...(identity.placeholder ? { placeholderIdentity: true } : {}),
-          });
-          return;
-        }
-
-        if (event.type === ClientEventType.DesktopBridgeRegister) {
-          if (!boundActorId) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
-              }),
-            );
-            return;
-          }
-          if (!initAsDesktopBridge) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: {
-                  code: "DESKTOP_BRIDGE_INIT_REQUIRED",
-                  message: "session.init 须设置 desktopBridge: true 方可绑定桌面执行器",
-                },
-              }),
-            );
-            return;
-          }
-          if (!desktopBridgeCoordinator.requiresRegisterToken()) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.DesktopBridgeRegisterAck,
-                payload: { ok: true, actorId: boundActorId, mode: "userId", note: "当前为无口令模式，已在 session.init 自动绑定" },
-              }),
-            );
-            return;
-          }
-          const token = String((event.payload as Record<string, unknown>).token ?? "").trim();
-          if (!desktopBridgeCoordinator.verifyRegisterToken(token)) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: {
-                  code: "DESKTOP_BRIDGE_TOKEN_REJECTED",
-                  message: "桥接 token 与服务器 DESKTOP_BRIDGE_TOKEN 不一致",
-                },
-              }),
-            );
-            return;
-          }
-          desktopBridgeCoordinator.bindExecutor(boundActorId, socket);
-          socket.send(
-            JSON.stringify({
-              type: ServerEventType.DesktopBridgeRegisterAck,
-              payload: { ok: true, actorId: boundActorId, mode: "token" },
-            }),
-          );
-          return;
-        }
-
-        if (event.type === ClientEventType.DesktopBridgeResult) {
-          const pl = event.payload as Record<string, unknown>;
-          const jobId = String(pl.jobId ?? "").trim();
-          if (!jobId) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: { code: "BAD_DESKTOP_BRIDGE_RESULT", message: "缺少 jobId" },
-              }),
-            );
-            return;
-          }
-          const ok = desktopBridgeCoordinator.completeFromSocket(socket, jobId, pl);
-          if (!ok) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: { code: "DESKTOP_BRIDGE_JOB_UNKNOWN", message: "jobId 与当前连接不匹配或已结束" },
-              }),
-            );
-          }
-          return;
-        }
-
-        if (event.type === ClientEventType.DesktopEvent) {
-          if (!boundActorId) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
-              }),
-            );
-            return;
-          }
-          if (!initAsDesktopBridge) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: {
-                  code: "DESKTOP_BRIDGE_INIT_REQUIRED",
-                  message: "session.init 须设置 desktopBridge: true 方可推送 desktop.event",
-                },
-              }),
-            );
-            return;
-          }
-          // desktop.event 消息把 event_type / timestamp 放在顶层（与 type 同级），
-          // payload 为事件数据本体；此处只做接收与转发，不转 LifeSignal（Task 4 的工作）。
-          const rawEvent = event as Record<string, unknown>;
-          const eventType = String(rawEvent.event_type ?? rawEvent.eventType ?? "").trim();
-          if (!eventType) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: { code: "BAD_DESKTOP_EVENT", message: "缺少 event_type" },
-              }),
-            );
-            return;
-          }
-          const eventData = (event.payload as Record<string, unknown>) ?? {};
-          const rawTs = rawEvent.timestamp;
-          const eventTs: number | string =
-            typeof rawTs === "number" || typeof rawTs === "string" ? rawTs : Date.now();
-          desktopBridgeCoordinator.handleEventFromSocket(socket, boundActorId, {
-            actorId: boundActorId,
-            eventType,
-            payload: eventData,
-            timestamp: eventTs,
           });
           return;
         }
@@ -1654,6 +1485,30 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             payload: actionPayload,
           });
 
+          // 打车卡确定性直连（2026-11-20 根修）：APK 卡片按钮统一发
+          // chat.user_action，但 ride.* 卡动作（选点续价/两阶段下单确认）是
+          // 「服务端取数 → card.update 原地换卡」的零模型轮次设计——转写成
+          // user_message 交给模型会丢掉坐标/城市上下文（实测：模型轮 textsearch
+          // 缺 city 被滴滴端点 400 → 「无法定位目的地」）。按 actionId 前缀
+          // 分流到 card.action 确定性通道；其余卡（shopping 等）维持模型路径不变。
+          const rideCardAction =
+            typeof actionPayload.cardAction === "string" ? actionPayload.cardAction.trim() : "";
+          if (rideCardAction.startsWith("ride.")) {
+            const handled = await handleCardActionEvent(
+              { socket, boundActorId, sendUnifiedError },
+              {
+                sessionId: typeof actPl.sessionId === "string" ? actPl.sessionId : boundActorId,
+                messageId: typeof actPl.messageId === "string" ? actPl.messageId : "",
+                cardId,
+                actionId: rideCardAction,
+                payload: actionPayload,
+              },
+              { shoppingOrderService, shoppingCompareService, paymentService, bookingService, mcpClientService },
+            );
+            if (handled) return;
+            // 未识别的 ride 动作才落回模型轮（正常不会发生）
+          }
+
           // 计划交接回执（2026-10-19 handoff）：用户在「我已完成，继续下一步」按钮上
           // 点了一下 = 收回执行权的唯一证据。在点击原点就把等待步置 done（不信模型、
           // 也不必等下一轮），并标记本轮是计划续跑——下游据此走确定性任务面路由。
@@ -1719,7 +1574,6 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
               socket,
               boundActorId: boundActorId ?? "",
               sessionId: boundActorId ?? "",
-              initAsDesktopBridge,
               clientIp,
               deviceClass: wsConnectionRegistry.deviceClassOf(boundActorId ?? "", socket),
               sendUnifiedError,
@@ -1750,7 +1604,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           await handleCardActionEvent(
             { socket, boundActorId, sendUnifiedError },
             event.payload,
-            { shoppingOrderService, shoppingCompareService, paymentService, bookingService },
+            { shoppingOrderService, shoppingCompareService, paymentService, bookingService, mcpClientService },
           );
           return;
         }
@@ -1761,7 +1615,6 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
               socket,
               boundActorId: boundActorId ?? "",
               sessionId: boundActorId ?? "",
-              initAsDesktopBridge,
               clientIp,
               deviceClass: wsConnectionRegistry.deviceClassOf(boundActorId ?? "", socket),
               sendUnifiedError,
@@ -1786,7 +1639,6 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
               socket,
               boundActorId: boundActorId ?? "",
               sessionId: boundActorId ?? "",
-              initAsDesktopBridge,
               clientIp,
               sendUnifiedError,
             },
@@ -1849,7 +1701,6 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
               socket,
               boundActorId: boundActorId ?? "",
               sessionId: boundActorId ?? "",
-              initAsDesktopBridge,
               clientIp,
               sendUnifiedError,
             },

@@ -10,7 +10,7 @@
  * 零配置门禁：chat 未装配或未启用 → 直接 ok:false 返回，绝不 throw。
  */
 
-/** ExternalChatProvider 的结构化最小接口（与 desktop-scene-handlers 的约定一致）。 */
+/** ExternalChatProvider 的结构化最小接口。 */
 export type PetReactionChatLike = {
   isEnabled(): boolean;
   streamCompletion(

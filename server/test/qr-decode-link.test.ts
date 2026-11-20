@@ -9,8 +9,8 @@
  *   - decodeQrLink：qrcode 生成 → jsQR 解码 roundtrip；坏图/非二维码图返回
  *     null 而不是抛错（best-effort，绝不影响推码主流程）；
  *   - toAppLaunchLink：App scheme 原样透传；https 按平台包装（taobao/tmall
- *     走 tbopen、jd 走 openapp.jdmobile）；pdd/未知平台直通原 URL 兜底；
- *     纯 token 串（App 打不开）返回 null——该平台不出按钮，纯扫码兜底。
+ *     走 tbopen、jd 走 openapp.jdmobile、pdd 走 pinduoduo 宿主路径）；
+ *     纯 token 串/无已知 scheme 的平台返回 null——不出「点码登录」，纯扫码兜底。
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -42,27 +42,36 @@ test("decodeQrLink：非二维码的合法 PNG 返回 null", async () => {
   assert.ok(decoded === null || typeof decoded === "string");
 });
 
-test("toAppLaunchLink：App scheme 原样透传", () => {
+test("toAppLaunchLink：App scheme 原样透传（含非购物深链平台）", () => {
   const scheme = "taobao://s.taobao.com/search?q=手机";
   const link = toAppLaunchLink("taobao", scheme);
   assert.ok(link);
   assert.equal(link.link, scheme);
   assert.equal(link.fallback, undefined);
+  // 码内容本身就是 App scheme：即使平台包装规则没收录，也照样透传
+  assert.equal(
+    toAppLaunchLink("douyin", "snssdk1128://webview?url=x")?.link,
+    "snssdk1128://webview?url=x",
+  );
+  assert.equal(
+    toAppLaunchLink("meituan", "imeituan://www.meituan.com/web?url=x")?.link,
+    "imeituan://www.meituan.com/web?url=x",
+  );
 });
 
-test("toAppLaunchLink：taobao/tmall 的 https 包装成 tbopen 深链", () => {
+test("toAppLaunchLink：taobao/tmall 的 https 包装成 tbopen 深链（不回落网页）", () => {
   const url = "https://h5.m.taobao.com/qr/login.html?token=abc";
   const taobao = toAppLaunchLink("taobao", url);
   assert.ok(taobao);
   assert.equal(taobao.link, `tbopen://m.taobao.com/tbopen/index.html?h5Url=${encodeURIComponent(url)}`);
-  assert.equal(taobao.fallback, url);
+  assert.equal(taobao.fallback, undefined);
 
   const tmall = toAppLaunchLink("tmall", url);
   assert.ok(tmall);
   assert.equal(tmall.link, `tbopen://m.taobao.com/tbopen/index.html?h5Url=${encodeURIComponent(url)}`);
 });
 
-test("toAppLaunchLink：jd 的 https 包装成 openapp.jdmobile 深链", () => {
+test("toAppLaunchLink：jd 的 https 包装成 openapp.jdmobile 深链（不回落网页）", () => {
   const url = "https://plogin.m.jd.com/qr/login?token=xyz";
   const link = toAppLaunchLink("jd", url);
   assert.ok(link);
@@ -71,18 +80,26 @@ test("toAppLaunchLink：jd 的 https 包装成 openapp.jdmobile 深链", () => {
     decodeURIComponent(link.link.slice("openapp.jdmobile://virtual?params=".length)),
   ) as { category: string; des: string; url: string };
   assert.deepEqual(params, { category: "jump", des: "url", url });
-  assert.equal(link.fallback, url);
+  assert.equal(link.fallback, undefined);
 });
 
-test("toAppLaunchLink：pdd/未知平台 https 直通原 URL 兜底", () => {
-  const url = "https://login.pinduoduo.com/qr?token=1";
+test("toAppLaunchLink：pdd 的 https 包装成拼多多 App 深链（不打浏览器兜底）", () => {
+  // 拼多多扫码登录码的真实内容（2026-11-20 云端解码所得）
+  const url =
+    "https://mobile.yangkeduo.com/down_scan.html?secret_key=abc&pdd_biz_scene=AUTH_LOGIN&app_id=512";
   const pdd = toAppLaunchLink("pdd", url);
   assert.ok(pdd);
-  assert.equal(pdd.link, url);
+  assert.equal(pdd.link, `pinduoduo://com.xunmeng.pinduoduo/${url}`);
+  assert.equal(pdd.fallback, `pddopen://?h5Url=${encodeURIComponent(url)}`);
+  // 网页绝不能作为首选：打开 https 只会落到「打开拼多多APP」下载页
+  assert.notEqual(pdd.link, url);
+});
 
-  const unknown = toAppLaunchLink("suning", url);
-  assert.ok(unknown);
-  assert.equal(unknown.link, url);
+test("toAppLaunchLink：没有已知 scheme 的平台返回 null（不出「点码登录」）", () => {
+  // 返回原 https 会让 url_launcher 起浏览器（拼多多真机事故的同款路径），
+  // 宁可不出按钮、退回相册扫码
+  const unknown = toAppLaunchLink("suning", "https://login.suning.com/qr?token=1");
+  assert.equal(unknown, null);
 });
 
 test("toAppLaunchLink：纯 token 串返回 null（App 打不开，纯扫码兜底）", () => {

@@ -350,42 +350,35 @@ describe("记忆模块全流程", () => {
     });
   });
 
-  describe("4b. 读写契约（KV 槽位归属 + 按轮召回）", () => {
-    it("长期行只进 memory_summary，不再镜像进 session_recap", async () => {
+  describe("4b. 读写契约（摘要槽退役，召回统一走 ContextCompiler）", () => {
+    it("appendMemorySummaryLine 已下线：不写 memory_summary，也不镜像进 session_recap", async () => {
       const before = memorySync.getSnapshot(ACTOR, ["session_recap", "memory_summary"]).entries;
-      const recapBefore = String(before["session_recap"] ?? "");
       memorySync.appendMemorySummaryLine(ACTOR, "用户喜欢喝手冲咖啡，不加糖");
       await memorySync.flush();
       const after = memorySync.getSnapshot(ACTOR, ["session_recap", "memory_summary"]).entries;
-      assert.equal(
-        String(after["session_recap"] ?? ""),
-        recapBefore,
-        "session_recap 是短期滚动槽，长期行不得镜像进来",
-      );
-      assert.match(String(after["memory_summary"] ?? ""), /手冲咖啡/);
+      assert.equal(String(after["session_recap"] ?? ""), String(before["session_recap"] ?? ""));
+      assert.equal(String(after["memory_summary"] ?? ""), String(before["memory_summary"] ?? ""));
     });
 
-    it("存量整理器标记行在下次整理时被清掉，真实承诺行保留", async () => {
-      // 时间戳用当前时刻：留存评分按时间衰减，旧硬编码日期（2026-10-30）会随
-      // 日历推移跌进 forgotten 区，测试与产品行为无关地过期。
-      const observeTs = new Date().toISOString();
+    it("consolidateNow 不再改写 KV 摘要，旧整理器标记行也不再进 prompt", async () => {
       const legacy = [
         "[当日待整理 2026-10-30]",
+        `[${new Date().toISOString()}] [topic:consolidate] 承诺：周六去游泳`,
         "[/当日待整理]",
-        `[${observeTs}] [topic:consolidate] 承诺：周六去游泳`,
-        "[当日待整理 2026-10-30]",
       ].join("\n");
       await memorySync.setEntryAndWait(ACTOR, "memory_summary", legacy);
       await manager.consolidateNow(ACTOR);
       await memorySync.flush();
-      const after = String(
-        memorySync.getSnapshot(ACTOR, ["memory_summary"]).entries["memory_summary"] ?? "",
+      const entries = memorySync.getSnapshot(ACTOR, ["memory_summary"]).entries;
+      assert.equal(String(entries["memory_summary"] ?? ""), legacy, "摘要槽已下线，整理不得改写它");
+      assert.equal(
+        sliceMemoryEntriesToPromptContext(entries, "周六去游泳吗").memorySummary,
+        undefined,
+        "旧存量摘要在任何提问下都不得进 prompt",
       );
-      assert.doesNotMatch(after, /当日待整理/, `标记行应被清掉，实际：${after}`);
-      assert.match(after, /周六去游泳/, `真实承诺行必须保留，实际：${after}`);
     });
 
-    it("同一 store 不同 query：命中才有内容，无关 query 零注入", async () => {
+    it("同一份 KV 摘要：无论 query 是否相关都零注入", async () => {
       await memorySync.setEntryAndWait(
         ACTOR,
         "memory_summary",
@@ -395,15 +388,8 @@ describe("记忆模块全流程", () => {
         ].join("\n"),
       );
       const { entries } = memorySync.getSnapshot(ACTOR, ["memory_summary"]);
-      const hit = sliceMemoryEntriesToPromptContext(entries, "我平时喝什么咖啡？");
-      assert.ok(hit.memorySummary, "相关提问应有召回");
-      assert.match(hit.memorySummary!, /咖啡/);
-      const miss = sliceMemoryEntriesToPromptContext(entries, "怎么配置 SSH 隧道转发？");
-      assert.equal(
-        miss.memorySummary,
-        undefined,
-        "无关提问必须零注入——整段兜底全灌就是把长期记忆变噪音的根因",
-      );
+      assert.equal(sliceMemoryEntriesToPromptContext(entries, "我平时喝什么咖啡？").memorySummary, undefined);
+      assert.equal(sliceMemoryEntriesToPromptContext(entries, "怎么配置 SSH 隧道转发？").memorySummary, undefined);
     });
   });
 

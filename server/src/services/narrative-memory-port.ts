@@ -2,7 +2,6 @@ import type { AgenticMemoryIngestService } from "../agentic-memory/ingest.js";
 import type { AgenticMemoryRetrievalService } from "../agentic-memory/retrieval.js";
 import type { AgenticMemoryRecallCompressor } from "../agentic-memory/recall-compressor.js";
 import type { MemoryBridgeService } from "../agentic-memory/memory-bridge-service.js";
-import { formatHybridRecall } from "./narrative-hybrid-retrieval-service.js";
 import type {
   HumanLikeMemoryRecallResult,
   HumanLikeMemoryService,
@@ -56,6 +55,8 @@ export type NarrativeMemoryPort = {
   buildCrossContextRecall(actorId: string, query: string): Promise<string>;
   buildDetailedRecall(actorId: string, query: string): Promise<string>;
   buildSourceRecall(actorId: string, query: string): Promise<string>;
+  /** 同 actor 近期是否已写过同一内容（写入回执；未接线返回 false） */
+  wasRecentlyWritten?(actorId: string, text: string): boolean;
   runSleepConsolidation(actorIds: string[]): Promise<
     Array<{
       actorId: string;
@@ -303,6 +304,10 @@ export class NarrativeMemoryFacade implements NarrativeMemoryPort {
     );
   }
 
+  wasRecentlyWritten(actorId: string, text: string): boolean {
+    return this.bridge?.hasRecentWrite(actorId, text) ?? false;
+  }
+
   async runSleepConsolidation(actorIds: string[]): Promise<
     Array<{
       actorId: string;
@@ -364,149 +369,3 @@ export function createNarrativeMemoryPort(opts: {
   );
 }
 
-/**
- * 混合检索适配器：把 NarrativeHybridRetrievalService（BM25+Qdrant+RRF）
- * 与现有 NarrativeMemoryPort 组合，实现「人脑记忆 + 向量检索」双通道。
- *
- * - ingest：双写（facade 做人脑记忆沉淀，hybrid 做 BM25+Qdrant 索引）。
- *   bridgeActive 时短文本（< 切块阈值）跳过 hybrid 向量嵌入——其内容已由
- *   Mem0×认知图×FTS 融合召回覆盖，重复嵌入只是多烧一次 API 与一份向量存储；
- *   BM25 仍照常写入。
- * - buildNarrativeRecall：双通道召回后拼接结果（facade 优先，hybrid 补充）；
- *   hybrid 块与 facade 已展示内容做跨通道去重，避免同一记忆原文+抽取事实
- *   双份进 Prompt。
- * - 其余方法：仅委托 facade（hybrid 未实现这些方法）
- */
-class NarrativeHybridAdapter implements NarrativeMemoryPort {
-  constructor(
-    private readonly facade: NarrativeMemoryPort,
-    private readonly hybrid: import("./narrative-hybrid-retrieval-service.js").NarrativeHybridRetrievalService,
-    /** bridge 融合召回是否生效（决定短文本是否还需要 hybrid 向量索引） */
-    private readonly bridgeActive: boolean,
-  ) {}
-
-  /**
-   * hybrid 块与 facade 融合文本的跨通道去重：
-   * - facade 文本已逐字包含该块 → 纯重复，丢弃；
-   * - 短块（<200 字符）包含 facade 的某条事实行 → 块是该事实的原文冗余，丢弃；
-   * - 长块（切块的独有价值：上下文连续性）保守保留。
-   */
-  private dedupeChunksAgainstFacade(chunks: string[], facadeText: string): string[] {
-    if (chunks.length === 0) return chunks;
-    if (!facadeText.trim()) return chunks;
-    const norm = (s: string): string => s.replace(/\s+/g, " ").trim();
-    const facadeNorm = norm(facadeText);
-    // facade 渲染格式（buildFusedRecall / buildRecall / 认知图 recall）中事实行的
-    // 启发式提取：跳过说明头（以下为…）与元数据行（N. [融合]相关度 …）
-    const factLines = facadeText
-      .split("\n")
-      .map((l) => norm(l))
-      .filter((l) => l.length >= 10 && !/^(以下为|\d+[.、]\s*(融合)?相关度)/.test(l));
-    return chunks.filter((chunk) => {
-      const c = norm(chunk);
-      if (!c) return false;
-      if (facadeNorm.includes(c)) return false;
-      if (c.length < 200 && factLines.some((line) => c.includes(line))) return false;
-      return true;
-    });
-  }
-
-  async ingest(
-    actorId: string,
-    text: string,
-    source: string,
-    opts?: { highSignal?: boolean; context?: NarrativeMemoryContext },
-  ): Promise<void> {
-    const skipVector = this.bridgeActive && text.trim().length < this.hybrid.chunkChars;
-    await Promise.all([
-      this.facade.ingest(actorId, text, source, opts),
-      this.hybrid.ingest(actorId, text, source, { skipVector }),
-    ]);
-  }
-
-  async writeDecided(
-    actorId: string,
-    text: string,
-    source: string,
-    opts: { context: NarrativeMemoryContext; highSignal: boolean } & MemoryWriteProvenance,
-    unified?: import("../agentic-memory/unified-extractor.js").UnifiedExtraction,
-  ): Promise<WriteDecidedOutcome> {
-    const skipVector = this.bridgeActive && text.trim().length < this.hybrid.chunkChars;
-    // hybrid 只是附加索引，失败不影响主落库结论（由 facade 返回）
-    const hybridWrite = this.hybrid
-      .ingest(actorId, text, source, { skipVector })
-      .catch((err) => console.error("[NarrativeMemoryPort] hybrid 索引写入失败（忽略）:", err));
-    const [outcome] = await Promise.all([
-      this.facade.writeDecided(actorId, text, source, opts, unified),
-      hybridWrite,
-    ]);
-    // facade 未返回结论（旧 fake / 未实现）时不假设成功，避免“静默当已落库”
-    return outcome ?? { persisted: false };
-  }
-
-  async buildNarrativeRecall(actorId: string, query: string): Promise<string> {
-    const [facadeResult, chunks] = await Promise.all([
-      this.facade.buildNarrativeRecall(actorId, query),
-      this.hybrid.recallChunks(actorId, query),
-    ]);
-    const hybridResult = formatHybridRecall(this.dedupeChunksAgainstFacade(chunks, facadeResult));
-    return [facadeResult, hybridResult].filter(Boolean).join("\n\n");
-  }
-
-  async buildCrossContextRecall(actorId: string, query: string): Promise<string> {
-    return this.facade.buildCrossContextRecall(actorId, query);
-  }
-
-  async buildDetailedRecall(actorId: string, query: string): Promise<string> {
-    return this.facade.buildDetailedRecall(actorId, query);
-  }
-
-  async buildSourceRecall(actorId: string, query: string): Promise<string> {
-    return this.facade.buildSourceRecall(actorId, query);
-  }
-
-  async runSleepConsolidation(actorIds: string[]): Promise<
-    Array<{
-      actorId: string;
-      dailyCleanupCount: number;
-      weeklyMergedCount: number;
-      monthlyAbstractedCount: number;
-      consistencyFlagCount: number;
-      knowledgePromotedCount: number;
-      compressionRate: number;
-      estimatedRecallPrecision: number;
-      plannedActions: number;
-      executedActions: number;
-      stageReports: Array<{ stage: string; changed: number; notes: string[] }>;
-    }>
-  > {
-    return this.facade.runSleepConsolidation(actorIds);
-  }
-
-  async selfCheck(actorId: string, query: string): Promise<{ exists: boolean; domainId: string | null; confidence: number }> {
-    return this.facade.selfCheck(actorId, query);
-  }
-
-  getTelemetrySnapshot(): Record<string, unknown> {
-    return {
-      ...this.facade.getTelemetrySnapshot(),
-      hybridRetrieval: "enabled",
-    };
-  }
-}
-
-/**
- * 条件包装：如果 hybrid 检索服务可用，把 port 包装为双通道适配器。
- * @param port 现有 NarrativeMemoryPort（可能为 null）
- * @param hybrid NarrativeHybridRetrievalService 实例（可能为 null）
- * @param bridgeActive bridge 融合召回是否生效（true 时短文本跳过 hybrid 向量重复索引）
- * @returns 包装后的 NarrativeMemoryPort（或原 port / null）
- */
-export function wrapNarrativeWithHybrid(
-  port: NarrativeMemoryPort | null,
-  hybrid: import("./narrative-hybrid-retrieval-service.js").NarrativeHybridRetrievalService | null,
-  bridgeActive = false,
-): NarrativeMemoryPort | null {
-  if (!port || !hybrid) return port;
-  return new NarrativeHybridAdapter(port, hybrid, bridgeActive);
-}

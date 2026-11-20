@@ -152,91 +152,6 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
     },
   },
   {
-    prefix: "desktop.visual.",
-    metadata: {
-      aliases: ["desktop", "screenshot", "screen", "computer control", "桌面", "截图"],
-      // 注意：这里不放 "automation"/"自动化"——desktop.run_automation 才是该语义的目标工具，
-      // 避免 desktop.visual.*（如 screenshot/run_task）因通用 alias 抢走 top1。
-      negativeAliases: ["weather", "shopping recommendation", "wallet balance"],
-      examples: ["take a screenshot", "open the browser and click the search box"],
-      negativeExamples: ["what's today's weather"],
-    },
-  },
-  {
-    exact: "desktop.visual.screenshot",
-    metadata: {
-      negativeAliases: [
-        "automation task script",
-        "run automation",
-        "自动化任务脚本",
-        "UIA pattern",
-        "原生控件操作",
-      ],
-      negativeExamples: [
-        "运行桌面自动化任务脚本",
-        "用 UIA 操作 Windows 原生控件",
-        "执行 run_automation 任务",
-      ],
-    },
-  },
-  {
-    exact: "desktop.run_automation",
-    metadata: {
-      aliases: [
-        "run automation script",
-        "execute desktop automation task",
-        "UIA native control operation",
-        "运行桌面自动化任务脚本",
-        "桌面控件原子操作",
-        "UIA pattern 直接调用",
-        "免抢焦点的桌面操作",
-      ],
-      negativeAliases: [
-        "take a screenshot",
-        "open the browser",
-        "screenshot capture",
-        "截屏",
-        "打开浏览器",
-        "全屏截图",
-      ],
-      examples: [
-        "运行桌面自动化任务脚本",
-        "用 UIA 操作 Windows 原生控件",
-        "执行 run_automation 任务",
-      ],
-      negativeExamples: [
-        "截一张桌面截图",
-        "打开浏览器到百度",
-      ],
-    },
-  },
-  {
-    exact: "desktop.open",
-    metadata: {
-      aliases: [
-        "open app", "launch app", "open application", "open program", "open software",
-        "打开软件", "打开应用", "打开App", "启动应用", "启动软件", "运行软件",
-        "打开程序", "帮我打开", "打开抖音", "打开微信", "打开网易云", "打开记事本",
-        "打开B站", "打开QQ音乐", "打开浏览器",
-      ],
-      negativeAliases: [
-        "read webpage content",
-        "读网页正文", "搜索网页内容",
-        // 设备控制不是「打开应用」：把用户最常见的家居说法明确排除，
-        // 否则 desktop.open 会靠「打开」二字抢走 smart_home 的召回。
-        "开灯", "关灯", "灯光", "客厅的灯", "台灯",
-        "空调", "窗帘", "插座", "回家模式", "离家模式",
-        "智能家居", "设备控制",
-      ],
-      examples: [
-        "打开抖音", "帮我打开微信", "打开网易云播放影月", "启动记事本", "open wechat",
-      ],
-      negativeExamples: [
-        "读一下这个网页说了什么",
-      ],
-    },
-  },
-  {
     prefix: "browser.",
     metadata: {
       aliases: ["browser", "web page", "cookie", "page read", "浏览器", "网页"],
@@ -282,6 +197,23 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
       negativeAliases: ["搜一下", "找几张", "热搜"],
     },
   },
+  // 打车复合入口（2026-11-20）：quote/book/status/cancel 收编后，模型面只剩
+  // 裸名 `ride_hailing`，英文名与中文口语零词面重叠；不登记先验直取则「司机到哪了」
+  // 会被 agent/快递类别名顶掉。只作检索证据，不下单。
+  {
+    exact: "ride_hailing",
+    metadata: {
+      aliases: [
+        "打车", "打车去", "叫车", "叫个车", "网约车", "出租车", "滴滴", "专车", "快车",
+        "接我", "送我去", "接机", "送机", "预约用车",
+        "司机到哪了", "司机到了吗", "司机信息", "车牌", "行程状态",
+        "取消叫车", "取消刚才叫的车", "不要车了", "取消这个行程",
+      ],
+      examples: ["帮我叫个车去首都机场", "从家打车去公司多少钱", "司机到哪了", "取消刚才叫的车"],
+      negativeAliases: ["跑腿", "代买", "外卖", "点餐", "取快递", "怎么走", "路线规划", "记一笔"],
+      negativeExamples: ["帮我跑腿买杯咖啡", "从国贸到机场怎么走", "记一下这笔打车消费"],
+    },
+  },
   // ── 复合 action 覆盖（2026-11-11）：细分名收编后，各 action 的用户口语
   //    必须还能命中复合入口，否则模型看到的是空召回。──
   {
@@ -313,14 +245,6 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
       aliases: ["怎么没提醒", "为什么没说", "怎么没动静", "没告诉我", "沉默", "为什么不提醒", "怎么不说话了", "太吵", "别提醒", "别发了", "打扰", "少提醒", "批准", "就这么办"],
       examples: ["你最近怎么没提醒我", "提醒太频繁了别发了", "这个提议我批准了"],
       negativeAliases: ["定时提醒", "日程", "待办"],
-    },
-  },
-  {
-    exact: "care",
-    metadata: {
-      aliases: ["生日", "纪念日", "重要日子", "重要日期", "结婚纪念", "我妈生日", "爸爸生日", "女朋友生日"],
-      examples: ["记住我妈生日是5月20号", "我记了哪些重要日期", "把那个纪念日删掉"],
-      negativeAliases: ["定时提醒", "十分钟后", "明天早上"],
     },
   },
   {

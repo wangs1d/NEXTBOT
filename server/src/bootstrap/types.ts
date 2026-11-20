@@ -37,7 +37,6 @@ import type { FileProcessingService } from "../services/file-processing-service.
 import type { EmailSmsService } from "../services/email-sms-service.js";
 import type { EmailOtpService } from "../services/email-otp-service.js";
 import type { MediaMusicService } from "../services/media-music-service.js";
-import type { HealthFitnessService } from "../services/health-fitness-service.js";
 import type { FinanceDeepService } from "../services/finance-deep-service.js";
 import type { BillManagementService } from "../services/bill-management-service.js";
 import type { SocialOutreachService } from "../services/social-outreach-service.js";
@@ -114,8 +113,6 @@ export type AppServices = {
   emailOtpService: EmailOtpService;
   /** 媒体音乐服务（media.search / media.play / pause / resume / stop / now_playing） */
   mediaMusicService: MediaMusicService;
-  /** 健康/运动数据服务（health.log_metric / get_metrics / get_summary / set_goal / get_goals / import_data） */
-  healthFitnessService: HealthFitnessService;
   /** 财务深度服务（finance.import_transactions / analyze_spending / set_budget / get_budget_status / reconcile / categorize / export_report） */
   financeDeepService: FinanceDeepService;
   /** 账单管理服务（finance.add/list/update/pay_bill：账单追踪/到期提醒/缴费入账联动预算） */
@@ -167,6 +164,8 @@ export type AppServices = {
   attentionStore: import("../proactivity/attention-store.js").AttentionStore;
   /** 分级触达路由（矩阵路由 + 升级计时 + 专注降级） */
   reachRouter: import("../proactivity/reach-router.js").ReachRouter;
+  /** 期望效用触达决策层（voice.* / phone.* 共用；诊断接口读取决策留痕与配置） */
+  reachDecisionService: import("../proactivity/reach-decision-service.js").ReachDecisionService;
   /** Agent Brain Center —— 大脑中心外观（BRAIN_CENTER_ENABLED=0 时为 null） */
   brainCenter: BrainCenter | null;
   /** Agent Body Center —— 身体中心外观（BODY_CENTER_ENABLED=0 时为 null） */

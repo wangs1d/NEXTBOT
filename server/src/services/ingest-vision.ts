@@ -15,7 +15,7 @@
 
 import { modelSupportsVision } from "../external-model/vision-support.js";
 import type { IngestVisionExtract } from "./ingest-extractors.js";
-import { resolveDesktopVisualVlmConfig } from "./desktop-visual-vlm-config.js";
+import { resolveVisionModelConfig } from "./vision-model-config.js";
 
 /** 单次读图的硬超时：截图上传来是用户在现场等，30s 已经够宽容。 */
 const VISION_TIMEOUT_MS = 30_000;
@@ -23,11 +23,11 @@ const VISION_TIMEOUT_MS = 30_000;
 export function createIngestVisionExtract(
   env: NodeJS.ProcessEnv = process.env,
 ): IngestVisionExtract | null {
-  const cfg = resolveDesktopVisualVlmConfig(env);
+  const cfg = resolveVisionModelConfig(env);
   if (!cfg || !cfg.apiKey) return null;
   if (!modelSupportsVision(cfg.model)) return null;
 
-  // baseUrl 已被 resolveDesktopVisualVlmConfig 去掉 /v1 后缀
+  // baseUrl 已被 resolveVisionModelConfig 去掉 /v1 后缀
   const endpoint = `${cfg.baseUrl}/v1/chat/completions`;
 
   return async (imageBase64: string, mimeType: string, prompt: string): Promise<string> => {

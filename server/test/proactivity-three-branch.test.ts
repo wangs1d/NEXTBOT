@@ -40,9 +40,9 @@ function makeHub(opts?: { confirmations?: PendingConfirmationStore }) {
 function actIntent(overrides: Partial<ProactiveIntent> = {}): ProactiveIntent {
   return {
     actorId: ACTOR,
-    kind: "overwork_care",
+    kind: "life_reminder",
     importance: "high",
-    title: "过劳关怀",
+    title: "生活提醒",
     summary: "连续工作太久，帮你放首轻音乐",
     mode: "act",
     actArgs: [{ tool: "media.play", args: { trackId: "calm-1" } }],
@@ -257,7 +257,7 @@ test("低价值可逆动作直接 silence（问比做更打扰），不再 ask_f
   await flush();
   assert.equal(toolCalls.length, 0, "不执行");
   assert.equal(signals.length, 0, "不问（低价值不值得打扰）");
-  assert.equal(silenceLog.search({ actorId: ACTOR, keyword: "过劳关怀" }).length, 1, "沉默留痕");
+  assert.equal(silenceLog.search({ actorId: ACTOR, keyword: "生活提醒" }).length, 1, "沉默留痕");
 });
 
 test("挂起确认落盘恢复：重启后 listPendingConfirmations 仍可见且可推进", async () => {

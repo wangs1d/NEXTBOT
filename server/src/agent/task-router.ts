@@ -29,7 +29,7 @@ export const TASK_PLANE_FALLBACK_BUDGET = 3;
 /** 执行平面：chat=对话面；task=后台任务执行器。 */
 export type TurnPlane = "chat" | "task";
 /** 能力束标签（意图表删除后仅作观测/兼容，不再参与工具裁剪）。 */
-export type TurnCapability = "search" | "media" | "write" | "desktop" | "full" | "commerce" | "browser";
+export type TurnCapability = "search" | "media" | "write" | "full" | "commerce" | "browser";
 /** 模型档位。 */
 export type TurnTier = "flash" | "pro";
 
@@ -212,21 +212,13 @@ export function isForegroundTagProtocolEnabled(): boolean {
 /* ────────────────────────────────────────────────────────────
  * 任务面双通道（2026-09-05 前后台架构，先轻后重）
  *
- * 快速通道（默认起步）：跳过 planner，可见工具 = 桥工具（tool_discover/
- * tool_call），一切业务工具由 tool router（BM25 目录）按需召回——执行侧
+ * 快速通道（默认起步）：跳过 planner，可见工具 = 桥工具（tool_discover），
+ * 一切业务工具由 tool router（BM25 目录）按需召回——执行侧
  * 上下文零业务 schema，Flash 档单点查证直查直答。
  * 完整通道：快速通道产出道歉式/空 → 升级 planner + 预算波 + Pro 档。
  * 判定不在路由层：失败信号是执行结果本身（isApologyStyleFallback），由
  * 派发方（dispatchBackgroundTask）裁决升级。
  * ──────────────────────────────────────────────────────────── */
-
-/** 延迟目录桥（元工具，不算业务工具）：快速通道可见集的构成。 */
-export const TASK_TOOL_BRIDGE_NAMES: ReadonlySet<string> = new Set([
-  "tool_search",
-  "tool_discover",
-  "tool_describe",
-
-]);
 
 /* ────────────────────────────────────────────────────────────
  * 高精度纯闲聊短路（唯一保留的词法信号）

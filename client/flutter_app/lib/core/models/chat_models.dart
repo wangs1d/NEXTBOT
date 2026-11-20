@@ -333,6 +333,7 @@ class ChatMessage {
     List<Map<String, dynamic>>? envelopeBlocks,
     List<Map<String, dynamic>>? pendingMediaCards,
     List<String>? followUpPrompts,
+    bool clearFollowUps = false,
     List<NotifyAction>? notifyActions,
     Map<String, dynamic>? eveningDigest,
     Map<String, dynamic>? transferReminder,
@@ -365,7 +366,8 @@ class ChatMessage {
       replyBlocks: replyBlocks ?? this.replyBlocks,
       envelopeBlocks: envelopeBlocks ?? this.envelopeBlocks,
       pendingMediaCards: pendingMediaCards ?? this.pendingMediaCards,
-      followUpPrompts: followUpPrompts ?? this.followUpPrompts,
+      followUpPrompts:
+          clearFollowUps ? null : (followUpPrompts ?? this.followUpPrompts),
       notifyActions: notifyActions ?? this.notifyActions,
       eveningDigest: eveningDigest ?? this.eveningDigest,
       transferReminder: transferReminder ?? this.transferReminder,

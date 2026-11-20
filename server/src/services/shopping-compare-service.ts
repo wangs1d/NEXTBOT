@@ -131,7 +131,7 @@ export interface PendingCompareSession {
   /** 用户主动「跳过这家」的平台 */
   skipped: string[];
   /** 已推给用户的登录二维码（platform → 图片地址 + 点码深链），跳过一家后重发其余 */
-  qrItems: Array<{ platform: string; platformLabel: string; qrImage: string; qrLink?: string; qrLinkFallback?: string }>;
+  qrItems: Array<{ platform: string; platformLabel: string; qrImage: string; issuedAt?: number; qrLink?: string; qrLinkFallback?: string }>;
   createdAt: number;
   expiresAt: number;
 }
@@ -644,34 +644,60 @@ export class ShoppingCompareService {
     query: string,
     opts: { preferVisible?: boolean } = {},
   ): Promise<{ needsLogin: string[]; ready: string[] }> {
-    const needsLogin: string[] = [];
-    const ready: string[] = [];
     const service = this.deps.shoppingOrderService;
-    for (const platform of platforms) {
-      // 已有授权 Cookie 的平台不必探（登录态确定）。
-      // 注意：这里用 try/catch 而非 .catch()——被替换/裁剪过的 service 实现
-      // 可能**同步**抛（方法不存在时是 TypeError），.catch() 抓不到同步抛出。
-      let hasCookie = false;
+    const actorId = resolveActorId(ctx);
+    // 并发探针（2026-11-19 用户投诉「比价点下去半天没反应、浏览器一直冷启动」）：
+    // 以前逐家串行，三四家登录平台光预检就吃掉 15~25 秒。常驻浏览器里多开几个
+    // page 成本很低（每站独立 context），并发后整体预检压到「最慢那一家」的耗时。
+    // 注意用 try/catch 而非 .catch()：被替换/裁剪过的 service 可能**同步**抛。
+    const probes = platforms.map(async (platform) => {
       try {
-        const list = await service.listPlatformsWithCookies(resolveActorId(ctx), [platform]);
-        hasCookie = Array.isArray(list) && list.includes(platform);
+        const list = await service.listPlatformsWithCookies(actorId, [platform]);
+        if (Array.isArray(list) && list.includes(platform)) {
+          return { platform, needsLogin: false };
+        }
       } catch {
-        hasCookie = false;
-      }
-      if (hasCookie) {
-        ready.push(platform);
-        continue;
+        /* Cookie 查询失败按未登录继续探 */
       }
       try {
         const probe = await service.probeLoginWall(ctx, platform, query, {
           preferVisible: opts.preferVisible,
         });
-        if (probe?.required) needsLogin.push(platform);
-        else ready.push(platform);
+        return { platform, needsLogin: probe?.required === true };
       } catch {
         // 探测失败不当登录墙：交给取价阶段的真实结果判定
-        ready.push(platform);
+        return { platform, needsLogin: false };
       }
+    });
+    // 并发上限 2（2026-11-20 实测）：云端只有 2 核，3 个 chromium context 同时
+    // 导航会互相抢 CPU——三家并发总耗时 32s，比逐家串行（22s）还慢，每家页面
+    // 都被拖到 2~3 倍。两个并行是这台机器的最优点。
+    const CONCURRENCY = 2;
+    const queue = [...probes];
+    const results: Array<{ platform: string; needsLogin: boolean }> = [];
+    const workers = Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
+      for (;;) {
+        const next = queue.shift();
+        if (!next) return;
+        // 单家预算 9s：淘宝这类「点了不切扫码页」的站点会把整轮拖死，
+        // 超时就当「不确定」，交给取价阶段的真实结果判定，不再二次等待。
+        const outcome = await Promise.race([
+          next,
+          new Promise<{ platform: string; needsLogin: boolean }>((resolve) =>
+            setTimeout(() => resolve({ platform: "timeout", needsLogin: false }), 9_000).unref?.(),
+          ),
+        ]).catch(() => ({ platform: "timeout", needsLogin: false }));
+        results.push(outcome);
+      }
+    });
+    await Promise.all(workers);
+
+    const needsLogin: string[] = [];
+    const ready: string[] = [];
+    for (const platform of platforms) {
+      const hit = results.find((r) => r.platform === platform);
+      if (hit?.needsLogin) needsLogin.push(platform);
+      else ready.push(platform);
     }
     return { needsLogin, ready };
   }
@@ -964,7 +990,7 @@ export class ShoppingCompareService {
       // 批量推码：一次把要登录的几家全推出去（合并成一张多平台登录卡），
       // 用户扫任意一张即可全部放行——不再「补完京东再说淘宝」。
       // 用 try/catch 而非 .catch()：service 实现可能同步抛（方法缺失等）。
-      let pushed = new Map<string, { imageUrl: string; qrLink?: string; qrLinkFallback?: string }>();
+      let pushed = new Map<string, { imageUrl: string; qrLink?: string; qrLinkFallback?: string; issuedAt?: number }>();
       try {
         const result = await this.deps.shoppingOrderService.pushBatchLoginQrs(
           ctx,
@@ -998,6 +1024,7 @@ export class ShoppingCompareService {
               platform: p,
               platformLabel: platformLabel(p),
               qrImage: q.imageUrl,
+              issuedAt: q.issuedAt,
               ...(q.qrLink ? { qrLink: q.qrLink } : {}),
               ...(q.qrLinkFallback ? { qrLinkFallback: q.qrLinkFallback } : {}),
             };
@@ -1486,7 +1513,13 @@ export class ShoppingCompareService {
    */
   updatePendingQrImages(
     ctx: ToolContext,
-    images: Array<{ platform: string; imageUrl: string; qrLink?: string; qrLinkFallback?: string }>,
+    images: Array<{
+      platform: string;
+      imageUrl: string;
+      qrLink?: string;
+      qrLinkFallback?: string;
+      issuedAt?: number;
+    }>,
   ): PendingCompareSession | null {
     const session = this.getPendingCompare(ctx);
     if (!session) return null;
@@ -1497,6 +1530,7 @@ export class ShoppingCompareService {
         platform: img.platform,
         platformLabel: platformLabel(img.platform),
         qrImage: img.imageUrl,
+        ...(img.issuedAt != null ? { issuedAt: img.issuedAt } : {}),
         ...(img.qrLink ? { qrLink: img.qrLink } : {}),
         ...(img.qrLinkFallback ? { qrLinkFallback: img.qrLinkFallback } : {}),
       });

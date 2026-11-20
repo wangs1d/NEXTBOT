@@ -16,7 +16,6 @@
  * 边界区分（negativeAliases / negativeExamples）：
  *   - browser.fetch_page（只读单页抓取，无状态）
  *   - shopping.order.*（仅购物平台业务流程）
- *   - desktop.visual.run_task（操控用户桌面软件，非浏览器）
  *   - search_web / fetch_web（通用搜索/抓取，非交互式浏览器操作）
  */
 import type { ToolIntentRule } from "../../tool-search/intent-metadata.js";

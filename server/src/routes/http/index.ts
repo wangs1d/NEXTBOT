@@ -78,6 +78,7 @@ import { registerAdminInboxRoutes } from "./admin-inbox.js";
 import { registerSearchProxyRoutes } from "./search-proxy.js";
 import { registerToolSearchAdminRoutes } from "./tool-search-admin.js";
 import { registerGatewayAdminRoutes } from "./gateway-admin.js";
+import { registerReachDiagnosticsRoutes } from "./reach-diagnostics.js";
 import { registerToolRegistryRoutes } from "./tool-registry-routes.js";
 import { registerNotesRoutes } from "./notes.js";
 import { registerLibraryRoutes } from "./library.js";
@@ -230,6 +231,8 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerDownloadRoutes(app);
   registerToolSearchAdminRoutes(app);
   registerGatewayAdminRoutes(app);
+  // 期望效用触达决策诊断（/api/reach/config 公开 + /api/admin/reach/diagnostics 本机管理端）
+  registerReachDiagnosticsRoutes(app, deps);
   registerToolRegistryRoutes(app);
   registerLifeSignalRoutes(app, deps);
   if (deps.moodInferenceService) {

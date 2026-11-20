@@ -95,8 +95,6 @@ const SEARCH_ELIGIBLE_TOOLS = new Set([
   "web_fetch",
   "search_web",
   "fetch_web",
-  "info.search",
-  "info.read_webpage",
   "info.inspect_webpage",
   "info.navigate_site",
 ]);

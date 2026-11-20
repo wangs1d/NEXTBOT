@@ -8,7 +8,6 @@ export type ProactiveIntentKind =
   | "task_celebration" // 任务完成恭喜（复杂任务完成 / 用户待办闭环）
   | "interest_share"   // 兴趣分享（用户喜欢的话题 / agent 自己的视角）
   | "interest_alert"   // 兴趣话题热议推送（后台盯用户关注话题，热搜命中→主动告知）
-  | "overwork_care"    // 过劳关怀干预（连续加班 → 调日程 + 放音乐 + 说话）
   | "followup"         // 对话内待办跟进（迁移自 agent-core 对话钩子）
   // ── C 端生活管家场景（Task 20 统一频控注册）──
   | "weather_alert"    // 恶劣天气预警联动（暴雨/高温/寒潮等 + 当日有日程 → 合并提醒）

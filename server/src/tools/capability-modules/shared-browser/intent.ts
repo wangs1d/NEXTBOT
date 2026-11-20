@@ -4,7 +4,6 @@
  * 边界区分（negativeAliases / negativeExamples）：
  *   - agent_browser.*（服务端无头会话池，用户不可见、需 sessionId）
  *   - browser.fetch_page（只读单页抓取，无状态）
- *   - desktop.visual.run_task（操控桌面软件，非浏览器）
  */
 import type { ToolIntentRule } from "../../tool-search/intent-metadata.js";
 

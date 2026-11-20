@@ -18,13 +18,11 @@ const DEFAULT_KIND_COOLDOWN_MS: Record<string, number> = {
   care: 8 * 60 * 60 * 1000,             // 对话关怀：8h 冷却
   followup: 4 * 60 * 60 * 1000,         // 待办跟进：4h 冷却
   task_celebration: 30 * 60 * 1000,     // 恭喜：每任务一次（30min 防连发）
-  overwork_care: 8 * 60 * 60 * 1000,    // 过劳干预：8h 冷却
   // ── C 端生活管家场景（Task 20 统一频控注册）──
   weather_alert: 30 * 60 * 1000,        // 恶劣天气预警：预警类需即时触达，30min 冷却防同一场雨连发
   life_reminder: 4 * 60 * 60 * 1000,    // 生活提醒（重要日子/预算超支/节律提醒等）：4h 冷却
   monthly_report: 24 * 60 * 60 * 1000,  // 月度报告（消费月报等）：每日最多 1 次
   // ── 评估器场景独立档（一个场景一个 kind，避免与生活提醒互相挤占冷却）──
-  message_burst: 2 * 60 * 60 * 1000,    // 消息爆发提醒：2h 一次
   meeting_early: 4 * 60 * 60 * 1000,    // 临会预告（1h 档）：4h 冷却（与 15min 档独立）
   sleep_care: 20 * 60 * 60 * 1000,      // 深夜睡眠关怀：每晚最多一次
   // ── 位置场景（方案 D）──
@@ -79,13 +77,21 @@ function isQuietHour(hour: number): boolean {
 type ActorFrequencyState = {
   dateKey: string;
   dailyCount: number;
+  /** 其中「社交类」条数（2026-11-19：与事务类分账） */
+  socialCount: number;
   /** kind → 最近一次触发时间戳 */
   kindLastAt: Map<string, number>;
 };
 
 /** 频控状态快照（重启恢复用：预算计数 + 分 kind 冷却 + 自适应调整结果） */
 export type GovernorSnapshot = {
-  actors: Array<{ actorId: string; dateKey: string; dailyCount: number; kindLastAt: Array<[string, number]> }>;
+  actors: Array<{
+    actorId: string;
+    dateKey: string;
+    dailyCount: number;
+    socialCount?: number;
+    kindLastAt: Array<[string, number]>;
+  }>;
   cooldowns: Record<string, number>;
 };
 
@@ -96,6 +102,15 @@ export class FrequencyGovernor {
   private readonly actors = new Map<string, ActorFrequencyState>();
 
   private readonly dailyBudget: number;
+  /**
+   * 社交类独立日预算（2026-11-19）：招呼/接话/兴趣分享/寒暄这类「没事找话说」。
+   *
+   * 为什么单独分账：原来事务提醒和闲聊共用一个 15 条池子——事务多的日子闲聊被
+   * 挤光（主动性消失），闲聊多的日子提醒被挤掉（更要命）。分开之后各自有上限，
+   * 事务类仍受 dailyBudget 兜底，社交类永远越不过 socialDailyBudget。
+   * 默认 4：一个懂分寸的助理，一天主动闲聊超过 4 次就开始像推销。
+   */
+  private readonly socialDailyBudget: number;
   private readonly nowFn: () => Date;
   private readonly kindCooldownMs: Record<string, number>;
   private readonly disableQuietHours: boolean;
@@ -111,6 +126,8 @@ export class FrequencyGovernor {
 
   constructor(opts?: {
     dailyBudget?: number;
+    /** 社交类独立日预算（缺省 env PROACTIVITY_SOCIAL_DAILY_BUDGET，默认 4） */
+    socialDailyBudget?: number;
     kindCooldownMs?: Record<string, number>;
     /** 测试用：不读 env */
     ignoreEnv?: boolean;
@@ -124,6 +141,8 @@ export class FrequencyGovernor {
     // 每日预算定位为「异常熔断」而非主动性的日常约束：正常节制的责任在
     // ArbiterV2 打断成本 + 分 kind 冷却 + 反馈自适应，这里只防 LLM 抽风连发。
     this.dailyBudget = opts?.dailyBudget ?? readEnvInt("PROACTIVITY_DAILY_BUDGET", 15);
+    this.socialDailyBudget =
+      opts?.socialDailyBudget ?? readEnvInt("PROACTIVITY_SOCIAL_DAILY_BUDGET", 4);
     this.kindCooldownMs = { ...DEFAULT_KIND_COOLDOWN_MS };
     for (const [kind, ms] of Object.entries(opts?.kindCooldownMs ?? {})) {
       if (typeof ms === "number" && Number.isFinite(ms)) {
@@ -158,12 +177,13 @@ export class FrequencyGovernor {
   /** 频控状态快照（ProactivePipeline 落盘 data/proactivity/frequency.json） */
   snapshot(): GovernorSnapshot {
     return {
-      actors: [...this.actors].map(([actorId, s]) => ({
-        actorId,
-        dateKey: s.dateKey,
-        dailyCount: s.dailyCount,
-        kindLastAt: [...s.kindLastAt],
-      })),
+    actors: [...this.actors].map(([actorId, s]) => ({
+      actorId,
+      dateKey: s.dateKey,
+      dailyCount: s.dailyCount,
+      socialCount: s.socialCount,
+      kindLastAt: [...s.kindLastAt],
+    })),
       cooldowns: { ...this.kindCooldownMs },
     };
   }
@@ -174,6 +194,7 @@ export class FrequencyGovernor {
       this.actors.set(a.actorId, {
         dateKey: a.dateKey,
         dailyCount: a.dailyCount,
+        socialCount: a.socialCount ?? 0,
         kindLastAt: new Map(a.kindLastAt ?? []),
       });
     }
@@ -183,11 +204,13 @@ export class FrequencyGovernor {
   }
 
   /** 预算用量（诊断接口展示） */
-  usageSnapshot(): Array<{ actorId: string; dailyCount: number; budget: number }> {
+  usageSnapshot(): Array<{ actorId: string; dailyCount: number; budget: number; socialCount: number; socialBudget: number }> {
     return [...this.actors].map(([actorId, s]) => ({
       actorId,
       dailyCount: s.dailyCount,
       budget: this.dailyBudget,
+      socialCount: s.socialCount,
+      socialBudget: this.socialDailyBudget,
     }));
   }
 
@@ -199,6 +222,7 @@ export class FrequencyGovernor {
       state = {
         dateKey,
         dailyCount: 0,
+        socialCount: 0,
         kindLastAt: state?.kindLastAt ?? new Map(),
       };
       this.actors.set(actorId, state);
@@ -219,7 +243,7 @@ export class FrequencyGovernor {
     kind: string,
     importance: "high" | "medium" | "low",
     now: Date = this.nowFn(),
-    opts?: { awake?: boolean },
+    opts?: { awake?: boolean; tier?: "must" | "social" },
   ): FrequencyVerdict {
     const state = this.stateOf(actorId, now);
 
@@ -238,6 +262,14 @@ export class FrequencyGovernor {
     // 规则 1：每日总预算
     if (state.dailyCount >= this.dailyBudget) {
       return { allowed: false, reason: `daily_budget_exhausted(${state.dailyCount}/${this.dailyBudget})` };
+    }
+
+    // 规则 1b：社交类独立预算（与事务类分账，见 socialDailyBudget 注释）
+    if (opts?.tier === "social" && state.socialCount >= this.socialDailyBudget) {
+      return {
+        allowed: false,
+        reason: `social_budget_exhausted(${state.socialCount}/${this.socialDailyBudget})`,
+      };
     }
 
     // 规则 2：分 kind 冷却（未知 kind 用默认冷却，防新标签绕过）
@@ -264,9 +296,10 @@ export class FrequencyGovernor {
   }
 
   /** 记录一次已放行的触发（进入计数与冷却） */
-  record(actorId: string, kind: string, now: Date = this.nowFn()): void {
+  record(actorId: string, kind: string, now: Date = this.nowFn(), tier?: "must" | "social"): void {
     const state = this.stateOf(actorId, now);
     state.dailyCount += 1;
+    if (tier === "social") state.socialCount += 1;
     state.kindLastAt.set(kind, now.getTime());
   }
 

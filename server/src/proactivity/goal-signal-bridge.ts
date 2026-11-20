@@ -6,7 +6,7 @@
 //
 // 本模块提供两个方向：
 //  方向 A（感知 → 目标）：`activeGoalContext(actorId)` —— 给规则注入"用户当前活跃目标"，
-//      让规则文案能带上目标上下文（如 work_marathon 附一句"你今天的计划还有 2 步"）。
+//      让规则文案能带上目标上下文。
 //  方向 B（目标 → 感知）：`retrievalRequestFor(goal, step)` —— 判定某步骤是否需要
 //      感知层检索（查邮件/日历/热搜），供 GoalRunner 按需发起（本版仅产出"检索意图"，
 //      实际执行由装配层接 realtime search / SourceStore 查询完成）。

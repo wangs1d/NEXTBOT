@@ -11,6 +11,7 @@
  * 所有对外函数都不抛错：sidecar 不可用 = 质量降级，不是故障。
  */
 import { getToolSearchConfig } from "./env.js";
+import { ensureLocalEmbeddingEndpoint, getLocalEmbeddingEndpoint } from "../../agentic-memory/local-embedding/local-embedding-endpoint.js";
 import {
   toolSearchMetrics,
   type NeuralMetricFeature,
@@ -124,6 +125,42 @@ function isTimedOut(error: unknown): boolean {
   );
 }
 
+/**
+ * 2026-11-20 根修：此前的 embed 一律打 `cfg.neuralSidecarUrl`（默认 8790 的
+ * FastAPI 侧车），但本部署根本没有那个服务——所有神经召回静默降级成纯 BM25
+ * （实证：tool-embeddings.json 从未生成、日志只有「embed 调用失败」）。
+ * 现改为：进程内 bge 侧车（getLocalEmbeddingEndpoint，OpenAI 兼容 /v1）优先，
+ * 它有 512 维中文小模型、云端离线可用；没有才回退旧 URL。
+ */
+async function embedTextsOnce(texts: string[], timeoutMs: number): Promise<NeuralEmbedResult | null> {
+  const localTimeout = Math.max(timeoutMs, 2_000);
+  // 侧车未拉起时等它就绪（幂等；bootstrap 早期调用的预热正需要这个）
+  const local = getLocalEmbeddingEndpoint() ?? (await ensureLocalEmbeddingEndpoint());
+  if (local) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(`${local.baseUrl.replace(/\/+$/, "")}/embeddings`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(local.apiKey ? { Authorization: `Bearer ${local.apiKey}` } : {}),
+        },
+        body: JSON.stringify({ model: local.model, input: texts }),
+        signal: AbortSignal.timeout(localTimeout),
+      });
+      if (!res.ok) throw new Error(`local embedding HTTP ${res.status}`);
+      const json = (await res.json()) as { data?: Array<{ embedding?: number[] }> };
+      const vectors = (json.data ?? []).map((d) => d.embedding ?? []).filter((v) => v.length > 0);
+      if (vectors.length !== texts.length) throw new Error(`local embedding 数量不匹配 ${vectors.length}/${texts.length}`);
+      return { model: local.model, dim: vectors[0]?.length ?? 0, vectors };
+    } catch (e) {
+      console.info(`[tool-search:neural] 本地 bge 侧车失败（attempt ${attempt + 1}）：${e instanceof Error ? e.message : String(e)}`);
+      await new Promise((r2) => setTimeout(r2, 800));
+    }
+    }
+  }
+  return null;
+}
 async function postJson<T>(
   path: string,
   body: unknown,
@@ -182,15 +219,28 @@ const SIDECAR_MAX_BATCH = 64;
  * （单块 ≤32 条长文本，且可能是 sidecar 冷启动的第一个请求，含模型懒加载）。
  */
 export async function neuralEmbedTextsBulk(texts: string[]): Promise<NeuralEmbedResult | null> {
+  // provider=openai（2026-11-20）：查询与工具向量必须同模型同维度——
+  // 本地 bge(512) 与 SiliconFlow bge-large(1024) 不能互算余弦。走远端缓存通道。
+  if (getToolSearchConfig().embeddingProvider === "openai") {
+    const { fetchOpenAiCompatibleEmbeddings } = await import("../../services/openai-embedding-client.js");
+    const out = await guardedCall("embed", () =>
+      fetchOpenAiCompatibleEmbeddings({ inputs: texts, model: getToolSearchConfig().embeddingModel, timeoutMs: Math.max(timeoutMs, 3_000) }),
+    );
+    if (!out || out.vectors.length !== texts.length) return null;
+    return { model: getToolSearchConfig().embeddingModel, dim: out.vectors[0]?.length ?? 0, vectors: out.vectors };
+  }
+
   if (texts.length === 0) return { model: "", dim: 0, vectors: [] };
   const timeoutMs = getToolSearchConfig().neuralEmbedBulkTimeoutMs;
   let first: NeuralEmbedResult | null = null;
   const vectors: number[][] = [];
   for (let i = 0; i < texts.length; i += 32) {
     const chunk = texts.slice(i, i + 32);
-    const part = await guardedCall("embed", () =>
-      postJson<NeuralEmbedResult>("/embed", { texts: chunk }, timeoutMs),
-    );
+    const part =
+      (await guardedCall("embed", () => embedTextsOnce(chunk, timeoutMs))) ??
+      (await guardedCall("embed", () =>
+        postJson<NeuralEmbedResult>("/embed", { texts: chunk }, timeoutMs),
+      ));
     if (!part) return null;
     if (!first) first = part;
     vectors.push(...part.vectors);
@@ -203,15 +253,28 @@ export async function neuralEmbedTextsBulk(texts: string[]): Promise<NeuralEmbed
  * （部分成功不留半吊子向量，调用方整体走下一 provider 重来）。
  */
 export async function neuralEmbedTexts(texts: string[]): Promise<NeuralEmbedResult | null> {
+  // provider=openai（2026-11-20）：查询与工具向量必须同模型同维度——
+  // 本地 bge(512) 与 SiliconFlow bge-large(1024) 不能互算余弦。走远端缓存通道。
+  if (getToolSearchConfig().embeddingProvider === "openai") {
+    const { fetchOpenAiCompatibleEmbeddings } = await import("../../services/openai-embedding-client.js");
+    const out = await guardedCall("embed", () =>
+      fetchOpenAiCompatibleEmbeddings({ inputs: texts, model: getToolSearchConfig().embeddingModel, timeoutMs: Math.max(timeoutMs, 3_000) }),
+    );
+    if (!out || out.vectors.length !== texts.length) return null;
+    return { model: getToolSearchConfig().embeddingModel, dim: out.vectors[0]?.length ?? 0, vectors: out.vectors };
+  }
+
   if (texts.length === 0) return { model: "", dim: 0, vectors: [] };
   const timeoutMs = getToolSearchConfig().neuralEmbedTimeoutMs;
   let first: NeuralEmbedResult | null = null;
   const vectors: number[][] = [];
   for (let i = 0; i < texts.length; i += SIDECAR_MAX_BATCH) {
     const chunk = texts.slice(i, i + SIDECAR_MAX_BATCH);
-    const part = await guardedCall("embed", () =>
-      postJson<NeuralEmbedResult>("/embed", { texts: chunk }, timeoutMs),
-    );
+    const part =
+      (await guardedCall("embed", () => embedTextsOnce(chunk, timeoutMs))) ??
+      (await guardedCall("embed", () =>
+        postJson<NeuralEmbedResult>("/embed", { texts: chunk }, timeoutMs),
+      ));
     if (!part) return null;
     if (!first) first = part;
     vectors.push(...part.vectors);

@@ -88,6 +88,10 @@ export type PostValidationResult = {
 const MINIMAL_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
   "taskContext",
   "memorySummary",
+  // 编译三块（读侧唯一出口）：剥离即失去当前状态/在办/按需回忆
+  "memoryCurrentState",
+  "memoryPending",
+  "memoryRecall",
   "currentTime",
   // 运行环境（手机/电脑，2026-10-07）：剥离会让模型不知道用户在哪类设备上
   "deviceEnvironment",
@@ -103,8 +107,7 @@ const MINIMAL_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
   "memoryPreferences",
   "memoryCommitments",
   "memoryOpenLoops",
-  // 跨会话/跨日衔接：recap 让 Agent 知道本会话已发生什么、dailyDigest 提供当日上下文
-  "sessionRecap",
+  // 跨日衔接：dailyDigest 提供当日上下文（账号级 session_recap 已下线）
   "dailyDigest",
   // 动态用户适配：剥离会导致 LLM 失去对用户画像/语气/关系/位置的感知
   "userProfile",
@@ -148,7 +151,9 @@ const DYNAMIC_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
   "memoryFacts",
   "memoryCommitments",
   "memoryOpenLoops",
-  "sessionRecap",
+  "memoryCurrentState",
+  "memoryPending",
+  "memoryRecall",
   "interruptedContext",
   "currentTime",
   // 运行环境（手机/电脑，2026-10-07）：同 minimal，剥离即失联
@@ -181,15 +186,6 @@ const KEYWORDS = {
     "\u7a7a\u8c03",
     "\u7a97\u5e18",
     "\u667a\u80fd\u5bb6\u5c45",
-  ],
-  desktop: [
-    "desktop",
-    "uia",
-    "\u7535\u8111",
-    "\u684c\u9762",
-    "\u6253\u5f00\u8f6f\u4ef6",
-    "\u70b9\u51fb",
-    "\u8f93\u5165",
   ],
   phone: [
     "phone",
@@ -493,9 +489,6 @@ export class RuntimeKernel {
     }
     if (hasAnyKeyword(text, KEYWORDS.smartHome)) {
       pins.push("smart_home");
-    }
-    if (hasAnyKeyword(text, KEYWORDS.desktop)) {
-      pins.push("desktop.open", "desktop.uia_query", "desktop.visual.screenshot");
     }
     if (hasAnyKeyword(text, KEYWORDS.phone)) {
       pins.push("phone", "voice");

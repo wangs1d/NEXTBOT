@@ -132,50 +132,7 @@ function makeExecutor(clock: MockClock, services: Record<string, unknown> = {}, 
   return { board, executor, events, feed, tick };
 }
 
-test("映射规则: away_return —— 离开4h后回归才问候", async () => {
-  const clock = new MockClock(MockClock.localAt(15, 0));
-  const { feed, tick, events } = makeExecutor(clock, {}, "away_return");
-  feed("presence", { state: "idle" });
-  await tick();
-  assert.equal(events.length, 0); // 刚离开不问候
-  clock.advance(4 * 3600_000); // 4h 后回归（19:00，仍在白天窗口）
-  feed("presence", { state: "active" });
-  await tick();
-  assert.equal(events.length, 1);
-  assert.equal(events[0].kind, "away_return");
-  // 2026-10-27 模板删除：body 留空（话术由 SpeechHub light 在投递出口生成），
-  // 素材走 title/summary
-  assert.equal(events[0].body, "", "话术模板已删，body 留空走 LLM");
-  assert.ok(events[0].title.length > 0);
-});
-
-test("映射规则: work_marathon —— 连续编码3h 触发休息干预", async () => {
-  const clock = new MockClock(MockClock.localAt(10, 0));
-  const { feed, tick, events } = makeExecutor(clock, {}, "work_marathon");
-  feed("screen", { kind: "coding" });
-  await tick();
-  assert.equal(events.length, 0);
-  clock.advance(181 * 60_000);
-  feed("screen", { kind: "coding" }); // 新心跳：since 不变、lastSeenAt 刷新
-  await tick();
-  assert.equal(events.length, 1);
-  assert.equal(events[0].kind, "work_marathon");
-  // 2026-10-27 模板删除：body 留空（话术由 SpeechHub light 生成），时长在 title
-  assert.equal(events[0].body, "", "话术模板已删，body 留空走 LLM");
-  assert.ok(events[0].title.includes("小时"), `标题含时长: ${events[0].title}`);
-});
-
-test("映射规则: work_marathon 陈旧快照不计时长（防休眠唤醒误报）", async () => {
-  const clock = new MockClock(MockClock.localAt(10, 0));
-  const { feed, tick, events } = makeExecutor(clock, {}, "work_marathon");
-  feed("screen", { kind: "coding" });
-  await tick();
-  clock.advance(6 * 3600_000); // 长时间无屏幕心跳（关机/离开）
-  await tick();
-  assert.equal(events.length, 0, "lastSeenAt 超过 20min 的陈旧焦点不得触发");
-});
-
-test("映射规则: morning_brief + digest 数据拼接，全缺数据也非空", async () => {
+test("映射规则: morning_brief + digest 数据拼接（天气不进卡片）", async () => {
   const clock = new MockClock(MockClock.localAt(7, 30));
   const services = {
     listTodayTasks: () => [{ title: "10点站会" }, { title: "14点评审" }],
@@ -188,7 +145,35 @@ test("映射规则: morning_brief + digest 数据拼接，全缺数据也非空"
   assert.equal(events[0].kind, "morning_brief");
   const body = events[0].body;
   assert.ok(body.includes("10点站会"), `简报含日程: ${body}`);
-  assert.ok(body.includes("小雨"), `简报含天气: ${body}`);
+  assert.ok(!body.includes("小雨"), "天气已迁睡前提醒，不进晨间简报");
+});
+
+test("映射规则: morning_brief 的拍板按钮随内容动态生成，最多两项", async () => {
+  const clock = new MockClock(MockClock.localAt(7, 30));
+  const services = { unreadSenders: () => ["支付宝提醒"], interestLines: () => [""] };
+  const { feed, tick, events } = makeExecutor(clock, services, "morning_brief");
+  feed("presence", { state: "active" });
+  await tick();
+  assert.equal(events.length, 1);
+  const ev = events[0];
+  assert.ok(!ev.body.includes("你关注的话题"), "空串话题不渲染空标题");
+  assert.deepEqual(
+    ev.notifyOptions?.map((o) => [o.action, o.label]),
+    [
+      ["acknowledge", "去看看消息"],
+      ["snooze", "稍后再说"],
+    ],
+    "有未读→主按钮去看看消息 + 稍后再说；话题无数据不生成对应按钮",
+  );
+});
+
+test("映射规则: morning_brief 全空数据 → 不生成按钮", async () => {
+  const clock = new MockClock(MockClock.localAt(7, 30));
+  const { feed, tick, events } = makeExecutor(clock, {}, "morning_brief");
+  feed("presence", { state: "active" });
+  await tick();
+  assert.equal(events.length, 1);
+  assert.ok(!events[0].notifyOptions?.length, "没有任何数据 → 无按钮 → 客户端不渲染拍板行");
 });
 
 
@@ -215,14 +200,10 @@ test("映射规则: 传感信号入板（桥接映射）——meeting/unread/goa
   });
   board.ingestSignal(sig("schedule", { nextRunAt: clock.t + 10 * 60_000, nextTitle: "周会" }), "user-1");
   board.ingestSignal(sig("goal", { goalId: "g1", title: "晨间简报", body: "已备好" }), "user-1");
-  for (let i = 0; i < 3; i++) {
-    board.ingestSignal(sig("message", { sender: `联系人${i}` }), "user-1");
-  }
   await executor.tickActor("user-1", clock.t);
   const kinds = events.map((e) => e.kind);
   assert.ok(kinds.includes("meeting_soon"), `临会提醒: ${kinds}`);
   assert.ok(kinds.includes("goal_ready"), `目标就绪: ${kinds}`);
-  assert.ok(kinds.includes("unread_burst"), `消息爆发: ${kinds}`);
 });
 
 // ─── L3 仲裁 ───
@@ -395,10 +376,17 @@ test("仲裁: 低成本直投 / 高成本挂起 / pause 后放行", () => {
 
 // ─── L5 表达层 ───
 
-test("模板: 简报卡片渲染（话术模板 2026-10-27 已删，正文统一走 SpeechHub light）", () => {
-  const card = renderDigestCard({ slot: "morning", tasks: ["站会"], weather: "晴" });
-  assert.ok(card.includes("站会") && card.includes("晴"));
+test("模板: 简报卡片渲染（天气不进卡片；空数据段不渲染）", () => {
+  const card = renderDigestCard({ slot: "morning", tasks: ["站会"] });
+  assert.ok(card.includes("站会"));
+  assert.ok(!card.includes("天气"), "天气不进简报卡片（已迁睡前提醒）");
   assert.ok(renderDigestCard({ slot: "evening" }).length > 0, "空数据也非空");
+});
+
+test("模板: 空串数据段不渲染空标题（关注话题无数据 → 不留冒号）", () => {
+  const card = renderDigestCard({ slot: "morning", unread: ["支付宝提醒"], interests: ["", "  "] });
+  assert.ok(card.includes("未读消息"));
+  assert.ok(!card.includes("你关注的话题"), "空串过滤后不应出现话题标题");
 });
 
 // ─── 直达车道（hub → 管道，全程零 LLM）────

@@ -244,7 +244,6 @@ const toolLimiters = new Map<string, Semaphore | null>();
  * 同一部手机、同一个浏览器实例），并行必然互踩——无论多少后台任务并行，
  * 同域工具全局同一时刻只允许一个在执行。 */
 const DOMAIN_SINGLE_FLIGHT_PREFIXES = [
-  "desktop.",
   "agent_browser.",
   "browser.",
   "phone.",
@@ -265,8 +264,7 @@ function getToolLimiter(toolName: string): Semaphore | null {
 
   const domain = DOMAIN_SINGLE_FLIGHT_PREFIXES.find((p) => toolName.startsWith(p));
   if (domain) {
-    // 同域共享一个单飞信号量：desktop.open 与 desktop.visual.run_task 互斥，
-    // 否则多后台任务各自调不同 desktop.* 工具仍会互踩同一台机器。
+    // 同域共享一个单飞信号量：同一浏览器实例上的不同工具并行会互踩。
     const domainKey = `domain:${domain}`;
     let domainLimiter = toolLimiters.get(domainKey);
     if (!domainLimiter) {

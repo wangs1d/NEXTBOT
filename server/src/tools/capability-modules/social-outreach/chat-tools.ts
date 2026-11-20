@@ -15,7 +15,7 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
  *   - world.social.*  = Agent 与人类共享的内部社交网页（游戏化世界内）
  *   - social.*（本模块）= 外部真实社交平台（Twitter / 微博 / 小红书 / 朋友圈）
  *
- * 走 deferred（BM25 索引），不进 CORE_TOOL_LIBRARY：
+ * 走 deferred（延迟目录）：
  *   1. LLM 不会每轮都发推，进核心会浪费 token
  *   2. 关键词触发（"发推" / "转发微博" / "tweet" / "post to twitter"）时由 tool_discover 拉出
  *

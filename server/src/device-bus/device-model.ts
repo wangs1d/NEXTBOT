@@ -16,7 +16,6 @@ export type DeviceKind =
   | "phone" // 手机（含桥接的真机）
   | "tablet" // 平板（复用 phone 协议）
   | "watch" // 手表 / 可穿戴
-  | "desktop" // 桌面 / 笔记本
   | "home" // 智能家居网关（HomeAssistant 等）
   | "camera" // 网络摄像头 / IP Cam
   | "glasses" // 智能眼镜

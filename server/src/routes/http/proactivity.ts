@@ -42,7 +42,6 @@ const FEEDBACK_SUPPRESSIBLE_KINDS = new Set([
   "interest_alert",
   "followup",
   "task_celebration",
-  "overwork_care",
   "weather_alert",
   "life_reminder",
   "monthly_report",
@@ -54,7 +53,7 @@ export type ProactivityFabricDeps = {
   /** 树枝配置面（2026-10-22 树状架构 Phase 3）：信息源树枝清单/启停/精简预算 */
   branches?: () => unknown;
   branchSetConfig?: (patch: { id: string; enabled?: boolean; condense?: boolean; dailyBudget?: number }) => unknown;
-  /** 盯梢任务面板（Muse 对齐件）：列表/删除/启停（创建走对话 watch.manage 工具） */
+  /** 盯梢任务面板（Muse 对齐件）：列表/删除/启停（创建走对话 watch.track 工具） */
   watchTasks?: (actorId?: string) => unknown;
   watchTaskRemove?: (actorId: string, id: string) => unknown;
   watchTaskSetActive?: (actorId: string, id: string, active: boolean) => unknown;
@@ -185,7 +184,7 @@ export function registerProactivityPipelineRoutes(
   });
 
   // ─── 盯梢任务面板（2026-10-22 Muse 对齐件）───
-  // GET  /api/proactivity/watch-tasks?actorId= —— 列表（创建走对话内 watch.manage 工具）
+  // GET  /api/proactivity/watch-tasks?actorId= —— 列表（创建走对话内 watch.track 工具）
   // POST /api/proactivity/watch-tasks/config —— remove / pause / resume
   app.get("/api/proactivity/watch-tasks", async (request) => {
     if (!deps.fabric?.watchTasks) return { ok: false, error: "盯梢任务面未装配" };

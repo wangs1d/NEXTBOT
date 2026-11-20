@@ -6,10 +6,10 @@
 // 契约：稳定层内部按写入频率分带 CORE 重配置级 → SLOW 夜间级 → MEMORY 对话级。
 // 以「字节公共前缀长度（LCP）」锁定行为，而非锁字符串顺序。
 //
-// 背景二（召回归属）：内容由本轮 userQuery 决定的块（【持久记忆】= KV 长期摘要
-// 的按轮召回结果）不得进稳定层——稳定层受会话冻结（freezeStableForSession）
-// 覆盖，逐轮字节不变，召回结果会被冻在首轮：换话题拿不到新命中，首轮命中又
-// 一直灌下去。本文件同时锁这条归属。
+// 背景二（召回归属）：内容由本轮 userQuery 决定的块（【按需回忆】=
+// ContextCompiler 的召回出口）不得进稳定层——稳定层受会话冻结
+// （freezeStableForSession）覆盖，逐轮字节不变，召回结果会被冻在首轮：
+// 换话题拿不到新命中，首轮命中又一直灌下去。本文件同时锁这条归属。
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -91,31 +91,31 @@ test("改写 MEMORY 带（理解档案）：理解档案之前的 CORE+SLOW 前�
   assert.ok(lcp < nextPos, "分歧必须落在理解档案块内部——其后事实库不得被牵连");
 });
 
-test("【持久记忆】留在动态层：召回内容不同不打断稳定前缀", () => {
-  const t1 = assembleSystemPrompt("你是助理。", buildFullMemory({ memorySummary: "第一轮命中的行。" }));
+test("【按需回忆】留在动态层：召回内容不同不打断稳定前缀", () => {
+  const t1 = assembleSystemPrompt("你是助理。", buildFullMemory({ memoryRecall: "【按需回忆】\n（截至 11/20 的真实历史）\n- 第一轮命中的行。" }));
   const t2 = assembleSystemPrompt(
     "你是助理。",
-    buildFullMemory({ memorySummary: "换了话题后命中的另一批行。" }),
+    buildFullMemory({ memoryRecall: "【按需回忆】\n（截至 11/20 的真实历史）\n- 换了话题后命中的另一批行。" }),
   );
   assert.notEqual(t1.dynamicSystemPrompt, t2.dynamicSystemPrompt, "召回内容确实不同（断言有效性）");
-  assert.match(t1.dynamicSystemPrompt ?? "", /【持久记忆】/);
+  assert.match(t1.dynamicSystemPrompt ?? "", /【按需回忆】/);
   assert.equal(
     t1.stableSystemPrompt,
     t2.stableSystemPrompt,
     "按轮召回内容改动不得影响稳定层字节——否则会话冻结会把首轮命中灌完全程",
   );
   assert.ok(
-    (t1.fullSystemPrompt.indexOf("【持久记忆】")) > (t1.fullSystemPrompt.indexOf("【用户长期画像】")),
-    "【持久记忆】必须排在稳定层之后（沉底），不能坐在稳定层中段",
+    (t1.fullSystemPrompt.indexOf("【按需回忆】")) > (t1.fullSystemPrompt.indexOf("【用户长期画像】")),
+    "【按需回忆】必须排在稳定层之后（沉底），不能坐在稳定层中段",
   );
 });
 
-test("零命中零注入：memorySummary 缺省时两层都不出现【持久记忆】", () => {
+test("零命中零注入：memoryRecall 缺省时两层都不出现【按需回忆】", () => {
   const { stableSystemPrompt, dynamicSystemPrompt, fullSystemPrompt } = assembleSystemPrompt(
     "你是助理。",
-    buildFullMemory({ memorySummary: undefined }),
+    buildFullMemory({ memoryRecall: undefined }),
   );
-  assert.doesNotMatch(stableSystemPrompt, /【持久记忆】/);
-  assert.doesNotMatch(dynamicSystemPrompt ?? "", /【持久记忆】/);
-  assert.doesNotMatch(fullSystemPrompt, /【持久记忆】/);
+  assert.doesNotMatch(stableSystemPrompt, /【按需回忆】/);
+  assert.doesNotMatch(dynamicSystemPrompt ?? "", /【按需回忆】/);
+  assert.doesNotMatch(fullSystemPrompt, /【按需回忆】/);
 });

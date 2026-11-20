@@ -129,20 +129,12 @@ export const MEMORY_AUTHORITY: Record<MemorySlotId, MemorySlotSpec> = {
     domain: "narrative",
     authority: "kv:agent-memory-sync.json#memory_summary",
     owner: "services/agent-memory-sync-service.ts",
+    // 摘要槽已退役：白天只追加 L0，当前状态由 ContextCompiler 从权威库编译。
+    // 保留 owner 作为历史数据清理的唯一入口（healPollutedMemoryLines）。
     producers: [
       { id: "AgentMemorySyncService", file: "services/agent-memory-sync-service.ts" },
-      // 记忆管理器的留存/遗忘重写（同一存储的正规生产路径）
-      { id: "MemoryManagerService", file: "services/memory-manager-service.ts" },
-      // 统一写入者：候选裁决后落行
-      { id: "MemoryConsolidationService", file: "services/memory-consolidation-service.ts" },
-      // 热路径事实直写（轮次收尾）
-      { id: "TurnLifecycle", file: "agent/turn-lifecycle.ts" },
-      // 世界入账 / 技能购买等世界事件叙事
-      { id: "WorldEvolutionHooks", file: "bootstrap/create-app-services.ts" },
-      // Agent 取名是人生史事件，走叙事摘要（2026-11-13 登记，此前是隐式写者）
-      { id: "AgentIdentityTools", file: "tools/agent-identity-tools.ts" },
     ],
-    readers: ["PromptContextBuilder", "MemoryManagerService", "NightlyMemoryTaskService", "MemoryCortex"],
+    readers: ["MemoryInventory"],
     forbiddenWrites: [
       "file:long-term-memory/*.json",
       "kv:agent-memory-sync.json#memory_preferences",

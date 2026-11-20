@@ -71,6 +71,54 @@ test("classifyEpitomeLine: 短文本或无信号 → null", () => {
   assert.equal(classifyEpitomeLine(""), null);
 });
 
+// ── 写入侧行体检（2026-11-20 根修：生产脏行回归，判据全部结构性）──────────────
+
+test("classifyEpitomeLine: 协议残留行 → null", () => {
+  assert.equal(classifyEpitomeLine("委派子 Agent 处理：还有我的生日是6月18"), null);
+  assert.equal(classifyEpitomeLine("委派子Agent处理:记得我叫什么吗"), null);
+});
+
+test("classifyEpitomeLine: 分类语义不变（回归护栏）", () => {
+  // 语言层分类保持原样：疑问句/确认句仍按 MEMORY_EXPLICIT_RE 走 preference，
+  // 不做语言层硬编码拦截——这里钉住行为，防止未来无意改动
+  assert.equal(classifyEpitomeLine("还有我的生日是6月18"), "preference");
+  assert.equal(classifyEpitomeLine("记一下，我妈的生日是每年5月20号"), "preference");
+  assert.equal(classifyEpitomeLine("帮我打辆车去街心花园。"), "open_loop");
+});
+
+test("SessionEpitomeStore: 存量协议残留行读取时清洗并回写 KV", () => {
+  const { kv, persisted } = makeMockKv();
+  // 直接种入生产实证的脏快照（模拟写入侧洞补上之前的存量）
+  persisted.set("a1", {
+    revision: 7,
+    entries: {
+      [EPITOME_KV_KEY]: {
+        openLoops: [
+          { text: "帮我打辆车去街心花园。", createdAt: "2026-11-19T15:50:10.284Z" },
+          { text: "委派子 Agent 处理：帮我打辆车去街心花园。", createdAt: "2026-11-19T15:50:10.284Z" },
+        ],
+        commitments: [],
+        preferences: [
+          { text: "记得我叫什么吗", createdAt: "2026-11-18T10:48:34.319Z" },
+          { text: "委派子 Agent 处理：还有我的生日是6月18", createdAt: "2026-11-18T10:48:34.319Z" },
+          { text: "还有我的生日是6月18", createdAt: "2026-11-18T10:48:34.319Z" },
+        ],
+        updatedAt: "2026-11-19T15:50:10.284Z",
+        revision: 7,
+      },
+    },
+  });
+  const store = new SessionEpitomeStore(kv);
+  const snap = store.get("a1");
+  // 只剔结构性残留（委派协议行），语言层分类语义不动
+  assert.deepEqual(snap.preferences, ["记得我叫什么吗", "还有我的生日是6月18"]);
+  assert.deepEqual(snap.openLoops, ["帮我打辆车去街心花园。"]);
+  // 回写验证：重新实例化（模拟重启）后读取的仍是清洗后的快照
+  const reloaded = new SessionEpitomeStore(kv);
+  assert.deepEqual(reloaded.get("a1").preferences, ["记得我叫什么吗", "还有我的生日是6月18"]);
+  assert.deepEqual(reloaded.get("a1").openLoops, ["帮我打辆车去街心花园。"]);
+});
+
 // ── 提取 ─────────────────────────────────────────────
 
 test("extractEpitomeEntries: 从 query + writes 提取三类", () => {

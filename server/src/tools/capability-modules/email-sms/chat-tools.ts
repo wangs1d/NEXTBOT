@@ -7,7 +7,7 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
  *   - email.send  主动发邮件（SMTP）：to / subject / body / html? / attachments?
  *   - sms.send    主动发短信（阿里云 SMS）：to / text
  *
- * 走 deferred（BM25 索引），不进 CORE_TOOL_LIBRARY：
+ * 走 deferred（延迟目录）：
  *   1. LLM 不会每轮都发邮件 / 短信，进核心会浪费 token
  *   2. 关键词触发（"发邮件" / "send email" / "发短信" / "text him"）时由 tool_discover 拉出
  *   3. 与 phone.call_user 区分：phone.* 是电话触达（语音），email.send / sms.send 是异步文本触达

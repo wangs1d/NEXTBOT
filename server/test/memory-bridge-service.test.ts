@@ -146,22 +146,24 @@ test("writeUnified：认知图节点 + Mem0 记忆 + 双向 linkage + bridge_lin
   });
 });
 
-test("writeUnified：re-ingest 相同内容时 mem0Ids 合并去重，不重复累计", async () => {
+test("writeUnified：36h 内 re-ingest 相同内容直接去重（不重复累计、不新增 linkage）", async () => {
   await withBridgeEnv(async ({ bridge }) => {
     await bridge.writeUnified("user-1", "chat:turn-1", "用户喜欢在周末爬山，每周都去", {
       context: "main",
       highSignal: true,
     });
-    await bridge.writeUnified("user-1", "chat:turn-2", "用户喜欢在周末爬山，每周都去", {
+    const again = await bridge.writeUnified("user-1", "chat:turn-2", "用户喜欢在周末爬山，每周都去", {
       context: "main",
       highSignal: true,
     });
 
+    assert.equal(again.deduped, true, "同内容重复写入应命中写去重收据");
+    assert.equal(again.graphNodeId, null);
+    assert.deepEqual(again.mem0Items, []);
+
     const links = bridge.listLinks();
-    // 两轮各插一行 link（来源不同），但节点 metadata 只有一组去重后的 ids
-    assert.equal(links.length, 2);
-    const nodeIds = links.map((l) => l.graphNodeId);
-    assert.equal(new Set(nodeIds).size, 1, "同语义内容应命中同一认知图节点");
+    assert.equal(links.length, 1, "去重后不得新增 linkage");
+    assert.equal(new Set(links.map((l) => l.graphNodeId)).size, 1);
   });
 });
 

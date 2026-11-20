@@ -82,7 +82,6 @@ export async function enrichVideosWithPlayable(
  * 视频工具注册：
  *   - video.grab      根据分享/播放链接解析视频信息（抖音/小红书/B站等国内平台，适配器自动路由）
  *   - video.find      按内容找视频：搜索候选播放页 → 逐个解析出可内联播放的流（无需用户贴链接）
- *   - video.platforms 查看当前支持的平台（便于排查/健康检查）
  */
 export function registerVideoTools(
   toolRegistry: ToolRegistry,
@@ -132,15 +131,6 @@ export function registerVideoTools(
         playable.length > 0
           ? ["items 中带 videoUrl 的条目可内联播放（首条最优先）"]
           : ["候选页均未解析出可播放视频流（平台反爬或需登录）"],
-    };
-  });
-
-  toolRegistry.register("video.platforms", async () => {
-    const health = await videoGrabService.checkHealth();
-    return {
-      platforms: health.platforms,
-      mcporterAvailable: health.mcporterAvailable,
-      notes: health.notes,
     };
   });
 }

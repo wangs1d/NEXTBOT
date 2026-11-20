@@ -1,12 +1,11 @@
 // 工具：agent.update_identity / agent.update_homepage
 //
-// update_identity 是名字的唯一写入口：一次调用同步四处——
+// update_identity 是名字的唯一写入口：一次调用同步三处——
 //   1. agent-memory-sync KV `agent.name`（prompt 自我认知注入的数据源，
 //      prompt-context-builder 每轮读出拼进 persona 稳定前缀）——先写且必须
 //      落盘成功，它是 prompt 里认不认识自己的唯一依据
 //   2. AgentAccountService（好友发现/世界身份里的网络名）
 //   3. user-preferences agentProfile（客户端主页/侧栏显示）
-//   4. memory_summary 叙事线（「我为自己取名…」，成为人生史的一部分）
 // 各处各改各的必然漂移——改名必须走这里，不要直改账号或 prefs（prefs 的身份
 // 字段在 applyAgentProfilePatch 里默认被拦，只有本管道传 allowIdentity 才放行）。
 //
@@ -189,15 +188,7 @@ export async function applyAgentIdentityRename(
     { allowIdentity: true },
   );
 
-  // 4) 叙事记忆：命名是人生史事件，不是配置变更
-  // 网络名（handle）往往为空——模型取名只给 displayName。空 handle 不拼
-  // 「（@）」，否则记忆里会留一行「「17赫兹」（@）」的残括号。
-  const nameRef = handle ? `「${name}」（@${handle}）` : `「${name}」`;
-  const narrative = reason
-    ? `${origin === "user" ? "用户为我取名" : "我为自己取名"}${nameRef}——${reason}`
-    : `${origin === "user" ? "用户为我取名" : "我为自己取名"}${nameRef}`;
-  deps.memorySync.appendMemorySummaryLine(actorId, narrative, "identity", "AgentIdentityTools");
-
+  // 命名是配置事件，已由身份记录与对话流水承载；摘要叙事槽已下线。
   pushToActor(deps, actorId, "identity_renamed", {
     displayName: name,
     handle,

@@ -27,14 +27,13 @@ import { BROWSER_SESSION_SITES, type BrowserSessionSiteId } from "../../../servi
  *   - browser.fetch_page：只读抓页读价，明文禁止下单；本工具突破此边界
  *   - shopping.suggest：仅比价建议，不执行下单
  *   - wallet.purchase：纯内存记账；本工具真实下单后经消费管家自动入账
- *   - meituan.create_order：调平台开放 API；本工具走浏览器，不依赖开放 API
  *
  * 支付边界：**只点提交订单，不点支付**。订单落本地表（so_* 单号）；
  * 拿到支付宝收银台链接（cashier/qr.alipay.com）的订单可用 shopping.pay.submit
  * 经用户本人支付宝钱包代付（用户在支付宝 App 内确认扣款）；其余平台订单
  * 引导用户去平台 App 支付，shopping.pay.check 同步状态。
  *
- * 走 deferred（BM25 索引），不进 CORE_TOOL_LIBRARY：
+ * 走 deferred（延迟目录）：
  *   1. 用户不会每轮都下单，进核心会浪费 token
  *   2. 关键词触发（"下单" / "帮我买" / "在淘宝买"）时由 tool_discover 拉出
  *

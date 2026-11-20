@@ -10,12 +10,19 @@ import type { FastifyInstance } from "fastify";
 import { registerRechargeRoutes } from "../src/routes/http/recharge.js";
 import type { HttpRouteDeps } from "../src/routes/http/types.js";
 import { getWebpayStore } from "../src/services/webpay/webpay-store.js";
+import {
+  getSiteSessionStore,
+  SITE_SESSION_COOKIE,
+} from "../src/services/recharge/site-session-store.js";
 
 /**
- * App 内额度充值接口（/api/recharge/app/*）：Bearer 登录态直连，
- * 不再走官网 Cookie 会话与邮箱验证码；支付仍复用支付宝 wap 收银台。
+ * 统一充值支付接口（POST /api/recharge/payments）：网页与 App 共用。
  *
- * 只验证「身份 → 下单 → 查单 → 入账」这一层，不真付款（付款必须由用户在支付宝完成）。
+ * - Bearer → App，显式 channel=app 返回支付宝客户端订单串；
+ * - Cookie + CSRF → 网页，桌面 UA 返回 page 收银台表单；
+ * - 手机 UA / Bearer 未指定 channel → wap 浏览器收银台。
+ *
+ * 只验证「身份 → 通道选择 → 下单 → 查单 → 入账」这一层，不真付款。
  */
 
 let workDir: string;
@@ -28,6 +35,7 @@ function rawBase64Der(pem: string): string {
 before(async () => {
   workDir = mkdtempSync(join(tmpdir(), "recharge-app-test-"));
   process.env.WEBPAY_LEDGER_DB = join(workDir, "orders.db");
+  process.env.RECHARGE_SESSION_DB = join(workDir, "site-sessions.db");
   const pair = crypto.generateKeyPairSync("rsa", { modulusLength: 2048 });
   const privateKeyPem = pair.privateKey.export({ type: "pkcs1", format: "pem" }) as string;
   const publicDer = pair.publicKey.export({ type: "spki", format: "der" }) as Buffer;
@@ -65,27 +73,45 @@ before(async () => {
 after(async () => {
   await app.close();
   getWebpayStore().close();
+  getSiteSessionStore().close();
   delete process.env.WEBPAY_LEDGER_DB;
+  delete process.env.RECHARGE_SESSION_DB;
   delete process.env.WEBPAY_SANDBOX_CONFIG;
   rmSync(workDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 });
 });
 
-describe("App 内额度充值", () => {
-  it("无 Bearer 凭证一律 401", async () => {
-    const me = await app.inject({ method: "GET", url: "/api/recharge/app/me" });
+describe("统一充值支付接口", () => {
+  const desktopUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36";
+
+  function siteCookie(email: string): string {
+    const token = getSiteSessionStore().create(email);
+    return `${SITE_SESSION_COOKIE}=${encodeURIComponent(token)}`;
+  }
+
+  it("收银台能力：支付宝可用、微信未开通", async () => {
+    const res = await app.inject({ method: "GET", url: "/api/recharge/config" });
+    assert.equal(res.statusCode, 200);
+    const data = res.json();
+    assert.equal(data.payConfigured, true);
+    assert.equal(data.providers.alipay, true);
+    assert.equal(data.providers.wechat, false);
+  });
+
+  it("没有任何凭证时 401", async () => {
+    const me = await app.inject({ method: "GET", url: "/api/recharge/me" });
     assert.equal(me.statusCode, 401);
     const order = await app.inject({
       method: "POST",
-      url: "/api/recharge/app/orders",
+      url: "/api/recharge/payments",
       payload: { amount: "1" },
     });
     assert.equal(order.statusCode, 401);
   });
 
-  it("Bearer 直接返回登录账号与余额，不再要求邮箱验证码", async () => {
+  it("Bearer 直接返回登录账号与余额", async () => {
     const res = await app.inject({
       method: "GET",
-      url: "/api/recharge/app/me",
+      url: "/api/recharge/me",
       headers: { authorization: "Bearer payer-token" },
     });
     assert.equal(res.statusCode, 200);
@@ -95,34 +121,81 @@ describe("App 内额度充值", () => {
     assert.equal(data.balance, "0.00");
   });
 
-  it("下单返回支付宝手机收银台地址并落本地订单", async () => {
+  it("Bearer 未指定 channel 时默认 wap 浏览器收银台", async () => {
     const res = await app.inject({
       method: "POST",
-      url: "/api/recharge/app/orders",
+      url: "/api/recharge/payments",
       headers: { authorization: "Bearer payer-token" },
       payload: { amount: "1" },
     });
     assert.equal(res.statusCode, 200);
     const data = res.json();
-    assert.equal(data.ok, true);
     assert.ok(String(data.outTradeNo).startsWith("WP"));
+    assert.equal(data.channel, "wap");
     assert.equal(data.amount, "1.00");
     assert.match(String(data.paymentUrl), /alipay\.trade\.wap\.pay/);
     assert.match(String(data.paymentUrl), /QUICK_WAP_WAY/);
   });
 
+  it("显式 channel=app 时返回支付宝客户端订单串", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/recharge/payments",
+      headers: { authorization: "Bearer payer-token" },
+      payload: { amount: "1", channel: "app" },
+    });
+    assert.equal(res.statusCode, 200);
+    const data = res.json();
+    assert.equal(data.ok, true);
+    assert.equal(data.channel, "app");
+    assert.equal(data.paymentUrl, null);
+    assert.match(String(data.orderStr), /alipay\.trade\.app\.pay/);
+    assert.match(String(data.orderStr), /QUICK_MSECURITY_PAY/);
+  });
+
+  it("网页 Cookie 会话 + 桌面 UA 返回电脑收银台表单", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/recharge/payments",
+      headers: {
+        cookie: siteCookie("payer@example.com"),
+        "x-requested-with": "nextbot-recharge",
+        "user-agent": desktopUA,
+      },
+      payload: { amount: "1" },
+    });
+    assert.equal(res.statusCode, 200);
+    const data = res.json();
+    assert.equal(data.channel, "page");
+    assert.match(String(data.paymentHtml), /alipay\.trade\.page\.pay/);
+    assert.match(String(data.paymentHtml), /FAST_INSTANT_TRADE_PAY/);
+  });
+
+  it("网页 Cookie 会话缺少 CSRF 头时 403", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/recharge/payments",
+      headers: {
+        cookie: siteCookie("payer@example.com"),
+        "user-agent": desktopUA,
+      },
+      payload: { amount: "1" },
+    });
+    assert.equal(res.statusCode, 403);
+  });
+
   it("查单只认本人订单；支付确认后余额同步入账", async () => {
     const created = await app.inject({
       method: "POST",
-      url: "/api/recharge/app/orders",
+      url: "/api/recharge/payments",
       headers: { authorization: "Bearer payer-token" },
-      payload: { amount: "5" },
+      payload: { amount: "5", channel: "app" },
     });
     const outTradeNo = created.json().outTradeNo as string;
 
     const stranger = await app.inject({
       method: "GET",
-      url: `/api/recharge/app/orders/${outTradeNo}`,
+      url: `/api/recharge/payments/${outTradeNo}`,
       headers: { authorization: "Bearer other-token" },
     });
     assert.equal(stranger.statusCode, 404);
@@ -137,7 +210,7 @@ describe("App 内额度充值", () => {
 
     const queried = await app.inject({
       method: "GET",
-      url: `/api/recharge/app/orders/${outTradeNo}`,
+      url: `/api/recharge/payments/${outTradeNo}`,
       headers: { authorization: "Bearer payer-token" },
     });
     assert.equal(queried.statusCode, 200);
@@ -150,7 +223,7 @@ describe("App 内额度充值", () => {
   it("金额非法时拒绝下单", async () => {
     const res = await app.inject({
       method: "POST",
-      url: "/api/recharge/app/orders",
+      url: "/api/recharge/payments",
       headers: { authorization: "Bearer payer-token" },
       payload: { amount: "0" },
     });

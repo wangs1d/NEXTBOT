@@ -32,10 +32,18 @@ export function registerMcpTools(
 /**
  * 从已发现的 MCP 工具动态生成 ChatCompletionTool 定义
  * 遵循项目 ChatCompletionTool[] 模式
+ *
+ * 过滤（2026-11-20 根修）：滴滴 server（alias=didi）的工具**不暴露给 LLM**。
+ * 滴滴能力已有统一抽象层 ride_hailing.*（报价推选点卡 / 两阶段确认下单 /
+ * 状态追踪），若裸 mcp.didi.taxi_estimate / maps_textsearch 也可见，模型会
+ * 绕过抽象层直调——起点没着落时就不会触发 ride_pickup 选点卡，退化成
+ * 文字追问。handler 注册保留（registerMcpTools 不动），只是不再给模型看。
  */
 export function buildMcpChatTools(mcpClientService: McpClientService): import("openai/resources/chat/completions").ChatCompletionTool[] {
   const tools = mcpClientService.listTools();
-  return tools.map(mcpToolToChatTool);
+  return tools
+    .filter((schema) => schema.serverAlias !== "didi")
+    .map(mcpToolToChatTool);
 }
 
 /** 将单个 McpToolSchema 转换为 OpenAI ChatCompletionTool */

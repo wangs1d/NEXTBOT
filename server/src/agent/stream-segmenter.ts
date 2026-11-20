@@ -97,6 +97,39 @@ const BUBBLE_VISIBLE_CHAR_RE = /[\p{L}\p{N}]/u;
 /** 表格行特征：行首（允许空白）竖线。markdown 表格由连续表格行构成。 */
 const TABLE_ROW_LINE_RE = /^[ \t]*\|/;
 
+/** 围栏行（``` 或 ~~~，行首允许空白）。 */
+const FENCE_LINE_RE = /^[ \t]*(`{3,}|~{3,})/;
+
+/** ATX 标题行。 */
+const HEADING_LINE_RE = /^[ \t]*#{1,6}[ \t]/;
+
+/** 列表项行（- / * / • / 1. / 1)）。 */
+const LIST_ITEM_LINE_RE = /^[ \t]*(?:[-*•]|\d+[.)])[ \t]+\S/u;
+
+/** 列表行或其流式半截（"2"、"2."、"-"）：下一行还是它时不能切，防列表被切断。 */
+const LIST_LIKE_OR_PREFIX_RE = /^[ \t]*(?:(?:\d+[.)]?|[-*•])(?:[ \t]+\S|[ \t]*$))/u;
+
+/**
+ * 切点合法性判定的结构状态：切点只允许落在「所有已开启结构都已闭合」的位置。
+ * 围栏与行内跨度未闭合时该位置不是切点；不认识的结构按未闭合处理（fail-closed）。
+ */
+type MdScanState = {
+  inFence: "```" | "~~~" | null;
+  openInline: "**" | "`" | "~~" | null;
+  atLineStart: boolean;
+  closingFenceLine: boolean;
+};
+
+function freshMdState(): MdScanState {
+  return { inFence: null, openInline: null, atLineStart: true, closingFenceLine: false };
+}
+
+/** 泡内是否含可见内容：剥掉 markdown 语法符号与空白后非空。
+ *  纯语法碎片（"**"、"##"、"---"）不构成一条消息。 */
+function hasBubbleContent(text: string): boolean {
+  return /[^\s#*`~>|_\-]/.test(text);
+}
+
 /** 泡尾/泡首需要剥掉的悬挂标点与空白（真人消息不以逗号开头/结尾）。 */
 const BUBBLE_EDGE_STRIP_RE = /^[\s，,、]+|[\s，,、]+$/gu;
 
@@ -113,7 +146,25 @@ const BUBBLE_EDGE_STRIP_RE = /^[\s，,、]+|[\s，,、]+$/gu;
  * （markdown 列表/表格行，单换行分隔）不受影响，纯空白行被剥掉。
  */
 function collapseIntraBubbleBlankLines(text: string): string {
-  return text.replace(/\n[ \t]*\n+/gu, "\n");
+  const out: string[] = [];
+  let fence: string | null = null;
+  for (const line of text.split("\n")) {
+    const m = FENCE_LINE_RE.exec(line);
+    if (fence) {
+      // 围栏内部原样保留（代码块的空行是内容）
+      out.push(line);
+      if (m && m[1][0] === fence[0]) fence = null;
+      continue;
+    }
+    if (m) {
+      fence = m[1][0] === "`" ? "```" : "~~~";
+      out.push(line);
+      continue;
+    }
+    if (line.trim() === "" && out.length > 0 && out[out.length - 1].trim() === "") continue;
+    out.push(line);
+  }
+  return out.join("\n");
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
@@ -151,6 +202,8 @@ export class StreamSegmenter {
    *  flushFinal 据此把"换行之后剩下的尾句"当成新的一条消息独立成泡，
    *  而不是硬并进上一条（否则短尾句又变成泡内分段）。 */
   private lastCutWasNewline = false;
+  /** 当前缓冲起点处的结构状态（切点合法性判定用，随消费单调推进）。 */
+  private mdState: MdScanState = freshMdState();
   /** 串行队列：保证 feed 的异步停顿不交错、乱序 */
   private chain: Promise<void> = Promise.resolve();
   private disposed = false;
@@ -268,11 +321,16 @@ export class StreamSegmenter {
       const deduped = collapseIntraBubbleBlankLines(
         stripSentencesAlreadySaid(this.emittedText, combined).trim(),
       );
-      if (!deduped) return;
+      // 纯语法碎片（"**"/"##"）不是一条消息
+      if (!deduped || !hasBubbleContent(deduped)) return;
+      // 残差起点仍处在未闭合结构里（围栏/行内跨度）→ 只能并回末泡，
+      // 开新泡会把结构切断。
+      const residualOpen = this.mdState.inFence !== null || this.mdState.openInline !== null;
       // 残差成新泡的条件：上次切泡跨了换行（模型用换行分条，尾句是新一条
       // 消息，哪怕只有"嗯"两个字），或残差本身含句末边界。碎片残差
       // （无边界、且紧接同一句）仍并入末泡。
       const canOpenNew =
+        !residualOpen &&
         this.bubbleCount > 0 &&
         this.bubbleCount < this.maxBubbles &&
         (this.lastCutWasNewline || BUBBLE_STRONG_BREAK_RE.test(deduped));
@@ -351,6 +409,7 @@ export class StreamSegmenter {
     this.tailBuffer = "";
     this.heldFirst = null;
     this.interimDone = !this.holdFirstSentence;
+    this.mdState = freshMdState();
   }
 
   /** feed 链的分发入口：气泡拆分模式走切泡循环，否则走信息块循环。 */
@@ -393,19 +452,21 @@ export class StreamSegmenter {
     while (!this.disposed) {
       if (this.bubbleCount >= this.maxBubbles) break;
       const firstBubble = this.bubbleCount === 0;
+      const buf = this.buffer;
       const brk = this.findBubbleBreak(
-        this.buffer,
+        buf,
         firstBubble ? BUBBLE_MIN_STRONG_CHARS : BUBBLE_MIN_CHARS,
       );
-      if (!brk) break; // 暂无达标的切泡点
-      const boundary = this.buffer[brk.index];
-      const restRaw = this.buffer.slice(brk.index + 1);
-      const raw = this.buffer.slice(0, brk.index + 1);
+      if (!brk) break; // 暂无结构闭合的切泡点
+      const boundary = buf[brk.index];
+      const restRaw = buf.slice(brk.index + 1);
+      const raw = buf.slice(0, brk.index + 1);
       // 换行即分条：边界本身是换行，或边界后的空白里还有换行，
       // 都说明接下来这段属于新的一条消息（flushFinal 据此不并末泡）。
       this.lastCutWasNewline = boundary === "\n" || /^\s*\n/u.test(restRaw);
       // 消费边界字符，并剥掉余文的leading逗号/顿号/空白
       this.buffer = restRaw.replace(/^[\s，,、]+/u, "");
+      this.mdState = { ...brk.states[buf.length - this.buffer.length] };
       const text = raw.replace(BUBBLE_EDGE_STRIP_RE, "");
       // 空行/纯悬挂标点不成泡；其余（含"嗯""？""🙂"这种极短条）都算一条
       // 真实消息——模型原生分条短到几个字也要照发，不再做并泡。
@@ -422,54 +483,183 @@ export class StreamSegmenter {
     }
   }
 
-  /** 从缓冲中找第一个达标的切泡点（不含则 null）。
-   *  只在强边界切：换行无条件切（段落/分行是模型刻意的结构分组，永远该换泡）；
-   *  句末标点须边界前可见字达标（首泡/后续泡两档下限）。字数只决定"句末边界
-   *  到了切不切"（太短的句子并进下一泡），绝不是切点本身——逗号等句中位置
-   *  永不切泡（2026-09-29 用户反馈：一段话必须正确讲完，不靠字数随便截断）。
+  /**
+   * 按结构状态扫描缓冲，返回状态数组（states[i] = 消费 buf[..i-1] 之后的状态）。
+   * 围栏与行内跨度在扫描中进出；不认识的结构按未闭合处理。
+   */
+  private scanMdStates(buf: string): MdScanState[] {
+    const states: MdScanState[] = new Array(buf.length + 1);
+    let s: MdScanState = { ...this.mdState };
+    states[0] = { ...s };
+    let i = 0;
+    while (i < buf.length) {
+      if (s.atLineStart) {
+        let nl = buf.indexOf("\n", i);
+        if (nl < 0) nl = buf.length;
+        const fence = FENCE_LINE_RE.exec(buf.slice(i, nl));
+        if (s.inFence) {
+          s.closingFenceLine = !!fence && fence[1][0] === s.inFence[0];
+        } else if (fence) {
+          s.inFence = fence[1][0] === "`" ? "```" : "~~~";
+          s.closingFenceLine = false;
+        }
+        s.atLineStart = false;
+      }
+      const ch = buf[i];
+      if (s.inFence) {
+        if (ch === "\n") {
+          if (s.closingFenceLine) {
+            s.inFence = null;
+            s.closingFenceLine = false;
+          }
+          s.atLineStart = true;
+        }
+        i += 1;
+        states[i] = { ...s };
+        continue;
+      }
+      if (ch === "\n") {
+        s.atLineStart = true;
+        i += 1;
+        states[i] = { ...s };
+        continue;
+      }
+      const next = buf[i + 1];
+      if (!s.openInline && ch === "*" && next === "*") {
+        s.openInline = "**";
+        i += 2;
+        states[i - 1] = { ...s };
+        states[i] = { ...s };
+        continue;
+      }
+      if (s.openInline === "**" && ch === "*" && next === "*") {
+        s.openInline = null;
+        i += 2;
+        states[i - 1] = { ...s };
+        states[i] = { ...s };
+        continue;
+      }
+      if (!s.openInline && ch === "~" && next === "~") {
+        s.openInline = "~~";
+        i += 2;
+        states[i - 1] = { ...s };
+        states[i] = { ...s };
+        continue;
+      }
+      if (s.openInline === "~~" && ch === "~" && next === "~") {
+        s.openInline = null;
+        i += 2;
+        states[i - 1] = { ...s };
+        states[i] = { ...s };
+        continue;
+      }
+      if (ch === "`") {
+        if (s.openInline === "`") s.openInline = null;
+        else if (!s.openInline) s.openInline = "`";
+      }
+      i += 1;
+      states[i] = { ...s };
+    }
+    states[buf.length] = { ...s };
+    return states;
+  }
+
+  /** 从缓冲中找第一个结构闭合的切泡点（不含则 null）。
    *
-   *  表格原子性（2026-11-06）：markdown 表格是「一行一对象」的数据交付形态，
-   *  逐行切泡会把一张表撕成 N 个碎泡、客户端拿到孤行渲染不出表。规则：
-   *  - 表格行内部（含行中句末标点、行尾换行接下一表格行）一律不切；
-   *  - 引子散文与表格之间正常切（可见字达标时表格独立成泡）；
-   *  - 表格末行与后续散文之间正常切（表格带着完整结构离场）；
-   *  - 可见字不足时表格与相邻散文并泡——宁可并泡绝不撕表。 */
+   *  切点只允许落在「所有已开启结构都已闭合」的位置：
+   *  - 围栏内部不切，围栏闭合行的换行才可切；
+   *  - 行内跨度（**加粗/`代码`/~~删除~~）未闭合处，句末标点不算切点；
+   *  - 标题行不以换行结尾成泡（标题与它的正文段同属一条消息）；
+   *  - 列表项行连续时不逐行切（列表是一份数据，不是多条消息）；
+   *  - 表格内部不切（沿用既有原子性规则）；
+   *  - 剥掉语法符号后没有可见内容的边界不成泡（"**"/"##"/"---" 不是消息）。
+   *  句末标点仍须边界前可见字达标（首泡/后续泡两档下限），换行不受字数限制。 */
   private findBubbleBreak(
     buf: string,
     minStrongChars: number,
-  ): { index: number } | null {
+  ): { index: number; states: MdScanState[] } | null {
+    const states = this.scanMdStates(buf);
     let visible = 0;
     let lineStart = 0;
-    let curLineIsTableRow = false;
     for (let i = 0; i < buf.length; i++) {
-      if (i === lineStart) {
-        curLineIsTableRow = TABLE_ROW_LINE_RE.test(buf.slice(lineStart, lineStart + 64).split("\n")[0]);
-      }
+      const s = states[i];
       const ch = buf[i];
+      const curLine = buf.slice(lineStart, i);
+      /** 切点前最后一个非空行（标题/表格/列表的归属判定）。 */
+      const prevContentLine = (): string => {
+        let start = lineStart;
+        let end = i;
+        for (;;) {
+          const line = buf.slice(start, end);
+          if (line.trim()) return line;
+          if (start === 0) return "";
+          end = start - 1;
+          // end === 0 时没有更早的行（lastIndexOf 对负 fromIndex 会回绕到 0）
+          start = end === 0 ? 0 : buf.lastIndexOf("\n", end - 1) + 1;
+        }
+      };
+      /** 切点后第一个非空行；缓冲里还没有内容时返回 null（未知）。 */
+      const nextContentLine = (): string | null => {
+        let start = i + 1;
+        while (start <= buf.length) {
+          const nl = buf.indexOf("\n", start);
+          const line = buf.slice(start, nl < 0 ? buf.length : nl);
+          if (line.trim()) return line;
+          if (nl < 0) return null;
+          start = nl + 1;
+        }
+        return null;
+      };
       if (ch === "\n") {
-        // 下一行的首字符决定边界性质：当前行与下一行都是表格行 → 表格内部，永不切
-        let k = i + 1;
-        while (k < buf.length && (buf[k] === " " || buf[k] === "\t")) k++;
-        const nextIsTableRow = k < buf.length && buf[k] === "|";
-        const insideTable = curLineIsTableRow && nextIsTableRow;
-        // 换行 = 模型分条的消息边界（prompt 协议：一行一条消息），无条件切，
-        // 只有表格内部例外。短到"嗯""？""🙂"的一条也照发，不做字数并泡。
-        if (!insideTable) return { index: i };
+        if (s.inFence) {
+          if (s.closingFenceLine && hasBubbleContent(buf.slice(0, i + 1))) {
+            return { index: i, states };
+          }
+          lineStart = i + 1;
+          continue;
+        }
+        const prevLine = prevContentLine();
+        // 标题与其后的正文/列表/表格同属一段文档单元：标题行后的换行永不切。
+        if (HEADING_LINE_RE.test(prevLine)) {
+          lineStart = i + 1;
+          continue;
+        }
+        // 表格行/列表项：下一行未知（流式未到）或仍是同类行时不切——
+        // 结构块可能还在继续，提前切会把表格/列表撕成两个泡。
+        const prevIsTable = TABLE_ROW_LINE_RE.test(prevLine);
+        const prevIsList = LIST_ITEM_LINE_RE.test(prevLine);
+        if (prevIsTable || prevIsList) {
+          const nextLine = nextContentLine();
+          if (nextLine !== null) {
+            const nextSameKind = prevIsTable
+              ? TABLE_ROW_LINE_RE.test(nextLine)
+              : LIST_LIKE_OR_PREFIX_RE.test(nextLine);
+            if (!nextSameKind && !s.openInline && hasBubbleContent(buf.slice(0, i))) {
+              lineStart = i + 1;
+              return { index: i, states };
+            }
+          }
+          lineStart = i + 1;
+          continue;
+        }
         lineStart = i + 1;
-        continue;
+        if (s.openInline) continue;
+        if (!hasBubbleContent(buf.slice(0, i))) continue;
+        return { index: i, states };
       }
-      if (curLineIsTableRow) {
-        // 表格行内不认句末标点：单元格里的「。」/「；」是内容，竖线间的
-        // 任何字符都不是切泡点；可见字照常计数（表格自身体量应能让
-        // 「表格末行 → 后续散文」的切泡点达标，不并泡）
-        if (BUBBLE_VISIBLE_CHAR_RE.test(ch)) visible += 1;
-        continue;
+      if (s.inFence) continue;
+      if (BUBBLE_STRONG_BREAK_RE.test(ch) && !s.openInline) {
+        // 结构行（标题/表格行/列表项）内部的标点不切：这些行是一个整体块，
+        // 块内句号不能把行撕成两半。
+        const structuralLine =
+          HEADING_LINE_RE.test(curLine) ||
+          TABLE_ROW_LINE_RE.test(curLine) ||
+          LIST_ITEM_LINE_RE.test(curLine);
+        if (!structuralLine && visible >= minStrongChars && hasBubbleContent(buf.slice(0, i + 1))) {
+          return { index: i, states };
+        }
       }
-      if (BUBBLE_STRONG_BREAK_RE.test(ch)) {
-        if (visible >= minStrongChars) return { index: i };
-      } else if (BUBBLE_VISIBLE_CHAR_RE.test(ch)) {
-        visible += 1;
-      }
+      if (BUBBLE_VISIBLE_CHAR_RE.test(ch)) visible += 1;
     }
     return null;
   }

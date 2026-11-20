@@ -55,8 +55,10 @@ const RULES: ClassRule[] = [
   { exact: "travel_booking.cancel", domain: "travel", action: "manage", risk: "write" },
   { exact: "travel_booking.refund", domain: "travel", action: "manage", risk: "write" },
   { exact: "ride_hailing.book", domain: "travel", action: "book", risk: "spend" },
+  // 复合入口裸名：默认按只读报价定性；book/cancel 分支由安全层按 action 解析成
+  // 真实执行器名后判定（resolveEffectiveToolName），不在这里按名字整体升 spend。
+  { exact: "ride_hailing", domain: "travel", action: "query", risk: "read" },
   { prefix: "ride_hailing.", domain: "travel" },
-  { exact: "meituan.create_order", domain: "dining", action: "book", risk: "spend" },
   { prefix: "geofence", domain: "travel", action: "manage", trigger: "event", risk: "write" },
   { prefix: "place", domain: "travel", action: "manage", risk: "write" },
   { prefix: "weather.", domain: "travel" },
@@ -64,7 +66,6 @@ const RULES: ClassRule[] = [
   // ── dining 餐饮 ──
   { prefix: "restaurant.", domain: "dining" },
   { exact: "restaurant.book", domain: "dining", action: "book", risk: "spend" },
-  { prefix: "meituan.", domain: "dining" },
   // ── home 居家 ──
   { prefix: "home_service.", domain: "home" },
   { exact: "home_service.book", domain: "home", action: "book", risk: "spend" },
@@ -116,13 +117,8 @@ const RULES: ClassRule[] = [
   { prefix: "video", domain: "media" },
   { prefix: "search_image", domain: "media", action: "query", risk: "read" },
   // ── learning 学习 ──
-  { exact: "notes.search", domain: "learning", action: "query", risk: "read" },
-  { exact: "notes.list", domain: "learning", action: "query", risk: "read" },
-  { prefix: "notes.", domain: "learning" },
   // ── work 生产力 ──
   { prefix: "calendar.", domain: "work" },
-  { prefix: "reminder", domain: "work", trigger: "scheduled" },
-  { prefix: "care", domain: "work", trigger: "scheduled" },
   { exact: "file.write_text", domain: "work", action: "execute", risk: "write" },
   { prefix: "file.", domain: "work", action: "query", risk: "read" },
   { prefix: "code.", domain: "work", action: "execute", risk: "write" },
@@ -159,8 +155,6 @@ const RULES: ClassRule[] = [
   { prefix: "body.", domain: "self", action: "execute", risk: "write" },
   { prefix: "task-dispatch", domain: "self", trigger: "event" },
   { prefix: "proactivity", domain: "self", trigger: "event" },
-  { prefix: "market-signal", domain: "self", trigger: "event", action: "query" },
-  { prefix: "life-signal", domain: "self", trigger: "event", action: "query" },
   // ── system 系统基础 ──
   { prefix: "clock.", domain: "system", action: "query", risk: "read" },
   { prefix: "search", domain: "system", action: "query", risk: "read" },
@@ -247,7 +241,7 @@ const DOMAIN_SEARCH_HINTS: Record<LifeDomain, string[]> = {
   health: ["health", "fitness", "健康", "运动", "体重", "睡眠", "体检"],
   social: ["email", "message", "social post", "邮件", "短信", "发消息", "朋友圈", "发帖", "微博"],
   media: ["music", "play", "image", "video", "音乐", "播放", "画图", "生图", "视频"],
-  learning: ["notes", "research", "笔记", "总结", "复习", "研究", "调研"],
+  learning: ["research", "笔记", "总结", "复习", "研究", "调研"],
   work: ["calendar", "schedule", "file", "code", "desktop", "日程", "提醒", "文档", "代码", "电脑", "浏览器"],
   comms: ["call", "notify", "voice", "电话", "打给我", "语音", "播报", "通知", "提醒我"],
   self: ["memory", "habit", "profile", "world", "记忆", "记住", "习惯", "自动化", "画像", "自我"],

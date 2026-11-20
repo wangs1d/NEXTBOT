@@ -77,10 +77,6 @@ const DEFAULT_TOOL_META: Record<string, ToolMetadata> = {
   weather_query: { name: "weather_query", category: "compute", avgTokens: 300, avgDurationMs: 800, criticality: "low" },
   clock_now: { name: "clock_now", category: "compute", avgTokens: 100, avgDurationMs: 50, criticality: "low" },
   calendar_query: { name: "calendar_query", category: "compute", avgTokens: 500, avgDurationMs: 500, criticality: "low" },
-  desktop_uia_query: { name: "desktop_uia_query", category: "ui", avgTokens: 1500, avgDurationMs: 1500, criticality: "high" },
-  desktop_run_input: { name: "desktop_run_input", category: "ui", avgTokens: 500, avgDurationMs: 1000, criticality: "high" },
-  desktop_open: { name: "desktop_open", category: "ui", avgTokens: 400, avgDurationMs: 800, criticality: "high" },
-  desktop_run_shell: { name: "desktop_run_shell", category: "io", avgTokens: 800, avgDurationMs: 2000, criticality: "high" },
   notes_create: { name: "notes_create", category: "io", avgTokens: 300, avgDurationMs: 200, criticality: "low" },
   browser_navigate: { name: "browser_navigate", category: "ui", avgTokens: 600, avgDurationMs: 2000, criticality: "medium" },
 };
@@ -178,11 +174,6 @@ export class ToolPlanningCortex {
         case "web_search":
         case "search_web":
           fallback = { tool: "web_fetch", reason: "检索失败时直接抓取目标 URL" };
-          break;
-        case "desktop_open":
-        case "desktop_uia_query":
-        case "desktop_run_input":
-          fallback = { tool: "desktop_run_shell", reason: "UIA 失败时降级到 shell 执行" };
           break;
         default:
           fallback = undefined;

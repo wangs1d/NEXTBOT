@@ -4,7 +4,7 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
  * 图像生成能力 —— ChatCompletionTool schema。
  *
  * 工具名：`image.generate`
- * 走 deferred（BM25 索引），不进 CORE_TOOL_LIBRARY，
+ * 走 deferred（延迟目录）：，
  * 因为：
  *   1. LLM 不会每轮都生成图，进核心会浪费 token
  *   2. 关键词触发（"画一张" / "生成图片" / "做张图"）时由 tool_discover 拉出

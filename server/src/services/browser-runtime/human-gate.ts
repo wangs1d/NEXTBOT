@@ -45,6 +45,19 @@ const LOGIN_COOKIE_MARKERS: Record<string, string[]> = {
   taobao: ["unb", "lgc", "_tb_token_"],
   tmall: ["unb", "lgc", "_tb_token_"],
   pdd: ["PDDUserID", "pdd_user_id"],
+  // 2026-11-20 补齐（修「扫码同意了仍显示未登录」）：此前只有上面四家，
+  // 其余平台 hasLoginCookieMarker/isPlatformLoggedIn 恒 false——用户明明
+  // 扫码确认成功了，点「我扫好了」永远回报 pending。
+  // 只收「登录后才落、匿名态必不存在」的强信号，宁缺勿滥（误报已登录
+  // 会让后续取价直接撞墙）：
+  //   meituan: lt=登录票据，token=跨域 SSO 票据（匿名态只有 uuid/csrftoken 类）；
+  //   douyin: sessionid / sid_tt 登录会话；
+  //   damai: 大麦走淘宝 SSO，登录态 Cookie 与淘宝同族（unb/lgc/_tb_token_）；
+  //   ctrip: CTicket=登录票据（DUID 是设备号，匿名也有，不收）。
+  meituan: ["lt", "token"],
+  douyin: ["sessionid", "sessionid_ss", "sid_tt"],
+  damai: ["unb", "lgc", "_tb_token_"],
+  ctrip: ["CTicket"],
 };
 
 /**
@@ -63,6 +76,22 @@ export async function isPlatformLoggedIn(
   } catch {
     return false;
   }
+}
+
+/**
+ * 按 Cookie 名判断「这个站点是否已登录」。
+ *
+ * 与 [isPlatformLoggedIn] 的区别：那个要 Page（读浏览器），这个只要 cookie 数组
+ * ——用于「扫码后 Cookie 还在浏览器里、没落库」的场景（多平台登录卡点
+ * 「我扫好了」时先拿实时 Cookie 判断，2026-11-20）。
+ */
+export function hasLoginCookieMarker(
+  siteId: string,
+  cookies: Array<{ name: string }>,
+): boolean {
+  const markers = LOGIN_COOKIE_MARKERS[siteId];
+  if (!markers || markers.length === 0) return false;
+  return cookies.some((c) => markers.includes(c.name));
 }
 
 /** 扫码登录最长等待（毫秒）。可用 SHOPPING_LOGIN_WAIT_MS 覆盖。 */

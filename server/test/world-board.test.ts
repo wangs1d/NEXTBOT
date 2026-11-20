@@ -159,20 +159,3 @@ test("映射规则: goal_ready —— 同 goalId 只投一次", async () => {
   assert.equal(events[0].kind, "goal_ready");
   assert.equal(events[0].dedupKey, "goal_ready:g1");
 });
-
-test("映射规则: unread_burst —— 30min 窗口外消息不计入", async () => {
-  const clock = new MockClock(Date.now());
-  const { board, events, tick } = mkExecutor(clock, "unread_burst");
-  for (let i = 0; i < 3; i++) {
-    board.append("u1", "current", "unreadRecent", { at: clock.t - 60 * 60_000, sender: `旧消息${i}` });
-  }
-  await tick();
-  assert.equal(events.length, 0, "1 小时前的消息不构成爆发");
-  for (let i = 0; i < 3; i++) {
-    board.append("u1", "current", "unreadRecent", { at: clock.t - i, sender: `新消息${i}` });
-  }
-  clock.advance(60_000); // 越过规则 tick 节流（60s）
-  await tick();
-  assert.equal(events.length, 1);
-  assert.ok(events[0].body.includes("3 条新消息"));
-});

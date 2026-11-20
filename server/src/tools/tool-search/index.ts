@@ -156,7 +156,7 @@ export function topToolMatchesForQuery(
 
 /** top-K 兜底绝对闸：RRF 分下限。实测校准（2026-10-09，全量语料 186 工具）：
  *  纯噪声簇（"嗯嗯好的"→voice 0.049、"找个X"→0.045-0.049）≤ ~0.05；同域二档
- *  （desktop.http_get/smart_home.list_devices）≈0.08+；意图先验命中 0.4-1.7。
+ *  （browser.session.list / smart_home.list_devices）≈0.08+；意图先验命中 0.4-1.7。
  *  取 0.075 = 噪声天花板之上、二档之下——宁缺勿滥，错误预载比不预载更糟。 */
 const BM25_TOPK_MIN_SCORE = 0.075;
 /** top-K 兜底相对闸：候选分须 ≥ top1 的 35%（RRF 序列衰减快，尾巴即噪声）。 */
@@ -228,7 +228,7 @@ export function priorDirectMatchesForQuery(
   const idfOf = (t: string): number => catalog.index.idfOf(t);
   // 证据聚合：整包含命中（封顶 1 次——短语命中是饱和证据，不随条数累加）+
   // 去重 token 的 IDF 和（同一 token 跨短语重复计数会让单一通词堆过阈值，
-  // 实测「提醒」在 care.rhythm_reminder 三条例句里各计一次 → 1.44 误命中）。
+  // 实测「提醒」在日历工具的多条例句里重复计分 → 误命中）。
   const evidence = (phrases: Array<{ tokens: string[]; whole: string | null }>): {
     wholeHit: boolean;
     idfSum: number;
@@ -357,7 +357,7 @@ export function prepareToolsWithToolSearch(
     };
   }
 
-  const bridgeTools = buildToolSearchBridgeTools(deferredCatalog.entries.length, cfg.bridgeMode);
+  const bridgeTools = buildToolSearchBridgeTools(deferredCatalog.entries.length);
   return {
     visibleTools: uniqueTools([...visibleTools, ...bridgeTools]),
     deferredCatalog,
@@ -373,18 +373,7 @@ export function invalidateFullCatalogCache(): void {
 }
 
 export {
-  CORE_TOOL_LIBRARY,
-  classifyToolExposureTier,
-  isCoreToolRegistryName,
-  summarizeCoreToolLibrary,
-  type ToolExposureTier,
-} from "./core-tool-library.js";
-export {
-  TOOL_SEARCH_CORE_REGISTRY_NAMES,
-  TOOL_SEARCH_CORE_REGISTRY_PREFIXES,
-  TOOL_SEARCH_BRIDGE_MERGED,
-  TOOL_SEARCH_BRIDGE_LEGACY,
-  isToolSearchCoreRegistryName,
+  TOOL_SEARCH_BRIDGE_NAMES,
   isToolSearchBridgeName,
 } from "./core-tools.js";
 export {

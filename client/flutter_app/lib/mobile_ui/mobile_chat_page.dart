@@ -19,8 +19,11 @@ import "../features/chat/evening_digest_card.dart";
 import "../features/chat/image_preview_panel.dart";
 import "../features/chat/media_disk_cache.dart";
 import "../features/chat/message_body_renderer.dart";
+import "../features/chat/structured_assistant_message_body.dart";
 import "../features/chat/travel_plan_archive.dart";
 import "../features/chat/travel_plan_launcher.dart";
+import "../features/chat/followup_bubbles.dart";
+import "../features/chat/voice_message_bubble.dart";
 import "mobile_agent_status_orb.dart";
 import "mobile_attach_panel.dart";
 import "mobile_chat_controller.dart";
@@ -32,6 +35,12 @@ const double kAgentStatusOrbInset = 16;
 
 /// 顶栏文字字体：与侧边栏统一使用 HarmonyOS Sans SC。
 const String _kTopBarFontFamily = "HarmonyOS Sans SC";
+
+/// 消息流左右边距：结构化内容（卡片/表格/摘要）的左右边缘距屏幕 16px。
+const double _kMessageSidePadding = 16;
+
+/// 闲聊气泡最大宽（设计稿 236 / 320 ≈ 73.8%，按屏宽等比）。
+const double _kChatBubbleWidthFactor = 0.738;
 
 /// 手机端对话主界面(白黑极简,跟随主题)。
 ///
@@ -266,7 +275,8 @@ class _MobileChatPageState extends State<MobileChatPage> {
     final ScaffoldMessengerState? messenger =
         mounted ? ScaffoldMessenger.maybeOf(context) : null;
     messenger?.showSnackBar(
-      const SnackBar(content: Text("正在呼叫 Agent…"), duration: Duration(seconds: 2)),
+      const SnackBar(
+          content: Text("正在呼叫 Agent…"), duration: Duration(seconds: 2)),
     );
   }
 
@@ -659,7 +669,8 @@ class _MobileChatPageState extends State<MobileChatPage> {
       child: ListView.builder(
         controller: _scroll,
         reverse: !openingOnly,
-        padding: EdgeInsets.fromLTRB(14, openingOnly ? 24 : 6, 14, 8),
+        padding: EdgeInsets.fromLTRB(_kMessageSidePadding, openingOnly ? 24 : 6,
+            _kMessageSidePadding, 8),
         itemCount: messageCount + flowOffset + (typing ? 1 : 0),
         // 按消息 id 复用 Element（2026-11-11 闪卡根治）：reverse 列表下每追加
         // 一条消息（用户气泡 / turn_started 空占位），所有已有消息的 index 都
@@ -674,9 +685,8 @@ class _MobileChatPageState extends State<MobileChatPage> {
           final int msgIndex = _controller.messages
               .indexWhere((ChatMessage m) => m.messageId == key.value);
           if (msgIndex < 0) return null;
-          final int viewIndex = openingOnly
-              ? msgIndex
-              : messageCount - 1 - msgIndex;
+          final int viewIndex =
+              openingOnly ? msgIndex : messageCount - 1 - msgIndex;
           final int typedIndex = viewIndex + flowOffset;
           if (typing && typedIndex >= messageCount + flowOffset) return null;
           return typedIndex;
@@ -688,9 +698,10 @@ class _MobileChatPageState extends State<MobileChatPage> {
               key: const ValueKey<String>("plan-flow"),
               child: TravelPlanInlineFlowView(
                 controller: planFlow,
-                agentName:
-                    (AgentNameStore.instance.name.value ?? widget.agentName ?? "")
-                        .trim(),
+                agentName: (AgentNameStore.instance.name.value ??
+                        widget.agentName ??
+                        "")
+                    .trim(),
                 onOpenPlan: TravelPlanLauncher.openPlanById,
                 onClose: _controller.closePlanFlow,
                 onFocusComposer: () =>
@@ -703,8 +714,8 @@ class _MobileChatPageState extends State<MobileChatPage> {
             return _buildTypingBubble(p);
           }
           // 正向列表（开场介绍）index 即消息顺序；reverse 列表 index 0 是最新。
-          final ChatMessage m = _controller.messages[
-              openingOnly ? viewIndex : messageCount - 1 - viewIndex];
+          final ChatMessage m = _controller
+              .messages[openingOnly ? viewIndex : messageCount - 1 - viewIndex];
           return KeyedSubtree(
             key: ValueKey<String>(m.messageId),
             child: _buildMessageItem(context, m, p),
@@ -717,11 +728,64 @@ class _MobileChatPageState extends State<MobileChatPage> {
   /// 单条消息 → widget 的分发（不含 key 外壳，见 _buildMessageList）。
   Widget _buildMessageItem(
       BuildContext context, ChatMessage m, MobilePalette p) {
+    final Widget core = _buildMessageItemCore(context, m, p);
+    if (m.role == "user") return core;
+    final List<String> followUps = m.followUpPrompts ?? const <String>[];
+    if (followUps.isEmpty) return core;
+    // 接续建议：不进助手气泡，逐条渲染成助手侧小泡挂在消息正下方
+    //（左对齐，点击即发送）。
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        core,
+        FollowUpBubbles(
+          prompts: followUps,
+          onTap: (String prompt) => unawaited(_controller.send(prompt)),
+          bubbleColor: p.assistantBubble,
+          textColor: p.assistantBubbleText,
+          bubbleRadius: MobileTheme.bubbleRadius,
+        ),
+      ],
+    );
+  }
+
+  Widget _buildMessageItemCore(
+      BuildContext context, ChatMessage m, MobilePalette p) {
     final bool isUser = m.role == "user";
     if (m.streaming && m.text.isEmpty) {
       // 处理状态由输入框上方的状态条承载（对齐桌面端：占位不进消息流），
       // 这里只留空位，避免多出一个空气泡。
       return const SizedBox.shrink();
+    }
+    // 语音条（agent.voice.message）：微信式可重播气泡，点击播放/暂停。
+    // 与桌面 chat_page 同构；无 audio 附件（TTS 降级）时继续走普通文本气泡。
+    if (m.contentType == "audio") {
+      final MessageAttachment? audio =
+          m.attachments.cast<MessageAttachment?>().firstWhere(
+                (a) => a?.type == MessageAttachmentType.audio,
+                orElse: () => null,
+              );
+      if (audio != null) {
+        return Align(
+          alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxWidth: MediaQuery.sizeOf(context).width * 0.738,
+            ),
+            child: VoiceMessageBubble(
+              mediaUrl: audio.url,
+              isMe: isUser,
+              durationMs: audio.durationMs ?? m.durationMs ?? 0,
+              waveform: audio.waveform ?? m.waveform,
+              transcript: (audio.transcript?.isNotEmpty == true
+                      ? audio.transcript
+                      : null) ??
+                  (m.text.isNotEmpty ? m.text : null),
+            ),
+          ),
+        );
+      }
     }
     if (m.contentType == "transfer_reminder") {
       // 接驳确认卡（agent.transfer_reminder）：行程段临近到达时
@@ -736,7 +800,10 @@ class _MobileChatPageState extends State<MobileChatPage> {
         child: Padding(
           padding: const EdgeInsets.symmetric(vertical: 4),
           child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 360),
+            constraints: BoxConstraints(
+              maxWidth:
+                  MediaQuery.sizeOf(context).width - _kMessageSidePadding * 2,
+            ),
             child: EveningDigestCard(digest: m.eveningDigest!),
           ),
         ),
@@ -819,11 +886,12 @@ class _MobileChatPageState extends State<MobileChatPage> {
     return Align(
       alignment: Alignment.centerLeft,
       child: Container(
+        width: double.infinity,
         constraints: BoxConstraints(
-          maxWidth: MediaQuery.sizeOf(context).width * 0.738,
+          maxWidth: MediaQuery.sizeOf(context).width - _kMessageSidePadding * 2,
         ),
         margin: const EdgeInsets.symmetric(vertical: 5),
-        padding: const EdgeInsets.fromLTRB(15, 11, 15, 5),
+        padding: const EdgeInsets.fromLTRB(15, 9, 15, 4),
         decoration: BoxDecoration(
           color: p.assistantBubble,
           borderRadius: const BorderRadius.only(
@@ -839,7 +907,7 @@ class _MobileChatPageState extends State<MobileChatPage> {
           children: <Widget>[
             if (title.isNotEmpty)
               Padding(
-                padding: const EdgeInsets.only(bottom: 10, left: 2, right: 2),
+                padding: const EdgeInsets.only(bottom: 8, left: 2, right: 2),
                 child: Text(
                   title,
                   style: TextStyle(
@@ -889,7 +957,7 @@ class _MobileChatPageState extends State<MobileChatPage> {
   /// 点整行即选中。
   Widget _buildNameChoiceRow(String name, MobilePalette p) {
     return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.only(bottom: 6),
       child: Material(
         color: p.background,
         shape: RoundedRectangleBorder(
@@ -902,7 +970,7 @@ class _MobileChatPageState extends State<MobileChatPage> {
           child: SizedBox(
             width: double.infinity,
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
               child: Text(
                 name,
                 maxLines: 1,
@@ -973,8 +1041,12 @@ class _MobileChatPageState extends State<MobileChatPage> {
       child: Opacity(
         opacity: settled ? 0.6 : 1.0,
         child: Container(
+          width: double.infinity,
           margin: const EdgeInsets.symmetric(vertical: 4),
-          constraints: const BoxConstraints(maxWidth: 300),
+          constraints: BoxConstraints(
+            maxWidth:
+                MediaQuery.sizeOf(context).width - _kMessageSidePadding * 2,
+          ),
           decoration: BoxDecoration(
             color: p.surface,
             borderRadius: BorderRadius.circular(14),
@@ -1238,8 +1310,8 @@ class _MobileChatPageState extends State<MobileChatPage> {
 
   /// 历史回填：按服务端落盘的 userImageUrls 渲染真实缩略图（走磁盘缓存 +
   /// 凭证注入的 CachedMediaImage），替换旧的「配图 ×N」文案回退。
-  Widget _buildUserUrlPhotoBubbles(BuildContext context, ChatMessage m,
-      MobilePalette p, List<String> urls) {
+  Widget _buildUserUrlPhotoBubbles(
+      BuildContext context, ChatMessage m, MobilePalette p, List<String> urls) {
     final List<Widget> thumbs = <Widget>[];
     for (int i = 0; i < urls.length; i++) {
       final String url = MediaUrl.resolveForHeaders(urls[i]);
@@ -1282,8 +1354,7 @@ class _MobileChatPageState extends State<MobileChatPage> {
             children: <Widget>[
               Icon(Icons.schedule, size: 12, color: p.textMuted),
               const SizedBox(width: 3),
-              Text("离线待发送",
-                  style: TextStyle(color: p.textMuted, fontSize: 11)),
+              Text("离线待发送", style: TextStyle(color: p.textMuted, fontSize: 11)),
             ],
           ),
         );
@@ -1375,12 +1446,18 @@ class _MobileChatPageState extends State<MobileChatPage> {
     }
     final Color bubble = isUser ? p.userBubble : p.assistantBubble;
     final Color text = isUser ? p.userBubbleText : p.assistantBubbleText;
+    // 宽度口径：普通闲聊维持设计稿泡宽；含卡片/表格/摘要的结构化回复
+    // 放宽到「屏宽 − 左右各 16px」，与气泡外的独立卡同宽。
+    final bool wideAssistant = !isUser && _assistantNeedsWideBubble(m);
+    final double screenWidth = MediaQuery.sizeOf(context).width;
     return Align(
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
+        width: wideAssistant ? double.infinity : null,
         constraints: BoxConstraints(
-          // 设计稿气泡最大宽 236 / 320 ≈ 73.8%，按屏宽等比。
-          maxWidth: MediaQuery.sizeOf(context).width * 0.738,
+          maxWidth: wideAssistant
+              ? screenWidth - _kMessageSidePadding * 2
+              : screenWidth * _kChatBubbleWidthFactor,
         ),
         margin: const EdgeInsets.symmetric(vertical: 5),
         padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 11),
@@ -1481,9 +1558,6 @@ class _MobileChatPageState extends State<MobileChatPage> {
                   cardData: cardData,
                   messageId: m.messageId,
                 ),
-                // 「接下来你可以」接续建议：点击即作为新消息发送（与桌面端同链路）。
-                onFollowupTap: (String prompt) =>
-                    unawaited(_controller.send(prompt)),
                 // 「需要你拍板」动作（2026-11-13「通知即界面」）：与通知栏按钮
                 // 共用同一个 actionId + 同一枚 token——两个渲染面，一套语义。
                 onNotifyAction: (NotifyAction action) =>
@@ -1755,6 +1829,40 @@ List<AgentResultData> _standaloneCardsOf(ChatMessage m) {
   return out;
 }
 
+/// 助手消息是否含「非纯闲聊」内容：摘要卡 / 媒体卡 / 信封块里的卡与媒体 /
+/// 结构化正文（小标题、列表、表格）。这类回复放宽到全宽渲染，
+/// 纯聊天文字仍按设计稿泡宽收窄。
+///
+/// 照片回复例外：只带照片（连同散文正文）的轮次保持设计稿泡宽，照片卡大小
+/// 与放宽前一致；同轮还带结果卡或结构化正文时才放宽。
+bool _assistantNeedsWideBubble(ChatMessage m) {
+  if (m.role == "user") return false;
+  if (m.summaryCard != null) return true;
+  bool hasMedia = (m.mediaCards?.isNotEmpty ?? false) ||
+      (m.pendingMediaCards?.isNotEmpty ?? false);
+  bool hasCard = m.text.contains(AgentResultParser.startMarker);
+  bool hasNonText = hasMedia;
+  for (final List<Map<String, dynamic>>? blocks
+      in <List<Map<String, dynamic>>?>[
+    m.renderBlocks,
+    m.envelopeBlocks,
+    m.replyBlocks,
+  ]) {
+    if (blocks == null) continue;
+    for (final Map<String, dynamic> b in blocks) {
+      final String type = b["type"]?.toString() ?? "text";
+      if (type == "media") hasMedia = true;
+      if (type == "card") hasCard = true;
+      if (type != "text") hasNonText = true;
+    }
+  }
+  final bool structuredText =
+      StructuredAssistantMessageBody.isStructuredText(m.text);
+  if (hasMedia && !hasCard && !structuredText) return false;
+  if (hasNonText) return true;
+  return structuredText;
+}
+
 /// 气泡里还有没有可见正文：卡外置后，若消息只剩卡（正文全被剥掉的历史形态），
 /// 不再渲染空气泡壳。判定 = 正文剥卡标记后非空，或信封/回复块序列里有
 /// 非 text 空的 text 块。
@@ -1815,7 +1923,7 @@ class _CustomNameInputState extends State<_CustomNameInput> {
   Widget build(BuildContext context) {
     final MobilePalette p = widget.palette;
     return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.only(bottom: 6),
       child: Container(
         padding: const EdgeInsets.only(left: 12, right: 5, top: 3, bottom: 3),
         decoration: BoxDecoration(
@@ -1838,7 +1946,7 @@ class _CustomNameInputState extends State<_CustomNameInput> {
                   border: InputBorder.none,
                   hintText: "自己取一个…",
                   hintStyle: TextStyle(color: p.textMuted, fontSize: 13.5),
-                  contentPadding: const EdgeInsets.symmetric(vertical: 11),
+                  contentPadding: const EdgeInsets.symmetric(vertical: 6),
                 ),
                 onChanged: (String v) {
                   final bool now = v.trim().isNotEmpty;
@@ -1942,7 +2050,6 @@ class _AssistantBody extends StatelessWidget {
     required this.message,
     required this.cs,
     this.onUserAction,
-    this.onFollowupTap,
     this.onNotifyAction,
     this.excludeCardTypes = const <String>[],
   });
@@ -1958,9 +2065,6 @@ class _AssistantBody extends StatelessWidget {
   /// 效果卡点击经它回传控制器，走 `chat.user_action` 协议。
   final void Function(AgentResultAction action,
       {required AgentResultData cardData})? onUserAction;
-
-  /// 「接下来你可以」接续建议点击回调（null 不渲染建议行）。
-  final void Function(String prompt)? onFollowupTap;
 
   /// 「需要你拍板」动作点击回调（2026-11-13「通知即界面」，null 不渲染动作行）。
   final void Function(NotifyAction action)? onNotifyAction;
@@ -1979,8 +2083,6 @@ class _AssistantBody extends StatelessWidget {
           isUser: false,
           // 卡片动作（选择型卡/chips）：与桌面端同协议回传 chat.user_action。
           onUserAction: onUserAction,
-          // 「接下来你可以」接续建议胶囊：与桌面端同渲染、同点击发送链路。
-          onFollowupTap: onFollowupTap,
           onNotifyAction: onNotifyAction,
           // 行程卡等外移卡由消息行在气泡外全宽渲染，body 内不再重复。
           excludeTravelCard: true,

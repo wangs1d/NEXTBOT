@@ -59,7 +59,6 @@ import "core/services/agent_sphere_mood_bridge.dart";
 import "core/services/agent_sphere_embodiment_mapper.dart";
 import "core/services/sphere_embodiment_motion_bridge.dart";
 import "core/services/agent_sphere_interact_bridge.dart";
-import "core/services/desktop_bridge_service.dart";
 import "core/services/phone_bridge_service.dart";
 import "core/services/agent_location_responder.dart";
 import "core/services/schedule_tool_result_sync.dart";
@@ -644,11 +643,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// 日历面板重新加载信号
   final ValueNotifier<int> _calendarReloadSignal = ValueNotifier<int>(0);
 
-  /// 与 userId 对齐的电脑桥接在线状态（由服务端 `desktop.bridge.sync` 推送）
-  // ignore: unused_field
-  bool? _desktopBridgeOnline;
-  String? _desktopBridgeLastSummary;
-
   /// 是否已初始化完成
   bool _isInitialized = false;
 
@@ -977,7 +971,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    DesktopBridgeService.instance.stop();
     unawaited(AgentSphereVoiceController.instance.dispose());
     unawaited(TtsPlayer.instance.dispose());
     unawaited(_mobileBriefingTapSub?.cancel());
@@ -1004,15 +997,14 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     // 时机拉起，Android 12+ 禁止后台启动前台服务。
     if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
       unawaited(KeepAliveService.start());
-      // 电池优化豁免（2026-11-12）：前台服务仍被 ROM 冻结的关键兜底。
-      // 未豁免时拉起系统对话框，用户点一次「允许」永久生效；已豁免空转。
-      unawaited(KeepAliveService.ensureBatteryExemption());
       // 网络路径监听（2026-11-18）：Wi‑Fi ⇄ 蜂窝切换/飞行模式恢复后旧 TCP
       // 会静默失效，原生回调一变化就让连接层立即探活，不再等 75s 心跳。
       NetworkWatchService.instance.start();
     }
     // 移动端系统通知初始化（后台收 WS 消息时用系统通知提醒，类微信）
-    await LocalNotificationService.init();
+    // 手机端冷启动不在登录门禁页弹系统通知权限：插件/渠道照常初始化，权限
+    // 申请延后到「注册/登录成功进入主壳」时（见 _promptPermissionsAfterEnteringMainShell）。
+    await LocalNotificationService.init(requestNotificationPermission: !_isMobile);
     LocalNotificationService.onOutcome = (String deliveryId, String outcome) {
       AmbientFeedsController.instance.sendProactiveOutcome(deliveryId, outcome);
     };
@@ -1381,7 +1373,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     // （fire-and-forget；未登录时内部跳过，登录后由 _completeWebAuth 补注册）。
     unawaited(ControlPlaneAccount.ensureRegistered());
     unawaited(_consumePendingMobileBriefingLaunch());
-    unawaited(_ensureAndroidNotificationPermission());
+    // 通知权限申请已挪到 _completeWebAuth 进主壳后：手机端冷启动还在登录门禁页，
+    // 此时弹系统框既突兀又常被系统丢弃（原 bootstrap 处无脑申请已移除）。
     unawaited(_tryShowMobileLaunchBriefing());
 
     AgentSphereInteractBridge.instance.bind((String action, {String? text}) {
@@ -1456,7 +1449,16 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           }
         }
       }
-      await _promptLocationConsentIfNeeded();
+      // 定位权限弹窗：
+      // - 桌面端沿用启动询问（根 Navigator 可用）。
+      // - 手机端冷启动可能仍在登录门禁页，主壳 Navigator 尚未挂载，弹窗取不到
+      //   context 会静默跳过；改到 _completeWebAuth 进主壳后再弹。这里只处理
+      //   已有同意记录的跟随（warms up GPS/恢复常驻），不打新用户的弹窗。
+      if (_isMobile) {
+        await _followExistingLocationConsent();
+      } else {
+        await _promptLocationConsentIfNeeded();
+      }
       // 启动时静默拉一次定位并上报（无 jobId 纯上报，填充服务端位置缓存供 Agent 复用）。
       // 原由右侧面板天气 Header 触发，组件移除后改由应用启动兜底；
       // Agent 运行中仍可走 agent.location_request 按需再拉。
@@ -2784,27 +2786,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             );
           }
         }
-        if (type == "desktop.bridge.sync") {
-          final bool? on = payload["bridgeOnline"] as bool?;
-          final Map<String, dynamic>? lt =
-              (payload["lastTask"] as Map?)?.cast<String, dynamic>();
-          final String? nextSummary = lt == null
-              ? null
-              : (lt["summary"]?.toString() ?? lt["error"]?.toString());
-          final String? previousSummary = _desktopBridgeLastSummary;
-          setState(() {
-            _desktopBridgeOnline = on;
-            _desktopBridgeLastSummary = nextSummary;
-          });
-          if (nextSummary != null &&
-              nextSummary.trim().isNotEmpty &&
-              nextSummary != previousSummary) {
-            _showToast(
-              on == false ? "桌面同步: $nextSummary" : "桌面同步: $nextSummary",
-            );
-          }
-        }
-
         if (type == "wallet.simulate.result") {
           final double nextBalance =
               (payload["ledger"]?["balance"] as num?)?.toDouble() ?? _balance;
@@ -3764,7 +3745,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     }
     unawaited(_flushScheduleOfflineDeletes());
     if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) {
-      DesktopBridgeService.instance.start();
       unawaited(_tryShowDesktopLaunchBriefing());
     }
     // 闹钟服务端对账（2026-10-13）：每次 WS 连上（含断线重连）都拉一次服务端
@@ -3842,6 +3822,14 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     // 而是排队等待依次处理（服务端 MessageBatchProcessor 同语义，每条独立回复）。
     // 429 退避重发同样走排队：服务端按到达顺序排在已排队消息之后，两端顺序一致。
     final bool isQueued = isRetry || _isAgentProcessing;
+
+    // 新消息一发出就撤掉旧轮次的接续建议（挂旧消息下的助手小泡，过期会诱导误点）。
+    if (!isRetry) {
+      for (int i = 0; i < _messages.length; i++) {
+        if (_messages[i].followUpPrompts == null) continue;
+        _messages[i] = _messages[i].copyWith(clearFollowUps: true);
+      }
+    }
 
     final int attachCount = attachmentFrames?.length ?? 0;
     final ChatMessage userMessage = ChatMessage(
@@ -5481,9 +5469,25 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     }
   }
 
-  /// 弹窗询问 GPS 定位权限：仅询问一次，未显式拒绝则默认同意并立即拉一次 GPS。
-  /// 「始终允许」= 系统定位权限选「始终允许/允许所有时间」+ 位移触发后台上报
-  /// （Agent 感知位置改变/进出常去地点）。
+  /// 已有定位同意记录时的跟随逻辑（手机端冷启动用）：只恢复预热/常驻流，
+  /// 绝不为「尚无记录」的新用户弹窗——那种情况留给进主壳后的正式询问。
+  Future<void> _followExistingLocationConsent() async {
+    final bool? existing = await ClientLocationService.getLocationConsent();
+    if (existing == true) {
+      unawaited(ClientLocationService.warmUpGpsIfConsented());
+      // 常驻开关开着 → 恢复常驻流（权限不够时 start 内部静默跳过，不重复打扰）
+      unawaited(_startResidentLocationReporting());
+    }
+  }
+
+  /// 弹窗询问 GPS 定位权限（桌面端专用）：仅询问一次，未显式拒绝则默认同意并
+  /// 立即拉一次 GPS。手机端应用内定位卡片已删（2026-11-19），改为进主壳直接
+  /// 请求系统权限（见 _promptMobileLocationConsent），不再走这里。
+  ///
+  /// context 必须取当前已挂载主壳的 Navigator：
+  /// - 手机端主壳在独立 MaterialApp（[_mobileMainNavigatorKey]）里，根 Navigator
+  ///   在手机端从不挂载——用 [_rootNavigatorKey] 会恒为 null、弹窗静默丢失。
+  /// - 桌面端仍用 [_rootNavigatorKey]。
   Future<void> _promptLocationConsentIfNeeded() async {
     final bool? existing = await ClientLocationService.getLocationConsent();
     if (existing != null) {
@@ -5495,7 +5499,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       return;
     }
 
-    final BuildContext? ctx = _rootNavigatorKey.currentContext;
+    final BuildContext? ctx = _isMobile
+        ? _mobileMainNavigatorKey.currentContext
+        : _rootNavigatorKey.currentContext;
     if (ctx == null || !ctx.mounted) {
       return;
     }
@@ -5507,10 +5513,54 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     await ClientLocationService.setLocationConsent(decided);
     if (decided) {
       await ClientLocationService.requestGpsAfterConsent();
-      if (choice == LocationConsentChoice.alwaysResident) {
-        await ClientLocationService.setResidentLocationEnabled(true);
-        unawaited(_startResidentLocationReporting());
+    }
+  }
+
+  /// 注册/登录成功、主壳已切入后申请手机端权限：通知 + 定位直接拉系统弹窗。
+  /// 冷启动自动登录（_loadAccountSession 恢复会话）也会走这里。
+  /// 已到位的权限自动跳过：通知已授权 / 定位已有同意记录时，对应项不再打扰。
+  Future<void> _promptPermissionsAfterEnteringMainShell() async {
+    if (!_isMobile) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(_runMobilePermissionBootstrap());
+    });
+  }
+
+  /// 手机端权限申请主流程：只申请真正缺的，先通知后定位。自然收敛：
+  /// - 通知：系统永久拒绝（permanentlyDenied）后 status 不再是 isDenied，
+  ///   不会再弹；用户没拒绝过才询问。
+  /// - 定位：consent 只记系统给过的真实答复（允许/拒绝），拒绝后绝不打扰；
+  ///   没问成的那次不落记录，下次冷启动继续问。
+  Future<void> _runMobilePermissionBootstrap() async {
+    bool notifNeeded = false;
+    try {
+      final PermissionStatus status = await Permission.notification.status;
+      notifNeeded = status.isDenied; // permanentlyDenied 不算（系统不再受理弹窗）
+    } catch (_) {
+      notifNeeded = false;
+    }
+    final bool locationNeeded =
+        await ClientLocationService.getLocationConsent() == null;
+    if (!notifNeeded && !locationNeeded) return;
+
+    // 通知先弹（系统框），用户点完再弹定位。
+    if (notifNeeded) {
+      await _ensureMobileNotificationPermission();
+      // Android 在「上一个权限对话框仍在销毁」时发起的新请求会被直接判 denied
+      // 且不显示 UI（一次只受理一个框）——不留这个间隔，首启只能看到通知框，
+      // 定位框要等下次冷启动才弹。
+      if (locationNeeded) {
+        await Future<void>.delayed(const Duration(milliseconds: 600));
       }
+    }
+    if (locationNeeded) {
+      final bool? granted =
+          await ClientLocationService.requestSystemLocationPermission();
+      if (granted == null) return;
+      await ClientLocationService.setLocationConsent(granted);
+      if (!granted) return;
+      unawaited(ClientLocationService.warmUpGpsIfConsented());
     }
   }
 
@@ -5818,7 +5868,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       navigatorKey: _gateNavigatorKey,
       title: "",
       theme: AppTheme.of(AppThemeVariant.dark).copyWith(
-        scaffoldBackgroundColor: Colors.black,
+        // 与登录页/启动画面同色（#161616）：纯黑会在首帧产生灰→黑硬切闪跳
+        scaffoldBackgroundColor: const Color(0xFF161616),
       ),
       // 黑底门禁页：edge-to-edge 下系统栏全透明 + 亮色图标（装配单源）
       home: MobileSystemBars(
@@ -6211,6 +6262,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     _syncIslandGate();
     if (_accountEmail != null) {
       unawaited(_loadUserAvatar());
+      // 冷启动自动登录（会话恢复）也补权限询问（2026-11-20）：此前只有显式
+      // 登录（_completeWebAuth）触发，「通知/定位」被拆到下一次登录才弹。
+      // _runMobilePermissionBootstrap 对已到位的权限自动跳过，老用户零打扰。
+      if (_isMobile) {
+        unawaited(_promptPermissionsAfterEnteringMainShell());
+      }
     }
   }
 
@@ -6284,6 +6341,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     // prefs）在本次会话里永远到不了顶栏，要等下次冷启动才补上。这里身份
     // 已就位，立即补拉，顶栏胶囊当场出现。
     unawaited(_loadAgentProfile());
+    // 手机端：注册/登录成功即进主壳（无首启向导），弹定位/通知权限的时机就在这里。
+    // 已注册老用户 likewise 走这里——getLocationConsent 有记录时会跟随、不重弹。
+    unawaited(_promptPermissionsAfterEnteringMainShell());
   }
 
   /// 向导完成：切入主界面（N 光扫不再补播，向导的进度条动画就是本次开场）。
@@ -6611,8 +6671,14 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     }
   }
 
-  Future<void> _ensureAndroidNotificationPermission() async {
-    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
+  /// 系统通知权限（Android 13+ / iOS）：带「本次会话只问一次」的守卫。
+  /// 手机端从冷启动挪到进主壳后调用，避免在登录门禁页弹系统框。
+  Future<void> _ensureMobileNotificationPermission() async {
+    if (kIsWeb ||
+        (defaultTargetPlatform != TargetPlatform.android &&
+            defaultTargetPlatform != TargetPlatform.iOS)) {
+      return;
+    }
     if (_notificationPermissionChecked) return;
     _notificationPermissionChecked = true;
     try {

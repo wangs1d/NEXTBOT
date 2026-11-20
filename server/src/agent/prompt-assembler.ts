@@ -18,7 +18,7 @@ import { recordPromptInjection } from "./prompt-ledger.js";
  *  - dynamicContext：本轮易变块（时间/召回/任务/短期上下文）
  *
  * 家族合并（块数 40+ → 10 组）：
- *  - 【短期上下文】：最近对话/工作记忆/会话回顾/今日日志/今日摘要（5→1，2026-09-23 并入 sessionRecap）
+ *  - 【短期上下文】：工作记忆/最近对话/今日日志/今日摘要
  *  - 【用户档案】：画像/偏好/事实（3→1）
  *  - 【待办与承诺】：承诺/未完成事项（2→1）
  *  - [Turn Task Context]：任务/追问锚点/建议工具链（3→1）
@@ -88,13 +88,14 @@ const RENDERED_MEMORY_FIELDS: ReadonlyArray<keyof AgentPromptMemoryContext> = [
   "onboardingHint",
   "narrativeRecall",
   "eventRecall",
+  "memoryCurrentState",
+  "memoryPending",
+  "memoryRecall",
   "workingMemorySummary",
   "recentConversationHistory",
   "journalRecall",
   "dailyDigest",
-  "sessionRecap",
   "userProfile",
-  "memorySummary",
   "memoryCommitments",
   "memoryOpenLoops",
   "interruptedContext",
@@ -196,9 +197,8 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
   if (m.memoryInventory) stableSlow.push(`【记忆目录】\n${m.memoryInventory}`);
 
   // MEMORY：对话级（稳定层沉底带）。查询相关的记忆字段（事实/偏好/待办承诺/
-  // 持久记忆召回，带 minRelevance 按轮过滤）不在此列——它们留动态层。⚠️ sessionRecap 也不在此列
-  // （2026-09-23）：滚动 recap 随 thread 裁剪持续追加，会话内几乎每轮都在变，
-  // 已在动态层【短期上下文】家族。
+  // 持久记忆召回，带 minRelevance 按轮过滤）不在此列——它们留动态层。
+  // 短期上下文（工作记忆/最近对话/今日日志/今日摘要）同理，全部沉在动态层。
   // 用户理解档案（理解档案 store）：agent 对用户理解的结构化沉淀，先于派生画像
   // 注入——块内自带使用指令（用户相关话题以此为准；玩笑/粉丝式称呼不当事实转述）。
   if (m.userUnderstanding) stableMemory.push(m.userUnderstanding);
@@ -218,6 +218,10 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
 
   // ── 动态层 ──
   const dynamicContext: string[] = [];
+  // 记忆三块（编译器唯一产出，总量 ≤1200）：当前状态 / 在办 / 按需回忆。
+  if (m.memoryCurrentState) dynamicContext.push(m.memoryCurrentState);
+  if (m.memoryPending) dynamicContext.push(m.memoryPending);
+  if (m.memoryRecall) dynamicContext.push(m.memoryRecall);
   const personaMoodBlock = m.personaMood;
   if (personaMoodBlock) dynamicContext.push(personaMoodBlock);
   // 当下情绪（2026-11-13 补渲染）：此前只填不渲染，runtime-kernel 的
@@ -263,26 +267,13 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
       `【记忆图联想检索】\n（历史记忆检索结果，可能来自更早会话，非用户本轮所述；其中提到的事发生时间不等于现在，别把旧事当刚发生，不确定时如实说明，与当前对话冲突时以用户最新消息为准）\n（仅当与当前话题相关时才引用，可自然带出处如"你之前提过…"；不主动翻旧账，不以"接着上次"开头）\n${m.narrativeRecall}`,
     );
   }
-  // 持久记忆（KV memory_summary 的按轮召回结果）：命中制，必须留动态层——
-  // 内容由本轮 userQuery 决定，坐在稳定层会被会话冻结成首轮字节，后续换话题
-  // 既拿不到新命中，也把首轮命中一直灌下去。
-  if (m.memorySummary) dynamicContext.push(`【持久记忆】\n${m.memorySummary}`);
   // 事件回忆（L0）：仅时间回溯意图 + 真实命中时才有值，沉底动态层。
   if (m.eventRecall) dynamicContext.push(m.eventRecall);
-  // 短期上下文家族（4→1）：工作记忆 / 最近对话 / 今日日志 / 今日摘要
-  // （2026-09-23 sessionRecap 并入本家族：随对话轮增长的内容必须沉底，
-  // 否则每轮打破稳定前缀缓存——见稳定层·慢变记忆处的注释）
+  // 短期上下文家族：工作记忆 / 最近对话 / 今日日志 / 今日摘要。
+  // 账号级 session_recap 已下线（跨会话串台源），会话连续性只由会话级 STM 承担。
   const shortTermBlock = buildFamilyBlock("【短期上下文】", SHORT_TERM_DISCLAIMER, [
     { label: "工作记忆", content: m.workingMemorySummary },
     { label: "最近对话", content: m.recentConversationHistory },
-    // 会话回顾（2026-11-05）：行表改单段——一行行清单读起来像系统日志，
-    // 并成一段自然文本更贴近"我知道我们聊过什么"的上下文形态。
-    {
-      label: "会话回顾",
-      content: m.sessionRecap
-        ? m.sessionRecap.split("\n").map((l) => l.trim()).filter(Boolean).join("；")
-        : undefined,
-    },
     { label: "今日日志", content: m.journalRecall },
     { label: "今日摘要", content: m.dailyDigest },
   ]);

@@ -225,26 +225,6 @@ test("E2E-2 跨源实体检索：一次查询同时命中邮件与日历（Muse�
 
 // ─── 第二段：统一库/传感器 → 世界板 → 规则 → 投递（用户真正关心的「是否会主动发起」）───
 
-test("E2E-3 邮件爆发 → 世界板 → unread_burst 规则 → 真正投递到用户", async () => {
-  const h = makeHarness();
-  try {
-    h.mailRows.push(
-      mail(1, "张总 <zhang@corp.com>", "合同签字页", "high"),
-      mail(2, "李经理 <li@corp.com>", "排期确认", "normal"),
-      mail(3, "王工 <wang@corp.com>", "线上告警", "high"),
-    );
-    await h.poll();
-    await h.tick();
-
-    const kinds = h.events.map((e) => e.kind);
-    assert.ok(kinds.includes("unread_burst"), `邮件应驱动 unread_burst 规则：${kinds}`);
-    assert.ok(h.delivered.length >= 1, "事件应经仲裁与管道真正投递");
-    assert.match(h.delivered[0].json, /新消息|unread_burst/, `投递内容应含消息摘要: ${h.delivered[0].json}`);
-  } finally {
-    rmSync(h.dir, { recursive: true, force: true });
-  }
-});
-
 test("E2E-4 日历订阅（ICS）→ 世界板 nextEvent → meeting_soon → 投递", async () => {
   const h = makeHarness();
   try {
@@ -264,22 +244,6 @@ test("E2E-4 日历订阅（ICS）→ 世界板 nextEvent → meeting_soon → �
     // 临会提醒按设计正文留空（话术层生成），因此走 speak 车道而非 trySend 直投
     assert.ok(h.spoken.length >= 1, "临会提醒应交给 speak 车道开口");
     assert.match(h.spoken[0].title, /周会/, `开口提案应含日程名: ${JSON.stringify(h.spoken[0])}`);
-  } finally {
-    rmSync(h.dir, { recursive: true, force: true });
-  }
-});
-
-test("E2E-5 账本（finance）→ 世界板 → spend_alert → 投递", async () => {
-  const h = makeHarness();
-  try {
-    h.txRows.push(tx("t-9", 3280, "携程", T0 + 1000));
-    await h.poll();
-    await h.tick();
-
-    const kinds = h.events.map((e) => e.kind);
-    assert.ok(kinds.includes("spend_alert"), `大额支出应驱动 spend_alert：${kinds}`);
-    assert.ok(h.delivered.length >= 1, "账单提醒应真正投递");
-    assert.match(h.delivered[0].json, /携程|3280/, `投递内容应含商户与金额: ${h.delivered[0].json}`);
   } finally {
     rmSync(h.dir, { recursive: true, force: true });
   }

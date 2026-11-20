@@ -4,7 +4,7 @@
  * 覆盖：
  *   1. getServerEdition 解析：未设置默认 internal（存量部署零变化）、大小写宽容
  *   2. capability-modules internalOnly 过滤：internal 四大家族在场；oss 整族剔除
- *      （旅游/虚拟电话/好友/比价/社交外联），通用能力（image_gen/safety_guard）保留
+ *      （旅游/虚拟电话/好友/比价/社交外联），通用能力（image_gen）保留
  *   3. core 常驻名单：oss 剔除 phone 与 agent.link 前缀族及 send_to_peer，shopping.suggest
  *      （开源拍板保留）与 calendar 等核心不受影响
  *
@@ -72,7 +72,6 @@ test("capability-modules：internal 四大家族在场，oss 整族剔除且通�
     assert.ok(!ossModules.some((m) => m.internalOnly), `oss 版不应残留 internalOnly 模块: ${d}`);
   }
   assert.ok(ossDomains.includes("image_gen"), "oss 版保留 image_gen");
-  assert.ok(ossDomains.includes("safety_guard"), "oss 版保留 safety_guard");
   assert.ok(ossDomains.includes("shopping_order") || true, "shopping_order 归属未拍板，默认保留");
 });
 

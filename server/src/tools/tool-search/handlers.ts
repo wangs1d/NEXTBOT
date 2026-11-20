@@ -14,6 +14,7 @@ import { getToolSearchConfig } from "./env.js";
 import { getDataDir } from "../../config/data-dir.js";
 import { getQueryEmbedding, getQueryEmbeddingBounded, peekQueryEmbedding } from "./tool-embedding.js";
 import { sharedHistoryStore, type HistoryScoreStore } from "./retrieval/history-score.js";
+import { findSkillBundle, isSkillBundleId, SKILL_BUNDLES } from "../exposure/skill-bundles.js";
 import { ResourceType } from "./registry/models.js";
 import { toolSearchMetrics } from "./observability/metrics.js";
 import { appendFile, mkdir } from "node:fs/promises";
@@ -48,28 +49,16 @@ const ADAPTIVE_AGENT_SEARCH_PATH = [
   "tool_reranking",
 ] as const;
 
-export type ToolSearchBridgeResult =
-  | {
-      kind: "search" | "describe" | "discover";
-      ok: boolean;
-      result: Record<string, unknown>;
-    }
-  | {
-      kind: "call";
-      ok: true;
-      registryToolName: string;
-      parsedArgs: Record<string, unknown>;
-    }
-  | {
-      kind: "call";
-      ok: false;
-      result: Record<string, unknown>;
-    };
+export type ToolSearchBridgeResult = {
+  kind: "search" | "describe" | "discover";
+  ok: boolean;
+  result: Record<string, unknown>;
+};
 
 /**
  * Agent 延迟工具桥接入口。
  *
- * tool_search / tool_discover 的主搜索路径统一迁移到 adaptive pipeline：
+ * 唯一入口 tool_discover 走 adaptive pipeline：
  * Intent Router → Hierarchical Router → Hybrid Retrieval → Adaptive Top-P →
  * Knowledge Graph Expansion → Tool Reranking。
  *
@@ -81,56 +70,13 @@ export async function executeToolSearchBridge(
   catalog: DeferredToolCatalog,
   residentTools?: ResidentToolInfo[],
 ): Promise<ToolSearchBridgeResult> {
-  const normalized = normalizeBridgeName(bridgeName);
   const cfg = getToolSearchConfig();
 
-  if (normalized === "tool_discover") {
+  if (bridgeName === "tool_discover") {
     return executeToolDiscover(args, catalog, cfg, residentTools);
   }
 
-  if (normalized === "tool_search") {
-    const query = String(args.query ?? "").trim();
-    if (!query) {
-      return { kind: "search", ok: false, result: { error: "query 不能为空", matches: [] } };
-    }
-    const limit = resolveSearchLimit(args.limit, cfg);
-    const includeSchema = args.include_schema === true;
-    const matches = await searchAdaptiveAgentPath(catalog, query, limit, {
-      includeSchema,
-      tenantId: resolveTenantArg(args),
-      agentContextHash: resolveContextHashArg(args),
-    });
-    return {
-      kind: "search",
-      ok: true,
-      result: {
-        matches,
-        query,
-        count: matches.length,
-        search_path: ADAPTIVE_AGENT_SEARCH_PATH,
-      },
-    };
-  }
-
-  if (normalized === "tool_describe") {
-    const name = String(args.name ?? "").trim();
-    if (!name) {
-      return { kind: "describe", ok: false, result: { error: "name 不能为空" } };
-    }
-    const schema = describeDeferredTool(catalog, name);
-    if (!schema) {
-      const resident = describeResidentTool(residentTools, name);
-      if (resident) {
-        return { kind: "describe", ok: true, result: { ...resident, resident: true, hint: RESIDENT_HINT } };
-      }
-      return { kind: "describe", ok: false, result: { error: `未找到延迟工具: ${name}` } };
-    }
-    return { kind: "describe", ok: true, result: schema };
-  }
-
-  // 2026-10-21 单一通道：延迟工具的调用只走「discover 加载 schema → 模型原生
-  // tool_calls」；`tool_call` 自由 JSON 执行通道已删除，不再有第二条入口。
-  return { kind: "search", ok: false, result: { error: `未知桥接工具: ${bridgeName}` } };
+  return { kind: "discover", ok: false, result: { error: `未知桥接工具: ${bridgeName}` } };
 }
 
 /**
@@ -159,11 +105,6 @@ function resolveCallArguments(raw: unknown): Record<string, unknown> {
     }
   }
   return {};
-}
-
-function normalizeBridgeName(name: string): string {
-  if (name === "tool_resolve") return "tool_discover";
-  return name;
 }
 
 function resolveSearchLimit(
@@ -245,24 +186,38 @@ function executeToolDiscoverByDomain(
   catalog: DeferredToolCatalog,
   domain: string,
 ): Promise<ToolSearchBridgeResult> {
-  // 2026-10-10 根修：域可用性由「目录里是否有该域成员」裁定，而非「是否登记在
-  // DOMAIN_REGISTRY」。派生域（技能族 habit/booking/picture/finance/virtual-phone/
-  // agentworld 等自动成域）因此与显式域同等可达；不存在的域名仍走自纠错分支。
-  const members = catalog.entries
-    .map((e) => e.registryName)
-    .filter((n) => domainsForTool(n).includes(domain));
+  // 2026-11-20 Skill 包（两级层次）：domain 传 skill id（如 ride/travel）时，
+  // 展开为该 skill 覆盖的全部能力域一次拉全族——意图粒度优于逐域往返。
+  const skill = isSkillBundleId(domain) ? findSkillBundle(domain) : undefined;
+  const domainsToPull = skill ? skill.domains : [domain];
+  const members = [
+    ...new Set(
+      catalog.entries
+        .map((e) => e.registryName)
+        .filter((n) => {
+          const toolDomains = domainsForTool(n);
+          return domainsToPull.some((d) => toolDomains.includes(d));
+        }),
+    ),
+  ];
   if (members.length === 0) {
     const available = [...new Set(catalog.entries.flatMap((e) => domainsForTool(e.registryName)))]
       .filter((d) => d !== "misc")
       .sort()
       .join("、");
+    const skills = SKILL_BUNDLES.map((s) => s.id).join("、");
     return Promise.resolve({
       kind: "discover",
       ok: false,
-      result: { error: `未知能力域: ${domain}`, available_domains: available },
+      result: {
+        error: `未知能力域/skill: ${domain}`,
+        available_domains: available,
+        available_skills: skills,
+      },
     });
   }
-  const def = resolveDomainDef(domain);
+  // skill 命中时沿用该 skill 的首域做展示定义（标题/说明），成员按全族收集。
+  const def = resolveDomainDef(skill ? skill.domains[0] : domain);
   const wire = members.slice(0, DOMAIN_PULL_LIMIT).map((memberName, rank) => {
     const entry = catalog.byName.get(memberName);
     const fn = entry && entry.tool.type === "function" ? entry.tool.function : undefined;

@@ -1,26 +1,25 @@
 /**
- * 对话面「按需」事件召回：只在用户出现时间回溯意图、且能命中真实事件时，
+ * 对话面「按需」事件召回：只在模型判定用户有回溯/回忆意图、且能命中真实事件时，
  * 往动态层注一个带龄期的【事件回忆】块（≤6 行）。
  *
  * 约束：
+ *  - 触发只看 TurnUnderstanding（recallIntent / reference=earlier_session）。
+ *    理解缺省（路由失败）→ 零注入：误注入=翻旧账串台，漏注入=少点可选上下文；
  *  - 不进稳定前缀（每轮随话题变，进稳定层会打断前缀缓存）；
  *  - 没有命中就零注入，不制造「翻旧账」；
  *  - 只给结果行，不向用户暴露检索过程（块内自带使用口径）。
  */
 
+import type { TurnUnderstanding } from "../agent/task-router.js";
 import { isEventMemoryRecallEnabled } from "./env.js";
 import { extractModelEntities } from "./event-builder.js";
 import { formatEventLine } from "./event-recall.js";
 import { getEventMemoryStore, type RecalledEvent } from "./event-store.js";
 
-/** 时间回溯意图词：出现即允许召回（最终是否注入仍取决于有没有真实命中）。 */
-const TIME_RETRO_RE =
-  /上次|上回|上一次|之前|那次|那天|哪天|什么时候|哪个时候|上个月|上周|去年|往年|以前|曾经|当时|前阵子|前几天|前些天/;
-
 const LOOKBACK_DAYS = 365;
 const MAX_LINES = 6;
 
-/** 回溯词 → 事件类型：用户说「上次比价」时不必猜词面，直接按域取真事。 */
+/** 回溯语句里的领域词 → 事件类型：只做同一次召回内的检索收窄，不参与触发判定。 */
 const INTENT_KINDS: Array<[RegExp, string[]]> = [
   [/比价|价格|多少钱|便宜|降价|报价/, ["price_compare"]],
   [/天气|气温|下雨|降温|穿什么/, ["weather_query"]],
@@ -48,18 +47,20 @@ function prioritize(events: RecalledEvent[]): RecalledEvent[] {
   });
 }
 
-export function hasTimeRetroIntent(text: string): boolean {
-  return TIME_RETRO_RE.test(text);
-}
-
 /**
- * 生成【事件回忆】块；不满足触发条件或无命中返回 undefined（零注入）。
+ * 生成【事件回忆】块；无回溯意图、无理解或无命中返回 undefined（零注入）。
  * 纯同步 SQLite 读，µs~ms 级。
  */
-export function buildEventRecallBlock(actorId: string, userText: string, now = Date.now()): string | undefined {
+export function buildEventRecallBlock(
+  actorId: string,
+  userText: string,
+  understanding: TurnUnderstanding | undefined,
+  now = Date.now(),
+): string | undefined {
   if (!isEventMemoryRecallEnabled()) return undefined;
   const text = userText.trim();
-  if (!text || !hasTimeRetroIntent(text)) return undefined;
+  if (!text || !understanding) return undefined;
+  if (!understanding.recallIntent && understanding.reference !== "earlier_session") return undefined;
   const store = getEventMemoryStore();
   if (!store) return undefined;
 

@@ -16,7 +16,7 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
  *     告知），支持 search → book → status → cancel 全流程演练
  *
  * 与相近能力的边界：
- *   - meituan.create_order / shopping.order.place：外卖/生鲜购物，非到店订座
+ *   - shopping.order.place：外卖/生鲜购物，非到店订座
  *   - travel.search-poi：旅行目的地餐饮探索（POI），非可订座时段
  */
 export const RESTAURANT_BOOKING_CHAT_TOOLS: ChatCompletionTool[] = [

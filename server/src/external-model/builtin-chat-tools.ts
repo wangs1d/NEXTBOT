@@ -321,24 +321,6 @@ export const LIFE_ASSISTANT_CHAT_TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
-      name: "budget.calculate",
-      description: "根据收入与各项支出计算剩余预算并给出建议。",
-      parameters: {
-        type: "object",
-        properties: {
-          income: { type: "number", description: "月收入" },
-          rent: { type: "number", description: "房租" },
-          food: { type: "number", description: "餐饮" },
-          transport: { type: "number", description: "交通" },
-        },
-        required: ["income"],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
       name: "shopping.suggest",
       description:
         "在自有商品库中检索并给出结构化购物建议（含商品图/试色图对比、参数对比表、" +
@@ -472,7 +454,7 @@ export const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
       // 每个 action 的语义、参数与回执保持不变。
       description:
         "【内置 Calendar】日程/提醒/定时任务的统一入口（用 action 分流）。\n" +
-        "action=create：创建提醒/日程/定时任务。优先把用户原句放进 text（含时间与事项，如「明天 9:00 提醒我开会」），服务端确定性解析时间与事项；只有时间/类型已结构化时才用下方字段。常见触发：「明天早上九点提醒我开会」「十分钟后提醒我」「到点叫我吃药」「定个明早七点的闹钟」（睡觉叫醒须传 alarmIntent=true）「提醒我交周报」（每天循环的喝水/睡觉/运动习惯走 care.rhythm_reminder）。带明确时间点时直接调用，不要追问；**用户只说了要做什么、没给任何时间（如「设置一个闹钟」「提醒我交周报」）时，先问清几点并停止本轮，不要调用本工具，也不要把自己猜的时间写进 text/runAt**；仅当返回 needsRecurrenceConfirm=true 时按 suggestedQuestion 追问一次后重调。kind=reminder 时返回 whenSpoken（口语时间，如「明天上午十一点」；**仅在时间不是用户说的、或与他说的不同时才用它交代一句，用户刚说过就别重复**，也别把钟点念成 11:00、别念 11/6 这种日期）；advanceReminderKinds 只说明提前提醒的性质（departure=出发前、evening_before=前一晚），是事实不是台词：要不要提起、怎么提起你自己判断，别提字段名、别说几级、别报时点；hasAdvanceReminder 为 true 时说明另有提前提醒，别让用户以为只响一次，但不要解释提醒是怎么排的，也不要罗列提醒时间点。提醒方式默认弹窗；仅用户明确要求电话/语音才升级。\n" +
+        "action=create：创建提醒/日程/定时任务。优先把用户原句放进 text（含时间与事项，如「明天 9:00 提醒我开会」），服务端确定性解析时间与事项；只有时间/类型已结构化时才用下方字段。常见触发：「明天早上九点提醒我开会」「十分钟后提醒我」「到点叫我吃药」「定个明早七点的闹钟」（睡觉叫醒须传 alarmIntent=true）「提醒我交周报」。带明确时间点时直接调用，不要追问；**用户只说了要做什么、没给任何时间（如「设置一个闹钟」「提醒我交周报」）时，先问清几点并停止本轮，不要调用本工具，也不要把自己猜的时间写进 text/runAt**；仅当返回 needsRecurrenceConfirm=true 时按 suggestedQuestion 追问一次后重调。kind=reminder 时返回 whenSpoken（口语时间，如「明天上午十一点」；**仅在时间不是用户说的、或与他说的不同时才用它交代一句，用户刚说过就别重复**，也别把钟点念成 11:00、别念 11/6 这种日期）；advanceReminderKinds 只说明提前提醒的性质（departure=出发前、evening_before=前一晚），是事实不是台词：要不要提起、怎么提起你自己判断，别提字段名、别说几级、别报时点；hasAdvanceReminder 为 true 时说明另有提前提醒，别让用户以为只响一次，但不要解释提醒是怎么排的，也不要罗列提醒时间点。提醒方式默认弹窗；仅用户明确要求电话/语音才升级。\n" +
         "action=batch_create：批量创建日程（一次最多 60 条）。用于用户一次性导入多件日程的场景（课表/排班表/会议日程/行程单），先从图/文提取每条的 description 与 runAt（ISO 时间），再一次创建；逐条转述结果，冲突/失败条目如实说明。单条日程不要用本 action。\n" +
         "action=list_tasks：查询当前用户已创建的定时日程/提醒（含下次执行时间）。默认只查未来 120 天；**要核对已响过/已过期/历史日程（如「今天早上那个提醒过了吗」「我昨天有什么安排」），把 from 设为过去时间（如今天 00:00 或昨天 00:00），返回项里 status=completed 与 lastRunAt 表示已经执行过，属于过去事件**。仅当用户**明确**要查看/确认日程或定时任务时调用；禁止用于「你确定？」「真的吗？」等短句追问。\n" +
         "action=delete_task：删除用户已创建的定时日程/提醒。仅当用户明确要求删除/取消某个日程或提醒时调用；可先用 action=list_tasks 找到 taskId。\n" +
@@ -613,6 +595,12 @@ export const PHONE_CHAT_TOOLS: ChatCompletionTool[] = [
             enum: ["peer", "reminder"],
             description: "peer=联络；reminder=提醒",
           },
+          importance: {
+            type: "string",
+            enum: ["low", "medium", "high", "critical"],
+            description:
+              "这次来电的事关重要程度（Agent 自主评估）：low=闲聊、medium=一般、high=重要、critical=紧急必达。仅影响触达决策的价值评估；用户显式点名打电话时可省略。",
+          },
         },
         required: ["spokenMessage"],
         additionalProperties: false,
@@ -689,7 +677,8 @@ export const CLOCK_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "clock.get_user_location",
       description:
-        "获取用户此刻的定位（GPS + 逆地理）。用户问「我在哪个城市」「我在哪」「当前位置」时必须调用。" +
+        "获取用户此刻的定位（GPS + 逆地理）。用户问「我在哪个城市」「我在哪」「当前位置」时，优先用已注入的【用户位置】块直接作答；" +
+        "仅在上下文没有位置信息、或用户明确要求重新定位时调用本工具。" +
         "注意：只代表此刻位置，不代表家/公司；问「我家/公司在哪个城市」请用 place 工具按需查询，禁止用当前城市顶替。",
       parameters: {
         type: "object",
@@ -718,9 +707,9 @@ export const AGENT_CAPABILITY_QUERY_CHAT_TOOLS: ChatCompletionTool[] = [  {
         properties: {
           domain: {
             type: "string",
-            enum: ["wallet", "agent_link", "calendar", "weather", "sub_agent", "aip", "desktop", "web", "life_assistant", "phone", "entertainment", "social_feed", "agent_account", "notes", "system", "all"],
+            enum: ["wallet", "agent_link", "calendar", "weather", "sub_agent", "aip", "web", "life_assistant", "phone", "entertainment", "social_feed", "agent_account", "system", "all"],
             description:
-              "能力领域过滤。不传或传 'all' 返回全部宿主域；传具体域名仅返回该域。建议优先指定领域以减少 token 消耗：wallet=钱包, agent_link=好友, calendar=日程, weather=天气, sub_agent=子Agent委派, aip=AIP协议, desktop=桌面自动化, web=网页浏览, life_assistant=生活助手, phone=虚拟电话, entertainment=娱乐互动, agent_account=账号注册, notes=笔记, system=系统管理。",
+              "能力领域过滤。不传或传 'all' 返回全部宿主域；传具体域名仅返回该域。建议优先指定领域以减少 token 消耗：wallet=钱包, agent_link=好友, calendar=日程, weather=天气, sub_agent=子Agent委派, aip=AIP协议, web=网页浏览, life_assistant=生活助手, phone=虚拟电话, entertainment=娱乐互动, agent_account=账号注册, system=系统管理。",
           },
         },
         additionalProperties: false,

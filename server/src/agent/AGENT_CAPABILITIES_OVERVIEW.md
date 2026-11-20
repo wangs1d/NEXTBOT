@@ -10,7 +10,6 @@
 - ✅ 天气查询
 - ✅ Agent间通信
 - ✅ AIP协议
-- ✅ 桌面自动化
 - ✅ Web浏览
 - ✅ 生活助手
 - ✅ 协议统一管理
@@ -103,33 +102,18 @@ import {
 - aip（action="proposal"）: 获取协作提案
 提示：用于多Agent协作场景
 
-5️⃣ 【桌面自动化能力】
-可用工具：
-- desktop.visual.screenshot: 截取电脑屏幕（或指定区域）并返回 PNG 图片
-- desktop.visual.run_task: 执行桌面视觉自动化任务（VLM驱动键鼠操作）
-提示：可截取屏幕查看内容、操作用户桌面、自动执行任务
-
-6️⃣ 【Web浏览能力】
+5️⃣ 【Web浏览能力】
 可用工具：
 - web.search: 执行网络搜索
 - web.fetch: 获取网页内容
 提示：可帮助用户查找信息、浏览网页
 
-7️⃣ 【生活助手能力】
+6️⃣ 【生活助手能力】
 可用工具：
-- budget.calculate: 计算预算和收支
+- finance（action="budget_estimate"）: 一次性收支测算
 - shopping.suggest: 提供购物建议
 - reminder.plan: 已并入 calendar.create（历史叫法）
 提示：可提供生活建议、财务管理
-
-8️⃣ 【协议统一管理能力】
-可用工具：
-- protocol.unified.quota_adjust: 调整计算配额
-- protocol.unified.memory_patch: 更新记忆
-- protocol.unified.memory_get: 获取记忆
-- protocol.unified.human_directive: 接收人类指令
-- protocol.unified.governance_probe: 治理探测
-提示：用于系统级管理和配置
 
 【虚拟电话能力】
 ✅ 您的虚拟联络号：123456（登记在 Agent 名下，与您共用）
@@ -181,9 +165,8 @@ Agent 可以：
 2. 日历管理：创建日程、设置提醒
 3. 天气查询：获取本地天气预报
 4. 虚拟电话：申领号码、拨打语音电话
-5. 桌面自动化：执行自动化任务
-6. Web浏览：搜索信息、获取网页内容
-7. 生活助手：预算管理、购物建议
+5. Web浏览：搜索信息、获取网页内容
+6. 生活助手：预算管理、购物建议
 ...等等
 
 请问您需要哪方面的帮助？"
@@ -237,9 +220,8 @@ Agent 可以：
 | 天气查询 | 1 | 天气预报、出行建议 |
 | Agent通信 | 1 | Agent间消息传递 |
 | AIP协议 | 3 | 多Agent协作、任务分发 |
-| 桌面自动化 | 1 | 桌面操作、自动任务 |
 | Web浏览 | 2 | 网络搜索、网页获取 |
-| 生活助手 | 3 | 预算、购物、提醒计划 |
+| 生活助手 | 2 | 预算测算、购物建议 |
 | 协议管理 | 5 | 系统配置、记忆管理 |
 | Agent账号 | 1 | 账号注册、身份管理 |
 | 虚拟电话 | 2 | 号码申领、语音通话 |

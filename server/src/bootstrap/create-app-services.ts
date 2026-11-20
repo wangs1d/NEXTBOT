@@ -56,8 +56,7 @@ import {
 } from "../agent/agent-runtime-config.js";
 import { resolvePrimaryChatSessionId } from "../agent/master-chat-session.js";
 import { UserPersonalizationService } from "../services/user-personalization/user-personalization-service.js";
-import { createNarrativeMemoryPort, wrapNarrativeWithHybrid } from "../services/narrative-memory-port.js";
-import { createNarrativeHybridRetrievalDefault } from "../services/narrative-hybrid-retrieval-service.js";
+import { createNarrativeMemoryPort } from "../services/narrative-memory-port.js";
 import { initMemoryManagerService, getMemoryManagerService } from "../services/memory-manager-service.js";
 import { initHumanLikeMemoryService } from "../services/human-like-memory-service.js";
 import { getAgenticMemoryRuntime, registerMemoryComponents } from "../agentic-memory/index.js";
@@ -74,6 +73,8 @@ import {
 import {
   createStructuredFactStoreIfEnabled,
   isProfileField,
+  isTailCategory,
+  tailKindOf,
 } from "../agentic-memory/structured-fact-store.js";
 import { LifeModelStore } from "../agentic-memory/life-model-store.js";
 import { registerLifeManageTools } from "../tools/life-manage-tools.js";
@@ -98,7 +99,7 @@ import { registerGeofenceTools } from "../tools/geofence-tools.js";
 import { registerPlaceTools } from "../tools/place-tools.js";
 import { ActorContextService } from "../services/actor-context-service.js";
 import { AbstractChatProvider } from "../external-model/abstract-chat-provider.js";
-import { GeofenceService, inferPlaceKind, isPublicHttpUrl } from "../services/geofence-service.js";
+import { GeofenceService, isPublicHttpUrl } from "../services/geofence-service.js";
 import { haversineMeters } from "../services/geo-utils.js";
 import { LocationHistoryService } from "../services/location-history-service.js";
 import { PlaceSemanticsService } from "../services/place-semantics-service.js";
@@ -110,8 +111,6 @@ import {
   isLocationHistoryEnabled,
 } from "../config/location-env.js";
 import { LocationSensor } from "../rhythm/sensors/location-sensor.js";
-import { LocationTrigger } from "../proactivity/triggers/location-trigger.js";
-import { PlaceTransitionTrigger } from "../proactivity/triggers/place-transition-trigger.js";
 import { createProactiveOutreachExecutor } from "../proactivity/proactive-outreach-executor.js";
 import { getDailyDigestService } from "../services/daily-digest-service.js";
 import { getShortTermMemoryConfig } from "../services/short-term-memory-config.js";
@@ -161,7 +160,6 @@ import type { TravelTicketProvider } from "../services/booking/providers/travel-
 import { LifeSignalHubService } from "../services/life-signal-hub-service.js";
 import { AnticipationEngineService } from "../services/anticipation-engine-service.js";
 import { ProactiveLifeRuntimeService } from "../services/proactive-life-runtime-service.js";
-import { DesktopPresenceSignalService } from "../services/desktop-presence-signal-service.js";
 import { HookBus, setHookBus } from "../services/hooks/index.js";
 import { WebhookService } from "../services/webhook/index.js";
 import { AgentPairingService } from "../services/agent-pairing-service.js";
@@ -172,7 +170,6 @@ import { EmailRegistrationService } from "../services/email-registration-service
 import { InfoHubService } from "../services/info-hub-service.js";
 import { RealFundsWalletService } from "../services/real-funds-wallet-service.js";
 import { PaymentService } from "../services/payment-service.js";
-import { MeituanService } from "../services/meituan-service.js";
 import { AlipayBotService } from "../services/alipay-bot-service.js";
 import { ScheduleIntentService } from "../services/schedule-intent-service.js";
 import { ScheduleTaskService } from "../services/schedule-task-service.js";
@@ -213,14 +210,12 @@ import { createImapflowClient, purgeStoredOtpMailSignals } from "../services/mai
 import { MailWatchRegistry } from "../services/mail-watch-registry.js";
 import { BillParcelLedger } from "../services/bill-parcel-ledger.js";
 import { BillParcelIngestService } from "../services/bill-parcel-ingest-service.js";
+import { BillParcelReactiveReporter } from "../services/bill-parcel-reporter.js";
 import {
   FinanceBillAutoFetchService,
   createPlaywrightAlipayBillFetcher,
 } from "../services/finance-bill-auto-fetch-service.js";
 import { isBillRelatedMail } from "../services/finance-ingest-service.js";
-import { HealthFitnessService } from "../services/health-fitness-service.js";
-import { PeriodCareService } from "../services/period-care-service.js";
-import { SafetyGuardService } from "../services/safety-guard-service.js";
 import { FinanceDeepService } from "../services/finance-deep-service.js";
 import { SubscriptionAuditService } from "../services/subscription-audit-service.js";
 import { BillManagementService } from "../services/bill-management-service.js";
@@ -285,8 +280,6 @@ import { registerPaymentTools } from "../tools/payment-tools.js";
 import { registerUnifiedPaymentTools } from "../tools/unified-payment-tools.js";
 import { initUnifiedPaymentService } from "../payments/unified-payment-service.js";
 import { QrAssistService } from "../services/qr-assist-service.js";
-import { registerWechatClawTools } from "../tools/wechat-claw-tools.js";
-import { registerMeituanTools } from "../tools/meituan-tools.js";
 import { registerAgentPhoneTools } from "../tools/agent-phone-tools.js";
 import { registerAgentVoiceTools } from "../tools/agent-voice-tools.js";
 import {
@@ -301,7 +294,7 @@ import {
   buildCatalogIntentRules,
   classifyFeatureByName,
 } from "../catalog/index.js";
-import { setCapabilityModuleDeps, getBuiltinAgentChatTools, invalidateBuiltinToolsCache, selectRelevantTools, setDeclaredSkillTimeoutResolver, declaredSkillTimeoutFromManager } from "../external-model/openai-compatible-tool-loop.js";
+import { setCapabilityModuleDeps, getBuiltinAgentChatTools, invalidateBuiltinToolsCache, setDeclaredSkillTimeoutResolver, declaredSkillTimeoutFromManager } from "../external-model/openai-compatible-tool-loop.js";
 import { registerAgentLinkTools, registerWorldStatusTools } from "../tools/agent-link-tools.js";
 import { registerAgentRelayTools } from "../tools/agent-relay-tools.js";
 import { formatNextRunAtLocal, registerCalendarTools } from "../tools/calendar-tools.js";
@@ -314,7 +307,6 @@ import { SmartHomeService } from "../services/smart-home-service.js";
 import { DeviceRegistry } from "../device-bus/device-registry.js";
 import { createHomeAdapterFactory } from "../device-bus/adapters/home-adapter.js";
 import { createPhoneAdapterFactory } from "../device-bus/adapters/phone-adapter.js";
-import { createDesktopAdapterFactory } from "../device-bus/adapters/desktop-adapter.js";
 import { createTabletAdapterFactory } from "../device-bus/adapters/tablet-adapter.js";
 import { createGlassesAdapterFactory } from "../device-bus/adapters/glasses-adapter.js";
 import { createCameraAdapterFactory } from "../device-bus/adapters/camera-adapter.js";
@@ -324,25 +316,11 @@ import { registerAccessAuthHook } from "../routes/http/auth.js";
 import { ApprovalInboxService, isSpendConfirmation } from "../services/approval-inbox-service.js";
 import { registerWeatherTools } from "../tools/weather-tools.js";
 import { registerGeoTools } from "../tools/geo-tools.js";
-import { registerCareReminderTools } from "../tools/care-reminder-tools.js";
-import { registerLifeSignalTools } from "../tools/life-signal-tools.js";
-import { registerMarketSignalTools } from "../tools/market-signal-tools.js";
 import { ToolRegistry } from "../tools/tool-registry.js";
 import type { ToolContext } from "../tools/tool-registry.js";
 import { resolveActorId, isEphemeralActorId } from "../agent/actor-id.js";
-import { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
 import { SharedBrowserCoordinator } from "../services/shared-browser-coordinator.js";
 import { SharedBrowserCdpGateway } from "../services/shared-browser/cdp-gateway.js";
-import {
-  DesktopSceneWatcherService,
-  isDesktopSceneWatcherEnabled,
-} from "../services/desktop-scene-watcher-service.js";
-import {
-  createDesktopSceneActionExecutor,
-  DesktopSceneDocumentHandler,
-  DesktopSceneMeetingHandler,
-  DesktopScenePriceHandler,
-} from "../services/desktop-scene-handlers.js";
 import { LocationCoordinator } from "../services/location-coordinator.js";
 import { WechatClawBindingService } from "../services/wechat-claw-binding-service.js";
 import { WechatClawBridgeService } from "../services/wechat-claw-bridge-service.js";
@@ -350,7 +328,6 @@ import { MessageHubService, type MessageHubPlatform } from "../services/message-
 import { MessagePlatformGateway } from "../services/message-platform-gateway.js";
 import { MessageBridgeService } from "../services/message-bridge-service.js";
 import { createDesktopVisualFromEnv } from "../services/desktop-visual-subprocess.js";
-import { registerDesktopVisualTools } from "../tools/desktop-visual-tools.js";
 import { registerPhoneBridgeTools } from "../tools/phone-bridge-tools.js";
 import { PhoneBridgeCoordinator } from "../services/phone-bridge-coordinator.js";
 import { PhoneCallCoordinator } from "../services/phone-call-coordinator.js";
@@ -362,6 +339,8 @@ import { registerMcpTools } from "../tools/mcp-tools.js";
 import { buildMcpChatTools } from "../tools/mcp-tools.js";
 import { McpClientService } from "../services/mcp-client-service.js";
 import { setMcpChatTools, setBrainChatTools, setBodyChatTools, setMemoryChatTools } from "../external-model/openai-compatible-tool-loop.js";
+import { ensureToolEmbeddings } from "../tools/tool-search/tool-embedding.js";
+import { getToolSearchConfig } from "../tools/tool-search/env.js";
 import { warnOnChatToolDrift } from "../tools/chat-tool-drift.js";
 import { registerBrainTools, BRAIN_TOOLS } from "../tools/brain-tools.js";
 import { registerMemoryRecallTools, MEMORY_RECALL_CHAT_TOOLS } from "../tools/memory-recall-tools.js";
@@ -370,7 +349,6 @@ import { configureMemoryConsolidation } from "../services/memory-consolidation-s
 import { registerBrowserTools } from "../tools/browser-tools.js";
 import { BrowserSessionService } from "../services/browser-session-service.js";
 import { registerSkillManageTools } from "../tools/skill-manage-tools.js";
-import { registerNotesTools } from "../tools/notes-tools.js";
 import { NotesService } from "../services/notes-service.js";
 import {
   MorningBriefingService,
@@ -394,7 +372,6 @@ import { WeatherService } from "../services/weather-service.js";
 import { ComputeQuotaService } from "../services/compute-quota-service.js";
 import { AipService } from "../aip/aip-service.js";
 import { registerAipTools } from "../tools/aip-tools.js";
-import { registerProtocolUnifiedTools } from "../tools/protocol-unified-tools.js";
 import { registerWebSocketRoute } from "../ws/connection.js";
 import { UnifiedIdempotencyService } from "../services/unified-idempotency-service.js";
 import { join } from "path";
@@ -525,29 +502,29 @@ import { AgentActivityStore } from "../proactivity/activity-store.js";
 import { AttentionStore } from "../proactivity/attention-store.js";
 import { ReachRouter, type ReachChannelDeps } from "../proactivity/reach-router.js";
 import { OutcomeStore } from "../proactivity/outcome-store.js";
-import { AgentPulseService } from "../proactivity/agent-pulse.js";
+import { AgentPulseService, extractRapport } from "../proactivity/agent-pulse.js";
 import { TopicDismissTracker } from "../proactivity/topic-dismiss-tracker.js";
 // ─── 五层主动性架构（传感→评估→仲裁→目标→表达）───
-import { SensorKernel, registerFeeder } from "../proactivity/sensors/kernel.js";
+import { registerFeeder } from "../proactivity/sensors/kernel.js";
 import type { ScreenFocusKind, Signal } from "../proactivity/sensors/types.js";
 import { ScreenFocusSensor } from "../rhythm/sensors/screen-focus-sensor.js";
-import { ScreenSensor } from "../proactivity/sensors/screen-sensor.js";
-import { FileWatcherSensor } from "../proactivity/sensors/file-watcher.js";
-import { ClipboardSensor, isClipboardSensorEnabled } from "../proactivity/sensors/clipboard-sensor.js";
-import { registerPerceptionOverviewTool } from "../tools/perception-tools.js";
-import { ScheduleSensor } from "../proactivity/sensors/schedule-sensor.js";
 // 外部信源收编（2026-10-10）：邮件/日历/财务 → ProactiveSensor 适配器
 import { MailSensor } from "../proactivity/sensors/mail-sensor.js";
 import { IcsSensor } from "../proactivity/sensors/ics-sensor.js";
 import { FinanceSensor } from "../proactivity/sensors/finance-sensor.js";
 import { SourceStore, sourceStoreRoot } from "../proactivity/source-store.js";
-import { ArbiterV2 } from "../proactivity/arbiter-v2.js";
+import { ArbiterV2, interruptCost } from "../proactivity/arbiter-v2.js";
+import { ReachDecisionService } from "../proactivity/reach-decision-service.js";
 import {
   appendEventAudit,
-  MappingExecutor,
-  type EventAuditRecord,
 } from "../proactivity/mapping-executor.js";
-import { buildBoardRules } from "../proactivity/mapping-rules.js";
+import { registerBuiltinProactiveSources } from "../proactivity/module.js";
+import {
+  createProactivityRulesLayer,
+  createBranchesLayer,
+  createLocationTriggers,
+  createSensorLayer,
+} from "../proactivity/module-factory.js";
 import { WorldBoard, bridgeSensorKernelToBoard } from "../proactivity/world-board.js";
 import { deriveOrderSignal } from "../proactivity/shopping-signal.js";
 import { registerOrderStatusTools } from "../tools/shopping-tools.js";
@@ -585,22 +562,17 @@ import { GoalIntrospector } from "../proactivity/goal-introspector.js";
 import { GoalNightlyJob, createGoalSemanticVerifier } from "../proactivity/goal-nightly.js";
 import { buildGoalCostReport } from "../proactivity/goal-cost.js";
 import { buildUnifiedGoalView } from "../proactivity/goal-unified-view.js";
-import { GoalSignalBridge, adjustImportanceByGoalRelation, appendGoalHint } from "../proactivity/goal-signal-bridge.js";
+import { GoalSignalBridge } from "../proactivity/goal-signal-bridge.js";
 import { DiscoveryLayer, primarySubjectOf } from "../proactivity/discovery-layer.js";
 import { AuditTrailService } from "../proactivity/audit-timeline.js";
 import { ProactiveCaller, type CallOutcome } from "../proactivity/proactive-caller.js";
 import { fabricSelftest } from "../proactivity/selftest.js";
 import { CostCalibrator } from "../proactivity/cost-calibrator.js";
-import { MessageWatchTrigger } from "../proactivity/triggers/message-watch-trigger.js";
 import { ScheduleAssertionStore } from "../proactivity/branches/schedule-assertion-store.js";
-import { AssertionConflictWatcher } from "../proactivity/branches/assertion-conflict-watcher.js";
-import { BranchRegistry } from "../proactivity/branches/branch-registry.js";
-import { BranchCondenser } from "../proactivity/branches/branch-condenser.js";
-import { WatchTaskStore, WatchTaskWatcher } from "../proactivity/branches/watch-tasks.js";
+import { WatchTaskStore } from "../proactivity/branches/watch-tasks.js";
 import { IntelService } from "../proactivity/intel/intel-service.js";
 import { createIntelJudge } from "../proactivity/intel/intel-judge.js";
 import { createIntelComposer } from "../proactivity/intel/intel-compose.js";
-import { registerWatchTaskTools } from "../tools/watch-task-tools.js";
 import { WatchBoard } from "../services/watch-board.js";
 import { UserRhythmStore, parsePrepMinutesFromFact } from "../services/user-rhythm-store.js";
 import { createUserStyleBrief } from "../brain/user-style-brief.js";
@@ -657,6 +629,50 @@ async function discoverMcpToolsInBackground(
   }
   registerMcpTools(toolRegistry, mcpClientService);
   setMcpChatTools(buildMcpChatTools(mcpClientService));
+  // 工具向量预热（2026-11-20）：本地 bge 侧车就绪后，后台把可检索工具的向量算进
+  // 缓存——否则首个 tool_discover(query) 要现算 200+ 条，混合召回首轮不可用。
+  void (async () => {
+    try {
+      const provider = getToolSearchConfig().embeddingProvider;
+      if (provider === "openai") {
+        // 远端档（ECS 2vCPU 本地宿主不稳）：直接预热 SiliconFlow bge-m3
+        const seen = new Set<string>();
+        const items = getBuiltinAgentChatTools()
+          .filter((t) => t.type === "function" && Boolean(t.function?.name) && !seen.has(t.function!.name) && seen.add(t.function!.name))
+          .map((t) => ({
+            registryName: (t as { function: { name: string } }).function.name,
+            searchText: ((t as { function: { description?: string; name: string } }).function.description ?? "") +
+              " " + (t as { function: { name: string } }).function.name,
+          }));
+        const stats = await ensureToolEmbeddings(items);
+        log("[tool-embedding] 预热完成 computed=" + stats.computed + " reused=" + stats.reused + " failed=" + stats.failed);
+        return;
+      }
+      // 本地档：等 bge 侧车真正可推理（端口绑定 ≠ 模型就绪，否则熔断器会被打开）
+      const { ensureLocalEmbeddingEndpoint } = await import("../agentic-memory/local-embedding/local-embedding-endpoint.js");
+      const { neuralEmbedTextsBulk } = await import("../tools/tool-search/neural-sidecar.js");
+      await ensureLocalEmbeddingEndpoint();
+      let warm = false;
+      for (let i = 0; i < 8; i++) {
+        const probe = await neuralEmbedTextsBulk(["warmup"]);
+        if (probe && probe.vectors.length > 0) { warm = true; break; }
+        await new Promise((r2) => setTimeout(r2, 1500));
+      }
+      if (!warm) throw new Error("工具向量通道 12s 内未就绪");
+      const seen = new Set<string>();
+      const items = getBuiltinAgentChatTools()
+        .filter((t) => t.type === "function" && Boolean(t.function?.name) && !seen.has(t.function!.name) && seen.add(t.function!.name))
+        .map((t) => ({
+          registryName: (t as { function: { name: string } }).function.name,
+          searchText: ((t as { function: { description?: string; name: string } }).function.description ?? "") +
+            " " + (t as { function: { name: string } }).function.name,
+        }));
+      const stats = await ensureToolEmbeddings(items);
+      log("[tool-embedding] 预热完成 computed=" + stats.computed + " reused=" + stats.reused + " failed=" + stats.failed);
+    } catch (e) {
+      log("[tool-embedding] 预热失败（不影响主链路）: " + (e instanceof Error ? e.message : String(e)));
+    }
+  })();
   log(
     `[MCP] 已发现并注册 ${tools.length} 个 MCP 工具（${mcpClientService
       .listServers()
@@ -761,7 +777,6 @@ export async function createAppServices(
   setVideoGrabServiceRef(videoGrabService);
   const realFundsWallet = new RealFundsWalletService();
   const paymentService = new PaymentService();
-  const meituanService = new MeituanService();
   const alipayBotService = new AlipayBotService();
   // 商家下单服务：从 data/merchants.json 加载商家目录，按意图路由商家并桥接支付宝下单→支付短链
   const merchantOrderService = new MerchantOrderService(
@@ -784,7 +799,6 @@ export async function createAppServices(
   );
   bootLoads.push(anticipationEngineService.load());
   const marketSignalService = new MarketSignalService(lifeSignalHubService);
-  const desktopPresenceSignalService = new DesktopPresenceSignalService(lifeSignalHubService);
   const messageHubService = new MessageHubService(join(getDataDir(), "message-hub.json"));
   bootLoads.push(messageHubService.load());
   // 订单信号派生的 emit 闭包（2026-10-19 handoff 数据源半边）：晚绑定——
@@ -798,11 +812,12 @@ export async function createAppServices(
   let emitBillParcel:
     | ((signal: Omit<import("../proactivity/sensors/types.js").Signal, "stream">) => void)
     | null = null;
-  // 账单/快递主动汇报的同类冷却：快递 10min（快递公司常连发多条：已发货→在途→已到站），
-  // 账单 6h（同一笔扣款常在短信+邮件+银行 App 三处各来一遍）。两类各计。
-  const BILL_PARCEL_COOLDOWN_MS = 10 * 60 * 1000;
-  const BILL_COOLDOWN_MS = 6 * 60 * 60 * 1000;
-  const billParcelCooldown = new Map<string, number>();
+  // 账单/快递主动汇报的同类冷却与提案构造已抽到 BillParcelReactiveReporter（可测）。
+  // submit 晚绑定：proactivePipeline 在本服务之后才创建，直接引用会踩 TDZ，
+  // 故经 ref 间接取——调用发生时管道已就绪。
+  const billParcelReporter = new BillParcelReactiveReporter({
+    submit: (proposal) => proactivePipelineRef.current?.submitProposal(proposal),
+  });
   // 入站消息**分发器**（2026-11-13 修 bug：此前此处与装配层下方各赋一次
   // messageHubService.onInbound，后者整体覆盖前者 → 订单信号派生（deriveOrderSignal /
   // emitShoppingOrder）永远不执行，shopping 流恒空、订单查询工具永远查不到东西）。
@@ -899,12 +914,6 @@ export async function createAppServices(
       actorId ? locationCoordinator.getLastKnown(actorId) : null,
   });
   registerMarketQuoteTools(toolRegistry);
-  registerCareReminderTools(toolRegistry, {
-    agentMemorySyncService,
-    scheduleTaskService,
-  });
-  registerLifeSignalTools(toolRegistry, lifeSignalHubService);
-  registerMarketSignalTools(toolRegistry, marketSignalService);
   let messageBridgeService: MessageBridgeService;
 
   const agentRelayService = new AgentRelayService();
@@ -1001,7 +1010,6 @@ export async function createAppServices(
   // 播放 URL 解析带用户身份（VIP 曲目用其会员权益）；无会话自动回退匿名。
   const mediaMusicService = new MediaMusicService(wsConnectionRegistry, undefined, browserSessionService);
   // 初始化健康/运动数据服务（data/health/{actorId}.json，1s 防抖落盘）。
-  const healthFitnessService = new HealthFitnessService(join(getDataDir(), "health"));
   // 初始化财务深度服务（data/finance/{actorId}/{transactions,budgets}.json + reports/）。
   const financeDeepService = new FinanceDeepService(join(getDataDir(), "finance"));
   // 初始化订阅盘点服务（财务管家 P0：候选检测/确认/使用率/续费前提醒，
@@ -1035,6 +1043,15 @@ export async function createAppServices(
     gateway: sharedBrowserCdpGateway,
     browserSessionService,
   });
+  // 开机预热常驻 Chromium（2026-11-19）：服务启动就把浏览器进程与渲染管线建好，
+  // 用户第一次真要开网页时不再吃冷启动（云端首次任务省 1~3 秒，也少一次风控
+  // 「全新实例」指纹）。best-effort：异步、不阻塞启动、失败静默。
+  void browserRuntime
+    .warmup()
+    .then((ok) => {
+      if (ok) console.log("[browser] 常驻 Chromium 已预热（复用实例，不再每次冷启动）");
+    })
+    .catch(() => {});
   // 保存登录态须用户同意（2026-10-25 拍板）：征询走共用浏览器桥推客户端弹条，
   // 答复经 ws 回来落到会话存储（问一次记住，deny 后不再问也不再存）。
   sharedBrowserCoordinator.onSaveLoginDecision = (actorId, siteId, allowed) => {
@@ -1169,6 +1186,23 @@ export async function createAppServices(
   app.log.info(
     `[Booking] 统一预订层已启用（mode=${bookingConfig.mode}，providers=[${bookingProviders.map((p) => `${p.key}:${p.domain}`).join(",")}]，限额 ¥${bookingConfig.maxAmountCny}/单、¥${bookingConfig.dailyBudgetCny}/日）`,
   );
+  // 期望效用触达决策层（voice.* / 未来的 phone.* 等主动发声共用）。
+  // 依赖的 arbiter / outcome store / presence 在装配后段才创建，用 holder 晚绑定：
+  // 闭包在**运行时**（工具被调用时）才读取，那时依赖已就绪。
+  const reachRefs: {
+    arbiter?: ArbiterV2;
+    outcomes?: InstanceType<typeof OutcomeStore>;
+    isOnline?: (actorId: string) => boolean;
+  } = {};
+  const reachDecisionService = new ReachDecisionService({
+    feedback: (actorId, kind) =>
+      reachRefs.outcomes?.outcomeCounts(actorId, kind) ?? { positive: 0, negative: 0 },
+    contextCost: (actorId) =>
+      reachRefs.arbiter ? interruptCost(reachRefs.arbiter.snapshot(actorId)) : 0,
+    recentBurst: (actorId) => reachRefs.arbiter?.snapshot(actorId).recentBurst ?? 0,
+    online: (actorId) => reachRefs.isOnline?.(actorId) ?? true,
+  });
+
   const voiceCapabilityService = new VoiceCapabilityService({
     ttsService,
     voiceDialogueService,
@@ -1222,7 +1256,6 @@ export async function createAppServices(
 
   // 初始化智能提醒系统（弹窗 → TTS闹钟 → 电话呼叫 三级升级链）
   const intelligentReminder = createIntelligentReminderSystem({
-    toolRegistry,
     virtualPhoneService,
     phoneBridgeCoordinator,
     voiceDialogueService,
@@ -1503,7 +1536,6 @@ export async function createAppServices(
     initUnifiedPaymentService({ alipayBotService, paymentService }),
     new QrAssistService({ imageStore: imageGenerationService }),
   );
-  registerMeituanTools(toolRegistry, meituanService);
   // 版本闸（NEXTBOT_EDITION=oss 开源版剔除）：中继/虚拟电话工具族
   // （好友联络工具族 registerAgentLinkTools 在 worldService 创建后注册——加好友门禁用世界身份）
   if (!isOssEdition()) {
@@ -1513,9 +1545,9 @@ export async function createAppServices(
       agentPairingService,
       agentAccountService,
     );
-    registerAgentPhoneTools(toolRegistry, virtualPhoneService);
+    registerAgentPhoneTools(toolRegistry, virtualPhoneService, reachDecisionService);
   }
-  registerAgentVoiceTools(toolRegistry, voiceCapabilityService);
+  registerAgentVoiceTools(toolRegistry, voiceCapabilityService, reachDecisionService);
   // task.dispatch（2026-09-05 前后台架构）：前台派后台任务原语。launch 晚绑定——
   // 工具注册发生在 registry 装配期（agentCore 尚未创建），agentCore 就绪后接上。
   const taskDispatchLauncherRef: {
@@ -1548,42 +1580,7 @@ export async function createAppServices(
     rootDir: join(getDataDir(), "pictures"),
     batchOutputDir: join(getDataDir(), "pictures", "batch"),
   });
-  // ─── 女性关怀（M1）：生理周期关怀 + 安全守护（docs/women-care-proposal.md）───
-  // 主动通知走 proactivity 管道、SOS 按需定位走位置协调器，两者都在本文件下方
-  // 才创建——持懒引用，工具调用/提醒 tick 时必然已就绪（同 briefing 天气兜底模式）。
-  const wellnessPipelineRef: { current: ProactivePipeline | null } = { current: null };
-  const wellnessLocationRef: { current: LocationCoordinator | null } = { current: null };
-  // 生理周期关怀：加密存储 data/period-care/，每分钟 tick 临近提醒
-  const periodCareService = new PeriodCareService({
-    dataDir: join(getDataDir(), "period-care"),
-    getPipeline: () => wellnessPipelineRef.current,
-  });
-  await periodCareService.load();
-  periodCareService.start();
-  // 安全守护：紧急联系人/SOS/借口来电；SOS 位置按需取一次，不持续上传不落库
-  const safetyGuardService = new SafetyGuardService({
-    dataDir: join(getDataDir(), "safety-guard"),
-    sendSms: (params) => emailSmsService.sendSms(params),
-    prepareCall: (actorId, input) =>
-      phoneCallCoordinator.prepare(actorId, {
-        number: input.number,
-        contactName: input.contactName,
-        goal: input.goal,
-        script: input.script,
-        facts: input.facts,
-      }) as Promise<Record<string, unknown>>,
-    isCallEnabled: () => phoneCallCoordinator.isEnabled(),
-    requestLocation: async (actorId, reason) => {
-      const coordinator = wellnessLocationRef.current;
-      if (!coordinator) return null;
-      const live = await coordinator.requestLocation(actorId, reason);
-      if (live) return live;
-      return coordinator.getCachedWithTime(actorId)?.payload ?? null;
-    },
-    getPipeline: () => wellnessPipelineRef.current,
-  });
-  await safetyGuardService.load();
-
+  // ─── 能力模块装配 ───
   const capabilityModuleDeps: CapabilityModuleDeps = {
     imageGenerationService,
     fileProcessingService,
@@ -1591,7 +1588,6 @@ export async function createAppServices(
     emailSmsService,
     mediaMusicService,
     wsConnectionRegistry,
-    healthFitnessService,
     financeDeepService,
     subscriptionAuditService,
     billManagementService,
@@ -1603,9 +1599,8 @@ export async function createAppServices(
     sharedBrowserCoordinator,
     sharedBrowserCdpGateway,
     bookingService,
+    mcpClientService,
     phoneCallCoordinator,
-    periodCareService,
-    safetyGuardService,
   };
   setCapabilityModuleDeps(capabilityModuleDeps);
   // 意图规则 = 能力模块静态规则 + Feature Catalog 生活域检索词（12 域 aliases）
@@ -1615,12 +1610,6 @@ export async function createAppServices(
   ]);
   registerAllCapabilityModules(toolRegistry, capabilityModuleDeps);
   registerAipTools(toolRegistry, aipService);
-  registerProtocolUnifiedTools(toolRegistry, {
-    computeQuotaService,
-    agentMemorySyncService,
-    auditService,
-    unifiedIdempotencyService,
-  });
 
   const worldService = new WorldService();
   // 已注册宿主账号（邮箱主体）即视为 Agent World 已注册：另一处设备登录时
@@ -1819,18 +1808,36 @@ export async function createAppServices(
   } catch (err) {
     console.warn("[life-model] 初始化失败（降级，生活模型不可用）:", err);
   }
-  // 实体物化（P0 接线）：写非 user 主体的事实时旁路建/更新 life_entities（零新增调用）。
+  // 事实写后副作用（单一出口）：
+  //   · 非 user 主体 → 物化 life_entities（零新增调用）；
+  //   · 长尾事实 → 认知图节点，让联想扩散的种子/激活目标覆盖到偏好与自称。
   if (structuredFactStore) {
-    structuredFactStore.setEntityObserver((actorId, entity, seenAt, sourceRef) => {
-      if (!lifeModelStore) return;
-      lifeModelStore.upsertEntity({
-        actorId,
-        kind: "person",
-        canonicalName: entity,
-        seenAt,
-        confidence: 0.6,
-        sourceRef: sourceRef ?? "structured_fact",
-      });
+    structuredFactStore.setFactObserver((fact, _input, changed) => {
+      if (fact.entity !== "user" && lifeModelStore) {
+        lifeModelStore.upsertEntity({
+          actorId: fact.actorId,
+          kind: "person",
+          canonicalName: fact.entity,
+          seenAt: fact.updatedAt,
+          confidence: 0.6,
+          sourceRef: fact.sourceRef ?? "structured_fact",
+        });
+      }
+      // 只在「新增这一条」时入图；重复确认（touch）不再触发副作用，
+      // 否则同一事实的两条并发回调会各建一个节点。
+      if (changed && isTailCategory(fact.category)) {
+        void humanLikeMemory
+          .linkTailFactNodes(fact.actorId, [
+            {
+              id: fact.id,
+              value: fact.value,
+              field: fact.field,
+              kind: tailKindOf(fact.category),
+              confidence: fact.confidence,
+            },
+          ])
+          .catch((err) => console.warn("[memory-graph] 长尾事实入图失败（忽略）:", err));
+      }
     });
   }
   // FTS 关键词第三路（混合检索 P0）：与四件套共用同一 SQLite 文件，
@@ -2168,24 +2175,39 @@ export async function createAppServices(
   const proactiveSubmitRef: { current?: (p: ProactiveProposal) => void } = {};
   const preferenceChangeTrigger = new PreferenceChangeTrigger({
     submit: (p) => proactiveSubmitRef.current?.(p),
-    getPreferenceFacts: (actorId) =>
-      getNightlyMemoryTaskService()?.getFactStore().getFacts(actorId, { kind: "preference" }) ?? [],
+    // 偏好事实两源并读：权威在 structured_facts(tail:preference)；legacy JSON
+    // 只在迁移完成前仍有存量（按值去重，同一句不会重复参与反转判定）。
+    getPreferenceFacts: async (actorId) => {
+      const seen = new Set<string>();
+      const out: Array<{ subject: string; value: string }> = [];
+      for (const f of structuredFactStore?.getTailFacts(actorId, { kind: "preference" }) ?? []) {
+        const value = f.value.trim();
+        if (!value || seen.has(value)) continue;
+        seen.add(value);
+        out.push({ subject: f.field, value });
+      }
+      const legacy =
+        getNightlyMemoryTaskService()?.getFactStore().getFacts(actorId, { kind: "preference" }) ?? [];
+      for (const f of await legacy) {
+        const value = f.value.trim();
+        if (!value || seen.has(value)) continue;
+        seen.add(value);
+        out.push({ subject: f.subject, value });
+      }
+      return out;
+    },
   });
 
-  const narrativeMemory = wrapNarrativeWithHybrid(
-    createNarrativeMemoryPort({
-      agenticIngest: agenticMemoryRuntime?.ingest ?? null,
-      agenticRetrieval: agenticMemoryRuntime?.retrieval ?? null,
-      compressor: agenticMemoryRuntime?.compressor ?? null,
-      humanLikeMemory,
-      bridge: memoryBridge,
-      onWrite: (actorId, text, source) => {
-        void preferenceChangeTrigger.noteMemoryWrite(actorId, text, { sourceRef: source });
-      },
-    }),
-    createNarrativeHybridRetrievalDefault(),
-    Boolean(memoryBridge),
-  );
+  const narrativeMemory = createNarrativeMemoryPort({
+    agenticIngest: agenticMemoryRuntime?.ingest ?? null,
+    agenticRetrieval: agenticMemoryRuntime?.retrieval ?? null,
+    compressor: agenticMemoryRuntime?.compressor ?? null,
+    humanLikeMemory,
+    bridge: memoryBridge,
+    onWrite: (actorId, text, source) => {
+      void preferenceChangeTrigger.noteMemoryWrite(actorId, text, { sourceRef: source });
+    },
+  });
 
   // ─── 统一记忆写入者（四路合一）：对话衍生的写入候选全部进整合队列，
   // 由单一链路完成 回声过滤 → 裁决 → 低信号摘要 → supersession → 落库。
@@ -2261,6 +2283,15 @@ export async function createAppServices(
       agentMemorySyncService,
       narrativeMemory,
     );
+    if (lifeModelStore) nightlyMemoryService.setLifeModelStore(lifeModelStore);
+    // 长尾事实入图（存量补节点）：增量走事实库写后钩子，夜间只补历史。
+    nightlyMemoryService.setTailFactLinker((actorId, facts) =>
+      humanLikeMemory.linkTailFactNodes(actorId, facts),
+    );
+    // 认知图孤立节点重连（存量补边）：建边不再截断候选，历史零边节点靠夜间收敛。
+    nightlyMemoryService.setGraphRelinker((actorId, limit) =>
+      humanLikeMemory.relinkIsolatedNodes(actorId, limit),
+    );
     nightlyMemoryService.startScheduler();
     app.log.info(
       `[NightlyMemory] Night mode: ${nightlyMemoryService.isInNightMode() ? "🌙 ON" : "☀️ OFF"} (${stmConfig.digestTimezone})`,
@@ -2290,12 +2321,6 @@ export async function createAppServices(
 
   worldService.setEvolutionHooks({
     onWorldCreditsCredited: (ev) => {
-      agentMemorySyncService.appendMemorySummaryLine(
-        ev.actorSessionId,
-        `世界入账 +${ev.amount}（${ev.reason}），余额 ${ev.balanceAfter}`,
-        "world",
-        "WorldEvolutionHooks",
-      );
       void narrativeMemory
         ?.ingest(
           ev.actorSessionId,
@@ -2306,12 +2331,6 @@ export async function createAppServices(
     },
     onSkillPurchased: (ev) => {
       const m = skillManager.get(ev.skillId);
-      agentMemorySyncService.appendMemorySummaryLine(
-        ev.actorSessionId,
-        `购买技能「${m?.displayName ?? ev.skillId}」（${ev.skillId}）花费 ${ev.pricePaid} 点，余额 ${ev.balanceAfter}`,
-        "world",
-        "WorldEvolutionHooks",
-      );
       void narrativeMemory
         ?.ingest(
           ev.actorSessionId,
@@ -2526,7 +2545,7 @@ export async function createAppServices(
     getSessionPrefs: (sessionId) => getUserPreferences(sessionId),
     // 天气定位兜底：客户端 GPS（配置城市 > GPS > IP）
     requestClientLocation: briefingClientLocation,
-    // 第五源：近期重要日子（读 care.set_important_date 写入的 KV）
+    // 第五源：近期重要日子（读 important_dates KV）
     agentMemorySyncService,
     // 用户称呼源：结构化事实库「称呼」字段（与首启向导/聊天面同源；
     // 绝不回退账号 displayName——那是 agent 的网络名，方向会反）
@@ -2986,15 +3005,14 @@ export async function createAppServices(
     persistPath: join(getDataDir(), "proactivity", "schedule-assertions.json"),
   });
   registerCalendarTools(toolRegistry, scheduleTaskService, scheduleIntentService, scheduleConflictService, () => alarmClockServiceRef, scheduleAssertionStore);
-  // 盯梢任务（2026-10-22 Muse 对齐件）：用户对话里说"帮我盯着XXX" → watch.manage
+  // 盯梢任务（2026-10-22 Muse 对齐件）：用户对话里说"帮我盯着XXX" → watch.track
   // 创建任务（创建时一次 LLM 提取关键词，运行期匹配零 LLM）；消费方 WatchTaskWatcher
   // 在主动性段装配。Muse 的"任务驱动盯梢"对齐件 + 截止×日历缺口推理。
   const watchTaskStore = new WatchTaskStore({
     persistPath: join(getDataDir(), "proactivity", "watch-tasks.json"),
   });
-  registerWatchTaskTools(toolRegistry, watchTaskStore);
   // 统一盯梢门面（2026-10-23）：watch.track 单入口，topic→watchTaskStore /
-  // price→shoppingCompareService 路由；既有 watch.manage 与 shopping.compare.watch
+  // price→shoppingCompareService 路由；watch.track 与 shopping.compare.watch
   // 两条工具链保持不变，门面只做统一登记/视图/生命周期。
   const watchBoard = new WatchBoard({
     topic: watchTaskStore,
@@ -3015,7 +3033,6 @@ export async function createAppServices(
   const deviceRegistry = new DeviceRegistry();
   deviceRegistry.registerFactory(createHomeAdapterFactory(smartHomeService));
   deviceRegistry.registerFactory(createPhoneAdapterFactory());
-  deviceRegistry.registerFactory(createDesktopAdapterFactory());
   deviceRegistry.registerFactory(createTabletAdapterFactory());
   deviceRegistry.registerFactory(createGlassesAdapterFactory());
   deviceRegistry.registerFactory(createCameraAdapterFactory());
@@ -3400,7 +3417,6 @@ export async function createAppServices(
 
     // AwarenessCortex：注册生命信号子系统
     awarenessCortex.registerLifeSignalHub(lifeSignalHubService);
-    awarenessCortex.registerDesktopPresence(desktopPresenceSignalService);
     // 注：MoodInferenceService 已不再注册（2026-11-01 提速，情绪交给主模型看上下文）。
     awarenessCortex.registerAnticipation(anticipationEngineService);
     // Stage 3 Task 4：注入 schedule-task-service，用于 meeting 状态识别
@@ -3753,40 +3769,12 @@ export async function createAppServices(
   app.log.info(`[AgentRuntime] ${formatAgentRuntimeConfigSummary(getAgentRuntimeConfig())}`);
 
   const desktopVisual = createDesktopVisualFromEnv();
-  // 主动性在场服务引用（proactivityPresence 在下方才构造；桌面同步回调运行时已就绪）
-  let proactivityPresenceRef: import("../proactivity/presence-service.js").PresenceService | null = null;
-  const desktopBridgeCoordinator = new DesktopBridgeCoordinator({
-    onSync: (actorId, payload) => {
-      wsConnectionRegistry.trySend(
-        actorId,
-        JSON.stringify({ type: ServerEventType.DesktopBridgeSync, payload }),
-      );
-      desktopPresenceSignalService.handleSync(actorId, payload);
-      // 桌面 presence 同步 = 用户活跃标记，喂节律感知（连续工作/深夜检测）
-      rhythmCore?.noteActivity(actorId, "desktop_presence");
-      // 同步刷新主动性在场：否则静默工作 10 分钟后被误判 idle，
-      // 重新开口时会触发假性「你离开了 N 小时」问候
-      proactivityPresenceRef?.noteActivity(actorId);
-    },
-    onTaskResult: (actorId, payload) => {
-      desktopPresenceSignalService.handleTaskResult(actorId, payload);
-    },
-  });
-
-  registerDesktopVisualTools(toolRegistry, {
-    localVisual: desktopVisual,
-    bridge: desktopBridgeCoordinator,
-    audit: auditService,
-  });
-  agentCore.setDesktopBridgeCoordinator(desktopBridgeCoordinator);
 
   // 按需位置协调器：Agent 需要位置（位置类工具）时向客户端请求实时 GPS。
   const locationCoordinator = new LocationCoordinator();
   agentCore.setLocationCoordinator(locationCoordinator);
   // 简报天气定位兜底经延迟引用取到此处创建的协调器
   locationCoordinatorRef.current = locationCoordinator;
-  // 安全守护 SOS 的按需定位同样取此处创建的协调器
-  wellnessLocationRef.current = locationCoordinator;
 
   // 分级提醒策略的实时路程因子（2026-10-05）：出发预留不再按 venue 静态表，
   // 用「用户当前位置 × 任务地点」的驾车实时路程。位置取用顺序：最近已知定位
@@ -4061,96 +4049,6 @@ export async function createAppServices(
     app.log.info("[Location] 位置历史已关闭（LOCATION_HISTORY_ENABLED=0），仅按需定位与显式围栏生效");
   }
 
-  // ─── Task 4: desktop.event → LifeSignal 转换 ───
-  // 将 Python 端推送的桌面事件转为 LifeSignal 并 publish 到 LifeSignalHub，
-  // 供 BrainStem（sweepOnce → recentSignals）与 ProactionCortex 消费。
-  // 未知事件类型忽略；focus_change 频繁故 importance=low，window_open/close=medium。
-  desktopBridgeCoordinator.subscribeEvents((actorId, event) => {
-    const kindByEventType: Record<string, string> = {
-      focus_change: "desktop_focus_change",
-      window_open: "desktop_window_open",
-      window_close: "desktop_window_close",
-    };
-    const kind = kindByEventType[event.eventType];
-    if (!kind) return;
-
-    const title = String(event.payload.title ?? "");
-    const process = String(event.payload.process ?? "");
-    const duration = event.payload.duration;
-    const ts = event.timestamp;
-    const occurredAt =
-      typeof ts === "number"
-        ? new Date(ts).toISOString()
-        : Number.isNaN(Date.parse(ts))
-          ? new Date().toISOString()
-          : new Date(ts).toISOString();
-
-    const importance: "low" | "medium" | "high" | "critical" =
-      event.eventType === "focus_change" ? "low" : "medium";
-
-    lifeSignalHubService.publish({
-      id: `${actorId}:desktop-event:${kind}:${occurredAt}`,
-      actorId,
-      source: "desktop",
-      kind,
-      title: title || `desktop ${event.eventType.replace(/_/g, " ")}`,
-      summary: [title, process].filter(Boolean).join(" - ") || `desktop ${event.eventType}`,
-      tags: ["desktop", "desktop_event", event.eventType],
-      importance,
-      evidence: [
-        `desktop event: ${event.eventType}`,
-        title ? `title=${title}` : "",
-        process ? `process=${process}` : "",
-      ].filter(Boolean),
-      metrics: typeof duration === "number" ? { duration } : undefined,
-      occurredAt,
-      metadata: {
-        title,
-        process,
-        event_type: event.eventType,
-        timestamp: event.timestamp,
-      },
-    });
-  });
-
-  // ─── 桌面情境感知（SceneWatcher）：会议勿扰 / 文档速读 / 商品比价 ───
-  // 检测全部为本地零 token 规则（窗口标题 + 进程 + 停留时长，scene_tick 心跳）；
-  // LLM 只在场景确认后单次调用（ephemeralTurn + maxOutputTokens 封顶）。
-  // 默认关闭：情境监测涉及隐私，须用户显式 DESKTOP_SCENE_WATCHER_ENABLED=1。
-  if (isDesktopSceneWatcherEnabled()) {
-    const sceneExec = createDesktopSceneActionExecutor(desktopVisual, desktopBridgeCoordinator);
-    // proactiveOutbound.send 的入参是 ProactiveOutboundLike 的超集，可直接复用
-    const meetingHandler = new DesktopSceneMeetingHandler(sceneExec, proactiveOutbound);
-    const documentHandler = new DesktopSceneDocumentHandler(sceneExec, externalChat, proactiveOutbound);
-    const priceHandler = new DesktopScenePriceHandler(sceneExec, externalChat, proactiveOutbound);
-    const sceneWatcher = new DesktopSceneWatcherService({
-      onMeetingStarted: (actorId, info) => {
-        void meetingHandler.onMeetingStarted(actorId, info).catch(() => {});
-      },
-      onMeetingEnded: (actorId, session) => {
-        void meetingHandler.onMeetingEnded(actorId, session).catch(() => {});
-      },
-      onDocumentDetected: (actorId, info) => {
-        void documentHandler.onDocumentDetected(actorId, info).catch(() => {});
-      },
-      onProductPageDetected: (actorId, info) => {
-        void priceHandler.onProductPageDetected(actorId, info).catch(() => {});
-      },
-    });
-    desktopBridgeCoordinator.subscribeEvents((actorId, event) => {
-      if (
-        event.eventType === "focus_change" ||
-        event.eventType === "scene_tick" ||
-        event.eventType === "window_open"
-      ) {
-        sceneWatcher.handleDesktopEvent(actorId, event.eventType, event.payload);
-      } else if (event.eventType === "window_close") {
-        sceneWatcher.handleWindowClose(actorId, event.payload);
-      }
-    });
-    app.log.info("[DesktopSceneWatcher] 情境感知已启用（meeting DND / document digest / price check）");
-  }
-
   // ─── Body Center 开关 ───
   // BODY_CENTER_ENABLED 未设置或非 "0"/"false"/"off" → 默认启用身体中心
   // 关闭时：整个 body/ 模块不实例化、BrainCenter.registerBodyGateway 会内部跳过
@@ -4164,8 +4062,7 @@ export async function createAppServices(
   //   BrainCenter.registerBodyGateway 内部会因 isBodyCenterEnabled() 返回 false 而忽略注入
   let bodyCenter: BodyCenter | null = null;
   let reflexArc: ReflexArc | null = null;
-  // 节律感知核心（body 侧）：连续工作 / 深夜活跃检测；外层声明供
-  // desktopBridgeCoordinator.onSync 闭包与 ProactivityHub 装配层引用。
+  // 节律感知核心（body 侧）：连续工作 / 深夜活跃检测；外层声明供 ProactivityHub 装配层引用。
   let rhythmCore: RhythmCore | null = null;
   if (bodyCenterEnabled) {
     // 1. BodyBus + ReflexArc（硬安全门，纯规则匹配）
@@ -4230,23 +4127,6 @@ export async function createAppServices(
             };
           }
         })();
-      },
-    };
-
-    // 3.2 DesktopBridgeCoordinator → DesktopBridgeLike（Eye 用，可选）
-    //     真实 desktopBridgeCoordinator.invoke(actorId, payload, timeoutMs) → DesktopVisualRunResult | null
-    //     期望 runTask?({task, region}) → Promise<unknown>
-    const desktopBridgeAdapter = {
-      async runTask(opts: {
-        task: string;
-        region?: [number, number, number, number] | null;
-        [key: string]: unknown;
-      }): Promise<unknown> {
-        return desktopBridgeCoordinator.invoke(
-          "default",
-          { task: opts.task, region: opts.region ?? null },
-          600_000,
-        );
       },
     };
 
@@ -4315,7 +4195,6 @@ export async function createAppServices(
     const eye = new Eye({
       bodyBus,
       desktopVisualPort: desktopVisual,
-      desktopBridge: desktopBridgeAdapter,
       deviceRegistry: deviceRegistryAdapter,
     });
 
@@ -5135,22 +5014,12 @@ export async function createAppServices(
 
   const wechatClawBindingService = new WechatClawBindingService();
   void wechatClawBindingService.load();
-  // 微信接入聊天工具族：login_qr 经通用推卡通道把登录二维码实时推到聊天流
-  registerWechatClawTools(toolRegistry, wechatClawBindingService, new QrAssistService({ imageStore: imageGenerationService }));
   const wechatClawBridgeService = new WechatClawBridgeService(runtime, {
     weatherPrefsService,
     ttsService,
     messageHubService,
   });
   messageBridgeService = new MessageBridgeService(runtime, messageHubService);
-
-  registerNotesTools(
-    toolRegistry,
-    notesService,
-    scheduleTaskService,
-    externalChat,
-    narrativeMemory,
-  );
 
   // ─── ProactivityHub 主动性多元化模块装配 ───
   // 多元触发（对话关怀/任务恭喜/待办闭环/过劳干预/问候）+ 全局频控
@@ -5178,7 +5047,6 @@ export async function createAppServices(
   proactivityGovernor.setDndCheck((actorId) => autonomySettings.isDnd(actorId));
   // 在场感知（active/idle/offline）：WS 连接事件 + 对话活跃喂入，供仲裁择时与投递选通道
   const proactivityPresence = new PresenceService();
-  proactivityPresenceRef = proactivityPresence;
   // 沉默日志（方案 B）：hub act 沉默与管道 silenced 共用同一实例，落盘 data/proactivity/silence-log.json
   const proactivitySilenceLog = new SilenceLog(
     join(getDataDir(), "proactivity", "silence-log.json"),
@@ -5321,80 +5189,14 @@ export async function createAppServices(
   });
   // 接线 1：agent-core（对话内触发 + advise 注入 + 编排器任务完成恭喜随内部传递）
   agentCore.setProactivityHub(proactivityHub);
-  // ── 位置方案 D：到达常去地点 → 主动问候（走 hub 统一频控/话术闭环）──
-  const locationTrigger = new LocationTrigger({
-    history: locationHistoryService,
-    submitIntent: (intent) => proactivityHub.submitIntent(intent),
-  });
-  // ── 地点语义转换（方案 E）：回家/离家/到公司/到外地 → 交给 hub，由模型决定是否开口 ──
-  // 只把「高置信或用户已确认」的地点当成语义事实；推断中的地点不当铁定事实用。
-  const placeTransitionTrigger = new PlaceTransitionTrigger({
-    resolvePlace: (actorId, loc) => {
-      // 用户显式建的「家/公司」围栏优先级最高：它是用户亲口说的，不需要推断
-      const fence = locationGeofenceService.matchPlace(actorId, loc);
-      if (fence) {
-        return {
-          placeId: fence.fence.id,
-          kind: fence.kind,
-          latitude: fence.fence.latitude,
-          longitude: fence.fence.longitude,
-          label: fence.fence.name,
-          radiusMeters: fence.fence.radiusMeters,
-          confirmed: true,
-        };
-      }
-      const hit = placeSemanticsService.matchCached(actorId, loc);
-      if (!hit) return null;
-      // 主动转换比 prompt 展示更严格：未确认的地点至少要有 3 天证据，
-      // 否则「在朋友小区住了两晚」会被误判成「到家了」。
-      if (
-        !hit.record.confirmed &&
-        (hit.record.confidence < 0.6 || hit.record.distinctDays < 3)
-      ) {
-        return null;
-      }
-      return {
-        placeId: hit.record.id,
-        kind: hit.record.kind,
-        latitude: hit.record.latitude,
-        longitude: hit.record.longitude,
-        ...(hit.record.label ? { label: hit.record.label } : {}),
-        radiusMeters: hit.record.radiusMeters,
-        confirmed: hit.record.confirmed,
-      };
-    },
-    resolveHome: (actorId) => {
-      const fence = locationGeofenceService
-        .list(actorId)
-        .find((item) => item.enabled && inferPlaceKind(item.name) === "home");
-      if (fence) {
-        return {
-          placeId: fence.id,
-          kind: "home" as const,
-          latitude: fence.latitude,
-          longitude: fence.longitude,
-          label: fence.name,
-          radiusMeters: fence.radiusMeters,
-          confirmed: true,
-        };
-      }
-      const home = placeSemanticsService.findPlace(actorId, "home");
-      if (
-        !home ||
-        (!home.confirmed && (home.confidence < 0.55 || home.distinctDays < 3))
-      ) {
-        return null;
-      }
-      return {
-        placeId: home.id,
-        kind: "home" as const,
-        latitude: home.latitude,
-        longitude: home.longitude,
-        ...(home.label ? { label: home.label } : {}),
-        radiusMeters: home.radiusMeters,
-        confirmed: home.confirmed,
-      };
-    },
+  // ── 位置方案 D/E：到达常去地点问候 + 回家/离家/到公司/到外地语义转换 ──
+  // 统一模块层 · 方案 B 第二步（2026-11-19）：两个位置触发器的装配收口到
+  // proactivity/module-factory.ts 的 createLocationTriggers（逐字迁移）；
+  // 位置上报入口与清除失效回调留在 bootstrap，经返回句柄消费。
+  const { locationTrigger, placeTransitionTrigger } = createLocationTriggers({
+    locationHistory: locationHistoryService,
+    geofence: locationGeofenceService,
+    placeSemantics: placeSemanticsService,
     submitIntent: (intent) => proactivityHub.submitIntent(intent),
   });
   // 用户清除位置历史时同步失效到达触发器/语义触发器的缓存：已删数据不再驱动主动行为
@@ -5652,65 +5454,31 @@ export async function createAppServices(
   const proactivityFabricPath = join(getDataDir(), "proactivity");
   /** 管道 outcome 存储（提升为命名引用：CostCalibrator 定时读取） */
   let outcomesStoreForCalibrator: InstanceType<typeof OutcomeStore> | null = null;
-  const sensorKernel = new SensorKernel({ dataPath: proactivityFabricPath });
+  // 统一模块层 · 方案 B 第三步（2026-11-19）：感知内核核心簇（屏幕/日程/文件/
+  // 剪贴板传感器 + goal/message feeder + presence 追踪）装配收口到
+  // proactivity/module-factory.ts 的 createSensorLayer（逐字迁移）。
+  // 邮件/ICS/账本传感器与运行期设备 feeder 的依赖在后段才就绪，仍经 kernel.register
+  // 晚注册（行为不变）。
+  const proactivitySensors = createSensorLayer({
+    dataPath: proactivityFabricPath,
+    desktopVisual,
+    scheduleTasks: scheduleTaskService,
+    toolRegistry,
+    hub: proactivityHub,
+    presence: proactivityPresence,
+  });
+  const sensorKernel = proactivitySensors.kernel;
+  const screenSensor = proactivitySensors.screenSensor;
+  const scheduleSensor = proactivitySensors.scheduleSensor;
+  const goalFeeder = proactivitySensors.goalFeeder;
+  /** 入站消息 feeder（MessageHub onInbound 推送） */
+  const messageFeeder = proactivitySensors.messageFeeder;
+  /** 物理设备 feeder 缓存（sensorId → emit；device-signal 上行入口用） */
+  const deviceFeeders = proactivitySensors.deviceFeeders;
+  const primaryActor = proactivitySensors.primaryActor;
   // 屏幕状态条件化信号源：内核 signals 日志（落盘持久，重启不丢；最近 600 条覆盖数日窗口）
   screenSignalSourceRef = () => sensorKernel.recentLog(600);
-  const screenSensor = new ScreenSensor({ visualPort: desktopVisual });
-  const scheduleSensor = new ScheduleSensor({ listTasks: () => scheduleTaskService.listAllTasks() });
-  sensorKernel.register(screenSensor);
-  sensorKernel.register(scheduleSensor);
-  // ─── 持续感知补全（2026-09-19 P0-1）：文件系统 + 剪贴板传感器 ───
-  // file_watcher：fs.watch 递归监听（env AGENT_FILE_WATCH_DIRS，缺省下载目录），
-  //   只报文件名/动作不读内容；clipboard_watch：30s 哈希比对，只落预览+长度。
-  //   感知回溯查询经 perception.overview 工具暴露给对话面。
-  const fileWatcherSensor = new FileWatcherSensor();
-  sensorKernel.register(fileWatcherSensor);
-  if (isClipboardSensorEnabled()) {
-    sensorKernel.register(new ClipboardSensor({ visualPort: desktopVisual }));
-  }
-  registerPerceptionOverviewTool(toolRegistry, {
-    kernel: sensorKernel,
-    screenFocus: () => screenSensor.latest(),
-  });
-  const goalFeeder = registerFeeder(sensorKernel, "goal_board", "goal");
-  /** 入站消息 feeder（unread_burst 评估器的数据源；MessageHub onInbound 推送） */
-  const messageFeeder = registerFeeder(sensorKernel, "message_hub", "message");
-  /** 物理设备 feeder 缓存（sensorId → emit；device-signal 上行入口用） */
-  const deviceFeeders = new Map<string, (signal: { actorId?: string; at: number; fingerprint: string; salience: "high" | "medium" | "low"; payload?: Record<string, unknown> }) => void>();
-  const primaryActor = (): string | null => {
-    const actors = proactivityHub.exportActors();
-    return actors.sort((a, b) => b.lastInteractionAt - a.lastInteractionAt)[0]?.actorId ?? null;
-  };
-  // presence 追踪传感器：轮询每个活跃用户的在场状态，变化才产出信号
-  // （away_return 的数据源）。按 actor 记录上次状态，不能共用一个变量。
-  const lastPresenceByActor = new Map<string, string>();
-  sensorKernel.register({
-    id: "presence_tracker",
-    stream: "presence",
-    pollIntervalMs: 60_000,
-    collect: () => {
-      const now = Date.now();
-      const cutoff = now - 24 * 3600_000;
-      const out = [];
-      for (const { actorId, lastInteractionAt } of proactivityHub.exportActors()) {
-        if (lastInteractionAt < cutoff) continue;
-        const state = proactivityPresence.getPresence(actorId, now);
-        if (lastPresenceByActor.get(actorId) === state) continue;
-        lastPresenceByActor.set(actorId, state);
-        out.push({
-          stream: "presence" as const,
-          actorId,
-          at: now,
-          fingerprint: `presence:${actorId}:${state}:${Math.floor(now / 60_000)}`,
-          salience: "low" as const,
-          delta: `用户当前状态：${state}`,
-          payload: { state },
-        });
-      }
-      return out;
-    },
-  });
-  sensorKernel.start();
+  proactivitySensors.start();
 
   // 天气一行话缓存（30min 刷新，按 actor 分桶）：规则 tick 按用户读自己的那一行，
   // 多租户下不能共用"最近交互用户"的天气。只刷新 24h 内有交互的用户，避免云端
@@ -5904,76 +5672,22 @@ export async function createAppServices(
     },
   });
 
+  // 晚绑定期望效用决策层的依赖：arbiter / outcome store / 在线判定均已就绪。
+  // 在线判定用 presence 服务（内部基于 WS 注册表，离线即 offline → 决策层 defer）。
+  reachRefs.arbiter = arbiterV2;
+  reachRefs.outcomes =
+    outcomesStoreForCalibrator ??
+    (outcomesStoreForCalibrator = new OutcomeStore(join(getDataDir(), "proactivity", "outcomes.json")));
+  reachRefs.isOnline = (actorId) => proactivityPresence.isOnline(actorId);
+
   // 评估器链（L2）：信号 delta → AttentionEvent（正文模板直出，零 LLM）
   // 感知 → 目标桥晚绑定容器（goalPlanner 在下方创建后填充；见 activeGoalLine）
   const goalSignalBridgeRef: { current: import("../proactivity/goal-signal-bridge.js").GoalSignalBridge | null } = { current: null };
   // 共享发现层晚绑定容器（sourceStore/goalBoard 在下方创建后填充；见 activeGoalLine）
   const discoveryRef: { current: DiscoveryLayer | null } = { current: null };
-  const builtinServices = {
-      // 按 actor 查（2026-10-23 跨账号泄漏根修）：listAllTasks() 是全库，规则按 actor
-      // tick 时会把别人的日程 / eval 账号的任务写进当前用户的晨报与时间轴。
-      listTodayTasks: (actorId: string) => {
-        if (!actorId) return [];
-        const now = Date.now();
-        const horizon = now + 24 * 3600_000;
-        return scheduleTaskService
-          .listTasksBySession(actorId)
-          .filter((t) => t.status !== "cancelled")
-          // 展示名回退：提醒类任务多由工具建，只有 shortTitle/description（title 为空）。
-          // 此前只取 title，主动性审阅拿到的是「18:00 」这种无事项的空行，只能从最近
-          // 对话里猜事项，于是编出了「六点整健身和游泳撞一块了」（2026-11-01）。
-          .map((t) => ({
-            title: (t.title ?? t.shortTitle ?? t.description ?? "").trim(),
-            runAt: t.nextRunAt ?? t.runAt,
-          }))
-        .filter((t) => {
-          const at = typeof t.runAt === "number" ? t.runAt : Date.parse(String(t.runAt));
-          return Number.isFinite(at) && at > now && at <= horizon;
-        })
-        .sort((a, b) => {
-          const at = (v: { runAt?: number | string }) =>
-            typeof v.runAt === "number" ? v.runAt : Date.parse(String(v.runAt));
-          return at(a) - at(b);
-        })
-        .slice(0, 6);
-    },
-    // 天气一行话：按 tick 的 actor 读自己的缓存（全局单值会把 A 的天气说给 B）
-    weatherLine: (actorId: string) => weatherLineByActor.get(actorId) ?? null,
-    // 未读发件人（digest/晨报拼接）：MessageHub 会话表中该 actor unreadCount>0 的对端
-    unreadSenders: (actorId: string) => {
-      if (!actorId) return [];
-      try {
-        return messageHubService
-          .listConversations(actorId, { limit: 20 })
-          .filter((c) => c.unreadCount > 0)
-          .map((c) => c.participantName || c.title || String(c.platform))
-          .slice(0, 5);
-      } catch {
-        return [];
-      }
-    },
-    readyGoals: (actorId: string) =>
-      goalBoard.readyTray(actorId).map((g) => ({ title: g.title, body: String(g.payload?.body ?? g.title) })),
-    interestLines: (actorId: string) =>
-      actorId ? [interestWatcher.listForPrompt(actorId, 3) ?? ""] : [],
-    recallMemory: async (actorId: string, query: string, limit: number) => {
-      if (!brainCenter || !actorId) return [];
-      const result = await brainCenter.recall(actorId, query, { domain: "episodic", limit });
-      return (result?.items ?? []).map((item) => item.content);
-    },
-    // 感知 → 目标桥（2026-10-10）+ 共享发现层读点（2026-10-19）：两者都晚绑定
-    // （goalPlanner / sourceStore 在下方创建）。规则文案据此从"碎片化场景"升级为
-    // "带目标上下文"，并带上**该目标尚未开口的发现条数**——对话注入与开口闸读的是
-    // 同一份发现台账，不再是各读各的。未装配时返回 null，行为不变。
-    activeGoalLine: (actorId: string) => {
-      const bridge = goalSignalBridgeRef.current;
-      const line = bridge?.goalLineFor(actorId) ?? null;
-      if (!line) return null;
-      const goal = bridge?.activeGoalContext(actorId, 1)[0];
-      const pending = goal && discoveryRef.current ? discoveryRef.current.findingsFor(goal.goalId).length : 0;
-      return pending > 0 ? `${line}（另有 ${pending} 条相关发现待汇总）` : line;
-    },
-  };
+  // 规则数据源（原 builtinServices）已迁入统一模块层工厂（方案 B 第一步，2026-11-19）：
+  // createProactivityRulesLayer 内部 buildRuleServices 逐字承载，见 proactivity/module-factory.ts。
+  // agentPulse 等消费方改用 proactivityRulesLayer.services（下方别名 builtinServices 保持不动）。
   // 世界状态板：传感信号分层整理成"专属给规则看的现在"（程序采集+整理，零判断零 LLM）
   const worldBoard = new WorldBoard({ dataPath: proactivityFabricPath });
   worldBoardRef.current = worldBoard;
@@ -6023,22 +5737,28 @@ export async function createAppServices(
     formatCurrentStatePrompt(worldBoard, actorId),
   );
   // 映射执行器（L2）：规则表读状态板 → AttentionEvent（正文模板直出，零 LLM）
-  const mappingExecutor = new MappingExecutor({
+  // 统一模块层（2026-11-19）：装配主动性子系统时登记内置触发源目录——
+  // describeProactivity() 从此是「agent 主动性全景」的唯一事实来源。
+  registerBuiltinProactiveSources();
+  // 统一模块层 · 方案 B 第一步：规则层装配（数据源 + MappingExecutor）收口到
+  // proactivity/module-factory.ts；投递出口在管线下游就绪后 attachDelivery 晚绑定。
+  const proactivityRulesLayer = createProactivityRulesLayer({
     board: worldBoard,
-    rules: buildBoardRules(builtinServices),
-    defaultActorId: primaryActor,
-    // 规则私有状态 + 事件去重指纹落盘：重启不重发、马拉松计时不清零
     dataPath: proactivityFabricPath,
-    // P0 配额窃取根修（2026-10-01）：板上是测试 actor 坟场（143 个 E2E/bench
-    // 永不过期），规则去重/节流若按插入序全局消费，先到的测试 actor 吃掉当天
-    // 配额——审计实证真实用户 16 天 0 事件。tick 只评估 7 天内交互过的用户。
-    isActiveActor: (actorId) => {
-      const hit = proactivityHub
-        .exportActors()
-        .find((a) => a.actorId === actorId);
-      return !!hit && Date.now() - hit.lastInteractionAt < 7 * 24 * 60 * 60_000;
-    },
+    defaultActorId: primaryActor,
+    hub: proactivityHub,
+    scheduleTasks: scheduleTaskService,
+    weatherLineByActor,
+    messageHub: messageHubService,
+    goalBoard,
+    interestWatcher,
+    brainCenter,
+    goalSignalBridgeRef,
+    discoveryRef,
   });
+  // 兼容别名：下游（agentPulse/诊断探针/停机）沿用原变量名，后续步骤再统一收口
+  const mappingExecutor = proactivityRulesLayer.executor;
+  const builtinServices = proactivityRulesLayer.services;
   console.log("[Bootstrap] 主动性已装配（传感→状态板→映射规则→仲裁→目标，零 LLM）");
 
   // 主动性模块的消息聚合开口（2026-10-25 取代 digest_beat 固定节拍「心跳回顾」）：
@@ -6048,14 +5768,15 @@ export async function createAppServices(
   // 普通主动消息（NOP = 沉默）。确定性闸门在前省 token，投递继承统一管道全部语义
   // （去重/静默择时/离线挂起重连补投/频控记账）。
   const agentPulseService = new AgentPulseService({
-    // 与映射规则同一活跃口径（7 天内有交互）；多租户下逐用户评审，
-    // 不再只服务"最近交互的那一个"
+    // 与映射规则同一活跃口径；多租户下逐用户评审，不再只服务"最近交互的那一个"。
+    // 2026-11-19：窗口 7 天 → 30 天——原窗口下「一周没聊 = 彻底消失」，和
+    // 「有存在感」直接冲突。关系时钟本身已限 4h 一次 + 只走白天时段，不会变骚扰。
     actors: () =>
       proactivityHub
         .exportActors()
-        .filter((a) => Date.now() - a.lastInteractionAt < 7 * 24 * 60 * 60_000)
+        .filter((a) => Date.now() - a.lastInteractionAt < 30 * 24 * 60 * 60_000)
         .map((a) => a.actorId),
-    aggregate: (actorId) => {
+    aggregate: async (actorId) => {
       const tasks = (builtinServices.listTodayTasks?.(actorId) ?? []).map((t) => {
         const at = typeof t.runAt === "number" ? t.runAt : Date.parse(String(t.runAt));
         const hhmm = Number.isFinite(at)
@@ -6119,17 +5840,58 @@ export async function createAppServices(
         .slice(0, 4) // 追加列表新值在前
         .map((t) => String(t.text ?? "").slice(0, 80))
         .filter((t) => t.length > 0);
-      if (
-        !tasks.length &&
-        !unread.length &&
-        !goals.length &&
-        !interests.length &&
-        !findings.length &&
-        !goalLine
-      ) {
-        return null;
+      // 距上次对话：关系时钟的唯一输入（>6h 才允许「没事找话说」）。
+      // lastInteractionAtOf = observeConversationTurn 记的对话时刻，不是设备活跃，
+      // 否则桌面端心跳刷新会让人的「刚聊过」永远为真。
+      const lastConvAt = proactivityHub.lastInteractionAtOf(actorId);
+      const idleMinutes =
+        lastConvAt == null ? null : Math.max(0, Math.round((Date.now() - lastConvAt) / 60_000));
+      // 「你记得的他」：画像里的短事实（称呼/城市/职业/偏好），闲聊的锚点。
+      // 只取 key：value 型短行、敏感字段过滤——主动消息会出现在锁屏上，
+      // 记忆里有的事不等于适合这个渠道说。画像读失败不影响主动性。
+      let rapport: string[] = [];
+      try {
+        const slice = await userPersonalizationService.getProfileOnlySlice(actorId);
+        rapport = extractRapport(slice.userProfile);
+      } catch (err) {
+        console.log(`[AgentPulse] 画像读取失败（忽略）actor=${actorId}: ${err}`);
       }
-      return { tasks, unread, goals, interests, goalLine, findings, presence, screenFocus, recentTurns };
+      // 位置 + 活动：闲聊最自然的锚点不是天气，是「我看到你在哪」。
+      // 置超过 2h 就视为旧数据（人早走了，再说「你在公司」就是瞎猜）。
+      const locCtx = actorContext.get(actorId);
+      const loc = locCtx?.location;
+      const placeFresh = loc && Date.now() - loc.observedAt <= 2 * 60 * 60_000;
+      const place = placeFresh
+        ? {
+            kind: loc.placeKind,
+            ...(loc.placeLabel ? { label: loc.placeLabel } : {}),
+            ...(loc.city ? { city: loc.city } : {}),
+            ...(loc.poi ? { poi: loc.poi } : {}),
+            updatedMinutesAgo: Math.max(0, Math.round((Date.now() - loc.observedAt) / 60_000)),
+          }
+        : null;
+      const activity = locCtx?.activity ?? null;
+      // 情绪只留标签：低/压力大时闲聊要收着，不把整段语气指导塞进来
+      const moodRaw = userPersonalizationService.getRecentMood(actorId);
+      const mood = moodRaw === "neutral" ? null : moodRaw;
+      // 2026-11-19：不再「材料全空就 return null」——那等于「没事发生就永不开口」，
+      // 主动性退化成告警器。空材料也返回，由 AgentPulse 的关系时钟决定要不要评审。
+      return {
+        tasks,
+        unread,
+        goals,
+        interests,
+        goalLine,
+        findings,
+        presence,
+        screenFocus,
+        recentTurns,
+        idleMinutes,
+        rapport,
+        place,
+        activity,
+        mood,
+      };
     },
     // 单次小 LLM 审阅。调用形态刻意对齐 decision-maker-factory 的 e2e-proaction
     // 决策器（同机实测稳定出字）：**新建** provider（不走共享 externalChat 的
@@ -6392,80 +6154,14 @@ export async function createAppServices(
   const billParcelIngest = new BillParcelIngestService({
     ledger: billParcelLedger,
     emit: (signal) => emitBillParcel?.(signal),
-    // 主动汇报（2026-11-13）：识别到新的账单/快递 → 走主动提案链路直接告知。
+    // 主动汇报（2026-11-13 建，2026-11-19 抽成可测模块）：识别到新的账单/快递
+    // → BillParcelReactiveReporter 做冷却 + 文案 + 提案 → 走主动提案链路直接告知。
     // 这是「自动识别并汇总」闭环的最后一环：识别只进台账，用户是不知道的。
     //
-    // 两类的节奏**故意不同**：
-    //   - 快递 = 时效刚需。「取件码 8-2-3010」晚一小时就没意义了 → high + 10min 冷却。
-    //   - 账单 = 汇总型。逐条弹窗只会刷屏，而且邮件侧的账单另有 IntelService
-    //     情报链路做跨封综述（"你本月话费扣了多少"）—— 两条路都报就是重复打扰。
-    //     故账单走 medium + 6h 冷却：即时知道有这笔扣款，但不打断；真正的
-    //     汇总口径交给台账与 bill_parcel.summary 工具，问一句就有。
-    onMatched: (info) => {
-      // 晚绑定取管道：proactivePipeline 在本服务之后才创建（此处直接引用会踩 TDZ）
-      const pipeline = proactivePipelineRef.current;
-      if (!pipeline) return;
-      const bill = info.entries.find((e) => e.category === "bill");
-      const parcel = info.entries.find((e) => e.category === "parcel");
-      const primary = bill ?? parcel;
-      if (!primary) return;
-      const actorId = info.actorId;
-      const now = Date.now();
-      const fingerprint = primary.id;
-      const isParcel = primary.category === "parcel";
-      // 同一账号同类冷却：快递 10min（快递公司常连发多条：已发货→在途→已到站）、
-      // 账单 6h（同一笔扣款常在短信+邮件+银行 App 三处各来一遍）
-      const cooldown = isParcel ? BILL_PARCEL_COOLDOWN_MS : BILL_COOLDOWN_MS;
-      const cooldownKey = `${actorId}:${primary.category}`;
-      const last = billParcelCooldown.get(cooldownKey);
-      if (last != null && now - last < cooldown) return;
-      billParcelCooldown.set(cooldownKey, now);
-
-      const sourceLabel =
-        info.source === "email" ? "邮件" : info.source === "sms" ? "短信" : "手机通知";
-      const title = isParcel ? "收到快递通知" : "收到账单通知";
-      const detailLines: string[] = [`来源: ${sourceLabel}`];
-      if (parcel) {
-        detailLines.push(
-          parcel.trackingNo ? `运单号: ${parcel.trackingNo}` : "运单号: 未在原文给出",
-        );
-        if (parcel.pickupCode) detailLines.push(`取件码: ${parcel.pickupCode}`);
-        if (parcel.carrier) detailLines.push(`承运商: ${parcel.carrier}`);
-      }
-      if (bill) {
-        detailLines.push(`账单类型: ${bill.billType ?? "未分类"}`);
-        detailLines.push(`金额: ${bill.amount != null ? `¥${bill.amount}` : "原文未给出"}`);
-      }
-
-      pipeline.submitProposal({
-        proposalId: `bp_${fingerprint}`,
-        actorId,
-        kind: "action.bill_parcel",
-        tier: "must",
-        importance: isParcel ? "high" : "medium",
-        dedupKey: `bill_parcel:${fingerprint}`,
-        title,
-        summary: primary.title,
-        evidence: [
-          "bill_parcel",
-          `source:${info.source}`,
-          `category:${primary.category}`,
-          ...(parcel?.trackingNo ? [`tracking:${parcel.trackingNo}`] : []),
-          ...(bill?.amount != null ? [`amount:${bill.amount}`] : []),
-        ],
-        directText:
-          isParcel
-            ? `刚收到一条快递通知——${parcel?.title ?? "包裹已到"}。` +
-              (parcel?.pickupCode ? `取件码 ${parcel.pickupCode}。` : "") +
-              `要我帮你记着，或者提醒你什么时候去取吗？`
-            : `刚收到一条账单通知——${bill?.title ?? "账单已出"}。` +
-              `要我帮你记进账本吗？`,
-        createdAt: now,
-        source: "bill_parcel",
-        subject: isParcel ? "快递" : "账单",
-        detail: Object.fromEntries(detailLines.map((l) => l.split(": "))),
-      });
-    },
+    // 节奏差异（在 reporter 内实现，注释见该模块）：
+    //   - 快递 = 时效刚需 → high + 10min 冷却；
+    //   - 账单 = 汇总型 → medium + 6h 冷却，真正的汇总口径交给台账与工具。
+    onMatched: (info) => billParcelReporter.report(info),
   });
   const mailWatch = new MailWatchRegistry({
     env: process.env,
@@ -6603,7 +6299,7 @@ export async function createAppServices(
           error: result.error,
           hint:
             "后台自动拉取需要：用户在网页登录支付宝后导入 Cookie（siteId=alipay）并授权 agentAllowed。" +
-            "在此之前可让用户直接粘贴账单导出文本（finance.import_transactions 支持自动识别）。",
+            "在此之前可让用户直接粘贴账单导出文本（finance 的 action=import 支持自动识别）。",
         };
       }
       return {
@@ -6889,7 +6585,7 @@ export async function createAppServices(
 
   // ─── Task 17 人情关系管家装配（场景C）───
   // 晨报每日生成 = 每日扫描：当天命中重要日子（KV important_dates，由
-  // care.set_important_date 录入）→ 单次 LLM 祝福草稿（关系标签+交往摘要）
+  // important_dates KV 录入）→ 单次 LLM 祝福草稿（关系标签+交往摘要）
   // → life_reminder 主动提醒，草稿附带给用户改写；频控 4h + 负反馈抑制兜底。
   onImportantDayToday = (sessionId, day) => {
     const label = importantDayTypeLabel(day.type);
@@ -7366,6 +7062,27 @@ export async function createAppServices(
     lastConversationAt: (actorId) => proactivityHub.lastInteractionAtOf(actorId),
     silenceLog: proactivitySilenceLog,
     confirmations: proactivityConfirmations,
+    // 离线落信箱（2026-11-19）：social 层两端都离线时不再无限挂起——
+    // 落一条站内信（不 push），用户下次打开 App 能看到。这是「主动感」最常
+    // 发生的时间段（人离开电脑），此前被 10-14 的「站内信不承载聊天提醒」删掉了。
+    offlineInbox: {
+      send: (input) => inboxService.send(input),
+    },
+    // 期望效用择时（2026-11-19）：社交提案投递前问一次「此刻时机对不对、他还愿不愿意看」，
+    // 把 interruptCost / 反馈后验 p 接进投递链。PROACTIVITY_REACH_GATE=0 一键关。
+    ...(process.env.PROACTIVITY_REACH_GATE === "0"
+      ? {}
+      : {
+          reachGate: (p: { actorId: string; kind: string; importance: "low" | "medium" | "high" | "critical" }) => {
+            const d = reachDecisionService.decide({
+              actorId: p.actorId,
+              kind: p.kind,
+              importance: p.importance,
+              tier: "social",
+            });
+            return { action: d.action, reason: d.reason };
+          },
+        }),
     // 分级触达：提案级确认 → Router 挂升级（确认文案已由管道投递）
     onPendingConfirmation: (entry) => {
       void reachRouter
@@ -7503,172 +7220,18 @@ export async function createAppServices(
       },
     });
   });
-  // 管道已就绪：女性关怀（周期提醒/SOS 告警）的懒引用自此可用
-  wellnessPipelineRef.current = proactivePipeline;
   // 映射规则事件 → 仲裁裁决 → 管道投递（决策零 LLM；状态板不再喂任何 LLM 观察流）
-  mappingExecutor.onEvent((event) => {
-    const actorId = event.actorId ?? "local_user";
-    // ── 社交开口类 → 统一主动出口（2026-10-26 用户拍板）──
-    // away_return 不产模板提案：映射规则只负责「何时触发」，说什么交给统一出口——
-    // BrainCenter 决策时机 → agent 主动做事（查日程/聚合消息/看行程等，工具循环）
-    // → 通用话术生成（ProactiveOutreachExecutor，拟人节奏投递）。走 arbiterV2/管道
-    // 直投会把「事件摘要 + 兜底模板」这类提示词材料原样说给用户（实测反馈）。
-    // brain 关闭时回退旧管道保底（模板直投，降级可用）。
-    if (event.kind === "away_return" && brainCenter) {
-      lifeSignalHubService.publish({
-        id: `${actorId}:proactivity:${event.kind}:${event.dedupKey}`,
-        actorId,
-        source: "system",
-        kind: event.kind,
-        title: event.title,
-        summary: event.summary ? `离开了 ${event.summary}，刚回到电脑前` : event.body,
-        tags: [event.kind, "proactivity"],
-        importance: event.importance,
-        evidence: [`mapping:${event.kind}`, event.title],
-        occurredAt: new Date(event.at).toISOString(),
-      });
-      appendEventAudit(join(getDataDir(), "proactivity", "events.ndjson"), {
-        at: Date.now(),
-        eventId: event.id,
-        kind: event.kind,
-        urgency: event.urgency,
-        actorId,
-        action: "life_signal",
-        title: event.title,
-      });
-      console.log(`[ArbiterV2] away_return → LifeSignal 统一主动出口（BrainCenter 决策话术）`);
-      return;
-    }
-    // 归属判定（2026-10-19）：这条场景信号是不是在说某个在办目标的事？
-    // 命中时**就地替换局部副本**——等级与正文都改由目标状态决定（卡在用户身上的
-    // 目标该抢注意力），未命中时下面逐字不变（零风险回退）。生产者的等级从此不是
-    // 唯一依据，"规则写死 medium" 这件事被去掉了。
-    const relation = goalSignalBridge.relatedGoalFor(actorId, `${event.title} ${event.body}`);
-    // 共享发现层收口已下沉到 proactivePipeline.submitProposal（所有触发源的共同底）：
-    // 归属判定只在这里按目标状态调一次等级并随提案下传（subject=goalId / needsUser）；
-    // 发现登记、开口前读合成、按 verdict 消费都由管道统一负责——本出口不再重复一份。
-    const graded = adjustImportanceByGoalRelation(event.importance, relation);
-    const goalRepeat = relation
-      ? discovery.previewOpen(relation.goalId, event.importance, relation.needsUser === true).repeat
-      : false;
-    if (relation) {
-      event = {
-        ...event,
-        importance: graded,
-        body: appendGoalHint(event.body, relation),
-      };
-    }
-    // 事件审计：每一次主动事件的仲裁动作与管道 verdict 全链留痕（events.ndjson）
-    const audit: EventAuditRecord = {
-      at: Date.now(),
-      eventId: event.id,
-      kind: event.kind,
-      urgency: event.urgency,
-      actorId,
-      action: "pending",
-      title: event.title,
-      ...(relation ? { goalId: relation.goalId, goalMatchedOn: relation.matchedOn, goalRepeat } : {}),
-    };
-    const action = arbiterV2.admit({
-      actorId,
-      urgency: event.urgency,
-      tier: event.tier,
-      label: event.title,
-      deliver: () => {
-        // 话术统一走 SpeechHub light（2026-10-27 模板层删除）：评估器事件正文
-        // 一律 LLM 基于素材（title/body/summary）组织语言，生产者成稿仅作兜底。
-        // 例外：morning_brief 是多行数据卡片（不是话术），保持直投；
-        // viaCall 走真实来电汇报（caller 内部自带话术）。
-        // LLM 失败且无成稿（body 为空）→ 沉默，绝不吐系统态素材。
-        const cardKinds = ["morning_brief"];
-        // 呼叫路由：PROACTIVE_CALL_KINDS 白名单（默认行程变化）+
-        // 任意 critical 事件——遇到事情打电话汇报，通话内可对话
-        const callKinds = (process.env.PROACTIVE_CALL_KINDS ?? "schedule_change")
-          .split(",")
-          .map((k) => k.trim())
-          .filter(Boolean);
-        const viaCall =
-          event.callPolicy === "always" ||
-          callKinds.includes(event.kind) ||
-          event.importance === "critical";
-        const submit = (bodyText: string): void => {
-          const decision = proactivePipeline.submitProposal({
-          proposalId: event.id,
-          actorId,
-          kind: event.proposalKind,
-          tier: event.tier,
-          importance: event.importance,
-          dedupKey: event.dedupKey,
-          title: event.title,
-          summary: (event.summary || event.body).slice(0, 120),
-          directText: bodyText || undefined,
-          evidence: [`evaluator:${event.kind}`],
-          createdAt: Date.now(),
-          source: `evaluator:${event.kind}`,
-          // 共同键 + 是否请用户拍板随提案下传：管道的单开口闸据此合并同目标/同实体的
-          // 他人发现（不再由本出口自己 compose）
-          ...(relation ? { subject: relation.goalId, needsUser: relation.needsUser } : {}),
-          ...(event.expiresAt !== undefined ? { expiresAt: event.expiresAt } : {}),
-          ...(event.confirmLabel ? { confirmAction: { label: event.confirmLabel } } : {}),
-        });
-        audit.verdict = decision.verdict;
-        // 投递成功记入防重复记忆：同一事件不再被 LLM 通用路径重复表达
-        if (decision.verdict === "delivered") proactivityHub.noteInitiative(actorId, event.kind, event.title);
-        console.log(
-          `[ArbiterV2] 事件投递 kind=${event.kind} verdict=${decision.verdict} urgency=${event.urgency}`,
-        );
-        };
-        if (viaCall) {
-          // 真实来电汇报 + 通话内对话；无应答/离线自动文本兜底（caller 内部处理）
-          void proactiveCaller
-            .callAndReport({
-              actorId,
-              kind: event.kind,
-              importance: event.importance === "critical" ? "critical" : "high",
-              title: event.title,
-              report: event.body,
-              context: event.summary,
-            })
-            .catch((err) => {
-              // callAndReport 内部已覆盖全部降级（disabled/cooldown/no_device/no_response
-              // → 文本兜底）；到这里的外层异常只记日志，防止兜底后二次投递
-              console.log(`[ArbiterV2] 通话异常（忽略）kind=${event.kind}: ${err}`);
-            });
-        } else if (cardKinds.includes(event.kind)) {
-          // 结构化数据卡片：不是话术，直投
-          submit(event.body);
-        } else {
-          void (async () => {
-            const polished = await speechHub.speak({
-              kind: event.kind,
-              sessionId: actorId,
-              facts: {
-                title: event.title,
-                ...(event.body ? { body: event.body } : {}),
-                ...(event.summary ? { 背景: event.summary } : {}),
-              },
-              // 生产者成稿兜底（可为空 → 话术失败时沉默）
-              fallback: event.body,
-              tier: "light",
-              // 统一话术（2026-10-27）：不传 importance——润色不设重要度门槛
-            });
-            // 话术为空且无成稿 → 沉默（材料是系统态的，绝不原样投递）
-            if (!polished.trim()) {
-              console.log(`[ArbiterV2] 话术为空，沉默 kind=${event.kind}`);
-              return;
-            }
-            submit(polished);
-          })().catch((err) => {
-            // 话术异常：有成稿用成稿兜底，否则沉默；不二次 submit 防双发
-            console.log(`[ArbiterV2] 话术生成失败 kind=${event.kind}: ${err}`);
-            if (event.body.trim()) submit(event.body);
-          });
-        }
-      },
-    });
-    audit.action = action.action;
-    audit.cost = action.cost;
-    appendEventAudit(join(getDataDir(), "proactivity", "events.ndjson"), audit);
+  // 统一模块层 · 方案 B 第一步：投递出口接线（原 mappingExecutor.onEvent 整段）
+  // 已迁入 proactivity/module-factory.ts 的 attachDeliveryLayer，逐字承载：
+  // 目标桥归属判定 → ArbiterV2 仲裁 → 话术/卡片/来电三分支 → 管道投递 → 事件审计。
+  proactivityRulesLayer.attachDelivery({
+    goalSignalBridge,
+    discovery,
+    arbiter: arbiterV2,
+    pipeline: proactivePipeline,
+    speechHub,
+    caller: proactiveCaller,
+    auditDir: getDataDir,
   });
   mappingExecutor.start();
   arbiterV2.start();
@@ -7693,115 +7256,33 @@ export async function createAppServices(
   // 消息监控触发器：手机入站消息（微信桥/通用消息桥统一汇入 MessageHub）落库后
   // 识别「日程变动」信号（延迟/改期/取消×会议/时间语境，零 LLM 规则）→ 主动提案。
   // 投递成功后由 delivery 层按 action.* 前缀自动落入代办足迹台账。
-  // 树枝注册表（2026-10-22 树状架构 Phase 1）：可插拔信息源的声明与用户启停配置面。
-  // 配置落盘 data/proactivity/branches.json，缺配置回落内置默认（零配置启动门禁：
-  // 不 throw）。message 树枝的闸语义现役由 message-gate 承担（ingestInbound 直调），
-  // Phase 2 迁移为经本注册表按树枝分发——先立接缝，不动行为。
-  const branchRegistry = new BranchRegistry({
-    configPath: join(getDataDir(), "proactivity", "branches.json"),
+  // 统一模块层 · 方案 B 第二步（2026-11-19）：树枝注册表 + 入站三监察
+  // （断言冲突/盯梢命中/消息行程信号）的装配收口到 proactivity/module-factory.ts
+  // 的 createBranchesLayer（逐字迁移）；HTTP 启停配置面与入站分发点留在 bootstrap，
+  // 经返回句柄消费。
+  const proactivityBranches = createBranchesLayer({
+    dataDir: getDataDir,
+    externalChat,
+    scheduleAssertionStore,
+    watchTaskStore,
+    scheduleTasks: scheduleTaskService,
+    pipeline: proactivePipeline,
+    speechHub,
   });
-  // L3 精简器（Phase 2）：挂在注册表统一编排入口（ingest），按树枝配置决定
-  // 是否花 LLM；全模板兜底。熔断/kill switch 与 SpeechHub 同纪律。
-  const branchCondenser = new BranchCondenser({ chat: () => (externalChat?.isEnabled() ? externalChat : null) });
-  branchRegistry.attachCondenser(branchCondenser);
-  console.log(
-    `[Bootstrap] 树枝注册表已装配：${branchRegistry.list().map((b) => `${b.id}(${b.mode})${b.enabled ? "" : "[停用]"}`).join(" / ")}`,
-  );
+  const branchRegistry = proactivityBranches.branchRegistry;
+  const branchCondenser = proactivityBranches.branchCondenser;
+  const assertionConflictWatcher = proactivityBranches.assertionConflictWatcher;
+  const watchTaskWatcher = proactivityBranches.watchTaskWatcher;
+  const messageWatchTrigger = proactivityBranches.messageWatchTrigger;
 
-  // 断言冲突监察（消息树枝 × 上传树枝，零 LLM）：日程变动信号撞上已导入的
-  // 课表/行程表主张 → "模型修正"提案 → 主动性板块开口（批量导入 ≥3 条才入库）。
-  const assertionConflictWatcher = new AssertionConflictWatcher({
-    store: scheduleAssertionStore,
-    submitProposal: (p) => {
-      proactivePipeline.submitProposal(p);
-    },
-  });
-
-  // 盯梢任务触发器（2026-10-22 Muse 对齐件）：用户点名要盯的事命中入站消息 →
-  // 主动提案（must 层：用户自己下的单）。截止时间可抽且日历有缺口 → 升级为
-  // "要我设个提醒吗"（Muse 体育选拔案例的确定性实现）。运行期零 LLM。
-  const watchTaskWatcher = new WatchTaskWatcher({
-    store: watchTaskStore,
-    submitProposal: (p) => {
-      // 盯梢命中 = 内容型场景：LLM 基于命中原话润色话术（模板兜底，润色失败不双发），
-      // 再进统一管道（must 层必达语义不变）——与 messageWatchTrigger 同范式。
-      void (async () => {
-        if (p.directText) {
-          p.directText = await speechHub
-            .speak({
-              kind: "watch_task_hit",
-              sessionId: p.actorId,
-              facts: {
-                task: p.detail?.["任务"] ?? p.subject ?? "",
-                excerpt: p.detail?.["原文"] ?? p.summary,
-                keyword: (p.evidence.find((e) => e.startsWith("keyword:")) ?? "").slice(8),
-                ...(p.detail?.["截止"] ? { deadline: p.detail["截止"] } : {}),
-              },
-              fallback: p.directText,
-              tier: "light",
-              importance: p.importance,
-            })
-            .catch(() => p.directText!);
-        }
-        proactivePipeline.submitProposal(p);
-      })().catch((err) => {
-        console.log(`[watch-task] 提案润色失败（忽略）: ${err instanceof Error ? err.message : err}`);
-      });
-    },
-    hasRelatedEntry: (actorId, keywords, startMs, endMs) =>
-      scheduleTaskService.listAllTasks().some((t) => {
-        if (t.status !== "active") return false;
-        const at = Date.parse(t.nextRunAt ?? t.runAt ?? "");
-        if (!Number.isFinite(at) || at < startMs || at > endMs) return false;
-        const hay = `${t.title ?? ""} ${t.shortTitle ?? ""} ${t.description}`;
-        return keywords.some((k) => hay.includes(k));
-      }),
-  });
-
-  const messageWatchTrigger = new MessageWatchTrigger({
-    submitProposal: (p) => {
-      // 行程/安排变化 = 内容型场景：LLM 基于消息原话生成主动回复（模板兜底），
-      // 再进统一管道（must 层必达语义不变）
-      void (async () => {
-        if (p.directText) {
-          // 仅话术生成可失败（回退模板）；提交只执行一次，避免异常路径双发
-          p.directText = await speechHub.speak({
-            kind: "message_watch",
-            sessionId: p.actorId,
-            facts: {
-              sender: p.detail?.["发件人"] ?? "",
-              excerpt: p.detail?.["原文"] ?? p.summary,
-              verb: (p.evidence.find((e) => e.startsWith("keyword:")) ?? "").slice(8),
-            },
-            fallback: p.directText,
-            tier: "light",
-            // 重要性分配：低于门槛（默认 high）的消息提醒直接模板直投
-            importance: p.importance,
-          }).catch(() => p.directText!);
-        }
-        proactivePipeline.submitProposal(p);
-      })().catch((err) => {
-        console.log(`[MessageWatch] 提案处理失败（忽略）: ${err}`);
-      });
-    },
-    // MESSAGE_WATCH_IMPORTANCE=critical 时夜间立即投递（默认 high：静默时段顺延到早7点）
-    importance:
-      process.env.MESSAGE_WATCH_IMPORTANCE?.trim().toLowerCase() === "critical"
-        ? "critical"
-        : undefined,
-  });
   inboundHandlers.push((input) => {
     // 消息前端陈列已撤（2026-10-14 定调）：不再每条入站直推 hub.message_arrived
     // 上岛展示——多数为垃圾消息，打扰体验。消息统一在后台扫描消化：
     // messageWatchTrigger 识别高价值信号（日程变动等）→ 主动提案链路按价值
-    // 推送；messageFeeder 供传感内核 unread_burst 评估；finance 静默入账。
-    messageWatchTrigger.handleInbound(input);
-    // 断言冲突监察（上传树枝 × 消息树枝，零 LLM）：变动信号撞上已导入的课表/行程
-    // 主张 → 专门冲突提案（比通用日程变动提醒更具体：指名哪节课、哪个时间）
-    assertionConflictWatcher.handleInbound(input);
-    // 盯梢任务触发器（用户点名要盯的事命中 → 主动报告；Muse 任务驱动盯梢对齐件）
-    watchTaskWatcher.handleInbound(input);
-    // 入站消息 → 传感内核 message 流（unread_burst 评估器数据源；30min 窗口 ≥3 条触发）。
+    // 推送；messageFeeder 供传感内核 message 流；finance 静默入账。
+    // 统一模块层：三个监察器按序分发收口到 branches.handleInbound。
+    proactivityBranches.handleInbound(input);
+    // 入站消息 → 传感内核 message 流。
     // payload.text 带正文（截 500 字）：SourceStore 按 payload.text 建实体索引，
     // 消息正文从此参与跨源检索（「提到三亚的所有来源」能命中消息）。
     messageFeeder({
@@ -8021,7 +7502,7 @@ export async function createAppServices(
         branches: branchRegistry.list().map((b) => ({ ...b, ...branchRegistry.getConfig(b.id) })),
         condenser: branchCondenser.stats(),
       }),
-      // 盯梢任务面板（2026-10-22 Muse 对齐件）：列表/删除（创建走对话 watch.manage 工具）
+      // 盯梢任务面板（2026-10-22 Muse 对齐件）：列表/删除（创建走对话 watch.track 工具）
       watchTasks: (actorId?: string) => ({
         tasks: watchTaskStore.list(actorId),
       }),
@@ -8232,7 +7713,6 @@ export async function createAppServices(
     voiceMessageService,
     imageGenerationService,
     fileProcessingService,
-    desktopBridgeCoordinator,
     phoneBridgeCoordinator,
     wechatClawBindingService,
     wechatClawBridgeService,
@@ -8287,6 +7767,7 @@ export async function createAppServices(
 
   registerWebSocketRoute(app, {
     sessionService,
+    mcpClientService,
     realFundsWallet,
     worldService,
     auditService,
@@ -8300,7 +7781,6 @@ export async function createAppServices(
     computeQuotaService,
     agentMemorySyncService,
     unifiedIdempotencyService,
-    desktopBridgeCoordinator,
     phoneBridgeCoordinator,
     sharedBrowserCoordinator,
     messageHubService,
@@ -8370,10 +7850,6 @@ export async function createAppServices(
     worldBoard.flush();
     sensorKernel.stop();
     intelService.stop();
-    // 女性关怀：停经期提醒调度 + 加密数据落盘
-    periodCareService.stop();
-    void periodCareService.flush();
-    void safetyGuardService.flush();
     // 新增子系统：习惯闭环 / 到站监控 / 全双工语音
     habitLoopService.stop();
     arrivalMonitorService.stop();
@@ -8437,7 +7913,6 @@ export async function createAppServices(
     emailSmsService,
     emailOtpService,
     mediaMusicService,
-    healthFitnessService,
     financeDeepService,
     billManagementService,
     socialOutreachService,
@@ -8472,6 +7947,7 @@ export async function createAppServices(
     approvalInboxService,
     attentionStore,
     reachRouter,
+    reachDecisionService,
     brainCenter,
     bodyCenter,
     reflexArc,

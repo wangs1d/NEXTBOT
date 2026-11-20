@@ -31,8 +31,6 @@ import type { BrowserSessionService } from "./browser-session-service.js";
 import { BROWSER_SESSION_SITES, resolveSiteIdFromUrl, type BrowserSessionSiteId } from "./browser-session-sites.js";
 import {
   BrowserRuntime,
-  loadPlaywright,
-  toPlaywrightCookies,
   type BrowserPageLease,
 } from "./browser-runtime/browser-runtime.js";
 import {
@@ -70,9 +68,6 @@ function getActionTimeoutMs(): number {
 }
 
 // ─── 常量 ──────────────────────────────────────────────────────────────────
-
-const USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 
 const DEFAULT_VIEWPORT = { width: 1280, height: 720 } as const;
 
@@ -303,55 +298,39 @@ export class AgentBrowserService {
     let context: BrowserContext | undefined;
     let page: Page | undefined;
     let cookieInjected = false;
+    let openError: unknown = null;
 
     if (lease) {
       page = lease.page;
       page.setDefaultTimeout(getActionTimeoutMs());
     } else {
-      // 2) 无头兜底：Playwright + 已授权 Cookie
-      const pw = await loadPlaywright();
-      if (!pw) {
-        return {
-          ok: false,
-          error: "Playwright 未安装。请在 server 目录执行: npm install playwright && npx playwright install chromium",
-          retryable: false,
-        };
+      // 2) 无头兜底：**常驻 Chromium**（复用进程与站点 context）+ 已授权 Cookie。
+      // 不再每次 chromium.launch：冷启动 + 新 context + 全新无痕态既慢又招风控，
+      // 也是「内置浏览器每次都要重启」的根因（2026-11-19 改）。
+      let cookies: Awaited<ReturnType<BrowserSessionService["getCookiesForAgent"]>> = [];
+      if (siteId) {
+        cookies = await this.deps.browserSessionService
+          .getCookiesForAgent(actorId, siteId)
+          .catch(() => []);
+        cookieInjected = cookies.length > 0;
       }
-      const { chromium } = pw;
-      browser = await chromium.launch({
-        headless: true,
-        args: ["--disable-blink-features=AutomationControlled"],
-      });
-      try {
-        const viewport = opts?.viewport ?? DEFAULT_VIEWPORT;
-        context = await browser.newContext({
-          userAgent: USER_AGENT,
-          locale: "zh-CN",
-          viewport: { width: viewport.width, height: viewport.height },
+      const headless = await this.deps.runtime
+        ?.openHeadlessPage(actorId, trimmedUrl, {
+          ...(siteId ? { siteId } : {}),
+          ...(cookies.length > 0 ? { cookies } : {}),
+          viewport: opts?.viewport ?? DEFAULT_VIEWPORT,
+          waitUntil: opts?.waitUntil ?? "domcontentloaded",
+          timeout: opts?.timeout ?? getNavTimeoutMs(),
+        })
+        .catch((err: unknown) => {
+          openError = err;
+          return null;
         });
-
-        // 对白名单站点，尝试注入用户已授权的 Cookie
-        if (siteId) {
-          try {
-            const cookies = await this.deps.browserSessionService.getCookiesForAgent(actorId, siteId);
-            if (cookies && cookies.length > 0) {
-              await context.addCookies(toPlaywrightCookies(trimmedUrl, cookies));
-              cookieInjected = true;
-            }
-          } catch {
-            // 未授权 / 未导入 Cookie —— 以未登录状态访问，不报错
-          }
+      if (!headless) {
+        const message = openError instanceof Error ? openError.message : String(openError ?? "");
+        if (!message) {
+          return { ok: false, error: "云端浏览器不可用（未装配浏览器运行时）", retryable: true };
         }
-
-        page = await context.newPage();
-        page.setDefaultTimeout(getActionTimeoutMs());
-        const timeout = opts?.timeout ?? getNavTimeoutMs();
-        const waitUntil = opts?.waitUntil ?? "domcontentloaded";
-
-        await page.goto(trimmedUrl, { waitUntil, timeout });
-      } catch (e) {
-        await browser.close().catch(() => {});
-        const message = e instanceof Error ? e.message : String(e);
         return {
           ok: false,
           error: message.includes("Executable doesn't exist")
@@ -360,6 +339,9 @@ export class AgentBrowserService {
           retryable: true,
         };
       }
+      lease = headless;
+      page = headless.page;
+      page.setDefaultTimeout(getActionTimeoutMs());
     }
 
     if (!page) return { ok: false, error: "页面打开失败", retryable: true };
@@ -373,7 +355,8 @@ export class AgentBrowserService {
       context,
       page,
       ...(lease ? { lease } : {}),
-      mode: lease ? "shared" : "headless",
+      // 常驻浏览器里跑的页面同样是 headless 模式（有面板租约才是 shared）
+      mode: lease?.mode === "shared" ? "shared" : "headless",
       ...(siteId ? { siteId } : {}),
       siteLabel,
       currentUrl: page.url(),
@@ -389,12 +372,17 @@ export class AgentBrowserService {
     // 连续预览流：会话建立即拉起（页面加载过程就是直播）
     this.ensurePreviewStream(ctx, session);
 
-    // 新标签页跟随（仅无头路径有 context；内置浏览器走同一面板页，不新开 target）
-    context?.on("page", (popup) => {
-      popup.setDefaultTimeout(getActionTimeoutMs());
-      session.page = popup;
-      session.currentUrl = popup.url();
-    });
+    // 新标签页跟随：常驻浏览器里 target=_blank 会新开页面，跟随到最新一页
+    // （内置浏览器走同一面板页，不新开 target，无需处理）。
+    // 测试桩页面没有 on()，跳过即可。
+    if (typeof page.on === "function") {
+      page.on("popup", (popup) => {
+        void popup.waitForLoadState("domcontentloaded").catch(() => {});
+        popup.setDefaultTimeout(getActionTimeoutMs());
+        session.page = popup;
+        session.currentUrl = popup.url();
+      });
+    }
 
     const title = await page.title().catch(() => "");
 

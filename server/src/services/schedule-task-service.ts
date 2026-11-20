@@ -22,7 +22,7 @@ export type ScheduleRunStatus = "success" | "failed" | "missed";
  */
 export type ScheduleTaskCategory = "itinerary" | "trivia";
 
-/** 节律任务标记前缀（care.rhythm_reminder 写入 description；旧数据无 category 时的兜底识别） */
+/** 节律任务标记前缀（旧数据无 category 时的兜底识别） */
 export const RHYTHM_MARK = "[节律提醒:";
 
 /** 宽松解析外部输入（工具参数/HTTP body）中的分类字段，非法值回退 undefined（=按 itinerary 展示）。 */

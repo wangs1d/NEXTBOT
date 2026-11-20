@@ -30,6 +30,7 @@ import type {
   BookingOrderStatus,
 } from "../booking-provider.js";
 import type { McpClientService } from "../../mcp-client-service.js";
+import { drivingRouteViaDidi, rideAppLinkViaDidi, type DrivingRouteSummary } from "../../ride-pickup-candidates.js";
 
 /** 从 MCP 工具结果提取文本（content[].text 或原始 JSON） */
 function textOf(result: Record<string, unknown>): string {
@@ -163,18 +164,27 @@ export class DidiMcpRideProvider implements BookingProvider {
       lat = (loc as { lat?: unknown }).lat;
     }
     if (lng === undefined || lat === undefined) return null;
-    const name = String(deepFind(parsed, /^(name|title)$/i) || keywords);
+    // 生产端点 POI 名在 display_name（沙箱是 name/title），取不到再落回 keywords
+    const name = String(
+      deepFind(parsed, /^(display_?name|name|title)$/i) || keywords,
+    );
     return { lng: String(lng), lat: String(lat), name };
   }
 
   async search(
     query: BookingSearchQuery,
     ctx: BookingProviderContext,
-  ): Promise<BookingProviderResult<{ options: BookingOption[]; note?: string }>> {
+  ): Promise<BookingProviderResult<{ options: BookingOption[]; note?: string; route?: DrivingRouteSummary; rideAppLink?: string }>> {
     const dropoffText = typeof query.params.dropoff === "string" ? query.params.dropoff.trim() : "";
     if (!dropoffText) return { ok: false, error: "缺少 dropoff（目的地）", retryable: true };
     const pickupText = typeof query.params.pickup === "string" ? query.params.pickup.trim() : "";
-    const city = query.city?.trim() || undefined;
+    // 生产端点 maps_textsearch 强制 city（缺失 HTTP 400）：模型/handler 没传时
+    // 从客户端定位补，双保险
+    const city =
+      query.city?.trim() ||
+      ctx.location?.city?.trim() ||
+      query.location?.city?.trim() ||
+      undefined;
 
     // 起点：坐标直传 > 坐标对文本 > 地址检索 > 客户端 GPS。
     // 定位标签只有区县级粗粒度，地理编码要么失败要么锚到区中心
@@ -213,6 +223,8 @@ export class DidiMcpRideProvider implements BookingProvider {
     if (!from) {
       return {
         ok: false,
+        // 结构化标记：quote handler 据此推「选上车点」卡，不让模型文字追问
+        code: "PICKUP_UNRESOLVED",
         error:
           pickupText
             ? `起点「${pickupText}」定位失败：请说更具体的上车点（如「太古里北门」），或检查定位授权后重试`
@@ -240,8 +252,9 @@ export class DidiMcpRideProvider implements BookingProvider {
     );
     if (!est.ok) return { ok: false, error: "滴滴估价请求失败（MCP 调用未成功）", retryable: true };
 
-    // 沙箱估价是自由文本：逐行解析「车型 (product_category: N)」，
-    // 每行各自取价/接驾时长，不能拿全局第一个价格套给全部车型。
+    // 估价是自由文本，两种已知形态逐行解析（每行各自取价，不能全局套一个金额）：
+    //   生产：「N. 快车: 约 27 元 (品类代码: 1)」（可带「, 券后约16元」）
+    //   沙箱：「快车 (product_category: 3)，预估流程ID：t，预估价 ¥58」
     const text = textOf(est.result);
     const traceIdGlobal = text.match(/预估流程ID[:：]\s*([A-Za-z0-9_-]+)/)?.[1] ?? "";
     const parsed: Array<{
@@ -252,6 +265,19 @@ export class DidiMcpRideProvider implements BookingProvider {
       etaMinutes: number | null;
     }> = [];
     for (const line of text.split(/\r?\n/)) {
+      const prod = line.match(
+        /^\s*\d+[.、]\s*([\u4e00-\u9fa5A-Za-z0-9]{2,10})[:：]\s*约\s*(\d+(?:\.\d+)?)\s*元.*?品类代码[:：]\s*(\d+)/,
+      );
+      if (prod) {
+        parsed.push({
+          name: prod[1],
+          category: prod[3],
+          traceId: traceIdGlobal,
+          amount: Number(prod[2]),
+          etaMinutes: null,
+        });
+        continue;
+      }
       const m = line.match(
         /([\u4e00-\u9fa5A-Za-z]{2,6})\s*[（(]\s*product_category[:：=]\s*(\d+)\s*[）)]/,
       );
@@ -265,8 +291,15 @@ export class DidiMcpRideProvider implements BookingProvider {
         etaMinutes: Number.isFinite(etaMin) ? etaMin : null,
       });
     }
+    // 生产文本同时含「无价车型列表行」与「带价明细行」（同 category 两行）：
+    // 按车型去重，优先保留带价格的那条。
+    const byCategory = new Map<string, (typeof parsed)[number]>();
+    for (const p of parsed) {
+      const prev = byCategory.get(p.category);
+      if (!prev || (prev.amount == null && p.amount != null)) byCategory.set(p.category, p);
+    }
     // 流程ID可能只在首行出现一次，也可能每行各带一个；两种形态都保留。
-    const usable = parsed.filter((p) => p.traceId);
+    const usable = [...byCategory.values()].filter((p) => p.traceId);
     if (usable.length === 0) {
       return {
         ok: false,
@@ -275,7 +308,7 @@ export class DidiMcpRideProvider implements BookingProvider {
       };
     }
 
-    const options: BookingOption[] = usable.slice(0, 4).map((m) => ({
+    const options: BookingOption[] = usable.slice(0, 8).map((m) => ({
       // 报价上下文（流程ID/车型）编码进 optionId，下单阶段原样带回
       id: `didi:${m.traceId}:${m.category}`,
       provider: this.key,
@@ -286,10 +319,33 @@ export class DidiMcpRideProvider implements BookingProvider {
       etaMinutes: m.etaMinutes,
       extra: { carType: m.name, estimateTraceId: m.traceId, productCategory: m.category },
     }));
+
+    // 加值信息（2026-11-20 接入滴图地图族）：驾车路线（里程/耗时/轨迹）+
+    // 滴滴 App 深链（备用发单入口），随报价结果带给 ride_quote 卡。
+    // 尽力而为：失败/超时不影响报价本身。
+    let route: DrivingRouteSummary | undefined;
+    let rideAppLink: string | undefined;
+    try {
+      const fromLng = Number(from.lng);
+      const fromLat = Number(from.lat);
+      const toLng = Number(dest.lng);
+      const toLat = Number(dest.lat);
+      const [routeRes, linkRes] = await Promise.all([
+        drivingRouteViaDidi(this.mcp, fromLng, fromLat, toLng, toLat),
+        rideAppLinkViaDidi(this.mcp, fromLng, fromLat, toLng, toLat, usable[0]?.category),
+      ]);
+      route = routeRes ?? undefined;
+      rideAppLink = linkRes ?? undefined;
+    } catch {
+      /* 加值失败不影响报价 */
+    }
+
     return {
       ok: true,
       options,
       note: "滴滴官方 MCP 报价；下单需两阶段确认（confirm + confirmationToken）",
+      ...(route ? { route } : {}),
+      ...(rideAppLink ? { rideAppLink } : {}),
     };
   }
 

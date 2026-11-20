@@ -72,7 +72,7 @@ export type ToolContext = {
    * 经 chat.media_ready 挂到当前流式回复上。聊天主路径装配；
    * 主动任务等无流式上下文的调用方为空，工具自行降级。
    */
-  pushMediaCards?: (cards: ToolMediaCard[]) => void;
+  pushMediaCards?: (cards: ToolMediaCard[]) => boolean | void;
   /**
    * Agent 浏览器工作预览帧（2026-11-12）：agent_browser 在无头浏览器里每执行
    * 一步后把页面截图推给客户端（手机端悬浮窗「Agent 正在控制浏览器」的画面源）。
@@ -88,8 +88,6 @@ export type ToolContext = {
   }) => boolean | void;
   /** 默认沙箱；`full` 时开放高权限工具 */
   agentAccessMode?: AgentAccessMode;
-  /** 电脑桥接在线时允许 desktop.visual.* */
-  desktopBridgeOnline?: boolean;
   /** 手机桥接在线时允许 phone.* */
   phoneBridgeOnline?: boolean;
   /** 单次调用取消信号（工具循环超时即 abort；子进程/HTTP 类 handler 可消费提前退出） */
@@ -133,10 +131,7 @@ export type ToolRegistrationMetadata = Partial<Omit<ToolMetadata, "name">> & {
 };
 
 /** LLM/API 工具名（下划线）→ 注册名（点号），兼容历史会话与未走 prepareToolsForChatApi 的路径。 */
-const REGISTRY_TOOL_NAME_ALIASES: Record<string, string> = {
-  desktop_visual_screenshot: "desktop.visual.screenshot",
-  desktop_visual_run_task: "desktop.visual.run_task",
-};
+const REGISTRY_TOOL_NAME_ALIASES: Record<string, string> = {};
 
 export function resolveRegistryToolName(name: string): string {
   return REGISTRY_TOOL_NAME_ALIASES[name] ?? name;
@@ -163,7 +158,6 @@ const CACHEABLE_TOOLS = new Set([
   "fetch_web",
   "info.inspect_webpage",
   "info.navigate_site",
-  "info.search",
   "hot_rankings",
   // 注意：用户维度只读工具（wallet.get_*/calendar.list_tasks/brain.recall/
   // perception.overview 等）故意不进——缓存键只有 name+input，跨 actor 复用
@@ -285,7 +279,6 @@ export class ToolRegistry {
     const registryName = this.normalizeToolName(resolveRegistryToolName(name));
     const accessMode = parseAgentAccessMode(context.agentAccessMode);
     if (!isToolAllowedInAccessMode(registryName, accessMode, {
-      desktopBridgeOnline: context.desktopBridgeOnline,
       phoneBridgeOnline: context.phoneBridgeOnline,
     })) {
       return {

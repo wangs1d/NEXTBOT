@@ -86,7 +86,6 @@ const KIND_WINDOWS: Record<string, KindWindow> = {
   followup: { delivery: Math.max(2.5 * HOUR, (asideTtlMin() + 10) * 60_000), ceiling: 24 * HOUR },
   care: { delivery: 6 * HOUR, ceiling: 24 * HOUR },
   location_arrival: { delivery: 3 * HOUR, ceiling: 12 * HOUR },
-  overwork_care: { delivery: 6 * HOUR, ceiling: 24 * HOUR },
   interest_alert: { delivery: 24 * HOUR, ceiling: 72 * HOUR },
   weather_alert: { delivery: 6 * HOUR, ceiling: 24 * HOUR },
 };

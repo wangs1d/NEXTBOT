@@ -1,6 +1,8 @@
 import type { ToolHandler, ToolContext, ToolRegistry } from "../../tool-registry.js";
 import type { ClientLocationWire } from "../../../types/client-location.js";
 import type { BookingService } from "../../../services/booking/booking-service.js";
+import type { McpClientService } from "../../../services/mcp-client-service.js";
+import { searchNearbyPickupsViaDidi } from "../../../services/ride-pickup-candidates.js";
 
 /**
  * ride_hailing.* 工具 handler 工厂集合 + 注册入口。
@@ -17,6 +19,8 @@ import type { BookingService } from "../../../services/booking/booking-service.j
 
 export interface RideHailingModuleDeps {
   bookingService: BookingService;
+  /** 滴滴 MCP client：选点卡的周边候选走滴图 maps_place_around；缺省时候选为空、卡退化纯地图选点 */
+  mcp?: McpClientService;
 }
 
 function formatLocationLabel(loc: ClientLocationWire): string {
@@ -78,24 +82,167 @@ function buildPickupParams(
   return params;
 }
 
+/**
+ * 起点没着落时的确定性出口（2026-11-20）：推「选上车点」卡
+ * （shopping_login 同通道 type=card），用户点候选/拖地图选好点后经
+ * card.action ride.pickup.select 续报价——全程零模型轮次、零文字追问。
+ *
+ * 定位口径（2026-11-20 用户定稿）：上车点**只认当下实时定位**——
+ * resolvePickup 每次调用都会按需向客户端现拉一次 GPS，拉到即用；
+ * 历史定位/快照一律不兜底（宁可诚实降级纯地图选点，不用旧位置装新鲜）。
+ *
+ * 候选来自滴滴 MCP 滴图地图 maps_place_around（不依赖高德）：
+ * 实时定位拿到 → 候选围着它搜、地图居中（预选态）；拿不到 → 空候选，
+ * 卡退化为纯地图选点，不阻塞、不冒充。
+ */
+async function pushPickupSelectCard(
+  context: ToolContext,
+  rideRequest: { dropoff: string; city?: string; scheduleAt?: string | null },
+  origin: { lat: number; lng: number; label: string } | null,
+  mcp?: McpClientService,
+): Promise<boolean> {
+  if (!context.pushMediaCards) return false;
+  const candidates = origin && mcp
+    ? await searchNearbyPickupsViaDidi(mcp, origin.lng, origin.lat)
+    : [];
+  console.log(
+    `[ride-pickup] 推选点卡 dropoff=${rideRequest.dropoff} origin=${origin ? `${origin.lng},${origin.lat}(${origin.label})` : "无"} candidates=${candidates.length}`,
+  );
+  const sent = context.pushMediaCards([
+    {
+      type: "card",
+      cardType: "ride_pickup",
+      title: "选个上车点",
+      items: [],
+      footer: "点候选或拖动地图，选好后我直接续报价，不用再打字",
+      extra: {
+        ridePickup: {
+          dropoff: rideRequest.dropoff,
+          ...(rideRequest.city ? { city: rideRequest.city } : {}),
+          ...(rideRequest.scheduleAt ? { scheduleAt: rideRequest.scheduleAt } : {}),
+          ...(origin
+            ? {
+                origin: {
+                  lat: origin.lat,
+                  lng: origin.lng,
+                  ...(origin.label ? { label: origin.label } : {}),
+                },
+              }
+            : {}),
+          candidates,
+        },
+      },
+    } as unknown as Parameters<NonNullable<ToolContext["pushMediaCards"]>>[0][number],
+  ]);
+  return sent !== false;
+}
+
+/** 起点没着落的统一失败回执：error 同时是对模型的行动指引。 */
+function pickupUnresolvedResult(
+  cardPushed: boolean,
+  dropoff: string,
+): {
+  ok: false;
+  code: string;
+  retryable: boolean;
+  error: string;
+} {
+  console.log(
+    `[ride-pickup] quote 起点没着落 dropoff=${dropoff} cardPushed=${cardPushed}（false=聊天通道不可用，文字兜底）`,
+  );
+  return {
+    ok: false,
+    code: "PICKUP_UNRESOLVED",
+    retryable: true,
+    error: cardPushed
+      ? `上车点没着落，选上车点卡已推送给用户（目的地=${dropoff}），用户在卡上选好后服务端会自动续报价，你无需再调用本工具。正文：**必须为空，一个字都不要写**——卡片自带「选个上车点」标题、地图、候选和按钮说明，任何文字介绍都多余且重复（2026-11-20 用户定稿：删掉硬编码开场白）。若用户改用文字给了具体上车点，再调本工具并携带该 pickup。`
+      : `起点没着落且聊天通道不可用，只能文字向用户要一个具体上车点（如「九华园1号门」）。`,
+  };
+}
+
 /** ride_hailing.quote —— 车型与价格预估。 */
-export function createRideQuoteHandler(service: BookingService): ToolHandler {
+export function createRideQuoteHandler(
+  service: BookingService,
+  mcp?: McpClientService,
+): ToolHandler {
   return async (input: Record<string, unknown>, context: ToolContext) => {
     const dropoff = typeof input.dropoff === "string" ? input.dropoff.trim() : "";
     if (!dropoff) return { ok: false, error: "缺少 dropoff（目的地）" };
     const provider = typeof input.provider === "string" && input.provider.trim() ? input.provider.trim() : undefined;
-    const city = typeof input.city === "string" && input.city.trim() ? input.city.trim() : undefined;
+    // 滴滴生产端点 maps_textsearch 强制要求 city（缺失直接 HTTP 400）：
+    // 模型没传时从客户端定位补，不再依赖模型自觉
+    const city =
+      (typeof input.city === "string" && input.city.trim()) ||
+      context.clientLocation?.city?.trim() ||
+      undefined;
     const scheduleAt =
       typeof input.scheduleAt === "string" && input.scheduleAt.trim() ? input.scheduleAt.trim() : null;
 
     const resolvedPickup = await resolvePickup(context, input.pickup);
+
+    // 起点没着落的两种形态（2026-11-19 根修）：
+    //   a) 无 pickup 文本且无任何定位来源 → resolvePickup 兜底「当前位置」必失败，直接推卡；
+    //   b) 有 pickup 文本但检索失败（provider 回 code=PICKUP_UNRESOLVED）→ 同样推卡，
+    //      此时若有客户端坐标就带周边候选。
+    // 出口只有一个：ride_pickup 选点卡 + 对模型的行动指引，杜绝文字追问。
+    // 定位口径（2026-11-20 用户定稿）：**只用当下实时定位**——resolvePickup
+    // 每次都会按需现拉 GPS；历史/快照一律不兜底，拉不到就诚实降级纯地图选点。
+    const rideRequestBase = {
+      dropoff,
+      ...(city ? { city } : {}),
+      ...(scheduleAt ? { scheduleAt } : null),
+    };
+    const origin = resolvedPickup.location
+      ? {
+          lat: resolvedPickup.location.latitude,
+          lng: resolvedPickup.location.longitude,
+          label: resolvedPickup.pickup,
+        }
+      : context.clientLocation
+        ? {
+            lat: context.clientLocation.latitude,
+            lng: context.clientLocation.longitude,
+            label: formatLocationLabel(context.clientLocation),
+          }
+        : null;
+
+    // 设计稿范式（2026-11-20 用户定稿）：**只要用户没指定具体上车点，一律推
+    // 「选上车点」卡**——有 GPS 就带滴图周边候选 + 地图居中定位点（预选态），
+    // 无 GPS 就是纯地图选点。不再有「有定位就直接用坐标报价跳过选点」的捷径：
+    // 上车点必须让用户在卡上过目确认，选完经 ride.pickup.select 续报价。
+    if (!(typeof input.pickup === "string" && input.pickup.trim())) {
+      const pushed = await pushPickupSelectCard(
+        context,
+        rideRequestBase,
+        origin,
+        mcp,
+      );
+      return pickupUnresolvedResult(pushed, dropoff);
+    }
+
+    // 用户/模型显式给了上车点：文本检索报价；起点检索失败时仍推卡兜底
     const result = await service.search(
       context,
       "ride",
-      { city, scheduleAt, params: { dropoff, scheduleAt, ...buildPickupParams(resolvedPickup) } },
+      { city, scheduleAt, params: { dropoff, scheduleAt, pickup: input.pickup.trim() } },
       provider,
     );
-    if (!result.ok) return result;
+    if (!result.ok) {
+      const failedResult = result as { code?: string; error?: string };
+      const pickupFailed =
+        failedResult.code === "PICKUP_UNRESOLVED" ||
+        /起点|pickup/i.test(String(failedResult.error ?? ""));
+      if (pickupFailed) {
+        const pushed = await pushPickupSelectCard(
+          context,
+          rideRequestBase,
+          origin,
+          mcp,
+        );
+        return pickupUnresolvedResult(pushed, dropoff);
+      }
+      return result;
+    }
     // 报价上下文回带给卡片：选择车型的卡内动作要原样带回起终点/时间，
     // 客户端不解释参数，只把服务端给的 payload 回传。
     const rideRequest = {
@@ -128,7 +275,11 @@ export function createRideBookHandler(service: BookingService): ToolHandler {
     }
 
     const provider = typeof input.provider === "string" && input.provider.trim() ? input.provider.trim() : undefined;
-    const city = typeof input.city === "string" && input.city.trim() ? input.city.trim() : undefined;
+    // 与 quote 同口径：生产端点检索强制 city，缺省从客户端定位补
+    const city =
+      (typeof input.city === "string" && input.city.trim()) ||
+      context.clientLocation?.city?.trim() ||
+      undefined;
     const scheduleAt =
       typeof input.scheduleAt === "string" && input.scheduleAt.trim() ? input.scheduleAt.trim() : null;
     const passengerPhone =
@@ -189,8 +340,8 @@ export function createRideCancelHandler(service: BookingService): ToolHandler {
 
 /** 注册 ride-hailing 全部工具到 ToolRegistry。 */
 export function registerRideHailingTools(registry: ToolRegistry, deps: RideHailingModuleDeps): void {
-  const { bookingService } = deps;
-  registry.register("ride_hailing.quote", createRideQuoteHandler(bookingService));
+  const { bookingService, mcp } = deps;
+  registry.register("ride_hailing.quote", createRideQuoteHandler(bookingService, mcp));
   registry.register("ride_hailing.book", createRideBookHandler(bookingService));
   registry.register("ride_hailing.status", createRideStatusHandler(bookingService));
   registry.register("ride_hailing.cancel", createRideCancelHandler(bookingService));

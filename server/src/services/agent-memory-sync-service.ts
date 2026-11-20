@@ -3,17 +3,10 @@ import { readFile } from "node:fs/promises";
 import { writeJsonAtomic } from "../storage/atomic-json.js";
 import { join } from "node:path";
 
-import { formatMemoryTopicTag, inferMemoryTopic } from "../agent/memory-topic.js";
 import { sanitizeMemoryLinesForPrompt } from "../agent/memory-line-hygiene.js";
-import { gateLtmWrite } from "../agentic-memory/ltm-write-gate.js";
 import { assertMemoryWriter } from "../memory/memory-authority.js";
 import { AGENT_NAME_KV_KEY } from "./agent-identity.js";
-import {
-  areLinesConflicting,
-  dedupeMemoryLines,
-  extractOverwriteKey,
-  limitLinesByChars,
-} from "./memory-record-utils.js";
+import { dedupeMemoryLines, limitLinesByChars } from "./memory-record-utils.js";
 
 type SessionMemory = {
   revision: number;
@@ -221,20 +214,12 @@ export class AgentMemorySyncService {
    *   「第二个写者」（2026-11-13：Agent 取名走的就是这条路）。
    */
   appendMemorySummaryLine(
-    actorId: string,
-    line: string,
-    topicHint?: string,
-    producer = "AgentMemorySyncService",
+    _actorId: string,
+    _line: string,
+    _topicHint?: string,
+    _producer = "AgentMemorySyncService",
   ): void {
-    // v3 写入门：KV 记忆字段与 Mem0/叙事同门——一次性提醒回执、任务态快照、
-    // 协议残留进 memory_summary 就是化石（「01:00 准时喊你」×4 的根因收口）
-    const verdict = gateLtmWrite(line, "kv:summary");
-    if (!verdict.admit) {
-      console.log(`[ltm-gate] 拒绝 KV 写入(${verdict.reason}): ${line.slice(0, 60)}`);
-      return;
-    }
-    assertMemoryWriter("memory_summary", producer);
-    void this.enqueueActorWrite(actorId, () => this.doAppendStructuredMemoryLine(actorId, verdict.cleaned, topicHint));
+    // memory_summary 已下线：读侧由 ContextCompiler 从权威库重建当前状态。
   }
 
   /**
@@ -291,73 +276,6 @@ export class AgentMemorySyncService {
       }
       return false;
     });
-  }
-
-  appendRelationshipHistoryLine(actorId: string, line: string, topicHint?: string): void {
-    this.appendMemorySummaryLine(actorId, `【关系线程】${line}`, topicHint ?? "relationship");
-  }
-
-  appendSessionRecapLine(actorId: string, line: string, topicHint?: string): void {
-    // 与 memory_summary 同门过闸（2026-10-23 recap 污染收口）：此前本入口无门，
-    // daily-chat-sync 曾把 `[HH:MM] [客户端同步] Agent: …` 逐字对话整批塞进来。
-    const verdict = gateLtmWrite(line, "kv:recap");
-    if (!verdict.admit) {
-      console.log(`[ltm-gate] 拒绝 KV recap 写入(${verdict.reason}): ${line.slice(0, 60)}`);
-      return;
-    }
-    void this.enqueueActorWrite(actorId, () =>
-      this.doAppendMemorySlotLine(actorId, "session_recap", verdict.cleaned, topicHint ?? "recap"),
-    );
-  }
-
-  setCurrentMission(actorId: string, mission: string | null, topicHint?: string): void {
-    void this.enqueueActorWrite(actorId, () =>
-      this.doSetMemorySlotValue(actorId, "memory_current_mission", mission, topicHint ?? "mission"),
-    );
-  }
-
-  // reconcileStructuredMemoryAfterTurn 已删除（2026-10-23 根因收口）：
-  // 它按「token 重叠≥5字符 ≈ 该承诺已完成」的启发式从 commitments/open_loops/recap
-  // 槽里删行——承诺板下线后这些槽没有合法写入者，而误判"已完成"会静默吞掉真实待办。
-  // 未闭环事项的收口归 consolidation / 统一抽取的语义决策，不做词面猜测。
-
-  private doAppendStructuredMemoryLine(actorId: string, line: string, topicHint?: string): boolean {
-    const maxRaw = process.env.AGENT_MEMORY_SUMMARY_MAX_CHARS;
-    const maxChars = maxRaw ? Math.max(1000, Number.parseInt(maxRaw, 10) || 16_000) : 16_000;
-    const archiveMaxChars = Math.max(maxChars, 48_000);
-    const stamp = new Date().toISOString();
-    const topicTag = formatMemoryTopicTag(topicHint ?? inferMemoryTopic(line));
-    const addition = `[${stamp}] ${topicTag} ${line}`;
-
-    for (let i = 0; i < 12; i++) {
-      const { revision, entries } = this.getSnapshot(actorId, [
-        "memory_summary",
-        "memory_summary_forgotten",
-      ]);
-
-      const prev = typeof entries.memory_summary === "string" ? entries.memory_summary : "";
-      const forgottenPrev =
-        typeof entries.memory_summary_forgotten === "string" ? entries.memory_summary_forgotten : "";
-      const merged = this.mergeMemorySummaryLines(prev, addition);
-      const { kept, evicted } = limitLinesByChars(merged, maxChars, { preserveTail: true });
-      const forgotten = dedupeMemoryLines(
-        [...(forgottenPrev ? forgottenPrev.split("\n").filter(Boolean) : []), ...evicted],
-        { preferLatest: true },
-      );
-      const forgottenTrimmed = limitLinesByChars(forgotten, archiveMaxChars, { preserveTail: true }).kept;
-
-      // 2026-11-12 收敛：不再把同一行镜像进 memory_preferences / memory_facts /
-      // memory_commitments / memory_open_loops。那四条槽由关键词正则分派，是
-      // 「比价这类任务内容进画像槽 → 每轮无条件注入」的根因；档案字段的权威源
-      // 是 structured_facts，在办事项的权威源是 commitments/tasks，本类只拥有
-      // memory.summary 一个概念（见 memory/memory-authority.ts）。
-      const result = this.applyPatchUnsafe(actorId, revision, [
-        { key: "memory_summary", op: "put", value: kept.join("\n") },
-        { key: "memory_summary_forgotten", op: "put", value: forgottenTrimmed.join("\n") },
-      ]);
-      if (result.ok) return true;
-    }
-    return false;
   }
 
   /**
@@ -421,54 +339,4 @@ export class AgentMemorySyncService {
     });
   }
 
-  private doAppendMemorySlotLine(actorId: string, key: string, line: string, topicHint?: string): boolean {
-    const maxRaw = process.env.AGENT_MEMORY_SUMMARY_MAX_CHARS;
-    const maxChars = maxRaw ? Math.max(1000, Number.parseInt(maxRaw, 10) || 16_000) : 16_000;
-    const stamp = new Date().toISOString();
-    const topicTag = formatMemoryTopicTag(topicHint ?? inferMemoryTopic(line));
-    const addition = `[${stamp}] ${topicTag} ${line}`;
-
-    for (let i = 0; i < 12; i++) {
-      const { revision, entries } = this.getSnapshot(actorId, [key]);
-      const prev = typeof entries[key] === "string" ? (entries[key] as string) : "";
-      const merged = dedupeMemoryLines([...prev.split("\n").filter(Boolean), addition], { preferLatest: true });
-      const kept = limitLinesByChars(merged, maxChars, { preserveTail: true }).kept;
-      const result = this.applyPatchUnsafe(actorId, revision, [{ key, op: "put", value: kept.join("\n") }]);
-      if (result.ok) return true;
-    }
-
-    return false;
   }
-
-  private doSetMemorySlotValue(actorId: string, key: string, value: string | null, topicHint?: string): boolean {
-    const normalized = value?.trim() ?? "";
-    const slotValue = normalized
-      ? `[${new Date().toISOString()}] ${formatMemoryTopicTag(topicHint ?? inferMemoryTopic(normalized))} ${normalized}`
-      : "";
-
-    for (let i = 0; i < 12; i++) {
-      const { revision } = this.getSnapshot(actorId, [key]);
-      const result = this.applyPatchUnsafe(actorId, revision, [{ key, op: "put", value: slotValue }]);
-      if (result.ok) return true;
-    }
-
-    return false;
-  }
-
-  private mergeMemorySummaryLines(prev: string, addition: string): string[] {
-    const base = prev
-      .split("\n")
-      .map((line) => line.trim())
-      .filter(Boolean);
-    const overwriteKey = extractOverwriteKey(addition);
-    const filtered = overwriteKey
-      ? base.filter((line) => {
-          const lineKey = extractOverwriteKey(line);
-          if (!lineKey || lineKey !== overwriteKey) return true;
-          return !areLinesConflicting(line, addition);
-        })
-      : base;
-    return dedupeMemoryLines([...filtered, addition], { preferLatest: true });
-  }
-
-}

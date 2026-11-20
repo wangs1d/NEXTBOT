@@ -16,10 +16,10 @@ import "mobile_theme.dart";
 /// - 一排四个功能入口：拍照 / 相册 / 本地文件 / 打电话
 /// - 下面直接铺最近相册九宫格（右下角选择圈）
 ///
-/// 交互：
-/// - 点一下照片：单选返回（2026-11-19 起：照片进输入框上方待发送区，
-///   由调用方让用户配文字后统一发送，面板只负责选图）
-/// - 长按照片：进入多选模式，点选多张后按「发送 N 张」（同样进待发送区）
+/// 交互（2026-11-19 起，对齐主流相册勾选）：
+/// - 点一下照片：勾选/取消勾选（角标圈常显），可勾多张
+/// - 选完按「添加 N 张」统一返回；照片进输入框上方待发送区，
+///   由调用方让用户配文字后一并发送，面板只负责选图
 ///
 /// 返回 `List<VisionWireFrame>`（空列表代表取消）；打电话项通过
 /// [onCall] 回调外部处理，面板本身不 pop。
@@ -54,7 +54,6 @@ class _MobileAttachPanelState extends State<MobileAttachPanel> {
   final List<AssetEntity> _assets = <AssetEntity>[];
   final Map<String, Uint8List> _thumbs = <String, Uint8List>{};
   final Set<String> _selectedIds = <String>{};
-  bool _multiSelect = false;
   bool _loading = true;
   bool _denied = false;
 
@@ -134,12 +133,6 @@ class _MobileAttachPanelState extends State<MobileAttachPanel> {
     }
   }
 
-  Future<void> _pickSingleAndSend(AssetEntity asset) async {
-    final VisionWireFrame? frame = await _toFrame(asset);
-    if (!mounted || frame == null) return;
-    Navigator.of(context).pop(<VisionWireFrame>[frame]);
-  }
-
   Future<void> _sendSelected() async {
     final List<VisionWireFrame> frames = <VisionWireFrame>[];
     for (final AssetEntity asset in _assets) {
@@ -156,29 +149,15 @@ class _MobileAttachPanelState extends State<MobileAttachPanel> {
     Navigator.of(context).pop(frames);
   }
 
-  Future<void> _onTapTile(AssetEntity asset) async {
-    if (_multiSelect) {
-      setState(() {
-        if (_selectedIds.contains(asset.id)) {
-          _selectedIds.remove(asset.id);
-        } else if (_selectedIds.length < kAgentUserVisionMaxFrames) {
-          _selectedIds.add(asset.id);
-        }
-      });
-      return;
-    }
-    await _pickSingleAndSend(asset);
-  }
-
-  void _onLongPressTile(AssetEntity asset) {
-    if (!_multiSelect) {
-      setState(() {
-        _multiSelect = true;
+  /// 点照片：勾选/取消勾选（上限 kAgentUserVisionMaxFrames 张）。
+  void _onTapTile(AssetEntity asset) {
+    setState(() {
+      if (_selectedIds.contains(asset.id)) {
+        _selectedIds.remove(asset.id);
+      } else if (_selectedIds.length < kAgentUserVisionMaxFrames) {
         _selectedIds.add(asset.id);
-      });
-    } else {
-      _onTapTile(asset);
-    }
+      }
+    });
   }
 
   Future<void> _takePhoto() async {
@@ -227,7 +206,7 @@ class _MobileAttachPanelState extends State<MobileAttachPanel> {
                 borderRadius: BorderRadius.circular(2),
               ),
             ),
-            if (_multiSelect)
+            if (_selectedIds.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 4, 12, 4),
                 child: Row(
@@ -238,11 +217,8 @@ class _MobileAttachPanelState extends State<MobileAttachPanel> {
                     ),
                     const Spacer(),
                     GestureDetector(
-                      onTap: () => setState(() {
-                        _multiSelect = false;
-                        _selectedIds.clear();
-                      }),
-                      child: Text("取消多选",
+                      onTap: () => setState(_selectedIds.clear),
+                      child: Text("清空",
                           style: TextStyle(fontSize: 12, color: labelColor)),
                     ),
                   ],
@@ -288,7 +264,7 @@ class _MobileAttachPanelState extends State<MobileAttachPanel> {
             ),
             Divider(height: 1, color: dark ? const Color(0xFF262626) : p.divider),
             _buildGrid(p, dark, labelColor),
-            if (_multiSelect)
+            if (_selectedIds.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
                 child: SizedBox(
@@ -406,8 +382,7 @@ class _MobileAttachPanelState extends State<MobileAttachPanel> {
           final Uint8List? thumb = _thumbs[asset.id];
           final bool selected = _selectedIds.contains(asset.id);
           return GestureDetector(
-            onTap: () => unawaited(_onTapTile(asset)),
-            onLongPress: () => _onLongPressTile(asset),
+            onTap: () => _onTapTile(asset),
             child: Stack(
               fit: StackFit.expand,
               children: <Widget>[
@@ -417,23 +392,24 @@ class _MobileAttachPanelState extends State<MobileAttachPanel> {
                       ? Container(color: dark ? const Color(0xFF232323) : p.divider)
                       : Image.memory(thumb, fit: BoxFit.cover, gaplessPlayback: true),
                 ),
-                if (_multiSelect || selected)
-                  Positioned(
-                    right: 4,
-                    bottom: 4,
-                    child: Container(
-                      width: 18,
-                      height: 18,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: selected ? Colors.white : Colors.transparent,
-                        border: Border.all(color: Colors.white, width: 2),
-                      ),
-                      child: selected
-                          ? const Icon(Icons.check, size: 13, color: Colors.black)
-                          : null,
+                Positioned(
+                  right: 4,
+                  bottom: 4,
+                  child: Container(
+                    width: 18,
+                    height: 18,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: selected
+                          ? Colors.white
+                          : Colors.black.withValues(alpha: 0.35),
+                      border: Border.all(color: Colors.white, width: 2),
                     ),
+                    child: selected
+                        ? const Icon(Icons.check, size: 13, color: Colors.black)
+                        : null,
                   ),
+                ),
               ],
             ),
           );

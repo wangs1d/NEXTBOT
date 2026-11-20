@@ -17,18 +17,26 @@ class StructuredAssistantMessageBody extends StatelessWidget {
   final ColorScheme cs;
   final TextTheme textTheme;
 
+  /// 文本能否渲染成结构化块（标题/列表/表格/围栏块等）。
+  ///
+  /// 供气泡宽度判定复用：结构化正文要放宽到全宽渲染，纯叙述仍按闲聊泡收窄。
+  static bool isStructuredText(String text) =>
+      _splitStructuredMessage(_normalize(text)).structured;
+
+  // 渲染层兜底（2026-10-10 搜图轮 CONTENT_SUMMARY 裸 JSON 泄漏）：本组件是
+  // 多条路由共用的正文渲染器，收到的文本若混入摘要块（mediaCards 分支 /
+  // RENDER_AS:structured / 历史落库消息），块没有折叠卡消费者，会整段以裸
+  // JSON 渲染。这里统一剥掉——块要么被专属路由消费，要么在此消失，绝不透出。
+  // 展示形态声明兜底：本组件是多条路由共用的正文渲染器，媒体卡片分支与
+  // 历史落库消息可能带着 [RENDER_AS:xxx]/[RENDER_HINT:xxx] 进来，一律剥除。
+  static String _normalize(String text) =>
+      _stripRenderMarkers(ContentSummaryParser.stripSummaryBlocks(text))
+          .replaceAll("\r\n", "\n")
+          .trimRight();
+
   @override
   Widget build(BuildContext context) {
-    // 渲染层兜底（2026-10-10 搜图轮 CONTENT_SUMMARY 裸 JSON 泄漏）：本组件是
-    // 多条路由共用的正文渲染器，收到的文本若混入摘要块（mediaCards 分支 /
-    // RENDER_AS:structured / 历史落库消息），块没有折叠卡消费者，会整段以裸
-    // JSON 渲染。这里统一剥掉——块要么被专属路由消费，要么在此消失，绝不透出。
-    // 展示形态声明兜底：本组件是多条路由共用的正文渲染器，媒体卡片分支与
-    // 历史落库消息可能带着 [RENDER_AS:xxx]/[RENDER_HINT:xxx] 进来，一律剥除。
-    final String normalized =
-        _stripRenderMarkers(ContentSummaryParser.stripSummaryBlocks(text))
-            .replaceAll("\r\n", "\n")
-            .trimRight();
+    final String normalized = _normalize(text);
     if (normalized.isEmpty) {
       return const SizedBox.shrink();
     }
@@ -113,8 +121,14 @@ _StructuredMessageParts _splitStructuredMessage(String text) {
   final List<String> lines = text.split("\n");
   final List<String> nonEmpty =
       lines.where((String line) => line.trim().isNotEmpty).toList();
+  final bool hasAtxHeading =
+      nonEmpty.any((String line) => _isAtxHeadingLine(line));
   if (nonEmpty.length < 2) {
-    return _StructuredMessageParts(lead: "", body: text, structured: false);
+    return _StructuredMessageParts(
+      lead: "",
+      body: text,
+      structured: hasAtxHeading,
+    );
   }
 
   final int sectionCount =
@@ -135,6 +149,9 @@ _StructuredMessageParts _splitStructuredMessage(String text) {
       (hasSections && hasList) ||
       hasFenceBlock ||
       hasTable ||
+      // 分泡后一个泡就是一段文档单元：带 ATX 标题的泡必须走块级渲染，
+      // 否则「## 结论」的井号会以内联排版原样漏出来。
+      hasAtxHeading ||
       (blankLines >= 2 &&
           text.length >= 220 &&
           (sectionCount >= 1 || listCount >= 2));
@@ -153,8 +170,7 @@ _StructuredMessageParts _splitStructuredMessage(String text) {
   // 走块级渲染（### 前缀剥除、层级样式），进了 lead 面板就会以内联排版把
   // 「### 方案 A」的井号原样漏出来（2026-10-08 手机端 markdown 裸露回归）。
   final String leadFirstLine = lead.split("\n").first.trim();
-  final bool leadIsHeading =
-      RegExp(r"^(#{1,6})\s+").hasMatch(leadFirstLine) ||
+  final bool leadIsHeading = _isAtxHeadingLine(leadFirstLine) ||
       RegExp(r"^(一|二|三|四|五|六|七|八|九|十)[、.．]").hasMatch(leadFirstLine);
   final bool keepLead = lead.isNotEmpty &&
       !leadIsHeading &&
@@ -192,10 +208,13 @@ bool _isListLikeLine(String line) {
       RegExp(r"^\d+[.)]\s+").hasMatch(trimmed);
 }
 
+bool _isAtxHeadingLine(String line) =>
+    RegExp(r"^#{1,6}\s+\S").hasMatch(line.trim());
+
 bool _isSectionLikeLine(String line) {
   final String trimmed = line.trim();
   if (trimmed.isEmpty) return false;
-  if (RegExp(r"^(#{1,6})\s+").hasMatch(trimmed)) return true;
+  if (_isAtxHeadingLine(trimmed)) return true;
   if (RegExp(r"^(一|二|三|四|五|六|七|八|九|十)[、.．]").hasMatch(trimmed)) return true;
   if (trimmed.length > 42) return false;
   if (!(trimmed.contains("：") || trimmed.contains(":"))) return false;

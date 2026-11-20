@@ -175,30 +175,32 @@ export class SharedBrowserCdpGateway {
       const panelPage = await this.waitMarkedPanelPage(context, waitPanelMs);
       if (!panelPage) return null;
       // 弹窗拦截（每个页面只装一次）：window.open 与 target=_blank 一律改为
-      // 当前页内导航，根除「独立浏览器窗口」。注意初始化函数体内不用任何
-      // 函数表达式（tsx esbuild keepNames 会注入 __name 导致浏览器端
-      // ReferenceError，实测踩坑）——这里用具名函数声明。
+      // 当前页内导航，根除「独立浏览器窗口」。初始化函数体里**不能出现具名
+      // 函数**（const 箭头赋值 / function 声明都会被 tsx esbuild keepNames
+      // 注入 __name，序列化进页面后 ReferenceError）——只用内联匿名函数。
       if (!this.agentTouchedPages.has(panelPage)) {
         await panelPage
           .addInitScript(() => {
-            function __sbOpen(u: string | undefined): null {
+            window.open = ((u?: string): null => {
               try {
                 if (u) window.location.href = String(u);
-              } catch (e) {
+              } catch {
                 /* ignore */
               }
               return null;
-            }
-            window.open = __sbOpen as typeof window.open;
-            function __sbClick(e: MouseEvent): void {
-              const t = e.target as HTMLElement | null;
-              const a = t && t.closest ? (t.closest('a[target="_blank"]') as HTMLAnchorElement | null) : null;
-              if (a && a.href) {
-                e.preventDefault();
-                window.location.href = a.href;
-              }
-            }
-            document.addEventListener("click", __sbClick, true);
+            }) as typeof window.open;
+            document.addEventListener(
+              "click",
+              (e: MouseEvent) => {
+                const t = e.target as HTMLElement | null;
+                const a = t && t.closest ? (t.closest('a[target="_blank"]') as HTMLAnchorElement | null) : null;
+                if (a && a.href) {
+                  e.preventDefault();
+                  window.location.href = a.href;
+                }
+              },
+              true,
+            );
           })
           .catch(() => {});
         this.agentTouchedPages.add(panelPage);

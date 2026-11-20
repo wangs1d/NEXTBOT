@@ -12,7 +12,7 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
  *   - 只需打开拨号盘、用户自己讲、无需确认卡与回填 → `phone.dial`
  *   - 对端是外部真实号码、需要拨前确认门 + 拨后结果回填闭环 → `phone_call.*`（本族）
  *
- * 走 deferred（BM25 索引），不进 CORE_TOOL_LIBRARY。
+ * 走 deferred（延迟目录）：。
  */
 export const PHONE_CALL_CHAT_TOOLS: ChatCompletionTool[] = [
   {

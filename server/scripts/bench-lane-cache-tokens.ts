@@ -39,8 +39,6 @@ function buildMemory(turn: number): AgentPromptMemoryContext {
     userProfileSummary: rep("用户是开发者，常调研 AI 产品。", 20),
     memoryInventory: rep("记忆条目索引。", 60),
     memorySummary: rep("持久记忆：用户在做 NextBot 项目。", 30),
-    // sessionRecap 随轮增长（模拟滚动 recap 追加行）
-    sessionRecap: `[ts:09:00] 早上讨论了构建问题。[ts:10:30] 优化了工具路由。`.repeat(turn),
     skillIndex: rep("- skill_demo：演示技能。", 12),
     interestList: "刘浩存、AI 产品、Flutter。",
     personaMood: `【人格·状态：日常调侃】\n默认带一点吐槽，一句到位不堆砌。`,

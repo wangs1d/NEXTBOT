@@ -76,8 +76,8 @@ Future<void> runRegisterPreviewWindow() async {
 }
 
 /// 真实注册：名单落后台账号服务（`POST /accounts/register`，email 已透传）。
-/// 开发/单机形态 [ApiConfig.controlPlaneBase] 回落 httpBase（127.0.0.1:3000
-/// 本地 server，与管理后台同库）；发版形态烤入 CONTROL_PLANE_URL 指云端后台。
+/// 走控制面（[ApiConfig.controlPlaneBase]）——这里只补运营后台的用户名单，
+/// 与登录发证不是同一条链路（见下方 [_issueDeviceTokenQuietly]）。
 /// 幂等：后台报「已存在」同样视为成功（退出登录后同一邮箱重新注册/重装重进）。
 /// 抛错时调用方捕获展示。
 ///
@@ -233,8 +233,13 @@ class _RegisterPageState extends State<RegisterPage> {
       // 回连时把 token 交回来。桌面端自己不重新跑一次登录——验证码是一次性
       // 的，回调之后再登录拿不到码（OTP 闸开启时）。
       final String deviceId = await InstallIdentity.instance.installId();
+      // 登录页必须由**将要校验这枚 token 的那台服务器**提供（httpBase），
+      // 不能取 controlPlaneBase：本地/捆绑形态下两者不是同一实例（如
+      // HTTP_BASE=127.0.0.1:3000、CONTROL_PLANE_URL=login.nextbot.top），
+      // 云端发的 token 本地 token 库里不存在，登录后 WS 立刻判 token_invalid
+      // 并被踢回登录页（2026-11-20 实证）。
       _webAuthUrl = Uri.parse(
-        "${ApiConfig.controlPlaneBase}/accounts/web"
+        "${ApiConfig.httpBase}/accounts/web"
         "?cb=${Uri.encodeComponent(cb)}&state=$state"
         "&deviceId=${Uri.encodeComponent(deviceId)}"
         "&deviceLabel=${Uri.encodeComponent("NEXTBOT Desktop")}",
@@ -351,13 +356,16 @@ class _RegisterPageState extends State<RegisterPage> {
   /// 复用手机端同一套 `/accounts/login`：网页登录已经验证过邮箱归属，这里
   /// 只是把「已认证」这件事换成可携带的凭据。OTP 闸开启时这一步会失败，
   /// 那时桌面端退回 guest 身份（不串账号数据），不影响主流程。
+  ///
+  /// 基址必须是 [ApiConfig.httpBase]（与 WS 校验方同源），不能用默认的
+  /// 控制面：否则签发方与校验方各持一套 token 库，换来的凭据进门即失效。
   Future<void> _issueDeviceTokenQuietly(
     String email, {
     required bool freshCreated,
   }) async {
     if (AccessCredentialStore.instance.hasCredentials) return;
     try {
-      final EmailLoginApi api = EmailLoginApi();
+      final EmailLoginApi api = EmailLoginApi(baseUrl: ApiConfig.httpBase);
       final EmailLoginResult r = freshCreated
           ? await api.register(email, name: email.split("@").first)
           : await api.login(email);

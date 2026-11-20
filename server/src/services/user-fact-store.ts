@@ -5,11 +5,10 @@
  * KV 结构化槽位 / USER_PROFILE.md 四个库，更新时机和覆盖逻辑各不相同——
  * 更新类事实（搬家、换工作）需要各库分别覆盖，任何一库漏更就自相矛盾。
  *
- * 架构定位（2026-11-13 收敛后）：
- *   每轮对话 →（档案字段类直接落 structured_facts 权威库，本库不收）
- *   夜间巩固 → 认不出标准档案字段的长尾事实落本库 upsertFact
- *              （subject 归一 + provenance + 置信度，冲突即替换）
- *   消费方   → proactivity 偏好变更触发器（getFacts(kind="preference)"）
+ * 架构定位（已收敛，仅作降级与存量来源）：
+ *   夜间巩固 → 认不出的长尾事实写 structured_facts（category=tail:<kind>）；
+ *              本库只在结构化库不可用时兜底写入，并在下次夜间被迁移走。
+ *   消费方   → proactivity 偏好变更触发器（两源并读、按值去重）
  *
  * 本库**不进 prompt**——prompt 的事实块只读 structured_facts 权威库。
  * 档案字段类事实（称呼/居住地/职业/配偶…）在写入与加载两侧都被拒收/清扫：

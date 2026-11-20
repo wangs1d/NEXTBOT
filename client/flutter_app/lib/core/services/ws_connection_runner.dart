@@ -7,11 +7,9 @@ import "package:web_socket_channel/web_socket_channel.dart";
 
 /// WS 连接生命周期基座（2026-11-10 连接收编）。
 ///
-/// 「自管第二连接」（桌面桥 DesktopBridgeService / 手机桥 PhoneBridgeService）
-/// 共用一套连接语义：连接建立（ready + 陈旧通道竞态守卫）、心跳（周期
-/// keepalive + 入站静默判死可选）、指数退避重连、stop/poke 语义。此前两处
-/// 各写一份 connect/heartbeat/reconnect，桌面桥是固定 4s 重连、手机桥是
-/// 指数退避但没有判死——收编后取两者并集：退避 + 可选判死。
+/// 手机桥 PhoneBridgeService 的第二连接使用本基座：连接建立（ready + 陈旧
+/// 通道竞态守卫）、心跳（周期 keepalive + 入站静默判死可选）、指数退避重连、
+/// stop/poke 语义。
 ///
 /// **不收编的连接**（有意为之，勿强行并线）：
 /// - 聊天主连接 `WsChatService`：带离线排队/在途重投/半开自检，语义远重于
@@ -38,7 +36,7 @@ class WsConnectionRunner {
         _gate = gate,
         _keepalivePayload = keepalivePayload;
 
-  /// 日志/排查标识（如 "desktop-bridge"）。
+  /// 日志/排查标识（如 "phone-bridge"）。
   final String name;
 
   final String Function() _urlProvider;

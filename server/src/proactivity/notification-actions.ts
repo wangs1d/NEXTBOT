@@ -4,16 +4,22 @@
  * 三条硬规则（来自设计稿，改动前先看那三行）：
  *   1. **每个按钮背后必须有一个真接口**。NEXTBOT 不在物理世界里，「放快递柜」
  *      这种动作一个都执行不了——所以动作集只覆盖纯软件决策。
- *   2. **按钮 ≤ 3**。Android 折叠区最多展示 3 个，多了等于没有。
+ *   2. **按钮 ≤ 2**（2026-11-19 用户拍板：最多两个并排，不要多）。原来 ≤ 3，
+ *      但第三项（「不用了」）是负反馈、极少有人点，白占一行。现在并排两项为主。
  *   3. **L2（花钱/不可逆）提案不放执行按钮**，只给「去确认」——通知栏是低承诺
  *      环境，误触成本远高于对话内确认。
+ *
+ * 选项来源（2026-11-19「按内容动态生成」）：
+ *   提案自带 notifyOptions → 直接用（触发源按本条真实内容声明，文案各不相同）；
+ *   没有自带 → 按 confirmAction 走通用默认（ask_first=批准/拒绝，告知类=收下/稍后）。
+ *   任何情况下都被 MAX_NOTIFY_ACTIONS=2 与 L2 风险闸收口。
  *
  * 动作 id 是**跨渲染面共享**的：聊天卡的按钮和通知栏的按钮用的是同一个 id，
  * 因此同一个动作在两个面上只有一套语义、一套审计、一套失败处理。
  */
 import type { ActionIntent, ActionIntentAction, ActionRisk } from "./action-intent-store.js";
 import type { ActionIntentService } from "./action-intent-service.js";
-import type { ProactiveProposal } from "./pipeline-types.js";
+import type { ProactiveProposal, ProposalNotifyOption } from "./pipeline-types.js";
 
 /** 通知栏动作 id 族（聊天卡与通知栏共用） */
 export const NOTIFY_ACTION = {
@@ -29,8 +35,8 @@ export const NOTIFY_ACTION = {
   decline: "proactivity.decline",
 } as const;
 
-/** Android 折叠区最多 3 个按钮 */
-export const MAX_NOTIFY_ACTIONS = 3;
+/** 并排最多 2 个按钮（2026-11-19 用户拍板，原为 3） */
+export const MAX_NOTIFY_ACTIONS = 2;
 
 /** 推迟重投的默认间隔（ms）：30 分钟 */
 export const DEFAULT_SNOOZE_MS = 30 * 60_000;
@@ -51,14 +57,52 @@ export function classifyNotifyRisk(p: ProactiveProposal): ActionRisk {
 }
 
 /**
- * 构造这条提案在通知栏上的动作集。
+ * 把提案自带的语义选项映射成真动作。每个 `action` 都对应 notification-action-executors
+ * 里已注册的执行器——文案可以随内容变，背后干的活始终是那一套真接口。
+ */
+function optionToAction(p: ProactiveProposal, opt: ProposalNotifyOption): ActionIntentAction {
+  const kind = "execute" as const;
+  const title = p.title;
+  const basePayload = { kind: p.kind, title };
+  switch (opt.action) {
+    case "acknowledge":
+      return { actionId: NOTIFY_ACTION.acknowledge, label: opt.label, kind, payload: basePayload };
+    case "snooze":
+      return {
+        actionId: NOTIFY_ACTION.snooze,
+        label: opt.label,
+        kind,
+        payload: {
+          ...basePayload,
+          delayMs: opt.delayMs ?? DEFAULT_SNOOZE_MS,
+          // 推迟要重新入队 → 必须带上提案本体（已投递的提案已出队，服务端手上没有了）
+          proposal: p,
+        },
+      };
+    case "dismiss":
+      return { actionId: NOTIFY_ACTION.dismiss, label: opt.label, kind, payload: basePayload };
+    case "approve":
+      return {
+        actionId: NOTIFY_ACTION.approve,
+        label: opt.label,
+        kind,
+        payload: { ...basePayload, confirmId: p.confirmAction?.label },
+      };
+    case "decline":
+      return { actionId: NOTIFY_ACTION.decline, label: opt.label, kind, payload: basePayload };
+  }
+}
+
+/**
+ * 构造这条提案在通知栏上的动作集（最多两个，2026-11-19）。
  *
- * 两种形态：
- *   · ask_first 提案（带 confirmAction）→ 批准 / 拒绝（真正拍板）
- *   · 告知类提案 → 收下 / 稍后 / 不用了（把「要不要回一句话」变成「点一下」）
+ * 选项来源优先级：
+ *   1. 提案自带 `notifyOptions` —— 触发源按本条真实内容生成，文案各不相同（推荐）；
+ *   2. ask_first 提案（带 confirmAction）→ 批准 / 拒绝（真正拍板）；
+ *   3. 其余告知类 → 收下 / 稍后再说（把「要不要回一句话」变成「点一下」）。
  *
- * L2 提案：两种形态都不给执行按钮，只给一个「去确认」——把不可逆动作留在
- * 用户明确知情的环境里做。
+ * L2 提案：任何形态都不给执行按钮，只留「去确认」——把不可逆动作留在用户
+ * 明确知情的环境里做。空文案项一律丢弃，避免渲染出没字的可点按钮。
  */
 export function buildNotifyActions(p: ProactiveProposal): ActionIntentAction[] {
   const risk = classifyNotifyRisk(p);
@@ -67,6 +111,16 @@ export function buildNotifyActions(p: ProactiveProposal): ActionIntentAction[] {
   // 环境里做。通知正文会写明「我不能替你静默做」，点开通知进 App 处理。
   if (risk === "L2") return [];
 
+  // ① 提案自带选项：按内容动态生成的按钮优先（空文案过滤后仍可能为空 → 回退默认）
+  if (p.notifyOptions?.length) {
+    const own = p.notifyOptions
+      .filter((opt) => opt.label?.trim())
+      .slice(0, MAX_NOTIFY_ACTIONS)
+      .map((opt) => optionToAction(p, opt));
+    if (own.length > 0) return own;
+  }
+
+  // ② 通用默认：ask_first=批准/拒绝，告知类=收下/稍后（最多两项）
   const base: ActionIntentAction[] = p.confirmAction
     ? [
         {
@@ -85,7 +139,7 @@ export function buildNotifyActions(p: ProactiveProposal): ActionIntentAction[] {
     : [
         {
           actionId: NOTIFY_ACTION.acknowledge,
-          label: "好就这么办",
+          label: "知道了",
           kind: "execute",
           payload: { kind: p.kind, title: p.title },
         },
@@ -100,12 +154,6 @@ export function buildNotifyActions(p: ProactiveProposal): ActionIntentAction[] {
             // 推迟要重新入队 → 必须带上提案本体（已投递的提案已出队，服务端手上没有了）
             proposal: p,
           },
-        },
-        {
-          actionId: NOTIFY_ACTION.dismiss,
-          label: "不用了",
-          kind: "execute",
-          payload: { kind: p.kind, title: p.title },
         },
       ];
 

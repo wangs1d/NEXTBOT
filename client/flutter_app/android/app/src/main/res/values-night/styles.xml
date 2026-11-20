@@ -5,6 +5,10 @@
         <!-- Show a splash screen on the activity. Automatically removed when
              the Flutter engine draws its first frame -->
         <item name="android:windowBackground">@drawable/launch_background</item>
+        <!-- 系统栏口径与 values 版一致（见 values/styles.xml）。 -->
+        <item name="android:statusBarColor">@color/boot_background</item>
+        <item name="android:navigationBarColor">@color/boot_background</item>
+        <item name="android:windowLightStatusBar">false</item>
         <!-- 夜间同样不展示应用图标层，只留与 N 光扫同色底（见 values/styles.xml）。 -->
         <item name="android:windowSplashScreenBackground">@color/boot_background</item>
         <item name="android:windowSplashScreenAnimatedIcon">@drawable/splash_no_icon</item>
@@ -20,5 +24,8 @@
         <!-- 与 values 版同口径：固定 #161616，Theme.Black 的 colorBackground
              是纯黑，与启动画面底色仍有一档色差，一并消掉。 -->
         <item name="android:windowBackground">@color/boot_background</item>
+        <item name="android:statusBarColor">@color/boot_background</item>
+        <item name="android:navigationBarColor">@color/boot_background</item>
+        <item name="android:windowLightStatusBar">false</item>
     </style>
 </resources>

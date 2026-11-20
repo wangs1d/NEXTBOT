@@ -47,6 +47,9 @@ class MainActivity : FlutterActivity() {
         // 否则首帧握手拿不到稳定 actorId，服务端那份加密绑定会认不出来。
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, DeviceKeyBackupPlugin.CHANNEL)
             .setMethodCallHandler(DeviceKeyBackupPlugin(this))
+        // 支付宝 App 支付（额度充值）：已安装支付宝时唤起原生收银台。
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, AlipayPayPlugin.CHANNEL)
+            .setMethodCallHandler(AlipayPayPlugin(this))
     }
 
     override fun onNewIntent(intent: Intent) {

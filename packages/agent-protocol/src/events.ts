@@ -47,12 +47,6 @@ export const ClientEventType = {
   WalletSimulateRequest: "wallet.simulate.request",
   /** AIP v0.1：结构化跨 Agent 消息（与工具 aip.dispatch 等价）。 */
   AipDispatch: "aip.dispatch",
-  /** 电脑端桥接：若服务端配置了 DESKTOP_BRIDGE_TOKEN 则须提交；无 token 模式无需发送本事件 */
-  DesktopBridgeRegister: "desktop.bridge.register",
-  /** 电脑端桥接：执行完成后回传结果（与 desktop.bridge.invoke 的 jobId 对应）。 */
-  DesktopBridgeResult: "desktop.bridge.result",
-  /** 电脑端桥接：Python 主动推送事件（如窗口焦点变化），单向推送，不阻塞 invoke 通道。 */
-  DesktopEvent: "desktop.event",
   /** 手机桥接注册：携带 PHONE_BRIDGE_TOKEN 验证 */
   PhoneBridgeRegister: "phone.bridge.register",
   /** 手机桥接：执行完成后回传结果（与 phone.bridge.invoke 的 jobId 对应）。 */
@@ -103,7 +97,7 @@ export const ClientEventType = {
 
   // ============================================================
   // 终端互连平台 device.* 事件族（Phase 2+）
-  // 与现有 phone.bridge.* / desktop.bridge.* 并存：
+  // 与现有 phone.bridge.* 并存：
   //   - 旧事件按 userId 单连接语义（每用户一个桥接器）
   //   - device.* 按 deviceId 多连接语义（每用户可挂 N 台设备）
   // 适配器迁移完成后旧事件可逐步废弃。
@@ -298,12 +292,6 @@ export const ServerEventType = {
    * 与 call_connecting 的区别：call_connecting 只出现在接通瞬间，voice_reply 用于通话中的多轮交互。
    */
   VirtualPhoneVoiceReply: "agent.phone.voice_reply",
-  /** 电脑端桥接绑定成功 */
-  DesktopBridgeRegisterAck: "desktop.bridge.register_ack",
-  /** 发往电脑端：执行一轮纯视觉桌面任务 */
-  DesktopBridgeInvoke: "desktop.bridge.invoke",
-  /** 手机端等与 userId 对齐的 WS：电脑桥接在线状态、最近桌面任务结果摘要 */
-  DesktopBridgeSync: "desktop.bridge.sync",
   /** 手机桥接：绑定成功 */
   PhoneBridgeRegisterAck: "phone.bridge.register_ack",
   /** 发往手机端：执行远程控制命令 */

@@ -26,6 +26,7 @@ import { isMemoryFtsEnabled, getMemoryFtsTopK } from "./env.js";
 import { openAgenticSqlite } from "./sqlite-store.js";
 import { actorIdVariants } from "./actor-key.js";
 import { tokenize } from "../services/memory-record-utils.js";
+import { classifyMemorySourceRole } from "../services/memory-source-role.js";
 
 /** 单条 FTS 命中（rank 列表元素；score 仅排序语义） */
 export interface FtsMemoryCandidate {
@@ -112,6 +113,10 @@ export class AgenticMemoryFtsStore {
       for (const item of rows) {
         const text = (item.memory ?? "").trim();
         if (!item.id || !text) continue;
+        // 助手自己的历史发言不进词法索引：读侧默认丢弃助手语气条目，索引进来
+        // 只会占满 topK（实测占候选 15%）。用户明确追问「你上次怎么说」仍走
+        // 语义路，词法路不是它的唯一来源。
+        if (classifyMemorySourceRole(text) === "assistant") continue;
         const tokens = tokenize(text);
         if (tokens.length === 0) continue;
         const meta = item.metadata ?? {};

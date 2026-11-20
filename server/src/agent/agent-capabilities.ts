@@ -12,7 +12,6 @@ export const CAPABILITY_DOMAINS = [
   "market",
   "sub_agent",
   "aip",
-  "desktop",
   "web",
   "life_assistant",
   "voice",
@@ -22,13 +21,11 @@ export const CAPABILITY_DOMAINS = [
   "agent_account",
   "world",
   "smart_home",
-  "notes",
   "system",
   "image_gen",
   "file_doc",
   "email_sms",
   "media_music",
-  "health_fitness",
   "finance_deep",
   "social_outreach",
   "code_sandbox",
@@ -40,8 +37,6 @@ export const CAPABILITY_DOMAINS = [
   "home_services",
   "restaurant_booking",
   "travel_booking",
-  "period_care",
-  "safety_guard",
 ] as const;
 export type CapabilityDomain = (typeof CAPABILITY_DOMAINS)[number] | "all";
 
@@ -53,7 +48,6 @@ export const DOMAIN_LABELS: Record<CapabilityDomain, string> = {
   market: "行情报价（股票/指数实时报价）",
   sub_agent: "任务执行（后台 plan-and-execute 统一执行）",
   aip: "AIP协议（dispatch/状态/提案）",
-  desktop: "桌面自动化（VLM视觉操控电脑）",
   web: "Web浏览（搜索/抓取网页）",
   life_assistant: "生活助手（预算计算/购物建议）",
   voice: "语音能力（TTS播报，Agent底层语音能力，可自调度）",
@@ -63,13 +57,11 @@ export const DOMAIN_LABELS: Record<CapabilityDomain, string> = {
   agent_account: "Agent账号注册",
   world: "Agent World（世界状态/社交/市场）",
   smart_home: "智能家居（HomeAssistant：设备列表/开关/调温/灯控/场景）",
-  notes: "学习笔记（学习/会议/视频/读书/灵感沉淀、摘要、抽问、复习）",
   system: "系统管理（记忆和上下文、系统配置）",
   image_gen: "图像生成（text-to-image，OpenAI 兼容图像模型）",
   file_doc: "文件/文档处理（read/write/parse_pdf/parse_office/export_format）",
   email_sms: "邮件/短信主动发送（SMTP + 阿里云短信）",
   media_music: "媒体音乐播放控制（搜索/播放/暂停/继续/停止/now playing）",
-  health_fitness: "健康/运动数据接入（指标记录/查询/汇总/目标/导入）",
   finance_deep: "财务深度能力（交易导入/支出分析/预算/对账/分类/导出报告/订阅取消/账单管理）",
   social_outreach: "社交主动出击（Twitter/微博/小红书/朋友圈，发帖/评论/转发/点赞）",
   code_sandbox: "代码执行沙盒（python/node 子进程，工作目录隔离）",
@@ -81,8 +73,6 @@ export const DOMAIN_LABELS: Record<CapabilityDomain, string> = {
   home_services: "家政/本地生活预订（保洁/维修/搬家/美容/宠物，搜索/下单/改期/取消）",
   restaurant_booking: "餐厅预订（附近搜索/订座/状态/取消）",
   travel_booking: "机票/火车票/酒店预订（多源报价比价/下单/支付/出票/取消）",
-  period_care: "生理周期关怀（经期记录/预测/临近提醒/状态打卡，数据本地加密）",
-  safety_guard: "安全守护（紧急联系人/一键SOS/借口来电，定位仅按需获取一次）",
   all: "全部领域",
 };
 
@@ -97,12 +87,12 @@ function buildStaticSections(): CapabilitySection[] {
     {
       domain: "wallet",
       lines: [
-        "1️⃣ 钱包与支付：Agent 不代持资金、不保存支付凭证；统一入口是 payment.pay（一次走完授权判定→额度/护栏→确认→渠道下单/收款码）",
-        "   - 支付前先用 payment.authorization_status 看用户是否已授权；没有授权时 payment.pay 会返回 authorizationUrl，把链接原样发给用户，由其设置额度并点「同意授权」（未授权前不会产生任何扣款）",
-        "   - nextAction=confirm 表示超过免确认额度：把金额与事由告诉用户，用户明确同意后用 confirmToken 调 payment.pay_confirm；不要自行确认、不要拆单",
-        "   - nextAction=pay 表示收款单/收银台已生成：把二维码/链接发给用户，付款后用 payment.pay_status 向渠道核对真实状态（用户的「我付了」不算数）",
-        "   - 退款用 payment.refund（渠道支持时原路退）；账单查询用 payment.receipt",
-        "   - 历史通道仍可用但不作为首选：payment.create_order（商户收款码）、alipay.*（钱包收银台代付，依赖 alipay-bot CLI）",
+        "1️⃣ 钱包与支付：Agent 不代持资金、不保存支付凭证；统一入口是 payment（复合工具，action=pay 一次走完授权判定→额度/护栏→确认→渠道下单/收款码）",
+        "   - 支付前先用 payment（action=authorization_status）看用户是否已授权；没有授权时 action=pay 会返回 authorizationUrl，把链接原样发给用户，由其设置额度并点「同意授权」（未授权前不会产生任何扣款）",
+        "   - nextAction=confirm 表示超过免确认额度：把金额与事由告诉用户，用户明确同意后用 confirmToken 调 payment（action=confirm）；不要自行确认、不要拆单",
+        "   - nextAction=pay 表示收款单/收银台已生成：把二维码/链接发给用户，付款后用 payment（action=status）向渠道核对真实状态（用户的「我付了」不算数）",
+        "   - 退款用 payment（action=refund，渠道支持时原路退）；支付记录用 payment（action=receipt）",
+        "   - 历史通道仍在同一入口：payment（action=merchant_create）商户收款码、alipay.*（钱包收银台代付，依赖 alipay-bot CLI）",
       ],
     },
     {
@@ -142,15 +132,9 @@ function buildStaticSections(): CapabilitySection[] {
       ],
     },
     {
-      domain: "desktop",
-      lines: [
-        "8️⃣ 电商读价：browser.session.list / browser.fetch_page（用户导入 Cookie 并按站点授权 agentAllowed +「完全访问」）",
-        "8️⃣b 桌面自动化：desktop.visual.screenshot / desktop.visual.run_task（须「完全访问」+ 服务端/桥接已配置）",
-      ],
-    },
-    {
       domain: "web",
       lines: [
+        "8️⃣ 电商读价：browser.session.list / browser.fetch_page（用户导入 Cookie 并按站点授权 agentAllowed +「完全访问」）",
         "9️⃣ Web浏览：web_search（复合工具，必填 action：web=网页检索 / deep=深读检索 / images=找图并转存本地 PNG / images_batch=多主题并行找图 / videos=找视频 / hot=热搜榜 / weather=天气 / quote=行情）；web_fetch（action=read 抓正文 / inspect 看页面结构 / navigate 站内导航 / raw 直接 HTTP）",
         "9️⃣b 图片意图：**当前轮**用户明确表达了想看/找图/照片/实拍图/长什么样/配图/壁纸/风景照等视觉诉求时，调用 web_search（action=\"images\"）直接出图，不要建议用户去其他平台；同时可再调 web_search（action=\"web\"）获取来源信息。若本轮用户并未索图（只是普通提及、或不含图片诉求），**不要**用 images 分支，避免无关照片刷屏——宁缺勿滥。",
         "9️⃣c 找图数量与排版（web_search action=images）：单次默认 4 张、上限 8 张。**不要追求数量**，宁可少而精。多个地点/多个主题请**按主题各发一次 query 并行搜**（景物/场景用完整具体的描述，如「平潭岛蓝眼泪荧光海 夜景实拍」「黄山云海日出 云海翻涌」，不要把单个主题截成碎片短词；**人物/明星照片反过来：query 只写人名本身**，加「照片/图片/高清/最近」会搜出完全无关的图，确要某类图才加具体类型词如 壁纸/头像/写真/舞台）；不要一次性塞 20+ 张图，也不要把多个不同主题的图全堆在一张图墙里。每张照片会由视觉模型自动附带真实画面描述，正文不要逐张描述照片或用「第几张图」指代；只搜到图（没有文字检索结果）时，正文一两句话引入即可，**不要**分节盘点或写「已确认的/能说的/没查到的」式小节。",
@@ -168,7 +152,7 @@ function buildStaticSections(): CapabilitySection[] {
     {
       domain: "life_assistant",
       lines: [
-        "🔟 生活助手：budget.calculate / shopping.suggest",
+        "🔟 生活助手：finance（action=budget_estimate）一次性收支测算 / shopping.suggest",
       ],
     },
     {
@@ -203,20 +187,6 @@ function buildStaticSections(): CapabilitySection[] {
       domain: "system",
       lines: [
         "1️⃣5️⃣ 系统管理：管理记忆和上下文、调整系统配置",
-      ],
-    },
-    {
-      domain: "notes",
-      lines: [
-        "📝 学习/知识笔记（单用户本地存储，不进 World）",
-        "   - notes.create / notes.list / notes.get / notes.update / notes.delete",
-        "   - notes.search（关键词 BM25 排序，命中后可走 update 复用）",
-        "   - notes.summarize（生成摘要，懒写回）",
-        "   - notes.flashcards（生成记忆卡片 q/a）",
-        "   - notes.quiz（生成自测题）",
-        "   - notes.schedule_review（创建复习提醒，调用 calendar(action=create) 落地）",
-        "适用：学习（看书/视频/课程）、会议纪要、读书摘录、灵感闪念、视频字幕沉淀等。",
-        "状态连续性：写之前先 notes.search 查重；update/delete 必须基于返回的 id。",
       ],
     },
     {
@@ -268,30 +238,14 @@ function buildStaticSections(): CapabilitySection[] {
       ],
     },
     {
-      domain: "health_fitness",
-      lines: [
-        "💪 健康/运动数据接入：",
-        "   - health.log_metric（记录指标）：步数/心率/睡眠/卡路里/体重等",
-        "   - health.get_metrics（查询指标）：按时间范围查询历史",
-        "   - health.get_summary（汇总）：日/周/月汇总",
-        "   - health.set_goal / health.get_goals：目标管理",
-        "   - health.import_data（导入）：批量导入历史数据",
-        "   - 适用场景：用户说「记录今天走了 8000 步」「最近心率怎么样」「导入运动手表数据」",
-      ],
-    },
-    {
       domain: "finance_deep",
       lines: [
-        "💰 财务深度能力：",
-        "   - finance.import_transactions（导入交易）：CSV/JSON 批量导入",
-        "   - finance.analyze_spending（支出分析）：按类目/时间统计",
-        "   - finance.set_budget / finance.get_budget_status：预算管理",
-        "   - finance.reconcile（对账）：账户余额核对",
-        "   - finance.categorize（分类）：自动归类交易",
-        "   - finance.export_report（导出报告）：生成财务报表",
-        "   - finance.cancel_subscription（自动取消订阅）：识别低使用订阅并退订，统计省钱金额，给出商户侧取消路径",
-        "   - finance.savings_summary（省钱统计）：已退订订阅累计省下的金额",
-        "   - finance.add_bill / finance.list_bills / finance.update_bill / finance.pay_bill：账单管理（登记/追踪/到期提醒/缴费入账联动预算）",
+        "💰 财务与账单：统一入口 finance（复合工具）",
+        "   - action=import 导入交易；action=analyze 支出分析；action=set_budget / budget_status 预算",
+        "   - action=reconcile 对账、categorize 分类、export_report 导出报表、budget_estimate 粗略收支测算",
+        "   - action=list_subscriptions / confirm_subscription / update_subscription / cancel_subscription / savings_summary 订阅管理",
+        "   - action=add_bill / list_bills / update_bill / pay_bill 账单管理；action=sync_bills / auto_fetch_on / auto_fetch_off / auto_fetch_status 支付宝账单同步",
+        "   - action=bill_parcel_list / bill_parcel_summary 邮件短信里的账单与快递台账",
         "   - 适用场景：用户说「这个月花了多少」「导入银行账单」「设置餐饮预算 2000」" +
           "「帮我退掉没用的订阅」「退订省了多少钱」「记一下房租每月1号3500」「最近有什么账单要交」",
       ],
@@ -369,7 +323,7 @@ function buildStaticSections(): CapabilitySection[] {
         "   - action=handoff（人工交接）：把当前页面截图 + 操作指引推到用户聊天，等用户完成后继续",
         "   - 有状态会话：open 返回 sessionId 后，后续动作复用同一 Page，支持多步流程（open → extract_text → click → type → extract_text → close）",
         "   - 撞登录墙/验证码：回执带 humanRequired，页面留在内置浏览器，用户登录/验证后点「我已完成」继续（普通失败不交人）",
-        "   - 与 browser.fetch_page（只读单页无状态）/ shopping.order.*（仅购物业务）/ desktop.visual.run_task（操控桌面软件）的区别：本工具是通用多步浏览器操作",
+        "   - 与 browser.fetch_page（只读单页无状态）/ shopping.order.*（仅购物业务）的区别：本工具是通用多步浏览器操作",
         "   - 典型流程：open 打开页面 → extract_text 看页面结构和可点元素 → click/type 操作 → extract_text 确认结果 → close 关闭",
       ],
     },
@@ -392,14 +346,15 @@ function buildStaticSections(): CapabilitySection[] {
     {
       domain: "ride_hailing",
       lines: [
-        "🚕 打车/网约车（统一预订抽象层 services/booking/）：",
-        "   - ride_hailing.quote（报价）：车型（经济/舒适/商务）+ 价格预估；pickup 缺省自动取用户当前 GPS 定位",
-        "   - ride_hailing.book（下单）：两阶段确认。confirm=false 返回订单摘要+确认 token；confirm=true+token 真实（或模拟）下单",
-        "   - ride_hailing.status（追踪）：司机接单/行程中/完成，含司机/车牌等动态信息；不传 orderId 返回最近订单",
-        "   - ride_hailing.cancel（取消）：两阶段确认取消",
+        "🚕 打车/网约车（统一预订抽象层 services/booking/；复合工具 ride_hailing，必填 action）：",
+        "   - ride_hailing（action=quote）报价：车型（经济/舒适/商务）+ 价格预估；调用时机铁律——用户表达打车意图且给出目的地后**立即调用**（目的地抄用户原话），系统会自动推送「选上车点」卡（周边候选 + 地图选点）让用户确认；起点没指定/同名地点歧义/当前位置全由这张卡解决，**禁止文字追问起点、你在哪、是哪个同名地点**",
+        "   - 用户明说了具体上车点才传 pickup 文本；选点卡上用户确认后服务端直接续报价，无需你再调用",
+        "   - ride_hailing（action=book）下单：两阶段确认。confirm=false 返回订单摘要+确认 token；confirm=true+token 真实（或模拟）下单（optionId 来自 quote 返回）",
+        "   - ride_hailing（action=status）追踪：司机接单/行程中/完成，含司机/车牌等动态信息；不传 orderId 返回最近订单",
+        "   - ride_hailing（action=cancel）取消：两阶段确认取消",
         "   - Provider：BOOKING_MODE=mock（默认）为模拟数据（simulated=true，必须如实告知用户）；live 走滴滴官方 MCP（生产端点真实下单，需 DIDI_MCP_KEY）",
         "   - 安全护栏：两阶段确认 token（5 分钟 TTL）+ 审计；所有下单必须用户在确认卡上明确同意，Agent 不代付",
-        "   - 与 meituan.create_order（跑腿）/ travel.compute-route（纯路线查询）的区别：本工具为叫车报价与下单",
+        "   - 与 travel.compute-route（纯路线查询）的区别：本工具为叫车报价与下单",
         "   - 下单前必须先返回确认摘要让用户确认，得到明确同意后再带 confirm=true+token 执行",
       ],
     },
@@ -425,7 +380,7 @@ function buildStaticSections(): CapabilitySection[] {
         "   - restaurant.status（状态）：订座状态查询；不传 orderId 返回最近订单",
         "   - restaurant.cancel（取消）：两阶段确认取消",
         "   - Provider：restaurant.search 默认命中高德真实门店（provider=amap，simulated=false，无占座通道——把 extra.tel 给用户致电，别声称订到位）；模拟库（provider=simulated，simulated=true，仅 4 家样例）只有走它才支持 book/cancel 全流程演练",
-        "   - 与 meituan.create_order（外卖跑腿）/ travel.search-poi（旅行 POI 探索）的区别：本工具为到店用餐",
+        "   - 与 travel.search-poi（旅行 POI 探索）的区别：本工具为到店用餐",
       ],
     },
     {

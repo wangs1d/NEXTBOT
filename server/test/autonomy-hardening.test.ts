@@ -83,12 +83,10 @@ test("桥接后传感信号入板并产出规则事件（L1→L2 连通）", asy
     const at = Date.now();
     fabric.feed({ stream: "schedule", fingerprint: `s1:${at}`, payload: { nextRunAt: at + 10 * 60_000, nextTitle: "周会" } });
     fabric.feed({ stream: "goal", fingerprint: `g1:${at}`, payload: { goalId: "g1", title: "准备包", body: "好了", status: "ready" } });
-    for (let i = 0; i < 3; i++) fabric.feed({ stream: "message", fingerprint: `m${i}:${at}`, payload: { sender: `c${i}` } });
     await fabric.executor.tickActor("u1", at);
     const kinds = fabric.events.map((e) => e.kind);
     assert.ok(kinds.includes("meeting_soon"), `应有 meeting_soon，实际 ${kinds.join(",")}`);
     assert.ok(kinds.includes("goal_ready"), `应有 goal_ready，实际 ${kinds.join(",")}`);
-    assert.ok(kinds.includes("unread_burst"), `应有 unread_burst，实际 ${kinds.join(",")}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -111,7 +109,14 @@ test("无桥接时信号不入板，规则零事件（复现断线行为）", as
 test("bootstrap 接线守卫：生产装配必须包含状态板桥接与执行器 dataPath", () => {
   const src = readFileSync(join(process.cwd(), "src", "bootstrap", "create-app-services.ts"), "utf8");
   assert.match(src, /bridgeSensorKernelToBoard\(sensorKernel,\s*worldBoard/, "bootstrap 必须调用 L1→板 桥接（防再次断线）");
-  assert.match(src, /new MappingExecutor\(\{[\s\S]*?dataPath:/, "MappingExecutor 构造必须传 dataPath（状态持久化）");
+  // 方案 B 第一步（2026-11-19）：MappingExecutor 构造迁入统一模块层工厂，
+  // 守卫随之搬到工厂源码——dataPath（状态持久化）仍是硬性要求
+  const factorySrc = readFileSync(join(process.cwd(), "src", "proactivity", "module-factory.ts"), "utf8");
+  assert.match(factorySrc, /new MappingExecutorImpl\(\{[\s\S]*?dataPath:/, "MappingExecutor 构造必须传 dataPath（状态持久化）");
+  assert.match(src, /createProactivityRulesLayer\(\{/, "bootstrap 必须经统一模块层工厂装配规则层");
+  assert.match(src, /createBranchesLayer\(\{/, "树枝注册表与入站监察必须经统一模块层工厂装配（方案 B 第二步）");
+  assert.match(src, /createLocationTriggers\(\{/, "位置触发器必须经统一模块层工厂装配（方案 B 第二步）");
+  assert.match(src, /createSensorLayer\(\{/, "感知内核核心簇必须经统一模块层工厂装配（方案 B 第三步）");
   assert.match(src, /worldBoardRef.current = worldBoard/, "对话轮入板回调必须接线（会话层）");
 });
 
@@ -266,8 +271,6 @@ test("风险分级口径：money/irreversible 命中、未知工具保守归 wri
   assert.equal(classifyToolRisk("shopping.order.place"), "money");
   assert.equal(classifyToolRisk("payment.create_order"), "money");
   assert.equal(classifyToolRisk("finance.pay_bill"), "money");
-  assert.equal(classifyToolRisk("desktop.run_shell"), "irreversible");
-  assert.equal(classifyToolRisk("care.delete_important_date"), "irreversible");
   assert.equal(classifyToolRisk("geofence", { action: "delete" }), "irreversible");
   assert.equal(classifyToolRisk("wallet.get_balance"), "read_only");
   assert.equal(classifyToolRisk("calendar", { action: "list_tasks" }), "read_only");

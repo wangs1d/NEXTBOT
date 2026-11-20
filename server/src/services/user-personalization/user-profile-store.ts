@@ -163,6 +163,94 @@ export function sanitizeProfileMarkdown(md: string): string {
   return compact.join("\n");
 }
 
+/** 各 section 内容行上限（保留最新）；防止同一句被反复追加把画像撑成流水账。 */
+const SECTION_LINE_CAPS: Record<string, number> = {
+  basic: 16,
+  interest: 10,
+  communication: 10,
+  note: 10,
+};
+
+const FIELD_LABEL_RE = /^([^：:\s]{1,12})\s*[：:]/;
+
+/**
+ * 画像落盘压缩（确定性、幂等）：
+ *  - 同 section 内字段行按 label latest-wins（新值替换旧值，位置取最新）；
+ *  - 非字段行按归一文本去重（「你喜欢猫」重复 71 次只留一条，取最新）；
+ *  - 每 section 超过上限时丢最旧的行。
+ * 标题/引用块/占位行/系统样板行原样保留。无变化返回原字符串。
+ */
+export function compactProfileMarkdown(md: string): string {
+  const source = md.replace(/\r\n/g, "\n");
+  const lines = source.split("\n");
+  /** null = 被淘汰的行（去重/超限），输出时丢弃 */
+  const out: Array<string | null> = [];
+  const sectionLines = new Map<string, number[]>();
+  /** section → (label 或归一文本) → out 索引 */
+  const claims = new Map<string, Map<string, number>>();
+  let current: string | undefined;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const heading = /^##\s+(.+?)\s*$/.exec(trimmed);
+    if (heading) {
+      current = SECTION_TITLE_TO_KEY[heading[1]!];
+      out.push(line);
+      continue;
+    }
+    if (/^#\s*/.test(trimmed)) {
+      current = undefined;
+      out.push(line);
+      continue;
+    }
+    if (!current || !trimmed.startsWith("- ")) {
+      out.push(line);
+      continue;
+    }
+    const content = trimmed.slice(2).trim();
+    if (!content || PROFILE_PLACEHOLDER_RE.test(content) || SYSTEM_SAMPLE_LINE_RE.test(content)) {
+      out.push(line);
+      continue;
+    }
+    const label = FIELD_LABEL_RE.exec(content)?.[1];
+    const claimKey = label ? `field:${label}` : `text:${normalizeProfileLine(content)}`;
+    let sectionClaims = claims.get(current);
+    if (!sectionClaims) {
+      sectionClaims = new Map();
+      claims.set(current, sectionClaims);
+    }
+    const existing = sectionClaims.get(claimKey);
+    if (existing !== undefined) out[existing] = null; // 旧值让位，新值放最新位置
+    sectionClaims.set(claimKey, out.length);
+    out.push(line);
+    const idxs = sectionLines.get(current) ?? [];
+    idxs.push(out.length - 1);
+    sectionLines.set(current, idxs);
+  }
+
+  for (const [section, idxs] of sectionLines) {
+    const cap = SECTION_LINE_CAPS[section];
+    if (!cap || idxs.length <= cap) continue;
+    for (const idx of idxs.slice(0, idxs.length - cap)) out[idx] = null;
+  }
+
+  const compact: string[] = [];
+  for (const line of out) {
+    if (line === null) continue;
+    if (line.trim() === "" && compact.length > 0 && compact[compact.length - 1]!.trim() === "") continue;
+    compact.push(line);
+  }
+  const joined = compact.join("\n");
+  return joined === source ? md : joined;
+}
+
+function normalizeProfileLine(content: string): string {
+  return content
+    .toLowerCase()
+    .replace(/[\s，。！？、,:;|()[\]{}<>“”"'`]/g, "")
+    .trim();
+}
+
 /**
  * 画像是否含有真实事实（非纯默认模板/系统样板）。
  * 判据：存在一条内容行不属于默认模板样板集——占位括号行与
@@ -238,8 +326,9 @@ export class UserProfileStore {
   async write(actorId: string, content: string): Promise<void> {
     const path = this.profilePath(actorId);
     // 所有写入方共用同一不变式：落盘前过确定性净噪器（噪声行清掉、
-    // 已有真实行时清占位行），避免"什么内容都往画像里写"。
-    const clean = sanitizeProfileMarkdown(content.trim()).trim();
+    // 已有真实行时清占位行）+ 压缩器（同字段 latest-wins / 同句去重 / 分段限行），
+    // 避免"同一句话被追加几十遍"把画像撑成流水账。
+    const clean = compactProfileMarkdown(sanitizeProfileMarkdown(content.trim())).trim();
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, `${clean}\n`, "utf8");
   }

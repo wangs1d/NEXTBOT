@@ -34,11 +34,10 @@ import type {
   DesktopVisualSetDndInput,
   DesktopVisualSetDndResult,
 } from "./desktop-visual-port.js";
-import { resolveDesktopVisualVlmConfig } from "./desktop-visual-vlm-config.js";
+import { resolveVisionModelConfig } from "./vision-model-config.js";
 import { isVisualEnabled } from "./desktop-visual-env.js";
 
 // 纯 env 判定收敛到叶子模块 desktop-visual-env.ts（避免 env 谓词随本模块的重依赖被静态引出）。
-export { isLocalDesktopVisualEnabledFromEnv } from "./desktop-visual-env.js";
 
 function envStr(env: NodeJS.ProcessEnv, key: string, legacyKey: string, fallback = ""): string {
   return env[key]?.trim() || env[legacyKey]?.trim() || fallback;
@@ -104,7 +103,7 @@ function spawnStdioWorker(payload: Record<string, unknown>, pythonExe: string, p
 }
 
 function withVlmPayload(payload: Record<string, unknown>): Record<string, unknown> {
-  const vlm = resolveDesktopVisualVlmConfig();
+  const vlm = resolveVisionModelConfig();
   return vlm ? { ...payload, vlm } : payload;
 }
 

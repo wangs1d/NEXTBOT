@@ -10,8 +10,7 @@ export type StreamDeltaHandler = (delta: string) => void;
 export type VisionSourceKind =
   | "device_camera"
   | "external_stream"
-  | "agent_attachment"
-  | "desktop_screen";
+  | "agent_attachment";
 
 /** 已通过 MIME 裁定的单帧图像（Base64 无 `data:` 前缀）。 */
 export type VisionFrame = {
@@ -80,7 +79,15 @@ export type AgentPromptMemoryContext = {
   memoryFacts?: string;
   memoryCommitments?: string;
   memoryOpenLoops?: string;
-  sessionRecap?: string;
+  /**
+   * 编译块一·当前状态（≤500 字）：事实/理解/关系/画像四源去重后的当前值。
+   * 由 memory-context-compiler 唯一产出；上游各块被清空，不再单独渲染。
+   */
+  memoryCurrentState?: string;
+  /** 编译块二·在办（≤300 字）：未完成任务最多 3 条，带龄期。 */
+  memoryPending?: string;
+  /** 编译块三·按需回忆（≤400 字）：事件/叙事召回最多 5 行，带发生时间。 */
+  memoryRecall?: string;
   /** 用户打断的回复上下文，用于整合到下一次回复中 */
   interruptedContext?: string;
   /** 用户当前所在地（前端 GPS + 逆地理，注入 system，供位置相关问答使用） */
@@ -196,6 +203,11 @@ export type AgentPromptMemoryContext = {
    * 过往日期已固化进长期记忆图，不再走本条文件检索（跨天由图谱/KV 召回兜底）。
    */
   journalRecall?: string;
+  /**
+   * 长尾事实召回块（structured_facts category=tail:*）：用户过去表达过的偏好/
+   * 习惯，仅当与当前话题强相关时带出。只作背景，不是本轮指令。
+   */
+  tailFactsRecall?: string;
   /**
    * 事件回忆块（L0 memory_events）：用户出现时间回溯意图且命中真实事件时
    * 注入的动态块，带发生时间与龄期，≤6 行。只作往事回答依据，不主动翻旧账。
@@ -316,8 +328,6 @@ export type AgentStreamOptions = {
   masterSubAgentDelegate?: boolean;
   /** 已废弃：沙箱模式已移除，Agent 始终以 full 运行；字段保留仅为协议兼容 */
   agentAccessMode?: "sandbox" | "full";
-  /** 电脑桥接在线时向 LLM 暴露 desktop.visual.*（手机↔PC，可不依赖完全访问） */
-  desktopBridgeOnline?: boolean;
   /** 手机桥接在线时向 LLM 暴露 phone.*（远程控制真实手机，可不依赖完全访问） */
   phoneBridgeOnline?: boolean;
   toolExposureProfile?: ToolExposureProfile;

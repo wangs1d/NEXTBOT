@@ -21,7 +21,7 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
  *   - finance.update_bill         更新账单信息
  *   - finance.pay_bill            账单缴费登记（入账 + 预算联动）
  *
- * 走 deferred（BM25 索引），不进 CORE_TOOL_LIBRARY：
+ * 走 deferred（延迟目录）：
  *   1. 用户不是每轮都会查账本 / 预算
  *   2. 关键词触发（"账单" / "预算" / "对账" / "月度报告" / "订阅" / "退订" / "缴费"）时由 tool_discover 拉出
  *

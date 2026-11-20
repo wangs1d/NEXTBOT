@@ -1,6 +1,6 @@
 // Agent Brain Center —— 觉察皮层（AwarenessCortex）
 //
-// 职责：基于 LifeSignalHub / DesktopPresence / MoodInference / AnticipationEngine
+// 职责：基于 LifeSignalHub / MoodInference / AnticipationEngine
 // 子系统提供的信号，按纯规则（无 LLM）推断用户当前的活动状态（UserActivityState），
 // 并对外提供 observe / recentActivity / onActivityChange 等查询与订阅入口。
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -24,17 +24,6 @@ type LifeSignalSubscriber = (signal: LifeSignal) => Promise<void> | void;
 interface LifeSignalHubLike {
   subscribe(subscriber: LifeSignalSubscriber): () => void;
   recentSignals(actorId: string, limit?: number): LifeSignal[];
-}
-
-/**
- * DesktopPresenceSignalService 的最小化结构接口。
- *
- * 现阶段该服务仅通过 LifeSignalHub 发布 desktop_presence_* 信号，
- * AwarenessCortex 直接从 hub 中读取这些信号即可，无需直接调用其方法。
- * 保留此接口用于 registerDesktopPresence 的类型约束与未来扩展。
- */
-interface DesktopPresenceLike {
-  // 占位：当前无直接调用方法
 }
 
 /** MoodInferenceService 的最小化结构接口 */
@@ -166,7 +155,6 @@ type ActivityChangeListener = (state: UserActivityState) => void | Promise<void>
  */
 export class AwarenessCortex {
   private hub: LifeSignalHubLike | null = null;
-  private desktop: DesktopPresenceLike | null = null;
   private mood: MoodInferenceLike | null = null;
   private anticipation: AnticipationLike | null = null;
   private scheduleTask: ScheduleTaskLike | null = null;
@@ -328,11 +316,6 @@ export class AwarenessCortex {
   registerLifeSignalHub(hub: LifeSignalHubLike): void {
     this.hub = hub;
     console.log("[AwarenessCortex] 已注册 LifeSignalHub");
-  }
-
-  registerDesktopPresence(svc: DesktopPresenceLike): void {
-    this.desktop = svc;
-    console.log("[AwarenessCortex] 已注册 DesktopPresenceSignalService");
   }
 
   registerMoodInference(svc: MoodInferenceLike): void {

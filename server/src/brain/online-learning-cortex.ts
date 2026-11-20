@@ -322,7 +322,6 @@ export class OnlineLearningCortex {
     // 6. 深度优化：追踪偏好工具领域
     const domainFromRoute: Record<string, string> = {
       search: "search",
-      desktop: "desktop",
       compute: "compute",
       browser: "browser",
     };

@@ -11,7 +11,7 @@ import { dropExpiredCommitmentLines } from "../src/services/memory-record-utils.
 // 存储文件放进系统临时目录，避免测试数据散落到仓库（见项目记忆：测试文件统一管理）
 const storePath = join(mkdtempSync(join(tmpdir(), "memory-slots-")), "test-agent-memory-sync.json");
 
-test("appendMemorySummaryLine 只写 memory_summary，不再镜像进四个结构槽", async () => {
+test("appendMemorySummaryLine 已下线：任何 KV 槽位都不再落行", async () => {
   const service = new AgentMemorySyncService(storePath);
 
   service.appendMemorySummaryLine("actor-1", "user prefers concise answers");
@@ -28,15 +28,9 @@ test("appendMemorySummaryLine 只写 memory_summary，不再镜像进四个结�
     "session_recap",
   ]);
 
-  // 2026-11-12 单一写者：长期记忆只由 memory_summary 承载。
-  // 偏好/事实/承诺/未闭环各有权威源（structured_facts / commitments），
-  // 由关键词正则镜像写一份，正是「比价这类任务内容进画像槽后每轮常驻」的根因。
-  assert.match(String(entries.memory_summary ?? ""), /concise answers/);
-  for (const key of ["memory_preferences", "memory_commitments", "memory_facts"]) {
+  for (const key of Object.keys(entries)) {
     assert.equal(entries[key], undefined, `${key} 不应再有写入者`);
   }
-  // 长期记忆行不镜像进 session_recap（短期槽唯一写入者是 appendSessionRecapLine）
-  assert.doesNotMatch(String(entries.session_recap ?? ""), /concise answers|continue following up|Flutter/);
 });
 
 test("sliceMemoryEntriesToPromptContext：档案槽位不再进 prompt，其余槽位照常", () => {
@@ -60,53 +54,12 @@ test("sliceMemoryEntriesToPromptContext：档案槽位不再进 prompt，其余�
   // 其余槽位不受影响
   assert.match(prompt, /待兑现承诺/);
   assert.match(prompt, /未完成事项/);
-  assert.match(prompt, /会话回顾/);
+  // 账号级 session_recap 已下线：会话连续性由会话级 STM 承担，不再拼进 prompt
+  assert.doesNotMatch(prompt, /会话回顾/);
+  assert.doesNotMatch(prompt, /recently focused on fixing chat memory/);
 });
 
-test("同一 subject 的新旧陈述在 summary 内不产生重复行（替换语义由权威库承担）", async () => {
-  const service = new AgentMemorySyncService(storePath);
 
-  service.appendMemorySummaryLine("actor-3", "user prefers concise answers");
-  service.appendMemorySummaryLine("actor-3", "user dislikes concise answers");
-
-  await new Promise((resolve) => setTimeout(resolve, 20));
-
-  const summary = String(service.getSnapshot("actor-3", ["memory_summary"]).entries.memory_summary ?? "");
-  // 两条都保留在长期记忆里（它们是不同时间的真实陈述）；
-  // "偏好以最新为准"由结构化事实库（structured_facts 字段级 supersede）承担，
-  // 不再由 KV 槽位做词面替换——那正是跨槽漂移的来源。
-  assert.match(summary, /prefers concise answers/);
-  assert.match(summary, /dislikes concise answers/);
-});
-
-test("档案字段不再写入 memory_facts 槽（唯一权威是 structured_facts）", async () => {
-  const service = new AgentMemorySyncService(storePath);
-
-  service.appendMemorySummaryLine("actor-4", "I live in Shanghai");
-  service.appendMemorySummaryLine("actor-4", "I live in Beijing");
-
-  await new Promise((resolve) => setTimeout(resolve, 20));
-
-  const { entries } = service.getSnapshot("actor-4", ["memory_summary", "memory_facts"]);
-  assert.equal(entries.memory_facts, undefined);
-  assert.match(String(entries.memory_summary ?? ""), /Beijing/);
-});
-
-test("current mission can be updated and cleared", async () => {
-  const service = new AgentMemorySyncService(storePath);
-
-  service.setCurrentMission("actor-5", "continue fixing memory continuity across long chats");
-  await new Promise((resolve) => setTimeout(resolve, 20));
-
-  let snapshot = service.getSnapshot("actor-5", ["memory_current_mission"]);
-  assert.match(String(snapshot.entries.memory_current_mission ?? ""), /memory continuity across long chats/);
-
-  service.setCurrentMission("actor-5", null);
-  await new Promise((resolve) => setTimeout(resolve, 20));
-
-  snapshot = service.getSnapshot("actor-5", ["memory_current_mission"]);
-  assert.equal(String(snapshot.entries.memory_current_mission ?? ""), "");
-});
 
 test("dropExpiredCommitmentLines drops only stale-dated lines, keeps undated ones", () => {
   const now = Date.parse("2026-09-24T12:00:00Z");

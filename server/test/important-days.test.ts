@@ -19,7 +19,7 @@ import {
 
 const SESSION = "actor-important-days-test";
 
-/** KV 存储 mock：important_dates 记录（结构与 care.set_important_date 写入一致） */
+/** KV 存储 mock：important_dates 记录 */
 function makeStore(records: unknown[]) {
   return {
     getSnapshot(sessionId: string, keys?: string[]) {

@@ -60,7 +60,7 @@ function makeListener(
 
 // ── 1. 消费事件自动入账 ───────────────────────────────
 
-test("消费管家：wallet.purchase 成功事件 → 自动入账（分类映射）", async () => {
+test("消费管家：restaurant.book 成功事件 → 自动入账（分类映射）", async () => {
   const { dir, finance } = await makeFixture();
   try {
     const { listener } = makeListener(finance);
@@ -70,15 +70,15 @@ test("消费管家：wallet.purchase 成功事件 → 自动入账（分类映�
     bus.emit(
       "tool.executed",
       {
-        toolName: "wallet.purchase",
-        args: { category: "food_delivery", amount: 35.5, description: "中午的外卖" },
+        toolName: "restaurant.book",
+        args: { optionId: "opt-lunch", amountCny: 35.5 },
         result: {
           ok: true,
-          amount: 35.5,
-          category: "food_delivery",
-          description: "中午的外卖",
-          merchant: "美团",
-          transactionId: "purchase_123",
+          simulated: false,
+          amountCny: 35.5,
+          summary: "中午的外卖",
+          provider: "美团",
+          orderId: "purchase_123",
         },
         actorId: ACTOR,
         timestamp: new Date().toISOString(),
@@ -92,7 +92,7 @@ test("消费管家：wallet.purchase 成功事件 → 自动入账（分类映�
     assert.equal(txs[0].amount, 35.5);
     assert.equal(txs[0].type, "expense");
     assert.equal(txs[0].category, "餐饮");
-    assert.equal(txs[0].source, "wallet_tool");
+    assert.equal(txs[0].source, "booking_tool");
     assert.equal(txs[0].merchant, "美团");
     listener.stop();
   } finally {
@@ -100,7 +100,7 @@ test("消费管家：wallet.purchase 成功事件 → 自动入账（分类映�
   }
 });
 
-test("消费管家：payment/meituan/recharge 事件的分类与类型映射", async () => {
+test("消费管家：payment/ride 事件的分类与类型映射", async () => {
   const { dir, finance } = await makeFixture();
   try {
     const { listener } = makeListener(finance);
@@ -115,33 +115,23 @@ test("消费管家：payment/meituan/recharge 事件的分类与类型映射", a
       actorId: ACTOR,
       timestamp: new Date().toISOString(),
     });
-    // 美团跑腿 → 交通支出（totalFee）
+    // 网约车 → 交通支出（amountCny）
     bus.emit("tool.executed", {
-      toolName: "meituan.create_order",
-      args: { itemDescription: "帮我买咖啡" },
-      result: { totalFee: 12.8, deliveryFee: 12.8, itemDescription: "帮我买咖啡", orderId: "mt-1" },
-      actorId: ACTOR,
-      timestamp: new Date().toISOString(),
-    });
-    // 钱包充值 → 收入
-    bus.emit("tool.executed", {
-      toolName: "wallet.recharge",
-      args: { amount: 200 },
-      result: { amount: 200 },
+      toolName: "ride_hailing.book",
+      args: { dropoff: "公司" },
+      result: { amountCny: 12.8, summary: "快车行程", orderId: "ride-1" },
       actorId: ACTOR,
       timestamp: new Date().toISOString(),
     });
     await flush();
 
     const txs = finance.getTransactions(ACTOR);
-    assert.equal(txs.length, 3);
+    assert.equal(txs.length, 2);
     const bySource = new Map(txs.map((t) => [t.source!, t]));
     assert.equal(bySource.get("payment_tool")!.category, "购物");
     assert.equal(bySource.get("payment_tool")!.amount, 99);
-    assert.equal(bySource.get("meituan_tool")!.category, "交通");
-    assert.equal(bySource.get("meituan_tool")!.amount, 12.8);
-    assert.equal(bySource.get("wallet_tool")!.type, "income");
-    assert.equal(bySource.get("wallet_tool")!.amount, 200);
+    assert.equal(bySource.get("booking_tool")!.category, "交通");
+    assert.equal(bySource.get("booking_tool")!.amount, 12.8);
     listener.stop();
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -198,9 +188,9 @@ test("消费管家：入账触发预算超支单次提醒（同月同分类不�
 
     // 一笔 ¥120 外卖 → 餐饮超支 → 提醒一次
     bus.emit("tool.executed", {
-      toolName: "wallet.purchase",
-      args: { category: "food_delivery", amount: 120, description: "聚餐" },
-      result: { amount: 120, category: "food_delivery", description: "聚餐", transactionId: "p1" },
+      toolName: "restaurant.book",
+      args: { optionId: "opt-dinner", amountCny: 120 },
+      result: { simulated: false, amountCny: 120, summary: "聚餐", provider: "美团", orderId: "p1" },
       actorId: ACTOR,
       timestamp: new Date().toISOString(),
     });
@@ -309,11 +299,11 @@ test("消费管家：每日扫描在每月 1 日触发上月月报 + 预算检�
 
 test("消费管家：isConsumptionTool / extractLedgerEntry / summarizeToolPayload", () => {
   assert.equal(isConsumptionTool("payment.create_order"), true);
-  assert.equal(isConsumptionTool("wallet.purchase"), true);
-  assert.equal(isConsumptionTool("meituan.create_order"), true);
+  assert.equal(isConsumptionTool("restaurant.book"), true);
+  assert.equal(isConsumptionTool("ride_hailing.book"), true);
   assert.equal(isConsumptionTool("shopping.order.place"), true);
   assert.equal(isConsumptionTool("wallet.get_balance"), false);
-  assert.equal(isConsumptionTool("meituan.query_order"), false);
+  assert.equal(isConsumptionTool("ride_hailing.status"), false);
   assert.equal(isConsumptionTool("weather.get_local"), false);
 
   // 两阶段下单无金额（阶段一）→ 不入账

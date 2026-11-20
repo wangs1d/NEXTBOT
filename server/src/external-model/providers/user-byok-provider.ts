@@ -90,7 +90,6 @@ export class UserByokProvider extends AbstractChatProvider {
     const finalizeOptions = {
       tools: Boolean(ctx.tools && !ctx.overrideSys),
       agentAccessMode: ctx.streamOpts?.agentAccessMode,
-      desktopBridgeOnline: ctx.streamOpts?.desktopBridgeOnline,
       phoneBridgeOnline: ctx.streamOpts?.phoneBridgeOnline,
       ...(ctx.suppressSuffixes
         ? {

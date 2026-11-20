@@ -42,8 +42,10 @@ const AGENT_UTTERANCE_MARKER_RE = /^\[\s*Agent\s*承诺\s*\/\s*结论\s*\]/;
 /** 逐字对话行：`用户:` / `Agent:` / `助手:` / `fact:`（生产数据里确实出现过 fact 角色）。 */
 const DIALOG_LINE_RE = /^(?:用户|user|助手|assistant|Agent|AI|fact|U|A)\s*[:：]/i;
 
-/** 出口协议 / 视图提示残留：属于内部渲染指令，不是记忆内容。 */
-const RESIDUE_RE = /\[RENDER_HINT|\[NEXT_UP|\[FU\||（本块为历史摘要/;
+/** 出口协议 / 视图提示残留：属于内部渲染指令，不是记忆内容。
+ *  2026-11-20 增补「委派子 Agent 处理」：委派管线的 MemoryItem content 前缀，
+ *  曾被逐字存进 session_epitome（生产实证：「委派子 Agent 处理：还有我的生日是6月18」）。 */
+const RESIDUE_RE = /\[RENDER_HINT|\[NEXT_UP|\[FU\||（本块为历史摘要|委派子\s*Agent\s*处理/;
 
 /** 剥掉行首的标签栈（时间 → 话题 → 标记），只用于判定，不改变保留行的原文。 */
 function probeOf(line: string): string {

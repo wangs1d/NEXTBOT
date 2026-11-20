@@ -111,8 +111,7 @@ export type ShellRunResult = CodeRunResult;
  * 设计原则：
  *   - 只放只读 / 文件操作 / 包管理 / 通用工具类命令，不放任何破坏性命令
  *   - 破坏性命令（rm/del/format/mkfs/dd/shutdown 等）一律拒绝
- *   - 与 `desktop.run_shell` 不同，本沙箱在隔离工作目录内执行，
- *     但仍保留白名单以防误调系统级命令
+ *   - 本沙箱在隔离工作目录内执行，但仍保留白名单以防误调系统级命令
  */
 const SHELL_COMMAND_ALLOWLIST: ReadonlySet<string> = new Set([
   // 文件/目录操作（只读 + 轻量写）

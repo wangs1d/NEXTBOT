@@ -166,7 +166,7 @@ export class WorldBoard {
         }
         break;
       case "mail": {
-        // 2026-10-11：邮件收编进板（原来落 background 尾迹 → unread_burst 永不触发）。
+        // 2026-10-11：邮件收编进板（邮件信号与消息同窗口聚合）。
         // 营销邮件在 MailWatchService 侧已过滤，能到这里的都是真人来信。
         const sender = String(payload.from ?? payload.sender ?? "未知发件人");
         this.append(actorId, "current", "unreadRecent", {
@@ -180,7 +180,7 @@ export class WorldBoard {
       }
       case "finance":
         // 2026-10-11：账本条目入板（原来落 background 尾迹 → 无任何消费方）。
-        // 驱动 spend_alert（大额支出）等财务类规则；金额/商户是可 JSON 化纯数据。
+        // 财务类主动规则的消费源；金额/商户是可 JSON 化纯数据。
         this.append(
           actorId,
           "current",

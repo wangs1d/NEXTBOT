@@ -15,6 +15,7 @@ import type {
   TonePolicyResult,
 } from "./types.js";
 import { TWO_PHASE_CONFIRM_TOOLS } from "../services/agent-task-safety.js";
+import { resolveEffectiveToolName } from "../external-model/composite-chat-tools.js";
 
 // ---- 子系统最小化接口（仅声明 LimbicCortex 实际用到的方法）------------
 
@@ -301,7 +302,9 @@ function convertSafetyResult(
       // 安全语义无损：这四个工具唯一的不可逆路径在 BookingService 内部，token
       // 缺失时它必然拒绝执行。自主任务通道不经过本转换，require_approval 照常
       // 挂起审批（agent-task-orchestrator 直接消费 AgentTaskSafety 结果）。
-      if (TWO_PHASE_CONFIRM_TOOLS.has(tool)) {
+      // 两阶段确认工具按复合 action 解析真实执行器名（ride_hailing+book 即
+      // ride_hailing.book），否则复合入口的下单会被这句「需人工审批」拦成死胡同。
+      if (TWO_PHASE_CONFIRM_TOOLS.has(resolveEffectiveToolName(tool, args))) {
         return {
           allowed: true,
           severity: "allowed",

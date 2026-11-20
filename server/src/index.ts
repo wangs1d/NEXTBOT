@@ -29,7 +29,6 @@ import { createAppServices } from "./bootstrap/create-app-services.js";
 import { beginBoot, markBootDone } from "./bootstrap/boot-readiness.js";
 import { initializeRuntimeState } from "./bootstrap/initialize-runtime-state.js";
 import { logTravelSourceHealth } from "./skills/travel-planning/source-health-check.js";
-import { startDesktopBridgeAutoClient } from "./services/desktop-bridge-auto-starter.js";
 import { startOpenClawModelSyncWatcher } from "./services/openclaw-config-sync.js";
 import {
   isWechatClawBridgeEnabled,
@@ -193,10 +192,6 @@ initClusterRouter();
 // 并发闸心跳：AIMD 判决与资源池机器上限取交集下发，同时清扫超时空闲的常驻缓存
 startAdaptiveConcurrency();
 
-const stopDesktopBridge = startDesktopBridgeAutoClient({
-  port: runtime.port,
-  log: (line) => services.app.log.info(line),
-});
 const stopOpenClawModelSync = isWechatClawBridgeEnabled(process.env)
   ? (() => {
       const bridge = readWechatClawBridgeConfig(process.env);
@@ -234,7 +229,6 @@ const performShutdown = (): void => {
   );
   services.webhookService.stop();
   stopClientUpdatePusher();
-  stopDesktopBridge();
   stopOpenClawModelSync();
   // 重启预告（2026-11-18 手机端「老是重连」治理）：先广播一帧，再用
   // 1001(Going Away) + reason=server_restart 关闭全部 WS。客户端据此走 ~1s

@@ -1,7 +1,7 @@
 /**
  * 位置协调器：服务端「按需」向客户端请求实时位置。
  *
- * 与 DesktopBridgeCoordinator 的 invoke/pending/complete 模式一致：
+ * 采用 invoke/pending/complete 模式：
  *  - Agent 需要位置时（如 weather.get_local 工具执行）调用 `requestLocation`，
  *    服务端通过 WS 下发 `agent.location_request`（携带 jobId），等待客户端回包。
  *  - 客户端收到后拉取 GPS 并回传 `client.location_report`，

@@ -41,7 +41,6 @@ import {
 import { AIP_CHAT_TOOLS } from "../aip/aip-chat-completion-tools.js";
 import { OBS_RECALL_CHAT_TOOL } from "./builtin-chat-tools.js";
 import { normalizeTraditionalToSimplified } from "../utils/simplified-chinese.js";
-import { getDesktopVisualChatTools } from "../tools/desktop-visual-chat-tools.js";
 import { getPhoneBridgeChatTools } from "../tools/phone-bridge-chat-tools.js";
 import { BROWSER_SESSION_LIST_CHAT_TOOL } from "../tools/browser-session-chat-tools.js";
 import {
@@ -56,7 +55,6 @@ import {
   PROACTIVITY_CONFIRM_CHAT_TOOLS,
   PROACTIVITY_FEEDBACK_CHAT_TOOLS,
 } from "../tools/proactivity-feedback-tools.js";
-import { CARE_REMINDER_CHAT_TOOLS } from "../tools/care-reminder-tools.js";
 import {
   AGENT_UPDATE_HOMEPAGE_CHAT_TOOL,
   AGENT_UPDATE_IDENTITY_CHAT_TOOL,
@@ -123,7 +121,6 @@ import {
   type ResidentToolInfo,
 } from "../gateway/index.js";
 import {
-  getCapabilityModuleCategoryMappings,
   getCapabilityModuleChatTools,
   type CapabilityModuleDeps,
 } from "../tools/capability-modules/index.js";
@@ -222,7 +219,6 @@ const TOOL_RESULT_PRESET_MAX_CHARS: Record<string, number> = {
   "deep_search": 6000,
   // hot_rankings 榜单项字段少，给足即可
   "hot_rankings": 1400,
-  "info.search": 5000,
   "info.inspect_webpage": 1000,
   "info.navigate_site": 1200,
   "browser.session.list": 600,
@@ -233,9 +229,6 @@ const TOOL_RESULT_PRESET_MAX_CHARS: Record<string, number> = {
   "agent.query_capabilities": 900,
   "search": 5000,
   "describe": 800,
-  "tool_search": 800,
-  // 2026-10-01 瘦身后实测 p50 1509 字符（top-3 瘦身 schema 全保）。旧 800 预算
-  // 配 4k 胖载荷=常态截断（LLM 从未见过完整结果）；现预算覆盖瘦身后载荷 → 零截断。
   "tool_discover": 1600,
   "shopping.order.search": 1500,
   "shopping.order.place": 1000,
@@ -284,8 +277,6 @@ const TOOL_RESULT_STRIP_KEYS: Record<string, string[]> = {
  */
 const META_TOOL_NAMES = new Set<string>([
   "tool_discover",
-  "tool_search",
-  "tool_describe",
   "agent.query_capabilities",
   "aip.list_my_state",
 ]);
@@ -504,7 +495,6 @@ function resolveBaseToolExecutionTimeoutMs(registryToolName: string): number {
     "fetch_web": Number.parseInt(process.env.TOOL_TIMEOUT_FETCH_MS ?? "15000", 10),
     "info.inspect_webpage": Number.parseInt(process.env.TOOL_TIMEOUT_FETCH_MS ?? "15000", 10),
     "info.navigate_site": Number.parseInt(process.env.TOOL_TIMEOUT_NAVIGATE_MS ?? "20000", 10),
-    "info.search": Number.parseInt(process.env.TOOL_TIMEOUT_SEARCH_MS ?? "6500", 10),
     "voice.speak": Number.parseInt(process.env.TOOL_TIMEOUT_VOICE_MS ?? "20000", 10),
     "voice.send_message": Number.parseInt(process.env.TOOL_TIMEOUT_VOICE_MS ?? "20000", 10),
     "image.generate": Number.parseInt(process.env.TOOL_TIMEOUT_IMAGE_GEN_MS ?? "60000", 10),
@@ -540,7 +530,7 @@ function toResidentToolIndex(
 }
 
 /**
- * 桥接调用（tool_discover / tool_search / tool_describe / tool_call 解析）超时上限。
+ * 桥接调用（tool_discover）超时上限。
  * 桥接只做检索与参数解析（真实工具执行另有 TOOL_TIMEOUT 竞速），但底层走
  * 桥接为纯进程内检索（毫秒级），此超时仅为极端情况下的兜底保险。
  * 默认 70s，env TOOL_BRIDGE_TIMEOUT_MS 可调。
@@ -598,7 +588,7 @@ export function isToolExecutionTimeoutError(err: unknown): err is ToolExecutionT
 /**
  * 超时残留执行守卫（阶段0-1 修复）。
  * 超时 race 返回后底层工具仍在跑（handler 无 AbortSignal 可取消），此时并发限制器
- * 的信号量已释放——desktop./browser./phone. 等单飞域若立刻放行下一个调用，会与
+ * 的信号量已释放——browser./phone. 等单飞域若立刻放行下一个调用，会与
  * 残留执行并发，破坏互斥。守卫让后续同工具调用先等待残留落定（带上限，防真挂死
  * 永久阻塞）。key = 注册表工具名。
  */
@@ -719,10 +709,7 @@ function buildArgsMalformedResult(
  * 即使看到 ok:false 的 tool result 也对用户宣称"已打开"，造成"假成功"。
  * 这里在 tool result content 后追加一条 system 级强约束，让 LLM 必须如实承认失败。
  *
- * P2 升级（2026-07-14）：
- * - 从硬编码 desktop.open 单例，改为调 tool-metadata.buildRecoveryHint，
- *   覆盖所有有 alternatives 的工具（desktop/web/shopping 等）。
- * - desktop.open 保留原有的兜底路径建议（跨盘符扫描/截图确认）。
+ * 兜底提示由 tool-metadata.buildRecoveryHint 统一生成，覆盖所有有 alternatives 的工具。
  *
  * 设计原则：
  * - 仅对"用户易感知成败"或"有确定性替代"的工具生效
@@ -765,15 +752,6 @@ function buildToolFailureReminder(toolName: string, content: string): string {
   // 通用恢复提示（覆盖所有有 alternatives / requireHonestFailure 的工具）
   const genericHint = buildRecoveryHint(toolName, errText);
   if (genericHint) {
-    // desktop.open 追加原有的具体兜底路径建议
-    if (toolName === "desktop.open") {
-      return (
-        codeTag +
-        genericHint +
-        `或改用 desktop.open 重试(自动跨盘符扫描)、` +
-        `desktop.visual.screenshot 截图确认当前屏幕状态后重试。`
-      );
-    }
     return codeTag + genericHint;
   }
 
@@ -1116,7 +1094,6 @@ export function setMcpChatTools(tools: ChatCompletionTool[]): void {
  *
  * 注入后：
  *   - {@link getBuiltinAgentChatTools} 会把所有能力模块的 ChatCompletionTool 合并进总列表
- *   - {@link selectRelevantTools} 会把能力模块的 category mappings 合并到关键词分类
  *
  * 与 {@link setMcpChatTools} 类似，调用后清缓存重建。
  */
@@ -1184,7 +1161,6 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
       ...AGENT_UPDATE_IDENTITY_CHAT_TOOL,
       ...AGENT_UPDATE_HOMEPAGE_CHAT_TOOL,
       ...PROACTIVITY_CONFIRM_CHAT_TOOLS,
-      ...CARE_REMINDER_CHAT_TOOLS,
       ...WATCH_TRACK_CHAT_TOOLS,
       ...PROFILE_QUERY_CHAT_TOOLS,
       ...GEOFENCE_CHAT_TOOLS,
@@ -1194,7 +1170,6 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
       ...AGENT_CAPABILITY_QUERY_CHAT_TOOLS,
       ...SMART_HOME_CHAT_TOOLS,
       ...DEVICE_CHAT_TOOLS,
-      ...getDesktopVisualChatTools(),
       ...getPhoneBridgeChatTools(),
       BROWSER_SESSION_LIST_CHAT_TOOL,
       ...capabilityModuleTools,
@@ -1226,461 +1201,6 @@ export function invalidateBuiltinToolsCache(): void {
  * 智能工具选择系统：基于用户输入上下文动态筛选相关工具，减少 Token 消耗和模型推理时间
  * 预期效果：减少 60-80% 的工具 Token，首字延迟降低 30-50%
  */
-
-type ToolCategory = 'web' | 'calendar' | 'wallet' | 'social' | 'phone' | 'clock' | 'life' | 'capability' | 'desktop' | 'programming' | 'world' | 'aip' | 'smart_home' | 'mcp' | 'image' | string;
-
-interface ToolCategoryMapping {
-  category: ToolCategory;
-  keywords: string[];
-  toolNames: string[];
-}
-
-const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
-  {
-    // 2026-08-29 C 端生活管家强化：补齐热搜/晨报口语关键词，并把 hot_rankings
-    // （实时热点榜单工具，注册于 web-tools.ts）纳入本分类工具清单——此前它不在
-    // 任何分类映射里，"热搜/吃瓜"命中 web 分类后 hot_rankings 也不会被召回。
-    category: 'web',
-    keywords: ['搜索', 'search', '网页', 'web', '网址', 'url', '链接', 'link', '查询', 'query', '新闻', 'news', '天气', 'weather', 'fetch', '浏览', 'browse', '导航', 'navigate', '图片', '图像', '照片', 'image', 'photo', '视频', 'video', '对比', '比较', '区别', '查查', '查一查', '搜一下', '八卦', '吃瓜', '爆料', '热搜', '热点', '热榜', '上热搜', '简报', '早报', '晨报', '早安', '今日要点', '近况', '怎么样了', '什么情况'],
-    toolNames: ['web_search', 'web_fetch']
-  },
-  {
-    // 记忆检索工具化（Letta/MemGPT agentic retrieval 模式）：
-    // 长期记忆召回不再只靠系统层注入，LLM 可在 PLAN 阶段自主决定调 brain.recall
-    // 按需检索（结果以 tool 消息进上下文，身份隔离天然防串台）。
-    // 用户提到记忆类措辞时命中，让 brain.recall / brain.remember 进入可见工具集。
-    category: 'memory',
-    keywords: ['记得', '回忆', '记忆', '忘了', '忘记', '上次聊', '上回聊', '之前说过', '之前提到', '提过', '聊过', 'remember', 'recall', 'memory'],
-    toolNames: ['brain.recall', 'brain.remember']
-  },
-  {
-    // 2026-08-29 C 端生活管家强化：补齐提醒类口语关键词（提醒我/别忘了/到点叫我/
-    // 定个闹钟），让对话面轻量档下 calendar.create 能被可靠召回。
-    category: 'calendar',
-    keywords: ['提醒', '提醒我', '别忘了', '到点叫我', '定个闹钟', 'reminder', '日程', 'schedule', '日历', 'calendar', '任务', 'task', '定时', 'timer', '闹钟', 'alarm', '计划', 'plan', '会议', 'meeting', '预约', 'appointment', '有空', '空闲', '改期', '冲突'],
-    toolNames: ['calendar']
-  },
-  {
-    // 2026-08-29 C 端生活管家强化：补齐支付/记账口语关键词（付钱/买单/代付/缴费/
-    // 记账/花了）。注意：钱包域工具有真实资金副作用，只做关键词映射召回，
-    // 不做强推（forced tool choice），最终是否调用仍由 LLM 在用户授权语境下决定。
-    category: 'wallet',
-    keywords: ['钱包', 'wallet', '余额', 'balance', '支付', 'pay', '转账', 'transfer', '充值', 'recharge', '付钱', '买单', '代付', '缴费', '记账', '花了', '消费', 'purchase', '交易', 'transaction', '账单', 'bill', '钱', 'money', '金额', 'amount'],
-    toolNames: [
-      'payment.pay',
-      'payment.pay_confirm',
-      'payment.pay_resume',
-      'payment.pay_status',
-      'payment.refund',
-      'payment.receipt',
-      'payment.authorization_status',
-      'payment.authorization_link',
-      'payment.revoke_authorization',
-      'payment.create_order',
-      'payment.query_order',
-      'alipay.check-wallet',
-      'alipay.apply-wallet',
-      'alipay.submit-payment',
-      'alipay.query-payment',
-      'alipay.pay-402',
-      'alipay.proxy-trade',
-      'alipay.merchant-list',
-      'alipay.merchant-order',
-    ]
-  },
-  {
-    // 账单/快递汇总查询（2026-11-13）：邮件与短信自动识别出的账单与快递条目，
-    // 汇总成台账后由模型按需查询——「这个月话费扣了多少」「我最近有快递吗，
-    // 取件码是多少」。关键词取用户实际会说的话，不取工具内部术语。
-    category: 'bill_parcel',
-    keywords: ['账单', 'bill', '话费', '流量费', '扣款', '还款', '消费记录', '快递', '包裹', '物流', '运单', '取件码', '取件', '驿站', '签收', '快递单号', 'parcel', 'tracking', 'pickup'],
-    toolNames: ['bill_parcel.list', 'bill_parcel.summary']
-  },
-  {
-    category: 'social',
-    keywords: ['好友', 'friend', '联系人', 'contact', '消息', 'message', '发送', 'send', '接收', 'receive', '请求', 'request', 'agent', 'peer', '中继', 'relay', '配对', 'pair', '未读', '微信', 'wechat', 'qq', '飞书', 'feishu', '短信', 'sms', '有人找', '回消息', '看消息', '查收'],
-    toolNames: ['world.link', 'wechat.login_qr', 'wechat.login_check']
-  },
-  {
-    category: 'phone',
-    keywords: ['电话', 'phone', '拨打', 'call', '虚拟号', 'virtual', '号码', 'number', '通话', 'ring', '来电', 'call'],
-    toolNames: ['phone']
-  },
-  {
-    category: 'voice',
-    keywords: ['语音', 'voice', '说话', 'speak', '播报', '朗读', '读出来', '说出来', '发语音', 'tts', '发声', '开口', '说一声', '念', '录音', 'audio'],
-    toolNames: ['voice']
-  },
-  {
-    category: 'clock',
-    keywords: ['时间', 'time', '日期', 'date', '时钟', 'clock', '现在', 'now', '当前', 'current', '几点', 'what time', '今天', 'today', '星期', 'week', '时区', 'timezone', 'timestamp', '时间戳'],
-    toolNames: ['clock.get_user_location']
-  },
-  {
-    category: 'life',
-    keywords: ['预算', 'budget', '计算', 'calculate', '购物', 'shopping', '建议', 'suggest', '比价', 'compare', '推荐', 'recommend', '生活', 'life', '助手', 'assistant'],
-    toolNames: ['budget.calculate', 'shopping.suggest']
-  },
-  {
-    // 兴趣话题追踪：用户表达长期关注（喜欢/粉丝/常看/关注）时命中 interest.manage
-    category: 'life',
-    keywords: ['喜欢', 'like', '粉丝', 'fan', '关注', 'follow', '常看', '常聊', '感兴趣', 'interest', '追', '热榜', '热搜', '热点', '动态', 'updates'],
-    toolNames: ['interest.manage']
-  },
-  {
-    // Task 20 统一频控框架：用户对主动提醒/推送表达负反馈（别再提醒/别推了/
-    // 太烦了）时命中 proactivity（action=feedback），LLM 调它写入持久抑制表。
-    category: 'life',
-    keywords: ['别再提醒', '别提醒', '不要提醒', '别再推', '别推', '别发了', '别再发', '别打扰', '不打扰', '太烦了', '烦死了', '安静点', '别唠叨', '别再给我', '退订', 'unsubscribe', 'suppress'],
-    toolNames: ['proactivity']
-  },
-  {
-    // Task 17 人情关系管家：提到生日/纪念日/重要日子时召回录入与查询工具
-    category: 'life',
-    keywords: ['生日', 'birthday', '纪念日', '周年', '重要日子', '重要日期', '谁要过生日', '记住这个日子'],
-    toolNames: ['care']
-  },
-  {
-    // 生活模型（人物关系）：用户提到家人/伴侣/朋友/同事/宠物等社会关系，
-    // 或问「我妹妹叫什么」「谁是我的上司」时召回 life.manage（记住/查询关系）。
-    category: 'life',
-    keywords: ['妹妹', '姐姐', '哥哥', '弟弟', '老婆', '妻子', '老公', '丈夫', '爸爸', '妈妈', '父母', '儿子', '女儿', '家人', '亲戚', '闺蜜', '发小', '伴侣', '我上司', '我老板', '同事', '同学', '宠物', '我家猫', '我家狗', '我养的', 'family', 'friend', 'colleague', 'relation'],
-    toolNames: ['life.manage']
-  },
-  {
-    // 统一盯梢：用户想长期盯着某件事被主动告知时召回 watch.track
-    category: 'life',
-    keywords: ['帮我盯着', '盯住', '盯着点', '帮我盯着点', '持续跟踪', '帮我蹲', '降价', '降到', '打折了叫我', '便宜了叫我', '有消息了叫我', '一有动静', 'watch'],
-    toolNames: ['watch.track']
-  },
-  {
-    // 方案 D 溯源作废：用户否认说过/要求删除记忆时召回 memory.invalidate
-    category: 'life',
-    keywords: ['我没说过', '我没有说过', '当我没说', '记错了', '那条记忆', '删掉记忆', '作废', '那条信息是错的', '我不是那个意思', 'invalidate'],
-    toolNames: ['memory.invalidate']
-  },
-  {
-    // Task 19 健康关怀：健康数据确定性统计问答（这周跑了几次步/步数/睡眠）
-    category: 'life',
-    keywords: ['跑步', '跑了几次', '跑了多少', '步数', '步行', '锻炼', '健身', '运动量', '运动了几天', '睡眠时长', '体重', '健康数据', 'health'],
-    toolNames: ['health.query']
-  },
-  {
-    // Task 18 管家任务闭环：任务状态查询（我还有什么待办/之前的任务跑完了吗）
-    category: 'life',
-    keywords: ['待办', '还有什么任务', '任务列表', '任务进度', '跑完了吗', '进行到哪', '任务状态'],
-    toolNames: ['agent']
-  },
-  {
-    category: 'capability',
-    keywords: ['能力', 'capability', '功能', 'function', '能做什么', 'can you do', '帮助', 'help', '技能', 'skill', '工具', 'tool', '介绍', 'introduce', '说明', 'explain'],
-    toolNames: ['agent']
-  },
-  {
-    // Body Center 器官层：让用户问"身体器官 / 大脑结构 / 我有哪些身体能力"时能命中 body.* 工具
-    category: 'body',
-    keywords: [
-      '身体器官', '器官', '大脑结构', '大脑', 'brain', '身体结构', '身体能力', '身体模块',
-      '我有哪些身体', '我有什么身体', '我的身体', '我在哪台设备', '我在哪里渲染',
-      '眼', '耳', '皮肤', '前庭', '稳态', '反射', 'eye', 'ear', 'skin',
-      '电量', 'battery', '算力配额', '负载', '疲劳度', 'fatigue',
-      'body.list_modules', 'body.where_am_i', 'body.state', 'body.calibrate',
-    ],
-    toolNames: ['body.list_modules', 'body.where_am_i', 'body.state', 'body.calibrate']
-  },
-  {
-    category: 'desktop',
-    keywords: [
-      '桌面', 'desktop', '电脑', 'computer', '屏幕', 'screen', '自动化', 'automation', '控制', 'control',
-      '操作', 'operate', '点击', 'click', '键盘', 'keyboard', '鼠标', 'mouse', '截屏', '截图', '操控',
-      '打开浏览器', '浏览器',
-      // 2026-07-13 新增：让 LLM 在「打开微信 / 启动应用 / 发消息 / 跑命令」等场景下能命中 desktop 工具
-      '打开', 'open', '启动', 'launch', '运行', 'run', '应用', 'app', '程序', 'program',
-      '微信', 'wechat', 'qq', '抖音', 'douyin', '钉钉', 'dingtalk', '飞书', 'feishu', 'lark',
-      '窗口', 'window', '按钮', 'button', 'uia', 'uia_query', '控件', 'control_',
-      'cmd', 'powershell', 'bash', 'shell', '终端', 'terminal', '命令行',
-    ],
-    toolNames: [
-      'desktop.visual.screenshot',
-      'desktop.visual.run_task',
-      'desktop.open',
-      'desktop.run_preset',
-      'desktop.run_shell',
-      'desktop.uia_query',
-    ],
-  },
-  {
-    category: 'programming',
-    keywords: ['编程', 'program', '代码', 'code', '开发', 'develop', '自我', 'self', '优化', 'optimize', '改进', 'improve', '修复', 'fix', 'bug', 'debug'],
-    toolNames: [] // self-programming tools are dynamic
-  },
-  {
-    category: 'world',
-    keywords: ['世界', 'world', '社交', 'social', '市场', 'market', '点数', 'points', '积分', 'score'],
-    toolNames: [] // agent world tools are dynamic
-  },
-  {
-    category: 'aip',
-    keywords: ['提案', 'proposal', '联盟', 'alliance', '冲突', 'conflict', '协议', 'protocol', 'aip', '投票', 'vote', '交易', 'trade'],
-    toolNames: [] // aip tools are dynamic
-  },
-  {
-    category: 'smart_home',
-    keywords: ['灯', '灯光', '开关', '空调', '温度', '窗帘', '传感器', '设备', '家电', '家居', '智能', 'home', 'light', 'climate', 'switch', 'cover', 'sensor', '加热', '取暖', '制冷', 'cool', 'heat', 'fan', '风扇', '湿度', 'humidity', 'brightness', '亮度', '场景', 'scene', '回家', '离家', '晚安'],
-    toolNames: ['smart_home']
-  },
-  {
-    category: 'mcp',
-    keywords: ['微博', 'weibo', '小红书', 'xiaohongshu', 'xhs', '微信', 'wechat', '抖音', 'douyin', 'mcp', '外部工具', 'external tool', '平台', 'platform', '文件', 'file', '读取', 'read', '写入', 'write', '搜索平台', 'platform search'],
-    toolNames: [] as string[], // 运行时由 buildToolCategoryMappings() 动态填充
-  },
-];
-
-/**
- * 构建带动态 MCP 工具名的分类映射。
- * 将已注册的 MCP 工具名注入 mcp 分类的 toolNames，
- * 使关键词筛选阶段能精确命中 MCP 工具（与内置工具行为一致）。
- */
-export function buildToolCategoryMappings(
-  extraMcpToolNames?: string[],
-): typeof TOOL_CATEGORY_MAPPINGS {
-  if (!extraMcpToolNames || extraMcpToolNames.length === 0) {
-    return TOOL_CATEGORY_MAPPINGS;
-  }
-  return TOOL_CATEGORY_MAPPINGS.map((mapping) =>
-    mapping.category === "mcp"
-      ? { ...mapping, toolNames: [...extraMcpToolNames] }
-      : mapping,
-  );
-}
-
-const ALWAYS_INCLUDED_TOOLS = [
-  'clock.get_current_time',
-  'agent',
-  'phone',
-  // ObservationPack 读回工具：压缩/折叠损失的原文按句柄分页读回（SoL-Pi 借鉴）。
-  // 常驻保证会话内 schema 集稳定（不随是否出现归档而抖动，保护前缀缓存）。
-  'obs_recall',
-  // 接驳下单两件套（travel-upgrade-plan P2，2026-10-18 live e2e 实证）：接驳提醒
-  // 确认后的后续轮（「好，就订经济型那单」「确认下单」）文本里没有打车/滴滴关键词，
-  // contextual 分类召回不命中 → quote/book 从可见 schema 被裁掉，模型只能幻觉提升
-  // 调用或走 tool_call 桥（桥上 ms=0 fail），两阶段确认永远走不通。时点性刚需
-  // （错过到站窗口就没意义）必须 1-2 轮内走通，与 weather.get_local 常驻核心同理。
-  'ride_hailing.quote',
-  'ride_hailing.book',
-  // 2026-09-05：escalate 哨兵工具已随车道内升级机制一起删除。
-  // search_images 不再常驻：
-  //   收敛误触发（2026-08-20，宁缺勿滥）——常驻会让模型在"对话前面搜过图、本轮并
-  //   未要图"时仍被勾着调用。改为回落到 contextual 筛选：只有当当前轮用户意图命
-  //   web/图片类别时才暴露。若模型未搜图但回复里回显了图片链接，服务端
-  //   promoteImageUrlsToMedia 会确定性兜底渲染，不会退回"图显示不出来"。
-];
-
-function extractKeywords(text: string): string[] {
-  const cleaned = text.toLowerCase()
-    .replace(/[^\u4e00-\u9fa5a-zA-Z0-9\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  
-  const words = cleaned.split(' ').filter(w => w.length > 0);
-  
-  const chineseSegments: string[] = [];
-  let currentChinese = '';
-  
-  for (const char of text) {
-    if (/[\u4e00-\u9fa5]/.test(char)) {
-      currentChinese += char;
-      if (currentChinese.length >= 2) {
-        chineseSegments.push(currentChinese);
-        currentChinese = currentChinese.slice(1);
-      }
-    } else {
-      currentChinese = '';
-    }
-  }
-  
-  return [...new Set([...words, ...chineseSegments])];
-}
-
-function detectRelevantCategoriesFrom(
-  userText: string,
-  mappings: typeof TOOL_CATEGORY_MAPPINGS = TOOL_CATEGORY_MAPPINGS,
-): Set<ToolCategory> {
-  const keywords = extractKeywords(userText);
-  const relevantCategories = new Set<ToolCategory>();
-  
-  for (const mapping of mappings) {
-    const matchCount = mapping.keywords.filter(kw => 
-      keywords.some(userKw => 
-        userKw.includes(kw) || kw.includes(userKw)
-      )
-    ).length;
-    
-    if (matchCount > 0) {
-      relevantCategories.add(mapping.category);
-    }
-  }
-  
-  return relevantCategories;
-}
-
-/**
- * 前台对话面的能力域工具确定性注入（2026-09-19 女性关怀 E2E 发现）。
- *
- * 前台 explicit 白名单只含 task.dispatch / search_web 等基础设施（见
- * agent-core.ts getForegroundChatToolWhitelist），其余工具全部依赖模型自觉
- * 调 tool_discover 召回——轻量模型（deepseek-flash 实测）不会主动调，导致
- * 「记录经期 / SOS / 借口来电」等关键词命中的能力域在话面上完全不可达。
- *
- * 本函数在用户文本命中能力域分类关键词时，返回该域的工具 schema 供前台
- * 白名单合并注入（与 selectRelevantTools 的 category 机制同源，只取能力域，
- * 不含基础/MCP 工具）。注入≠调用：模型仍自行决定是否调用。
- */
-export function selectForegroundCapabilityToolAdditions(
-  userText: string | undefined,
-): ChatCompletionTool[] {
-  if (!userText?.trim() || !_capabilityModuleDeps) return [];
-  const capabilityModuleMappings = getCapabilityModuleCategoryMappings(_capabilityModuleDeps).map(
-    (m) => ({
-      category: m.category as ToolCategory,
-      keywords: m.keywords,
-      toolNames: m.toolNames,
-    }),
-  );
-  if (capabilityModuleMappings.length === 0) return [];
-  const relevantCategories = detectRelevantCategoriesFrom(userText, capabilityModuleMappings);
-  if (relevantCategories.size === 0) return [];
-
-  const wanted = new Set<string>();
-  for (const mapping of capabilityModuleMappings) {
-    if (!relevantCategories.has(mapping.category)) continue;
-    mapping.toolNames.forEach((name) => wanted.add(name));
-  }
-  if (wanted.size === 0) return [];
-  // 单轮注入上限：防关键词宽泛的域（如 health）把 schema 预算打爆。
-  // 排序上安全/生理域置顶（E2E 实测：宽泛词如「通知/打车」会把 email_sms、
-  // shopping 等域的前景工具塞满上限，把 safety 挤出窗口——紧急域不可被挤掉）。
-  const MAX_INJECTED = 14;
-  const priority = (name: string): number => (name.startsWith("safety.") ? 0 : name.startsWith("period.") ? 1 : 2);
-  const injected = getCapabilityModuleChatTools(_capabilityModuleDeps)
-    .filter(
-      (t) =>
-        t.type === "function" &&
-        t.function?.name &&
-        wanted.has(t.function.name),
-    )
-    .sort((a, b) => {
-      const an = a.type === "function" ? a.function.name : "";
-      const bn = b.type === "function" ? b.function.name : "";
-      return priority(an) - priority(bn);
-    })
-    .slice(0, MAX_INJECTED);
-  if (injected.length > 0) {
-    console.log(
-      `[foreground-tools] 关键词命中，注入能力域工具: ${injected
-        .map((t) => (t.type === "function" ? t.function.name : ""))
-        .join(", ")}`,
-    );
-  }
-  return injected;
-}
-
-export function selectRelevantTools(
-  userText: string,
-  allTools: ChatCompletionTool[],
-  options?: {
-    minTools?: number;
-    maxTools?: number;
-    includeAlwaysIncluded?: boolean;
-    tokenBudget?: number;
-  }
-): ChatCompletionTool[] {  const minTools = options?.minTools ?? 5;
-  const maxTools = options?.maxTools ?? 20;
-  const includeAlwaysIncluded = options?.includeAlwaysIncluded ?? true;
-
-  // 从 allTools 中提取 MCP 工具名，动态注入分类映射
-  const mcpToolNames = allTools
-    .filter((t) => {
-      const fn = (t as { function?: { name?: string } }).function;
-      return Boolean(fn?.name?.startsWith("mcp."));
-    })
-    .map((t) => (t as { function: { name: string } }).function.name);
-  const baseCategoryMappings = buildToolCategoryMappings(mcpToolNames);
-
-  // 合并能力模块注入的分类映射（如 image / file_doc / email_sms 等）
-  const capabilityModuleMappings: ToolCategoryMapping[] = _capabilityModuleDeps
-    ? getCapabilityModuleCategoryMappings(_capabilityModuleDeps).map((m) => ({
-        category: m.category as ToolCategory,
-        keywords: m.keywords,
-        toolNames: m.toolNames,
-      }))
-    : [];
-  const categoryMappings = [...baseCategoryMappings, ...capabilityModuleMappings];
-
-  const relevantCategories = detectRelevantCategoriesFrom(userText, categoryMappings);
-
-  const selectedToolNames = new Set<string>();
-
-  if (includeAlwaysIncluded) {
-    ALWAYS_INCLUDED_TOOLS.forEach(name => selectedToolNames.add(name));
-  }
-
-  if (isExplicitPhoneCallRequest(userText)) {
-    selectedToolNames.add("phone");
-  }
-
-  for (const mapping of categoryMappings) {
-    if (relevantCategories.has(mapping.category)) {
-      mapping.toolNames.forEach(name => selectedToolNames.add(name));
-    }
-  }
-  
-  const filteredTools = allTools.filter((tool) => {
-    if (tool.type !== "function" || !("function" in tool) || !tool.function?.name) return false;
-    return selectedToolNames.has(tool.function.name);
-  });
-  
-  if (filteredTools.length < minTools) {
-    // 兜底补充工具：按"通用工具优先级"排序，而非按 allTools 原始拼接顺序
-    // 避免命中很少时（如"在吗"）塞进与意图无关的工具
-    const FALLBACK_PRIORITY = [
-      "clock.get_current_time",
-      "agent",
-      "web_search",
-      "calendar",
-      "phone",
-    ];
-    // 兜底填充黑名单：记忆工具（brain.recall/brain.remember）只能由 memory 分类
-    // 关键词召回（用户显式提及记忆时）。若经兜底混进低意图轮次（如"你确定？"），
-    // LLM 可能自发调用 brain.recall → 跨会话记忆灌回任务轮（串台回归向量）。
-    const PADDING_EXCLUDED_TOOLS = new Set(["brain.recall", "brain.remember"]);
-    const remainingTools = allTools.filter((tool) => {
-      if (tool.type !== "function" || !("function" in tool) || !tool.function?.name) return false;
-      if (PADDING_EXCLUDED_TOOLS.has(tool.function.name)) return false;
-      return !selectedToolNames.has(tool.function.name);
-    });
-    // 优先级排序：FALLBACK_PRIORITY 中的按顺序排前，其余保持原序
-    const priorityRank = new Map(FALLBACK_PRIORITY.map((name, idx) => [name, idx]));
-    const sortedRemaining = remainingTools.sort((a, b) => {
-      const aName = (a as { function?: { name?: string } }).function?.name ?? "";
-      const bName = (b as { function?: { name?: string } }).function?.name ?? "";
-      const aRank = priorityRank.has(aName) ? priorityRank.get(aName)! : FALLBACK_PRIORITY.length;
-      const bRank = priorityRank.has(bName) ? priorityRank.get(bName)! : FALLBACK_PRIORITY.length;
-      return aRank - bRank;
-    });
-    const needed = minTools - filteredTools.length;
-    filteredTools.push(...sortedRemaining.slice(0, needed));
-  }
-  
-  if (filteredTools.length > maxTools) {
-    // 超限截断：直接取前 maxTools 个（保持类别相关性排序），不再无条件补回
-    // search_images。此前这么做是为了"模型多轮里想看图就能用"，但它绕开了
-    // contextual 筛选，是"历史搜图上下文导致后续误触发"的来源之一（宁缺勿滥）。
-    return filteredTools.slice(0, maxTools);
-  }
-
-  return filteredTools;
-}
 
 function extractUserTextFromMessages(messages: ChatCompletionMessageParam[]): string | null {
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -1756,7 +1276,7 @@ function collectRecentDialogueLines(
 //     未用交互式工具"，先做一次「充分性探测」（不带 schema，首行输出
 //     NEED_MORE_TOOLS 可升级）；探测通过 → 直接 SUMMARIZE 收尾（2 次调用，
 //     token 最省路径）。
-//   - 存在失败 / 元工具（tool_search 桥接）/ 交互式工具（浏览器/桌面/代码链路）
+//   - 存在失败 / 元工具（tool_discover 桥接）/ 交互式工具（浏览器/代码链路）
 //     时，进入带 schema 的 replan 波次（2026-11-10 起**不限轮次**，与 Claude Code /
 //     Codex 一致：循环到模型不再发 tool_calls；仅测试与内部原子编排显式传 maxRounds
 //     收紧）：模型基于已有结果继续规划或直接给出最终回答（文本回复即流式返回）。
@@ -1843,7 +1363,6 @@ const SUMMARY_TRIM_REFERENCE_CUES =
  */
 const INTERACTIVE_TOOL_PREFIXES = [
   "agent_browser",
-  "desktop.",
   "code.",
   "phone",
   "browser.",
@@ -2285,7 +1804,7 @@ export async function streamCompletionWithTools(
   /**
    * 延迟目录「discover 加载 schema → 原生 tool_calls」的转正落地（2026-11-11 根修）。
    *
-   * tool_discover/tool_describe 的契约是「返回 schema，下一波模型直接按名调用」
+   * tool_discover 的契约是「返回 schema，下一波模型直接按名调用」
    * （见 tools/tool-search/handlers.ts 单一通道注释），但此前桥分支只把结果当文本
    * 回填，没把工具写进 stableApiTools/tools 数组。对严格校验 function name 的
    * provider，模型下一波根本无法发出这个调用，延迟目录实际不可用。
@@ -3402,9 +2921,7 @@ export async function streamCompletionWithTools(
         let targetArgs = item.parsedArgs;
 
         if (isToolSearchBridgeName(item.registryToolName)) {
-          // 桥检索执行去重（2026-10-01）：tool_discover/tool_search 同参数轮内只真查
-          // 一次（此前桥分支绕过 turnDedupeCache，同波并行重复 query 会重复执行检索）。
-          // tool_call 不在此去重——它只做参数解析，真正执行在下方与普通工具共享去重。
+          // 同参数轮内只真查一次：桥分支不经过下方普通工具去重。
           const bridgeKey = `bridge::${item.registryToolName}::${stableArgsKey(item.parsedArgs)}`;
           const inflightBridge = turnDedupeCache.get(bridgeKey) as
             | Promise<Awaited<ReturnType<typeof executeBridgeWithTimeout>>>
@@ -3481,27 +2998,6 @@ export async function streamCompletionWithTools(
               obsHint: "",
             } as const;
           }
-          if (bridge.kind === "call") {
-            if (!bridge.ok) {
-              const compacted = await compactToolOutputForLlm({
-                toolName: item.registryToolName,
-                ok: false,
-                result: bridge.result,
-                preferredMaxChars: budgetForTool(item.registryToolName),
-                stripKeys: getToolResultStripKeys(item.registryToolName),
-              });
-              return {
-                exec: { ok: false, result: bridge.result },
-                compacted,
-                injectFrames: undefined,
-                resultForWire: bridge.result,
-                wireToolName: item.registryToolName,
-                obsHint: "",
-              } as const;
-            }
-            targetToolName = bridge.registryToolName;
-            targetArgs = bridge.parsedArgs;
-          }
         }
 
         // 阶段0-3：arguments 非法且修复失败 → 不执行，回填自愈指引（模型看到后重发调用）
@@ -3524,7 +3020,7 @@ export async function streamCompletionWithTools(
         }
 
         // ObservationPack（SoL-Pi 借鉴）：obs_recall 在循环层直接服务——纯内存切片，
-        // 不进 ToolRegistry、不走超时竞速/确定性重试管线（与 tool_search 桥接同类）。
+        // 不进 ToolRegistry、不走超时竞速/确定性重试管线（与 tool_discover 桥接同类）。
         if (targetToolName === OBS_RECALL_TOOL_NAME) {
           // WP1.1：带 query 时先取语义向量（端点未配置/失败返回 null → 纯词面打分）
           let recallArgs: Record<string, unknown> = targetArgs;
@@ -3566,7 +3062,7 @@ export async function streamCompletionWithTools(
         // 阶段0-1 修复：超时 timer 落定即清（此前每次调用泄漏一个 timer，输掉 race 的
         // promise 在工具结束后 reject 变成 unhandled rejection）；超时后底层工具仍在跑，
         // 信号量已随 race 落定而释放 → 登记残留守卫，同工具的后续调用先等它落定再进
-        // 限制器，修复 desktop./browser./phone. 单飞域的互斥破坏。
+        // 限制器，修复 browser./phone. 单飞域的互斥破坏。
         // 2026-09-19 增强：超时落定同时 abort 单次调用信号并透传给 handler——
         // 子进程/HTTP 类工具可提前退出，不再"不等待但继续占着真实设备"。
         const attemptExec = async (): Promise<ToolExecOutcome> => {
@@ -3927,9 +3423,12 @@ export async function streamCompletionWithTools(
           ? buildToolSufficiencyHint(wireToolName, fullToolContent)
           : "";
       // 对失败的工具结果追加强约束 reminder，防止 LLM 忽略 error 字段后对用户撒谎。
-      // 关键场景：desktop.open 派发进程但窗口未起来 → ok=false → LLM 必须如实承认失败。
+      // 关键场景：工具调用返回 ok=false → LLM 必须如实承认失败。
       const failureReminder = !exec.ok
-        ? buildToolFailureReminder(wireToolName, fullToolContent)
+        ? buildToolFailureReminder(
+            resolveEffectiveToolName(wireToolName, item.parsedArgs),
+            fullToolContent,
+          )
         : "";
       // 照片轮回复方式提示：search_images 真出了图才挂；零结果改挂如实说明提示。
       const photoReplyHint =
@@ -3948,10 +3447,7 @@ export async function streamCompletionWithTools(
           : fencedToolContent,
       });
       if (injectFrames?.length) {
-        const frameHint =
-          wireToolName === "desktop.visual.screenshot"
-            ? "（以下为 desktop.visual.screenshot 截取的当前屏幕画面；请仔细观察画面内容,判断当前屏幕状态和可操作元素,然后决定下一步动作。）"
-            : `（以下为 ${wireToolName} 返回的图像；请根据画面内容继续完成任务。）`;
+        const frameHint = `（以下为 ${wireToolName} 返回的图像；请根据画面内容继续完成任务。）`;
         messages.push({
           role: "user",
           content: openAiUserContentFromTurn({
@@ -4041,7 +3537,7 @@ export async function streamCompletionWithTools(
       console.info(`[plan-execute] wave=${wave} 汇总探测报告结果不足，进入 replan 波次`);
       continue;
     }
-    // 存在失败 / 元工具（tool_search 桥接）/ 交互式工具 → replan（带 schema，
+    // 存在失败 / 元工具（tool_discover 桥接）/ 交互式工具 → replan（带 schema，
     // 模型基于已有结果继续规划或直接给出最终回答）
   }
 

@@ -6,7 +6,7 @@
  * - 进程内缓存（Map）+ 启动时 load，写入时 persist
  * - 关键词搜索复用已有 {@link Bm25LiteIndex}（中英混排友好）
  * - LLM 摘要/抽问懒生成，结果写回 Note.summary / Note.flashcards / Note.quiz
- * - 复习提醒不直接落 ScheduleTask，由工具层（notes.schedule_review）把任务交给 ScheduleTaskService
+ * - 复习提醒不直接落 ScheduleTask，由 HTTP 层把任务交给 ScheduleTaskService
  *
  * 设计上保持「服务不知道 LLM、不知道 schedule」—— 协调交给工具层
  * （避免循环依赖 + 便于单测）。

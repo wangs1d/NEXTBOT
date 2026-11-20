@@ -38,13 +38,49 @@ export type PulseAggregate = {
   screenFocus?: string | null;
   /** 最近对话摘录（用户刚说过的话；"已知的事不要重复"的事实依据）——世界板 session.recentTurns */
   recentTurns?: string[];
+  /**
+   * 距上次用户对话的分钟数（null = 从没聊过）。
+   * 关系时钟的输入：>6h 才允许「没事找话说」的社交型开口。
+   */
+  idleMinutes?: number | null;
+  /**
+   * 没聊完 / 没结果的事（在办目标、待收尾的事、上次说到一半的话题）。
+   * 「接一下上次的话」的锚点来源——没有锚点的主动消息就是 ping。
+   */
+  openLoops?: string[];
+  /**
+   * 你记得的他（2026-11-19）：称呼、城市、职业、稳定偏好这类画像事实，
+   * 3-5 行、每行 ≤40 字。
+   *
+   * 为什么必须有：C 类「单纯打个招呼」在没有画像素材时只能产出
+   * 「在吗 / 最近怎么样」这类空话——用户一眼就看出是模板。
+   * 闲聊的锚点不该只来自「刚才发生了什么」，还该来自「我知道你是谁」。
+   */
+  rapport?: string[];
+  /**
+   * 此刻在哪（位置语义，2026-11-19）：闲聊最自然的锚点不是天气，是「我看到你在哪」。
+   * kind: home / work / other；label 是常去地点的语义名（公司/健身房），
+   * city/poi 兜底；updatedMinutesAgo > 120 就视为旧数据，不进 prompt。
+   */
+  place?: {
+    kind: "home" | "work" | "other" | "unknown";
+    label?: string;
+    city?: string;
+    poi?: string;
+    updatedMinutesAgo?: number;
+  } | null;
+  /** 在动吗：still / walking / vehicle（和 place 组合出「你在外面？去哪」这类话头） */
+  activity?: "still" | "walking" | "vehicle" | "unknown" | null;
+  /** 最近情绪（只在非 neutral 时给）：情绪低时闲聊要收着，别自顾自唠 */
+  mood?: "positive" | "negative" | "stressed" | null;
 };
 
 export type AgentPulseDeps = {
   /** 本轮评审的用户（多租户：一次 tick 覆盖所有活跃 actor；空数组 = 不评审） */
   actors: () => string[];
-  /** 聚合当前材料；null/全空 = 无材料（不评审，重置指纹） */
-  aggregate: (actorId: string) => PulseAggregate | null;
+  /** 聚合当前材料；null/全空 = 无材料（不评审，重置指纹）。
+   *  可返回 Promise：画像读取是异步的（闲聊需要「他是谁」这类素材）。 */
+  aggregate: (actorId: string) => PulseAggregate | null | Promise<PulseAggregate | null>;
   /** agent 审阅（单次小 LLM 调用；未注入 = 功能关闭） */
   llmComplete?: (prompt: string) => Promise<string>;
   /**
@@ -83,6 +119,23 @@ const CHECK_INTERVAL_MS = 10 * 60_000;
 const FIRST_CHECK_DELAY_MS = 3 * 60_000;
 /** LLM 审阅超时（超时按本批材料已评审处理，不重试） */
 const REVIEW_TIMEOUT_MS = 30_000;
+
+// ── 关系时钟（2026-11-19：主动性重构 P0）────────────────────────────
+// 旧逻辑「材料全空 → 不评审」等于「没事发生就永不开口」，主动性退化成告警器。
+// 关系时钟给「无材料」一条独立的评审通道：隔得够久、时间合适，就给它一次想
+// 想要不要说句话的机会——说不说仍由 LLM 判断（NOP 合法）。
+/** 距上次对话超过这么久，才允许纯社交型开口 */
+export const SOCIAL_IDLE_MINUTES = 6 * 60;
+/** 两次「无材料社交评审」的最小间隔（既是 token 闸也是打扰节流，一天最多 4 次） */
+export const SOCIAL_REVIEW_GAP_MS = 4 * 60 * 60 * 1000;
+/** 允许社交开口的时段：本地时间 [start, end) */
+export const SOCIAL_ACTIVE_HOUR = { start: 8, end: 22 } as const;
+
+function isSocialHour(now: Date): boolean {
+  const h = now.getHours();
+  return h >= SOCIAL_ACTIVE_HOUR.start && h < SOCIAL_ACTIVE_HOUR.end;
+}
+
 function isPulseEnabled(): boolean {
   return process.env.AGENT_PULSE !== "0";
 }
@@ -90,6 +143,10 @@ function isPulseEnabled(): boolean {
 type PulseState = {
   /** 上次已评审的材料指纹（同材料不重复评审/不重发） */
   lastSignature?: Record<string, string>;
+  /** 上次「无材料社交评审」的时间戳（关系时钟节流） */
+  lastSocialReviewAt?: Record<string, number>;
+  /** 上次真正产出并提交了消息的时间戳（诊断 + 防连发） */
+  lastSpokeAt?: Record<string, number>;
 };
 
 /** 一次评审的完整留痕（测试端点 /api/test/trigger-agent-pulse 直接返回） */
@@ -127,10 +184,14 @@ export function pulseSignature(a: PulseAggregate): string {
     a.interests,
     a.goalLine ?? null,
     a.findings ?? [],
+    // 没聊完的事变了 = 值得带着新语境重审一次
+    a.openLoops ?? [],
     // 此刻状态也在指纹里：状态变了（如用户回到电脑前）值得带着新语境重审一次
     a.presence ?? null,
     a.screenFocus ?? null,
     a.recentTurns ?? [],
+    // 注：idleMinutes 刻意不进指纹——它每 10 分钟都在变，进来会让指纹闸失效、
+    // 每轮都烧一次 LLM。关系时钟单独管「无事也评审」的节奏。
   ]);
   let h = 0x811c9dc5;
   for (let i = 0; i < stable.length; i++) {
@@ -138,6 +199,38 @@ export function pulseSignature(a: PulseAggregate): string {
     h = Math.imul(h, 0x01000193);
   }
   return (h >>> 0).toString(36);
+}
+
+/**
+ * 从画像 markdown 里抽「你记得的他」——给闲聊用的锚点事实。
+ *
+ * 为什么不直接把整份画像塞进 prompt：画像默认上限 3500 字，而 pulse 是一次
+ * 小模型调用（省 token 是设计前提）。这里只取「key：value」型的短事实，
+ * 5 行以内、每行 40 字封顶，足够让 C 类招呼像「认识的人」而不是模板。
+ *
+ * 敏感字段一律不进 prompt：主动消息会出现在锁屏/通知栏，
+ * 记忆里的事不等于适合这个渠道说（主流陪伴产品的共同教训）。
+ */
+const RAPPORT_SENSITIVE = /密码|身份证|银行卡|卡号|手机号|电话号|住址|门牌|工资|薪|token|api[_-]?key|邮箱/i;
+
+export function extractRapport(profile: string | undefined, max = 4): string[] {
+  if (!profile) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of profile.split(/\r?\n/)) {
+    const m = /^\s*[-*]?\s*\*{0,2}([^：:*#]{1,16})\*{0,2}[：:]\s*(.+?)\s*$/.exec(raw);
+    if (!m) continue;
+    const key = m[1].trim();
+    const value = m[2].trim().replace(/\*\*/g, "");
+    if (!key || !value) continue;
+    if (RAPPORT_SENSITIVE.test(key) || RAPPORT_SENSITIVE.test(value)) continue;
+    const line = `${key}：${value.length > 40 ? `${value.slice(0, 39)}…` : value}`;
+    if (seen.has(line)) continue;
+    seen.add(line);
+    out.push(line);
+    if (out.length >= max) break;
+  }
+  return out;
 }
 
 /** 清洗 LLM 输出：剥包裹/折叠成一句；NOP 或空 → null（不开口） */
@@ -160,7 +253,11 @@ export function isPriceNews(text: string): boolean {
   return PRICE_NEWS_RE.test(text);
 }
 
-export function buildPulsePrompt(now: Date, a: PulseAggregate): string {
+export function buildPulsePrompt(
+  now: Date,
+  a: PulseAggregate,
+  opts?: { socialPath?: boolean },
+): string {
   const weekday = ["日", "一", "二", "三", "四", "五", "六"][now.getDay()];
   const hhmm = (d: Date) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
   const material: string[] = [`现在时间：${now.getFullYear()}-${now.getMonth() + 1}-${now.getDate()} ${hhmm(now)}（周${weekday}）`];
@@ -179,18 +276,69 @@ export function buildPulsePrompt(now: Date, a: PulseAggregate): string {
   if (a.interests.length) material.push(`【用户关注的话题】${a.interests.join("；")}`);
   if (a.goalLine) material.push(`【进行中的目标】${a.goalLine}`);
   if (a.findings?.length) material.push(`【还没跟用户说过的发现（邮件/日历/目标等渠道攒下的）】\n${a.findings.map((t) => `- ${t}`).join("\n")}`);
+  if (a.openLoops?.length) material.push(`【没聊完 / 没结果的事】\n${a.openLoops.map((t) => `- ${t}`).join("\n")}`);
+  if (a.rapport?.length) material.push(`【你记得的他（闲聊时从这里找话头）】\n${a.rapport.map((t) => `- ${t}`).join("\n")}`);
+  // 位置 + 活动：闲聊最自然的锚点——「我看到你在哪」比「今天降温了」具体得多
+  if (a.place && a.place.kind !== "unknown") {
+    const where = [
+      a.place.label?.trim() ||
+        (a.place.kind === "home" ? "家" : a.place.kind === "work" ? "公司" : "外面"),
+      a.place.poi?.trim() || a.place.city?.trim() || "",
+      typeof a.place.updatedMinutesAgo === "number"
+        ? `${a.place.updatedMinutesAgo} 分钟前的位置`
+        : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    material.push(`【他此刻在哪】${where}`);
+  }
+  if (a.activity && a.activity !== "unknown") {
+    const label = a.activity === "vehicle" ? "在车上/开车" : a.activity === "walking" ? "在走路" : "待着没动";
+    material.push(`【他在动吗】${label}`);
+  }
+  if (a.mood) {
+    const label =
+      a.mood === "negative" ? "情绪偏低" : a.mood === "stressed" ? "压力大/有点累" : "状态不错";
+    material.push(`【他最近的状态】${label}`);
+  }
   if (a.recentTurns?.length) material.push(`【最近对话摘录（这些用户已经知道，不要重复提）】\n${a.recentTurns.map((t) => `- ${t}`).join("\n")}`);
+  // 距上次对话：关系时钟的事实依据（C 类开口的唯一许可条件）
+  if (a.idleMinutes === null) {
+    material.push("【距上次对话】还没聊过（不要用「单纯招呼」这一类，先等用户开口）");
+  } else if (typeof a.idleMinutes === "number") {
+    const mins = Math.max(0, Math.round(a.idleMinutes));
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    material.push(`【距上次对话】${h > 0 ? `${h} 小时 ${m} 分钟` : `${m} 分钟`}前`);
+  }
   // 固定指令在前、逐次变化的材料在后：DeepSeek 前缀缓存按请求前缀命中，
   // 这个顺序让每次评审只有材料段是 cache miss（输入成本约降一个数量级）
   return [
-    "你是用户的私人助理。你每隔一段时间会收到一批后台聚合的信息，请判断：现在是否值得主动给用户发一条消息？",
+    "你是用户的私人助理。你每隔一段时间会有一次「想想要不要主动跟他说句话」的机会，请判断：现在值不值得发一条消息？",
+    "",
+    "开口有三种理由，满足任意一种就可以开口：",
+    "A 有事：日程有冲突或马上要到期的安排、重要的人发来未读、答应过用户的事有了结果、用户关心的动态有了新进展。",
+    "B 接话：接着最近对话或【没聊完的事】里的一件具体的事往下说一句。",
+    "C 观察：从材料里挑一个你确实看见的信号——他在哪、在干什么、在动还是待着、屏幕停了多久——像朋友一样问一句或说一句。只有【距上次对话】超过 6 小时时才可以，且一天最多一次。",
     "",
     "判断标准：",
-    "- 只在确实有值得现在说的事时才开口：日程有冲突或马上要到期的安排、重要的人发来未读、答应过用户的事有了结果、用户关心的动态有了新进展。",
+    "- C 类是好奇和搭话，不是叮嘱（「记得穿衣服」），也不是播报（「你现在在家」）：「你在外面呢？这是去哪儿」「还在公司啊」才是。没有真实观测就别硬编，改从【你记得的他】里找个具体话头。",
+    "- 【他最近的状态】情绪低或压力大时，C 类收着说，别自顾自唠；宁可只说一句「今天还顺利吗」。",
     "- 只有【今日与未来 24h 安排】里的两个不同事项同一时刻才算冲突；时间照抄材料里的 HH:mm，不要取整成「六点整」，不要拿最近对话或记忆内容推断、编造冲突和事项。",
-    "- 例行汇报、凑数、没有信息量的话一律不开口。宁可沉默，不可打扰。",
-    "- 开口时机参考用户此刻状态：专注工作/离线时非必要不打断，刚回到电脑前、空闲时更适合说话。",
+    "- 念一遍日程或未读数、没有信息增量的播报，不要开口。宁可沉默，不可打扰。",
+    "- 用户关注的话题不是拿来念新闻的：挑一个角度说一句（「你之前提的那部剧更新了，评价两极」），比罗列标题有用。",
+    "- 开口时机参考用户此刻状态：专注工作/离线时非必要不打断，刚回到电脑前、空闲时更适合说话；C 类在用户明显专注做事时不说。",
     "- 用户已知的事（最近对话里提过的、之前已经说过的）不要重复。",
+    "- 但也不要因为「怕打扰」把自己藏起来：只要你有一件具体的事可以说，就说。",
+    ...(opts?.socialPath
+      ? [
+          "- 这次没有新材料，你是靠「很久没说话了」拿到这次机会的：不要复述材料里已有的安排/未读，除非你能说出一个新角度（提醒他别忘了、发现时间撞了、问一句进展）。实在没有，就 NOP。",
+        ]
+      : []),
+    "",
+    "开口的硬要求：",
+    "- 必须有一个具体锚点：某件事、某个时间、某个他关注的东西。禁止「在吗」「最近怎么样」「今天过得如何」这类放之四海皆准的空话——那种话对谁都成立，等于没说他。",
+    "- C 类要留出口：可以是一句陈述、一个念头，用户不回也算完整，不要追着要回应。",
     "",
     "输出要求：",
     "- 开口时像同伴随口说一句：一两句话、口语化、直接说事；不要标题、不要列表、不要 markdown、不要客套。一次只说最重要的一件事。",
@@ -215,6 +363,8 @@ export class AgentPulseService {
       try {
         const restored = readJson<PulseState>(deps.statePath, {});
         if (restored.lastSignature) this.state.lastSignature = restored.lastSignature;
+        if (restored.lastSocialReviewAt) this.state.lastSocialReviewAt = restored.lastSocialReviewAt;
+        if (restored.lastSpokeAt) this.state.lastSpokeAt = restored.lastSpokeAt;
       } catch {
         /* 损坏文件按空状态处理 */
       }
@@ -303,8 +453,14 @@ export class AgentPulseService {
           presence: fixture.presence ?? null,
           screenFocus: fixture.screenFocus ?? null,
           recentTurns: fixture.recentTurns,
+          idleMinutes: fixture.idleMinutes ?? null,
+          openLoops: fixture.openLoops,
+          rapport: fixture.rapport,
+          place: fixture.place ?? null,
+          activity: fixture.activity ?? null,
+          mood: fixture.mood ?? null,
         }
-      : this.deps.aggregate(actorId);
+      : await this.deps.aggregate(actorId);
     const hasMaterial =
       aggregate !== null &&
       (aggregate.tasks.length > 0 ||
@@ -313,19 +469,30 @@ export class AgentPulseService {
         aggregate.interests.length > 0 ||
         (aggregate.findings?.length ?? 0) > 0 ||
         !!aggregate.goalLine);
-    if (!aggregate || !hasMaterial) {
+    // 注：openLoops 只作「接话」的锚点素材，不计入 hasMaterial——它可能长期恒定
+    // 存在（在办目标一直没结束），算进去会让「有意思的事」永远为真、关系时钟失效。
+    // 关系时钟：材料没变（或压根没材料）时，也能拿到一次「想想要不要开口」的机会。
+    // 这是「没事发生 = 永不开口」的结构性修复（见 docs/proactivity-initiative-redesign.md）。
+    const socialDue = this.isSocialDue(actorId, now, aggregate);
+    if (!aggregate || (!hasMaterial && !socialDue)) {
       if (!fixture) this.setSignature(actorId, "");
       return { enabled: true, actorId, ran: false, reason: "no_material", aggregate, fixture: !!fixture };
     }
     const signature = pulseSignature(aggregate);
+    const materialChanged = this.signatureOf(actorId) !== signature;
     const base = { enabled: true, actorId, aggregate, signature, fixture: !!fixture };
     // delta 闸：材料没变不评审（省 token；不是打扰闸——材料一变就再看）。
-    // force（测试端点）绕过：重复评审同一材料看真实产出。
-    if (!fixture && !force && this.signatureOf(actorId) === signature) {
+    // force（测试端点）绕过；socialDue 也绕过（节奏改由关系时钟控制）。
+    if (!fixture && !force && !materialChanged && !socialDue) {
       return { ...base, ran: false, reason: "unchanged" };
     }
+    // 本次开口的理由不是「新材料」= 社交补位（招呼/接话/关心），决定语气与去重键。
+    // 空材料也算社交补位。
+    const socialPath = !hasMaterial || !materialChanged;
+    // 无论材料评审还是社交评审，都记一次——下一次机会要等满 4h。
+    if (!fixture) this.setLastSocialReviewAt(actorId, now.getTime());
 
-    const prompt = buildPulsePrompt(now, aggregate);
+    const prompt = buildPulsePrompt(now, aggregate, { socialPath });
     let raw: string | null = null;
     try {
       raw = await Promise.race([
@@ -355,11 +522,16 @@ export class AgentPulseService {
             sessionId: actorId,
             facts: {
               draft: message,
+              ...(aggregate.idleMinutes === undefined || aggregate.idleMinutes === null
+                ? {}
+                : { idleMinutes: aggregate.idleMinutes }),
+              ...(socialPath ? { socialClock: true } : {}),
               context: [
                 aggregate.tasks.length ? `安排：${aggregate.tasks.join("；")}` : "",
                 aggregate.unread.length ? `未读：${aggregate.unread.join("、")}` : "",
                 aggregate.goals.length ? `备好的结果：${aggregate.goals.join("；")}` : "",
                 aggregate.findings?.length ? `相关发现：${aggregate.findings.join("；")}` : "",
+                aggregate.openLoops?.length ? `没聊完的事：${aggregate.openLoops.join("；")}` : "",
               ]
                 .filter(Boolean)
                 .join("。"),
@@ -374,13 +546,18 @@ export class AgentPulseService {
     // 降价/盯梢类消息 = 用户点名要的事 → must 层随到随送（绕过社交预算与
     // 2h 冷却；与专用盯价道 price_watch_hit 同语义）。其余保持 social。
     const priceNews = isPriceNews(finalText);
+    // 去重键：社交路径用「4h 时间桶」而不是材料指纹——空材料时指纹恒定，
+    // 会让第二条社交消息被当成重复提案吞掉。桶宽 = 关系时钟间隔，正好一一对应。
+    const dedupKey = socialPath
+      ? `agent_pulse:social:${fixture ? "fixture_" : ""}${actorId}:${Math.floor(now.getTime() / SOCIAL_REVIEW_GAP_MS)}`
+      : `agent_pulse:${fixture ? "fixture_" : ""}${signature}`;
     const decision = this.deps.submitProposal({
       proposalId: `p_${this.nowFn().toString(36)}_pulse`,
       actorId,
       kind: priceNews ? "agent_pulse_price" : "agent_pulse",
       tier: priceNews ? "must" : "social",
       importance: priceNews ? "medium" : "low",
-      dedupKey: `agent_pulse:${fixture ? "fixture_" : ""}${signature}`,
+      dedupKey,
       // 无标题（用户定稿：不再有「心跳回顾」牌子），正文即消息
       title: "",
       summary: finalText,
@@ -388,6 +565,7 @@ export class AgentPulseService {
       evidence: [
         "agent_pulse",
         `sig=${signature}`,
+        ...(socialPath ? ["social_clock", `idle=${aggregate.idleMinutes ?? "?"}m`] : []),
         ...(fixture ? ["fixture"] : []),
         ...(priceNews ? ["price_news_must"] : []),
         "proactivity_review",
@@ -396,6 +574,7 @@ export class AgentPulseService {
       source: "initiative",
     });
     if (!fixture) this.setSignature(actorId, signature);
+    if (!fixture) this.setLastSpokeAt(actorId, now.getTime());
     this.persist();
     const verdict =
       decision && typeof decision === "object" && "verdict" in decision
@@ -415,6 +594,39 @@ export class AgentPulseService {
       submitted: true,
       verdict,
     };
+  }
+
+  /**
+   * 关系时钟：多久没跟人说话，就该有一次「想想要不要开口」的机会。
+   *
+   * 三个条件同时满足才放行——距上次对话 >6h、时段合适（8-22 点）、
+   * 距上次评审满 4h（既省 token，也防 10min tick 连着问）。
+   *
+   * 注意它**不要求材料为空**：大多数用户每天都有一两条日程，材料恒定时指纹不变，
+   * 旧逻辑下 agent 一天都不会开口——那正是「主动性弱」的日常形态。
+   * 放行 ≠ 开口：仍由 LLM 判断，NOP 合法。
+   */
+  private isSocialDue(
+    actorId: string,
+    now: Date,
+    aggregate: PulseAggregate | null,
+  ): boolean {
+    if (!aggregate) return false;
+    if (!isSocialHour(now)) return false;
+    const idle = aggregate.idleMinutes;
+    if (typeof idle !== "number" || idle < SOCIAL_IDLE_MINUTES) return false;
+    const last = this.state.lastSocialReviewAt?.[actorId] ?? 0;
+    return now.getTime() - last >= SOCIAL_REVIEW_GAP_MS;
+  }
+
+  private setLastSocialReviewAt(actorId: string, at: number): void {
+    this.state.lastSocialReviewAt = { ...this.state.lastSocialReviewAt, [actorId]: at };
+    this.persist();
+  }
+
+  private setLastSpokeAt(actorId: string, at: number): void {
+    this.state.lastSpokeAt = { ...this.state.lastSpokeAt, [actorId]: at };
+    this.persist();
   }
 
   private signatureOf(actorId: string): string {

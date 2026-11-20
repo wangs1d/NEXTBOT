@@ -17,7 +17,7 @@ import type { CardSpec, TurnEffect } from "../types.js";
 import type { RenderScene, SceneContext, SceneMatch } from "./types.js";
 
 const MEDIA_TOOLS = new Set(["search_images", "search_images_batch", "search_videos", "image.generate"]);
-const SEARCH_TOOLS = new Set(["search_web", "info.search"]);
+const SEARCH_TOOLS = new Set(["search_web"]);
 const VIDEO_TOOLS = new Set(["video.grab", "video.find"]);
 const WEATHER_PREFIX = "weather.";
 const TRAVEL_TOOL = "travel.plan-itinerary";

@@ -40,6 +40,7 @@ import {
   getMemoryFtsTopK,
   isMemoryBridgeEnabled,
 } from "./env.js";
+import { createHash } from "node:crypto";
 import { openAgenticSqlite, fromJsonColumn, toJsonColumn } from "./sqlite-store.js";
 import { actorIdVariants } from "./actor-key.js";
 import { semanticFingerprint } from "../services/memory-record-utils.js";
@@ -152,6 +153,8 @@ export interface BridgeWriteResult {
   mem0Items: Mem0WrittenItem[];
   /** 两侧是否至少有一侧未抛错（false = 双写都失败，调用方不应丢弃原始流水） */
   ok: boolean;
+  /** 同 actor 近期已写入相同内容，本次整笔跳过（未产生任何存储） */
+  deduped?: boolean;
 }
 
 /** 遗忘同步单条执行明细 */
@@ -220,7 +223,65 @@ export class MemoryBridgeService {
         ON bridge_links(actor_id, graph_node_id);
       CREATE INDEX IF NOT EXISTS idx_bridge_links_forgotten
         ON bridge_links(forgotten_at);
+
+      CREATE TABLE IF NOT EXISTS memory_write_receipts (
+        actor_id TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        source_ref TEXT,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (actor_id, content_hash)
+      );
+      CREATE INDEX IF NOT EXISTS idx_memory_write_receipts_created
+        ON memory_write_receipts(created_at);
     `);
+  }
+
+  /** 同 actor 近期相同内容的写入窗口（小时，0 关闭去重）。 */
+  private dedupeWindowMs(): number {
+    const raw = Number.parseInt(process.env.AGENT_MEMORY_WRITE_DEDUPE_HOURS ?? "", 10);
+    const hours = Number.isFinite(raw) && raw >= 0 ? raw : 36;
+    return hours * 3_600_000;
+  }
+
+  private receiptHash(text: string): string {
+    const normalized = semanticFingerprint(text) || text.replace(/\s+/g, " ").trim();
+    return createHash("sha1").update(normalized).digest("hex");
+  }
+
+  /**
+   * 写入回执：同 actor 在窗口内已写过同内容时返回 true（调用方跳过整笔写入）。
+   * 只按内容判重、不区分来源——白天统一写入与夜间日志固化对同一句话的
+   * 双写正是要收口的那一类冗余。
+   */
+  hasRecentWrite(actorId: string, text: string): boolean {
+    const windowMs = this.dedupeWindowMs();
+    if (windowMs <= 0) return false;
+    try {
+      const row = this.db
+        .prepare(
+          `SELECT 1 AS hit FROM memory_write_receipts
+           WHERE actor_id = ? AND content_hash = ? AND created_at >= ?`,
+        )
+        .get(actorId, this.receiptHash(text), Date.now() - windowMs);
+      return !!row;
+    } catch {
+      return false;
+    }
+  }
+
+  private recordWrite(actorId: string, text: string, sourceRef: string): void {
+    if (this.dedupeWindowMs() <= 0) return;
+    try {
+      this.db
+        .prepare(
+          `INSERT INTO memory_write_receipts (actor_id, content_hash, source_ref, created_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(actor_id, content_hash) DO NOTHING`,
+        )
+        .run(actorId, this.receiptHash(text), sourceRef, Date.now());
+    } catch (err) {
+      console.error("[memory-bridge] 写入回执记录失败（忽略）:", err);
+    }
   }
 
   close(): void {
@@ -259,6 +320,9 @@ export class MemoryBridgeService {
     unified?: import("./unified-extractor.js").UnifiedExtraction,
   ): Promise<BridgeWriteResult> {
     const context = opts.context;
+    if (this.hasRecentWrite(actorId, text)) {
+      return { graphNodeId: null, mem0Items: [], ok: true, deduped: true };
+    }
     // 来源事件：认知图 metadata 与 Mem0 metadata 都带，结论可回溯到具体一轮
     const provenance: Record<string, string> = {};
     if (opts.sourceEventId) provenance.sourceEventId = opts.sourceEventId;
@@ -325,7 +389,9 @@ export class MemoryBridgeService {
       this.insertLink(actorId, sourceId, graphNodeId, mem0Ids);
     }
 
-    return { graphNodeId, mem0Items, ok: !(graphFailed && mem0Failed) };
+    const ok = !(graphFailed && mem0Failed);
+    if (ok) this.recordWrite(actorId, text, sourceId);
+    return { graphNodeId, mem0Items, ok };
   }
 
   private findNodeMem0Ids(actorId: string, nodeId: string): string[] {

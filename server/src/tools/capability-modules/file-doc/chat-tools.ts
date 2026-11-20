@@ -10,7 +10,7 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
  *   - file.parse_office  docx → HTML / xlsx → 各 sheet 行 JSON / pptx 暂不支持
  *   - file.export_format 导出为 md / json / csv / xlsx / txt（pdf / docx 暂不支持生成）
  *
- * 走 deferred（BM25 索引），不进 CORE_TOOL_LIBRARY：
+ * 走 deferred（延迟目录）：
  *   1. LLM 不会每轮都处理文件，进核心会浪费 token
  *   2. 关键词触发（"读这个文件" / "解析 PDF" / "导出 Excel"）时由 tool_discover 拉出
  *

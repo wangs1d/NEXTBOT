@@ -29,7 +29,10 @@ import "structured_assistant_message_body.dart";
 /// - `[RENDER_AS:xxx]` 显式展示形式路由（brief / structured / image_result /
 ///   video；data_brief 已退役 2026-11-06）
 /// - 内容摘要卡与 markdown 内联文本
-/// - `followUpPrompts`「接下来你可以」接续建议胶囊（仅回调接线方展示）
+///
+/// 接续建议（followups）不在这里渲染：由消息行在气泡外用
+/// [FollowUpBubbles] 逐条渲染成助手侧小泡、挂在消息正下方
+///（见 chat_page / mobile_chat_page）。
 Widget buildMessageBody(
   BuildContext context,
   ColorScheme cs,
@@ -38,10 +41,6 @@ Widget buildMessageBody(
   ContentSummaryParseResult? contentSummary,
   void Function(AgentResultAction action, {required AgentResultData cardData})?
       onUserAction,
-
-  /// 「接下来你可以」接续建议点击回调（传入即作为新消息发送）。
-  /// null 时不渲染建议行（未接线方/纯展示场景）。
-  void Function(String prompt)? onFollowupTap,
 
   /// 「需要你拍板」动作点击回调（2026-11-13「通知即界面」）。
   /// 与通知栏按钮共用同一个 actionId 与同一枚 token——两个渲染面，一套语义。
@@ -72,30 +71,22 @@ Widget buildMessageBody(
   final List<NotifyAction> notifyActions =
       message.notifyActions ?? const <NotifyAction>[];
   final bool hasActions = notifyActions.isNotEmpty && onNotifyAction != null;
-  final List<String> followUps = message.followUpPrompts ?? const <String>[];
-  final bool hasFollowUps = followUps.isNotEmpty && onFollowupTap != null;
-  if (!hasActions && !hasFollowUps) return body;
+  if (!hasActions) return body;
   return Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     mainAxisSize: MainAxisSize.min,
     children: <Widget>[
       body,
-      if (hasActions) ...<Widget>[
-        const SizedBox(height: AppTypography.space3),
-        _buildNotifyActionRow(context, cs, notifyActions, onNotifyAction),
-      ],
-      if (hasFollowUps) ...<Widget>[
-        const SizedBox(height: AppTypography.space3),
-        _buildFollowUpRow(context, cs, followUps, onFollowupTap),
-      ],
+      const SizedBox(height: AppTypography.space3),
+      _buildNotifyActionRow(context, cs, notifyActions, onNotifyAction),
     ],
   );
 }
 
 /// 「需要你拍板」动作行（2026-11-13「通知即界面」）。
 ///
-/// 样式沿用「接下来你可以」的胶囊行（黑白极简），但第 1 个动作是**主按钮**
-/// （实心），其余是描边——一眼能看出「推荐哪个」，与通知栏的按钮排序同一口径。
+/// 第一个动作是**主按钮**（实心），其余是描边——一眼能看出「推荐哪个」，
+/// 与通知栏的按钮排序同一口径。
 Widget _buildNotifyActionRow(
   BuildContext context,
   ColorScheme cs,
@@ -172,84 +163,6 @@ class _NotifyActionPill extends StatelessWidget {
           padding: const EdgeInsets.symmetric(
               horizontal: AppTypography.space4, vertical: AppTypography.space2),
           child: Text(action.label, style: textStyle),
-        ),
-      ),
-    );
-  }
-}
-
-/// 「接下来你可以」接续建议行：灰色小标题 + 换行平铺胶囊，黑白极简。
-/// 时机性内容（不持久化），仅当轮回复下发的 followups 非空时出现。
-Widget _buildFollowUpRow(
-  BuildContext context,
-  ColorScheme cs,
-  List<String> prompts,
-  void Function(String prompt) onFollowupTap,
-) {
-  final TextStyle labelStyle =
-      (Theme.of(context).textTheme.labelMedium ?? const TextStyle()).copyWith(
-    fontSize: AppTypography.secondary,
-    height: AppTypography.uiLineHeight,
-    color: cs.onSurfaceVariant,
-  );
-  final TextStyle promptStyle =
-      (Theme.of(context).textTheme.bodyMedium ?? const TextStyle()).copyWith(
-    fontSize: AppTypography.body,
-    height: AppTypography.uiLineHeight,
-    color: cs.onSurface.withValues(alpha: 0.85),
-  );
-
-  return Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    mainAxisSize: MainAxisSize.min,
-    children: <Widget>[
-      Text("接下来你可以", style: labelStyle),
-      const SizedBox(height: AppTypography.space2),
-      Wrap(
-        spacing: AppTypography.space2,
-        runSpacing: AppTypography.space2,
-        children: <Widget>[
-          for (final String prompt in prompts)
-            _FollowUpPill(
-              prompt: prompt,
-              style: promptStyle,
-              borderColor: cs.outlineVariant,
-              onTap: () => onFollowupTap(prompt),
-            ),
-        ],
-      ),
-    ],
-  );
-}
-
-class _FollowUpPill extends StatelessWidget {
-  const _FollowUpPill({
-    required this.prompt,
-    required this.style,
-    required this.borderColor,
-    required this.onTap,
-  });
-
-  final String prompt;
-  final TextStyle style;
-  final Color borderColor;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return Material(
-      color: Colors.transparent,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(20),
-        side: BorderSide(color: borderColor),
-      ),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(20),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(
-              horizontal: AppTypography.space4, vertical: AppTypography.space2),
-          child: Text(prompt, style: style),
         ),
       ),
     );
@@ -652,7 +565,7 @@ Widget? _buildEnvelopeBlocksBody(
           block["card"] as Map<String, dynamic>? ?? const <String, dynamic>{};
       appendStructured(card);
     } else if (type == "followups") {
-      // 接续建议由 buildMessageBody 的 followUpPrompts 行承担，块里跳过
+      // 接续建议由消息行在气泡外渲染（FollowUpBubbles），块里跳过
     } else {
       hasTextBlock = true;
       final String text = block["text"]?.toString() ?? "";

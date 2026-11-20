@@ -15,7 +15,6 @@
  *
  * 鉴权策略（复用现有 token，不引入新环境变量）：
  *  - kind=phone   → PhoneBridgeCoordinator.verifyRegisterToken
- *  - kind=desktop → DesktopBridgeCoordinator.verifyRegisterToken
  *  - kind=glasses/tablet/watch → 复用 PHONE_BRIDGE_TOKEN（移动设备族）
  *  - kind=home    → 本地服务，不走 WS（在 bootstrap 直接注册）
  *  - kind=camera  → DEVICE_BUS_TOKEN（Phase 4 引入）
@@ -23,7 +22,6 @@
  */
 import type { AuditService } from "../services/audit-service.js";
 import type { PhoneBridgeCoordinator } from "../services/phone-bridge-coordinator.js";
-import type { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
 import type { DevicePairingService } from "../services/device-pairing-service.js";
 import { ClientEventType, ServerEventType } from "../protocol.js";
 import type { DeviceRegistry } from "./device-registry.js";
@@ -53,7 +51,6 @@ export interface DeviceWsHandlerDeps {
   deviceRegistry: DeviceRegistry;
   auditService: AuditService;
   phoneBridgeCoordinator: PhoneBridgeCoordinator;
-  desktopBridgeCoordinator: DesktopBridgeCoordinator;
   /** 配对服务（可选）：用于校验 deviceId 是否已绑定到 register 时的 ownerUserId */
   devicePairingService?: DevicePairingService;
   log?: {
@@ -99,7 +96,7 @@ function resolveTokenVerifier(
   kind: DeviceKind,
   deps: DeviceWsHandlerDeps,
 ): TokenVerifier | null {
-  const { phoneBridgeCoordinator, desktopBridgeCoordinator } = deps;
+  const { phoneBridgeCoordinator } = deps;
   switch (kind) {
     case "phone":
     case "tablet":
@@ -109,10 +106,6 @@ function resolveTokenVerifier(
       if (!phoneBridgeCoordinator.isBridgeFeatureEnabled()) return null;
       if (!phoneBridgeCoordinator.requiresRegisterToken()) return null;
       return (token) => phoneBridgeCoordinator.verifyRegisterToken(token ?? "");
-    case "desktop":
-      if (!desktopBridgeCoordinator.isBridgeFeatureEnabled()) return null;
-      if (!desktopBridgeCoordinator.requiresRegisterToken()) return null;
-      return (token) => desktopBridgeCoordinator.verifyRegisterToken(token ?? "");
     case "camera":
     case "vehicle":
     case "speaker":
@@ -212,7 +205,7 @@ async function handleRegister(
     sendError(
       socket,
       "DEVICE_TOKEN_REJECTED",
-      `kind=${kind} 的 token 校验失败（请检查 PHONE_BRIDGE_TOKEN / DESKTOP_BRIDGE_TOKEN 配置）`,
+      `kind=${kind} 的 token 校验失败（请检查 PHONE_BRIDGE_TOKEN 配置）`,
     );
     return;
   }

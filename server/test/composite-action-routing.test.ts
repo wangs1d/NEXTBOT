@@ -81,10 +81,6 @@ const CASES: Case[] = [
   { tool: "proactivity", action: "confirm", query: "这个提议我批准了", args: { proposalId: "p1", decision: "accept" } },
   { tool: "proactivity", action: "feedback", query: "提醒太频繁了，别发了", args: { signal: "too_frequent" } },
   { tool: "proactivity", action: "why_silent", query: "你最近怎么没提醒我", args: { topic: "喝水" } },
-  // care
-  { tool: "care", action: "add", query: "记住我妈生日是5月20号", args: { name: "妈妈生日", date: "05-20" } },
-  { tool: "care", action: "list", query: "我记了哪些重要日期", args: {} },
-  { tool: "care", action: "delete", query: "把那个纪念日删掉", args: { id: "d1" } },
   // device
   { tool: "device", action: "list", query: "我有哪些绑定的设备", args: {} },
   { tool: "device", action: "use", query: "打开客厅摄像头", args: { deviceId: "cam1", command: "on" } },
@@ -93,6 +89,13 @@ const CASES: Case[] = [
   { tool: "aip", action: "dispatch", query: "把这个任务派给配对的助手", args: { targetId: "peer1", content: "帮我查下快递" } },
   { tool: "aip", action: "state", query: "我的协作状态怎么样", args: {} },
   { tool: "aip", action: "proposal", query: "看一下对方的提案", args: { proposalId: "p2" } },
+  // ride_hailing
+  { tool: "ride_hailing", action: "quote", query: "叫个车去首都机场T3", args: { dropoff: "首都机场T3" } },
+  { tool: "ride_hailing", action: "quote", query: "从九华园1号门打车去公司", args: { pickup: "九华园1号门", dropoff: "公司" } },
+  { tool: "ride_hailing", action: "book", query: "确认叫车下单", args: { optionId: "eco", confirm: true, confirmationToken: "t1" } },
+  { tool: "ride_hailing", action: "status", query: "司机到哪了", args: { orderId: "bkg_1" } },
+  // 漏填 action 时按 orderId 落只读 status（取消必须显式选，错位方向安全）
+  { tool: "ride_hailing", action: "cancel", query: "取消刚才叫的车", args: { action: "cancel", orderId: "bkg_1", reason: "行程有变" }, fallback: "status" },
   // world
   { tool: "world", action: "status", query: "我在 Agent 世界的在线状态怎么样", args: {} },
   { tool: "world", action: "room_create", query: "给我开个房间", args: { name: "自习室" } },
@@ -142,7 +145,7 @@ test("schema 完整：每个 action 都出现在 enum 与描述里，且描述�
   }
 });
 
-test("召回可达：44 个 action 的代表性措辞都把所属复合工具排到第 1", async () => {
+test(`召回可达：${CASES.length} 个 action 的代表性措辞都把所属复合工具排到第 1`, async () => {
   const failures: string[] = [];
   for (const testCase of CASES) {
     const names = await discover(testCase.query);
@@ -169,7 +172,7 @@ test("兜底路由：漏填 action 时只按参数签名或只读默认分支落
   assert.deepEqual(failures, [], `兜底路由错位:\n${failures.join("\n")}`);
 });
 
-test("转发正确：44 个 action 全部落到对应执行器，且 action 字段不透传", async () => {
+test(`转发正确：${CASES.length} 个 action 全部落到对应执行器，且 action 字段不透传`, async () => {
   const executed: Array<{ tool: string; input: Record<string, unknown> }> = [];
   const handlers = new Map<string, (input: Record<string, unknown>, ctx: unknown) => Promise<unknown>>();
   const fakeRegistry = {

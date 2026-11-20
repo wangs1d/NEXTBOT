@@ -40,11 +40,10 @@ export type CapabilityExpansionProposal = {
  */
 const DOMAIN_TOOL_PATTERNS: Record<string, string[]> = {
   agent_link: ["world.link."],
-  calendar: ["calendar.", "reminder."],
+  calendar: ["calendar."],
   weather: ["weather."],
   sub_agent: ["master."],
   aip: ["aip."],
-  desktop: ["desktop.", "browser.session.", "browser.fetch_page"],
   web: ["web_search", "web_fetch", "search_web", "search_images", "search_videos", "fetch_web", "info."],
   life_assistant: ["budget.", "shopping.suggest", "payment.", "alipay."],
   voice: ["voice."],
@@ -53,12 +52,10 @@ const DOMAIN_TOOL_PATTERNS: Record<string, string[]> = {
   social_feed: ["world.social."],
   world: ["world."],
   smart_home: ["smart_home."],
-  notes: ["notes."],
   image_gen: ["image."],
   file_doc: ["file."],
   email_sms: ["email.", "sms."],
   media_music: ["media."],
-  health_fitness: ["health."],
   finance_deep: ["finance."],
   // 外部社交平台：精确匹配 6 个工具名（不带 world. 前缀，避免与 social_feed 冲突）
   social_outreach: [

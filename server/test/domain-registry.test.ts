@@ -3,12 +3,11 @@
  *
  * 三张历史表（lane-tool-sets / resolve-chat-tools 各自的 CAPABILITY_TOOL_PREFIXES
  * 副本 + TOOL_CATEGORIES）已收敛为 domain-registry 单表。本文件锁定两件事：
- *  1. 束投影等价性：域投影结果 ⊇ 旧前缀表结果（media/write/desktop 精确等价；
+ *  1. 束投影等价性：域投影结果 ⊇ 旧前缀表结果（media/write 精确等价；
  *     search 允许且有意识超集 = internet.* 归入检索域）；
  *  2. 覆盖完整性：全量延迟目录工具均有域归属，misc 兜底规模受控（防堆积成垃圾桶）。
  */
 process.env.AGENT_TOOL_SEARCH_ENABLED = "on";
-process.env.DESKTOP_VISUAL_ENABLED = "1";
 
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -34,13 +33,12 @@ const LEGACY_PREFIXES: Record<string, string[]> = {
     "calendar.", "reminder", "voice.", "phone.", "shopping.", "commitment.",
     "wallet.", "agent.", "surface.", "smart_home.",
   ],
-  desktop: ["desktop", "agent_browser", "shared_browser", "screen"],
 };
 
 const corpus: ChatCompletionTool[] = [...getBuiltinAgentChatTools()];
 const nameOf = (t: ChatCompletionTool): string => (t.type === "function" ? t.function?.name ?? "" : "");
 
-const BRIDGES = new Set(["tool_search", "tool_discover", "tool_describe", "agent.query_capabilities"]);
+const BRIDGES = new Set(["tool_discover", "agent.query_capabilities"]);
 
 function legacySet(cap: string): Set<string> {
   const prefixes = LEGACY_PREFIXES[cap] ?? [];
@@ -51,7 +49,7 @@ function legacySet(cap: string): Set<string> {
   );
 }
 
-test("束投影等价性：域投影 ⊇ 旧前缀表；media/write/desktop 精确等价；search 仅有意识超集 internet.*", () => {
+test("束投影等价性：域投影 ⊇ 旧前缀表；media/write 精确等价；search 仅有意识超集 internet.*", () => {
   for (const cap of Object.keys(LEGACY_PREFIXES)) {
     const legacy = legacySet(cap);
     const modern = new Set(toolsMatchingCapabilityBeam(corpus, [cap]).map(nameOf));
@@ -60,16 +58,14 @@ test("束投影等价性：域投影 ⊇ 旧前缀表；media/write/desktop 精�
     }
     const extra = [...modern].filter((n) => !legacy.has(n));
     // 有意识超集（锁进测试防漂移）：search + internet.*（realtime 轮情报核实）、
-    // write + budget.calculate、media + video.grab、
-    // desktop + browser 全族（ROUTE_BEAM_DOMAINS.desktop 显式并上 browser 域）。
+    // media + video.grab。
     const conscious: Record<string, string[]> = {
       // 复合工具面（2026-11）：search_web/fetch_web 收编为 web_search/web_fetch，
       // 两者仍归检索域，属同一「有意识超集」。
       search: ["internet.", "web_search", "web_fetch"],
       // 复合工具面（2026-11）：calendar/voice/phone/smart_home 由整族收编为裸名，
       // 旧前缀表只认带点号的细名，故裸名同样记为有意识超集。
-      write: ["budget.calculate", "calendar", "voice", "phone", "smart_home"],
-      desktop: ["browser.", "shared_browser", "agent_browser", "fetch_web", "search_web", "web_fetch", "web_search"],
+      write: ["calendar", "voice", "phone", "smart_home", "finance", "payment"],
       // media 束：复合后图片/视频检索统一走 web_search，属有意识超集。
       media: ["video.grab", "web_search"],
     };

@@ -131,8 +131,8 @@ export class QrAssistService {
   async saveBatchQrPngs(
     ctx: ToolContext,
     items: Array<{ platform: string; label: string; png: Buffer | null }>,
-  ): Promise<Array<{ platform: string; label: string; imageUrl: string; width?: number; height?: number; qrLink?: string; qrLinkFallback?: string }>> {
-    const saved: Array<{ platform: string; label: string; imageUrl: string; width?: number; height?: number; qrLink?: string; qrLinkFallback?: string }> = [];
+  ): Promise<Array<{ platform: string; label: string; imageUrl: string; width?: number; height?: number; qrLink?: string; qrLinkFallback?: string; issuedAt: number }>> {
+    const saved: Array<{ platform: string; label: string; imageUrl: string; width?: number; height?: number; qrLink?: string; qrLinkFallback?: string; issuedAt: number }> = [];
     if (!this.deps.imageStore) return saved;
     const actorId = ctx.userId ?? ctx.sessionId;
     for (const item of items) {
@@ -147,6 +147,9 @@ export class QrAssistService {
           platform: item.platform,
           label: item.label,
           imageUrl,
+          // 出码时刻（2026-11-20）：客户端据此倒计时，快过期/已过期时点码
+          // 先换新码再跳——否则用户点进 App 只会看到「二维码已失效」。
+          issuedAt: Date.now(),
           ...(dims ? { width: dims.width, height: dims.height } : {}),
           ...(link ?? {}),
         });
@@ -177,12 +180,12 @@ export class QrAssistService {
     ctx: ToolContext,
     items: Array<{ platform: string; label: string; png: Buffer | null }>,
     meta: { title: string; caption?: string },
-  ): Promise<Map<string, { imageUrl: string; qrLink?: string; qrLinkFallback?: string }>> {
-    const pushed = new Map<string, { imageUrl: string; qrLink?: string; qrLinkFallback?: string }>();
+  ): Promise<Map<string, { imageUrl: string; qrLink?: string; qrLinkFallback?: string; issuedAt: number }>> {
+    const pushed = new Map<string, { imageUrl: string; qrLink?: string; qrLinkFallback?: string; issuedAt: number }>();
     if (!ctx.pushMediaCards || !this.deps.imageStore) return pushed;
     const actorId = ctx.userId ?? ctx.sessionId;
     // 逐张落盘（每家一张独立 PNG），收集 URL
-    const saved: Array<{ platform: string; label: string; imageUrl: string; dims?: { width: number; height: number }; qrLink?: string; qrLinkFallback?: string }> = [];
+    const saved: Array<{ platform: string; label: string; imageUrl: string; issuedAt: number; dims?: { width: number; height: number }; qrLink?: string; qrLinkFallback?: string }> = [];
     for (const item of items) {
       if (!item.png) continue;
       try {
@@ -191,15 +194,18 @@ export class QrAssistService {
         });
         const dims = pngDimensions(item.png);
         const link = await qrAppLink(item.png, item.platform);
+        const issuedAt = Date.now();
         saved.push({
           platform: item.platform,
           label: item.label,
           imageUrl,
+          issuedAt,
           ...(dims ? { dims } : {}),
           ...(link ?? {}),
         });
         pushed.set(item.platform, {
           imageUrl,
+          issuedAt,
           ...(link.qrLink ? { qrLink: link.qrLink } : {}),
           ...(link.qrLinkFallback ? { qrLinkFallback: link.qrLinkFallback } : {}),
         });
@@ -207,7 +213,10 @@ export class QrAssistService {
         /* 单张失败不阻断其余 */
       }
     }
-    if (saved.length === 0) return pushed;
+    if (saved.length === 0) {
+      console.log("[qr] 批量推码：没有可推的二维码（截图全失败）");
+      return pushed;
+    }
 
     // 多平台：一张 shopping_login 卡，卡内 N 个平台分区各一张码。
     // 客户端 ShoppingLoginCard 支持 qrItems 多码版式（单码时行为不变）。
@@ -216,7 +225,7 @@ export class QrAssistService {
     // 一张裸二维码图——用户看得见码，却没有「跳过这家 / 重新出码 / 继续比价」
     // 的入口，只能回到对话里说一句话，整条「登录完再统一交付」的链路就断了。
     if (saved.length > 0) {
-      ctx.pushMediaCards([
+      const sent = ctx.pushMediaCards([
         {
           type: "card",
           cardType: "shopping_login",
@@ -232,6 +241,7 @@ export class QrAssistService {
                 platform: s.platform,
                 platformLabel: s.label,
                 qrImage: s.imageUrl,
+                issuedAt: s.issuedAt,
                 ...(s.qrLink ? { qrLink: s.qrLink } : {}),
                 ...(s.qrLinkFallback ? { qrLinkFallback: s.qrLinkFallback } : {}),
                 ...(s.dims ? { width: s.dims.width, height: s.dims.height } : {}),
@@ -246,6 +256,19 @@ export class QrAssistService {
           },
         } as unknown as ToolMediaCard,
       ]);
+      // 送达确认（2026-11-19）：回调返回 false = 回合已收口/连接失效，卡片
+      // 只落了盘没送到用户眼前。此时必须按「没推」回执，绝不能报成已推送。
+      if (sent === false) {
+        console.log(
+          `[qr] 登录卡未能实时送达（回合已收口/连接失效）：${saved
+            .map((s) => s.platform)
+            .join(",")}`,
+        );
+        return new Map();
+      }
+      console.log(
+        `[qr] 登录卡已推送：${saved.map((s) => `${s.platform}(${s.imageUrl})`).join(" ")}`,
+      );
       return pushed;
     }
     return pushed;
@@ -257,7 +280,10 @@ export class QrAssistService {
     meta: { title: string; caption?: string },
     png: Buffer,
   ): Promise<string | null> {
-    if (!ctx.pushMediaCards || !this.deps.imageStore) return null;
+    if (!ctx.pushMediaCards || !this.deps.imageStore) {
+      console.log("[qr] 推卡不可用：缺少聊天通道或图片服务");
+      return null;
+    }
     const actorId = ctx.userId ?? ctx.sessionId;
     // 扫码/登录/支付截图属于工具性图片，只服务当前对话，不进资料库。
     const imageUrl = await this.deps.imageStore.savePng(actorId, png, ctx.sessionId, {
@@ -275,7 +301,14 @@ export class QrAssistService {
       ...(dims ? { width: dims.width, height: dims.height } : {}),
       ...(meta.caption ? { caption: meta.caption } : {}),
     };
-    ctx.pushMediaCards([card]);
+    // 送达确认（2026-11-19）：stale/连接失效时回调返回 false——这时「已推送」
+    // 是假的，调用方必须按失败处理，否则模型会把没送到的东西说成已送到。
+    const sent = ctx.pushMediaCards([card]);
+    if (sent === false) {
+      console.log(`[qr] 卡片未能实时送达（回合已收口/连接失效）：${meta.title} ${imageUrl}`);
+      return null;
+    }
+    console.log(`[qr] 卡片已推送：${meta.title} ${imageUrl} ${png.length}B`);
     return imageUrl;
   }
 }
@@ -305,9 +338,10 @@ export async function decodeQrLink(png: Buffer): Promise<string | null> {
   }
 }
 
-/** 已知购物平台的 App URL scheme（深链透传判定）。 */
+/** 已知购物平台的 App URL scheme（深链透传判定）。
+ * 码内容本身就是 scheme 时原样交给 App（码是平台自己生成的，最可靠）。 */
 const APP_SCHEME_RE =
-  /^(?:taobao|tbopen|tmall|jd|openapp\.jdmobile|pinduoduo|pdd|pddopen):\/\//i;
+  /^(?:taobao|tbopen|tmall|jd|openapp\.jdmobile|pinduoduo|pdd|pddopen|snssdk1128|aweme|imeituan|dianping|damai|maoyan|suning|smzdm):\/\//i;
 
 /**
  * 解码内容 → App 深链（点码登录，2026-11-14）。
@@ -315,9 +349,12 @@ const APP_SCHEME_RE =
  * · 本身就是平台 App scheme（taobao:// 等）→ 原样透传；
  * · https URL → 按平台包一层 App scheme（App 打开同一个 URL，走的还是
  *   平台自己的登录确认页，不引入新风控）；
- * · 纯 token 串（App 打不开）→ null，该平台不出按钮，纯扫码兜底。
+ * · 纯 token 串 / 没有已知 scheme 的平台 → null，不渲染「点码登录」按钮。
  *
- * fallback：深链打不开（未装 App / scheme 变了）时客户端改开的原地址。
+ * 所有平台同一条规则：**绝不把原 https 当 link 或 fallback 返回**。
+ * url_launcher 用 externalApplication 打开 https 一定成功（起来的是浏览器），
+ * 用户看到的是平台「下载 App」落地页——拼多多 2026-11-20 真机就是这样被带到
+ * 下载页的。返回 null 后客户端退回「保存二维码 → 相册扫码」，至少不会送错地方。
  */
 export function toAppLaunchLink(
   platform: string,
@@ -332,19 +369,26 @@ export function toAppLaunchLink(
     case "tmall":
       return {
         link: `tbopen://m.taobao.com/tbopen/index.html?h5Url=${encodeURIComponent(text)}`,
-        fallback: text,
       };
     case "jd":
       return {
         link: `openapp.jdmobile://virtual?params=${encodeURIComponent(
           JSON.stringify({ category: "jump", des: "url", url: text }),
         )}`,
-        fallback: text,
+      };
+    case "pdd":
+      // 拼多多扫码登录的码内容是
+      // https://mobile.yangkeduo.com/down_scan.html?secret_key=…&pdd_biz_scene=AUTH_LOGIN
+      // （云端实测解码所得）。App 的 scheme 支持「宿主 + 原样 https 路径」：
+      //   pinduoduo://com.xunmeng.pinduoduo/https://mobile.yangkeduo.com/…
+      // 直接开 https 只会落到「打开拼多多APP」下载页（真机事故），所以两个
+      // 候选都是 App scheme，浏览器不作为兜底。
+      return {
+        link: `pinduoduo://com.xunmeng.pinduoduo/${text}`,
+        fallback: `pddopen://?h5Url=${encodeURIComponent(text)}`,
       };
     default:
-      // pdd / 未知平台：暂无可靠 scheme 包装，直接给原 URL——
-      // universal link 可能拉起 App，不行就系统浏览器打开。
-      return { link: text };
+      return null;
   }
 }
 
@@ -354,9 +398,58 @@ async function qrAppLink(
   platform: string,
 ): Promise<{ qrLink?: string; qrLinkFallback?: string }> {
   const content = await decodeQrLink(png);
-  if (!content) return {};
+  if (!content) {
+    console.log(`[qr] ${platform || "?"} 码解码失败，无点码深链（扫码兜底）`);
+    return {};
+  }
+  // 解码内容落日志（2026-11-20）：「点码进 App 没出登录确认页」要靠码内容
+  // 取证——是 token URL、下载落地页还是纯 scheme，各平台修法不同。
+  console.log(
+    `[qr] ${platform || "?"} 码内容: ${content.length > 160 ? `${content.slice(0, 160)}…` : content}`,
+  );
   const link = toAppLaunchLink(platform, content);
+  if (!link) {
+    console.log(`[qr] ${platform || "?"} 码内容无已知 scheme 映射，不渲染点码按钮`);
+    return {};
+  }
   return link ? { qrLink: link.link, ...(link.fallback ? { qrLinkFallback: link.fallback } : {}) } : {};
+}
+
+/**
+ * 给截下来的二维码补静区（quiet zone）+ 保证最小分辨率。
+ *
+ * 平台登录页的码图紧贴元素边界（云端实测拼多多 qr-code-box 350×350，四边
+ * 零白边）；二维码标准要求四周至少 4 个模块宽的白边，缺了它相册扫码/截屏
+ * 扫码经常直接判「没找到二维码」。这里按边长 10% 补白（≈4~6 个模块），并
+ * 把小码用最近邻**整数倍**放大到 ≥480px——整数倍保证每个模块像素宽一致，
+ * 截图放大后边缘不被插值糊掉。
+ */
+async function addQuietZone(png: Buffer): Promise<Buffer> {
+  try {
+    const meta = await sharp(png).metadata();
+    const w = meta.width ?? 0;
+    const h = meta.height ?? 0;
+    if (!w || !h) return png;
+    const side = Math.max(w, h);
+    const margin = Math.max(16, Math.round(side * 0.1));
+    let img = sharp(png).flatten({ background: "#ffffff" });
+    if (side < 480) {
+      const factor = Math.ceil(480 / side);
+      img = img.resize(w * factor, h * factor, { kernel: "nearest" });
+    }
+    return await img
+      .extend({
+        top: margin,
+        bottom: margin,
+        left: margin,
+        right: margin,
+        background: "#ffffff",
+      })
+      .png()
+      .toBuffer();
+  } catch {
+    return png;
+  }
 }
 
 /**
@@ -411,8 +504,174 @@ function fileUrlToPath(fileUrl: string): string {
  * qr/code 提示），把它滚到视口中央再截屏；找不到候选才退回整屏截图。
  */
 async function captureQrFocused(page: Page): Promise<Buffer> {
+  // 单测里页面是桩（evaluate 恒 false），等满会白烧十几秒：走快速通道。
+  const fast = process.env.QR_CAPTURE_FAST === "1";
+
+  // 先**立刻找一次**（2026-11-20 提速）：京东/淘宝登录页首屏就带码，
+  // 先等「页面渲染完成」纯属白等 2~3 秒。找到就返回，找不到再按下面的
+  // 渲染/切换流程走。
+  const direct = await captureQrElement(page);
+  if (direct) return direct;
+  if (fast) return page.screenshot({ type: "png" });
+
+  // 刚 domcontentloaded 的瞬间可能还没画完：给 600ms 再看一眼
+  await page.waitForTimeout(600).catch(() => {});
+  const second = await captureQrElement(page);
+  if (second) return second;
+
+  // 还没码：等页面「真的有内容」——拼多多移动站是 uni-app，domcontentloaded
+  // 之后还要 2~4 秒才画出登录方式（这一刻整屏纯白，截出来只有 5KB）。
+  await waitForPageSettled(page, 3_500);
+  const third = await captureQrElement(page);
+  if (third) return third;
+
+  // 没找到码：绝大多数平台默认停在「手机登录/验证码登录」，二维码要先切 tab
+  // 才渲染。切过去之后轮询等码出现（拼多多点完会先转圈 2~4 秒才画出码）。
+  const deadline = Date.now() + (fast ? 0 : 12_000);
+  let lastSwitchAt = 0;
+  while (Date.now() < deadline) {
+    if (Date.now() - lastSwitchAt > 3_500) {
+      lastSwitchAt = Date.now();
+      await switchToScanLogin(page);
+    }
+    await page.waitForTimeout(700).catch(() => {});
+    const hit = await captureQrElement(page);
+    if (hit) return hit;
+    if (isPageClosed(page)) break;
+  }
+  return page.screenshot({ type: "png" });
+}
+
+/** 页面是否已关闭（测试桩可能没有 isClosed，别让它在热路径上抛错）。 */
+function isPageClosed(page: Page): boolean {
+  try {
+    return typeof page.isClosed === "function" ? page.isClosed() : false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 等页面渲染出实质内容（body 有文本 + 元素数够）。
+ *
+ * SPA/uni-app 的 domcontentloaded 只代表 HTML 到了，壳子还是空的；此时截图
+ * 会得到一张白图。轮询到「看起来有内容」或超时为止（超时直接放行，不阻塞）。
+ */
+async function waitForPageSettled(page: Page, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const ready = await page
+      .evaluate(() => {
+        const text = (document.body?.innerText ?? "").trim();
+        return text.length > 20 && document.querySelectorAll("*").length > 30;
+      })
+      .catch(() => false);
+    if (ready) return;
+    if (isPageClosed(page)) return;
+    await page.waitForTimeout(350).catch(() => {});
+  }
+}
+
+async function switchToScanLogin(page: Page): Promise<boolean> {
+  // 各家的入口文案与形态差异很大（2026-11-19 云端实测）：
+  //   · 拼多多：登录方式选择页一颗大按钮「扫码登录」（520×68）
+  //   · 淘宝：密码登录弹窗右上角「扫码登录更安全」
+  //   · 京东：默认就是扫码，不需要点
+  // 判定放宽成「短文本含扫码 + 尺寸像按钮/标签」，先完全匹配再包含匹配。
+  // 点击必须走 Playwright 的**真实点击**——移动站/React 页面常只认真实
+  // 输入事件（dispatchEvent 点了没反应，2026-11-19 实测拼多多就是这种）。
+  const marked = await page
+    .evaluate(() => {
+      const exact = /^(扫码登录|二维码登录|扫码|扫一扫登录|APP扫码登录)$/;
+      const loose = /(扫码登录|二维码登录|扫一扫登录)/;
+      const forbidden = /(密码登录|短信登录|手机登录|忘记密码)/;
+      // 用 * 全量扫（2026-11-19 云端实测）：拼多多移动站是 uni-app，
+      // 页面元素是 <uni-view>/<uni-text> 这类自定义标签，固定选择器
+      // a/button/div/span 一个都匹配不到——云端「找不到扫码入口」的真身。
+      const all = Array.from(document.querySelectorAll<HTMLElement>("*")).slice(0, 4000);
+      const nodes = all.filter((el) => {
+        const text = (el.textContent ?? "").trim();
+        if (!text || text.length > 12) return false;
+        if (forbidden.test(text)) return false;
+        const rect = el.getBoundingClientRect();
+        if (rect.width < 8 || rect.height < 8) return false;
+        if (rect.width > 640 || rect.height > 140) return false;
+        const style = window.getComputedStyle(el);
+        return style.visibility !== "hidden" && style.display !== "none";
+      });
+      // 大元素优先（真入口是按钮/tab，纯文字 span 往往是它的子节点）。
+      // 排序函数必须内联匿名：tsx/esbuild keepNames 会给具名函数注入 __name，
+      // 序列化进浏览器后直接 ReferenceError（同 spec-extract 的坑）。
+      const exactHits = nodes
+        .filter((el) => exact.test((el.textContent ?? "").trim()))
+        .sort((a, b) => {
+          const ra = a.getBoundingClientRect();
+          const rb = b.getBoundingClientRect();
+          return rb.width * rb.height - ra.width * ra.height;
+        });
+      const looseHits = nodes
+        .filter((el) => loose.test((el.textContent ?? "").trim()))
+        .sort((a, b) => {
+          const ra = a.getBoundingClientRect();
+          const rb = b.getBoundingClientRect();
+          return rb.width * rb.height - ra.width * ra.height;
+        });
+      const pick = exactHits[0] ?? looseHits[0];
+      if (!pick) return false;
+      document
+        .querySelectorAll("[data-pa-scan-tab]")
+        .forEach((el) => el.removeAttribute("data-pa-scan-tab"));
+      pick.setAttribute("data-pa-scan-tab", "1");
+      return true;
+    })
+    .catch(() => false);
+
+  if (!marked) return false;
+  const handle = await page.$("[data-pa-scan-tab='1']").catch(() => null);
+  if (!handle) return false;
+  try {
+    // force：页面常有透明遮罩/浮层，可操作性检查会判「不可点」（云端拼多多
+    // 就是这种），但事件派发到元素本身是有效的。
+    await handle.click({ timeout: 3_000, force: true });
+    return true;
+  } catch {
+    // 被浮层遮挡/判定不可点时，直接在元素中心点一下（淘宝的入口就属于这种）
+    const box = await handle.boundingBox().catch(() => null);
+    if (box) {
+      await page
+        .mouse.click(box.x + box.width / 2, box.y + box.height / 2)
+        .catch(() => {});
+      return true;
+    }
+    // 被遮挡/不可点：退回事件派发（部分站点只监听冒泡的 click）
+    const fallback = await page
+      .evaluate(() => {
+        const el = document.querySelector<HTMLElement>("[data-pa-scan-tab='1']");
+        if (!el) return false;
+        el.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+        el.dispatchEvent(new MouseEvent("mouseup", { bubbles: true }));
+        el.click();
+        return true;
+      })
+      .catch(() => false);
+    return fallback;
+  } finally {
+    await handle.dispose().catch(() => {});
+  }
+}
+
+/**
+ * 在当前页找「能扫的码」并截图。
+ *
+ * 2026-11-19 真机教训：只按「看起来像二维码」挑元素不够——拼多多/淘宝的码
+ * 外面套着更大的容器（qr-code-wrapper 399×399），按面积/类名评分会把容器
+ * 选中，截出来带一圈白边和 logo，肉眼能扫、程序解不出，卡片上的「点码登录」
+ * 也就没有深链可给。现在改成**按评分取前几个候选，逐个截图并真正解码验证**，
+ * 返回第一张解得出来的；都解不出才退回最高分那张（扫码兜底仍在）。
+ */
+async function captureQrElement(page: Page): Promise<Buffer | null> {
   const mark = "data-pa-qr-target";
-  const found = await page
+  const count = await page
     .evaluate((markAttr: string) => {
       const viewportArea = window.innerWidth * window.innerHeight;
       const nodes = Array.from(
@@ -420,8 +679,7 @@ async function captureQrFocused(page: Page): Promise<Buffer> {
           "img, canvas, svg, [class*='qr'], [class*='QR'], [id*='qr'], [id*='QR']",
         ),
       );
-      let best: HTMLElement | null = null;
-      let bestScore = 0;
+      const scored: Array<{ el: HTMLElement; score: number }> = [];
       for (const el of nodes) {
         const rect = el.getBoundingClientRect();
         if (rect.width < 80 || rect.height < 80) continue;
@@ -435,36 +693,52 @@ async function captureQrFocused(page: Page): Promise<Buffer> {
         const hint = `${el.getAttribute("alt") ?? ""} ${el.id} ${el.getAttribute("src") ?? ""} ${el.getAttribute("class") ?? ""}`.toLowerCase();
         let score = squareness * Math.min(rect.width, rect.height);
         if (/qr|erweima|scan|扫码|二维码/.test(hint)) score *= 2.5;
-        if (score > bestScore) {
-          bestScore = score;
-          best = el;
-        }
+        // 尺寸越接近常见码（180~320px）越可信：超大容器带白边/logo 反而解不出
+        const side = Math.min(rect.width, rect.height);
+        if (side > 360) score *= 0.6;
+        scored.push({ el, score });
       }
-      if (!best) return false;
-      best.setAttribute(markAttr, "1");
-      best.scrollIntoView({ block: "center", inline: "center" });
-      return true;
+      scored.sort((a, b) => b.score - a.score);
+      const picked = scored.slice(0, 4);
+      document
+        .querySelectorAll(`[${markAttr}]`)
+        .forEach((el) => el.removeAttribute(markAttr));
+      picked.forEach((item, i) => item.el.setAttribute(markAttr, String(i + 1)));
+      if (picked[0]) picked[0].el.scrollIntoView({ block: "center", inline: "center" });
+      return picked.length;
     }, mark)
-    .catch(() => false);
+    .catch(() => 0);
 
-  if (found) {
-    // 滚动后等一帧布局与（懒加载的）码图绘制
-    await page.waitForTimeout(500).catch(() => {});
-    // 关键：截**元素本身**，不是整屏。整屏截图里二维码只占一角，塞进卡片
-    // 的方形框后肉眼根本扫不出来（真机取证：整页 1080×760，码只 170px）。
-    const handle = await page.$(`[${mark}="1"]`).catch(() => null);
-    if (handle) {
-      const buf = await handle.screenshot({ type: "png" }).catch(() => null);
-      await handle.dispose().catch(() => {});
-      await page
-        .evaluate((m: string) => {
-          document
-            .querySelectorAll(`[${m}="1"]`)
-            .forEach((el) => el.removeAttribute(m));
-        }, mark)
-        .catch(() => {});
-      if (buf) return buf;
+  if (!count) return null;
+  // 等一帧布局与（懒加载的）码图绘制
+  await page.waitForTimeout(250).catch(() => {});
+
+  let fallback: Buffer | null = null;
+  for (let i = 1; i <= count; i += 1) {
+    const handle = await page.$(`[${mark}="${i}"]`).catch(() => null);
+    if (!handle) continue;
+    const raw = await handle.screenshot({ type: "png" }).catch(() => null);
+    await handle.dispose().catch(() => {});
+    if (!raw) continue;
+    // 补静区后再交付：元素截图紧贴码边，零白边的码在相册扫码/截屏扫码时
+    // 普遍识别失败（2026-11-20 用户真机：截了图也扫不了）。
+    const buf = await addQuietZone(raw);
+    if (!fallback) fallback = buf;
+    // 真正解一次：解得出说明这张图就是码本身（不是套着码的容器）
+    if (await decodeQrLink(buf)) {
+      await clearQrMarks(page, mark);
+      return buf;
     }
   }
-  return page.screenshot({ type: "png" });
+  await clearQrMarks(page, mark);
+  return fallback;
+}
+
+/** 清掉候选标记（下一轮重新计算）。 */
+async function clearQrMarks(page: Page, mark: string): Promise<void> {
+  await page
+    .evaluate((m: string) => {
+      document.querySelectorAll(`[${m}]`).forEach((el) => el.removeAttribute(m));
+    }, mark)
+    .catch(() => {});
 }

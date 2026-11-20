@@ -1,25 +1,18 @@
 /**
  * Agent 自主任务的安全层:高危操作判定 + 权限白名单。
  *
- * 设计参考:
- *   - desktop-visual/desktop_visual/shell_policy.py 的黑名单短路 + 白名单思路
- *   - Anthropic Claude Code Auto Mode 的 classifyAllShell 思路
- *
- * 判定优先级:DENIED(绝对拒绝) > HIGH_RISK(需人工审批) > ALLOWED(白名单放行) > 默认 require_approval。
+ * 判定优先级:DENIED(绝对拒绝) > HIGH_RISK(需人工审批) > 默认 allow。
  * 所有规则用「工具名 + 参数匹配函数」表达,可扩展。
  */
 
 import type { SafetyCheckResult } from "./agent-task-types.js";
 import { AuditService } from "./audit-service.js";
 import { classifyFeatureByName } from "../catalog/class-map.js";
+import { resolveEffectiveToolName } from "../external-model/composite-chat-tools.js";
 
 // --------------------------------------------------------------------------- //
 // 正则规则集合
 // --------------------------------------------------------------------------- //
-
-/** shell 命令黑名单(命中即拒绝,即使审批也不允许) */
-const SHELL_DENY_REGEX =
-  /rm -rf|format|del \/f|shutdown|reboot|reg delete|Stop-Service|Invoke-Expression|iex |mkfs|dd if=/i;
 
 /** 输入文本敏感金融信息(禁止直接输入) */
 const INPUT_DENY_REGEX = /转账|汇款|支付|密码|验证码/;
@@ -27,36 +20,8 @@ const INPUT_DENY_REGEX = /转账|汇款|支付|密码|验证码/;
 /** 输入文本敏感个人信息(需审批) */
 const INPUT_HIGH_RISK_REGEX = /账号|账户|金额|身份证|银行卡/;
 
-/** 打开金融软件路径(需审批) */
-const OPEN_FINANCE_REGEX = /银行|网银|支付宝|财付通/;
-
 /** 通用危险操作关键词(适用于任何工具的参数与任务目标) */
 const GENERIC_HIGH_RISK_REGEX = /删除|清空|格式化|卸载|关闭.*服务|停止.*进程/;
-
-/** shell 只读命令首 token 白名单(小写,跨 cmd/powershell/bash) */
-const SHELL_READONLY_TOKENS: Set<string> = new Set([
-  // cmd 常用只读
-  "dir", "cd", "echo", "type", "more", "findstr", "where", "whoami",
-  "systeminfo", "ver", "set", "path", "hostname", "date", "time",
-  "tasklist", "ipconfig", "ping", "tracert", "nslookup", "netstat", "arp",
-  "route", "wmic",
-  // powershell 只读 cmdlet(小写)
-  "get-childitem", "get-item", "get-content", "get-process", "get-service",
-  "get-location", "get-date", "get-host", "get-computerinfo", "get-ciminstance",
-  "get-wmiobject", "get-itemproperty", "get-itempropertyvalue", "get-variable",
-  "get-command", "get-help", "get-member", "get-alias", "get-history",
-  "get-psdrive", "get-netipaddress", "get-netadapter", "get-netroute",
-  "get-dnsclient", "select-object", "where-object", "sort-object",
-  "format-table", "format-list", "format-wide", "out-host", "out-string",
-  "write-output", "write-host", "read-host", "measure-object", "group-object",
-  "test-path", "test-connection", "test-netconnection", "resolve-path",
-  "convertto-json",
-  // bash 只读
-  "ls", "cat", "head", "tail", "less", "pwd", "uname", "env", "printenv",
-  "id", "groups", "ps", "top", "df", "du", "free", "uptime", "which",
-  "whereis", "find", "grep", "awk", "sed", "wc", "sort", "uniq", "cut",
-  "tr", "stat", "file", "tree", "xargs", "tee", "curl", "wget", "git",
-]);
 
 // --------------------------------------------------------------------------- //
 // 规则类型定义
@@ -87,34 +52,7 @@ interface HighRiskRule {
  * 绝对禁止的工具+参数组合(即使审批也拒)。
  * 顺序敏感:前面的先判定。
  */
-const DENIED_ACTIONS: DenyRule[] = [
-  {
-    tool: "desktop.run_shell",
-    match: (args) => {
-      const cmd = typeof args.command === "string" ? args.command : "";
-      return SHELL_DENY_REGEX.test(cmd);
-    },
-    reason: "shell 命令命中黑名单(破坏性/系统级操作:rm -rf/format/shutdown 等)",
-  },
-  {
-    tool: "desktop.run_input",
-    match: (args) => {
-      const action = typeof args.action === "string" ? args.action : "";
-      const text = typeof args.text === "string" ? args.text : "";
-      return action === "type" && INPUT_DENY_REGEX.test(text);
-    },
-    reason: "输入文本包含敏感金融信息(转账/汇款/支付/密码/验证码),禁止自动输入",
-  },
-  {
-    tool: "desktop.run_shell",
-    match: (args) => {
-      const cmd = typeof args.command === "string" ? args.command : "";
-      const allowDestructive = args.allowDestructive === true;
-      return allowDestructive && SHELL_DENY_REGEX.test(cmd);
-    },
-    reason: "allowDestructive=true 且命令命中黑名单",
-  },
-];
+const DENIED_ACTIONS: DenyRule[] = [];
 
 /**
  * 高危工具闸的统一文案：AgentTaskSafety 规则表与 RuntimeKernel 兼容入口共用，
@@ -134,33 +72,6 @@ const HIGH_RISK_TOOL_PATTERNS: HighRiskRule[] = [
     tool: "*",
     match: (args, toolName) => isHighRiskFinancialTool(toolName),
     reason: HIGH_RISK_TOOL_REASON,
-  },
-  {
-    tool: "desktop.run_shell",
-    match: (args) => args.allowDestructive === true,
-    reason: "shell 命令开启 allowDestructive,可能造成不可逆破坏",
-  },
-  {
-    tool: "desktop.run_input",
-    match: (args) => {
-      const action = typeof args.action === "string" ? args.action : "";
-      const text = typeof args.text === "string" ? args.text : "";
-      return action === "type" && INPUT_HIGH_RISK_REGEX.test(text);
-    },
-    reason: "输入文本包含敏感个人信息(账号/账户/金额/身份证/银行卡)",
-  },
-  {
-    tool: "desktop.open",
-    match: (args) => {
-      const path = typeof args.path === "string" ? args.path : "";
-      return OPEN_FINANCE_REGEX.test(path);
-    },
-    reason: "打开金融软件(银行/网银/支付宝/财付通等)",
-  },
-  {
-    tool: "desktop.visual.run_task",
-    match: () => true,
-    reason: "VLM 视觉操控,潜在不可预测,需人工确认",
   },
   {
     // 通配规则:对任意工具,只要参数值中包含高危关键词即触发
@@ -208,17 +119,20 @@ function isHighRiskFinancialTool(toolName: string): boolean {
  * 导出供 tool-loop 在「请求卡转正加载」时做前置拦截——高危工具不因模型一句
  * <tool_request> 就自动进入 chat 车道可见集，资金/外发动作必须走 task.dispatch
  * 派发后台 + 人工审批，或既有两阶段确认。
+ *
+ * 传入 input 时按复合 action 解析成真实执行器名再判定（ride_hailing+book 与
+ * ride_hailing.book 同判）；拿不到参数的名字级调用保持族名兜底。
  */
-export function isHighRiskToolName(toolName: string): boolean {
-  return isHighRiskFinancialTool(toolName);
+export function isHighRiskToolName(
+  toolName: string,
+  input?: Record<string, unknown>,
+): boolean {
+  return isHighRiskFinancialTool(input ? resolveEffectiveToolName(toolName, input) : toolName);
 }
 
 /**
- * 敏感输入文本判定（2026-09-19 P1-1：CDP 可信输入门用）。
- * desktop.run_input 的 type 通道已有同口径 DENY/HIGH_RISK 规则；浏览器可信输入
- * （shared_browser.trusted type）此前没有同款门——真实键盘事件直接打进受控
- * 表单，反而更该拦。与 desktop 同口径：金融敏感词一律拒绝，个人信息词要求
- * 用户自行输入。
+ * 敏感输入文本判定（CDP 可信输入门用）。
+ * 金融敏感词一律拒绝，个人信息词要求用户自行输入。
  */
 export function isSensitiveTypedText(text: string): { sensitive: boolean; reason?: string } {
   if (INPUT_DENY_REGEX.test(text)) {
@@ -273,25 +187,6 @@ function truncate(s: string, max: number = AUDIT_SUMMARY_MAX): string {
   return s.length > max ? s.slice(0, max) + "...<truncated>" : s;
 }
 
-/**
- * 从 shell 命令中提取首 token(剥离 cmd /c / powershell -Command 等包装)。
- * 用于查白名单判定是否为只读命令。
- */
-function extractFirstToken(command: string): string {
-  let s = command.trim();
-  // 剥离 cmd /c / cmd.exe /c 包装
-  s = s.replace(/^(?:cmd|cmd\.exe)\s+\/c\s+/i, "");
-  // 剥离 powershell -Command / -c 包装
-  s = s.replace(/^(?:powershell|powershell\.exe)\s+(?:-c|-command)\s+/i, "");
-  if (!s) return "";
-  const first = s.split(/\s+/)[0] ?? "";
-  if (!first) return "";
-  // 去路径前缀,取 base name
-  const base = first.split(/[\\/]/).pop() ?? first;
-  // 去可执行文件扩展名
-  return base.replace(/\.(exe|cmd|bat|ps1|sh)$/i, "");
-}
-
 // --------------------------------------------------------------------------- //
 // 安全层主类
 // --------------------------------------------------------------------------- //
@@ -305,18 +200,21 @@ export class AgentTaskSafety {
    * 判定顺序:
    *   1. DENIED_ACTIONS 命中 → deny(绝对拒绝)
    *   2. HIGH_RISK_TOOL_PATTERNS 命中 → require_approval(需人工审批)
-   *   3. desktop.run_shell 额外做只读校验:非只读 → require_approval
-   *   4. 其他 → allow(默认放行;工具暴露范围由 provider 基于 streamOpts 控制)
+   *   3. 其他 → allow(默认放行;工具暴露范围由 provider 基于 streamOpts 控制)
    */
   checkToolCall(
     toolName: string,
     args: Record<string, unknown>,
   ): SafetyCheckResult {
+    // 复合工具按 action 解析成真实执行器名再判定：ride_hailing+book 必须与
+    // ride_hailing.book 同档（两阶段/审批），而 quote/status 等只读分支不被族名连坐。
+    const effectiveName = resolveEffectiveToolName(toolName, args);
+
     // 1. 绝对禁止规则优先(即使审批也拒)
     for (const rule of DENIED_ACTIONS) {
-      if (rule.tool !== "*" && rule.tool !== toolName) continue;
+      if (rule.tool !== "*" && rule.tool !== effectiveName) continue;
       try {
-        if (rule.match(args, toolName)) {
+        if (rule.match(args, effectiveName)) {
           return {
             isHighRisk: true,
             action: "deny",
@@ -331,9 +229,9 @@ export class AgentTaskSafety {
 
     // 2. 高危规则(需人工审批)
     for (const rule of HIGH_RISK_TOOL_PATTERNS) {
-      if (rule.tool !== "*" && rule.tool !== toolName) continue;
+      if (rule.tool !== "*" && rule.tool !== effectiveName) continue;
       try {
-        if (rule.match(args, toolName)) {
+        if (rule.match(args, effectiveName)) {
           return {
             isHighRisk: true,
             action: "require_approval",
@@ -346,24 +244,7 @@ export class AgentTaskSafety {
       }
     }
 
-    // 3. shell 命令额外做只读白名单校验:非只读命令降级为 require_approval
-    if (toolName === "desktop.run_shell") {
-      if (isReadOnlyShellCommand(args)) {
-        return {
-          isHighRisk: false,
-          action: "allow",
-          matchedRule: "ALLOWED:desktop.run_shell.readonly",
-        };
-      }
-      return {
-        isHighRisk: true,
-        action: "require_approval",
-        reason: "shell 命令不在只读白名单中,需人工审批",
-        matchedRule: "HIGH_RISK:shell_not_readonly",
-      };
-    }
-
-    // 4. 默认放行(工具暴露范围已由 provider 基于 streamOpts 控制)
+    // 3. 默认放行(工具暴露范围已由 provider 基于 streamOpts 控制)
     return {
       isHighRisk: false,
       action: "allow",
@@ -435,20 +316,6 @@ export class AgentTaskSafety {
       // 审计日志写入失败不应影响主流程,静默吞掉
     }
   }
-}
-
-// --------------------------------------------------------------------------- //
-// 判定 shell 命令是否只读(模块级纯函数,便于测试)
-// --------------------------------------------------------------------------- //
-
-function isReadOnlyShellCommand(args: Record<string, unknown>): boolean {
-  const cmd = typeof args.command === "string" ? args.command : "";
-  if (!cmd.trim()) return false;
-  // allowDestructive=true 的命令不走只读白名单
-  if (args.allowDestructive === true) return false;
-  const firstToken = extractFirstToken(cmd);
-  if (!firstToken) return false;
-  return SHELL_READONLY_TOKENS.has(firstToken.toLowerCase());
 }
 
 // --------------------------------------------------------------------------- //

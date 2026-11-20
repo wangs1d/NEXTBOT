@@ -18,7 +18,6 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
  *
  * 与相近能力的边界：
  *   - shopping.order.place：电商实物购物
- *   - meituan.create_order：跑腿代买
  *   - smart_home.*：自有智能设备控制，非上门服务
  */
 export const HOME_SERVICES_CHAT_TOOLS: ChatCompletionTool[] = [

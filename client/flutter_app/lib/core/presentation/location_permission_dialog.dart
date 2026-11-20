@@ -3,9 +3,8 @@ import "package:flutter/services.dart";
 
 import "../theme/app_theme.dart";
 
-/// 定位权限选择结果：allow=使用期间允许；alwaysResident=始终允许（后台持续）；
-/// deny=暂不允许。
-enum LocationConsentChoice { allow, alwaysResident, deny }
+/// 定位权限选择结果：allow=使用期间允许；deny=暂不允许。
+enum LocationConsentChoice { allow, deny }
 
 /// 简洁的定位权限弹窗：默认聚焦「允许」按钮（按 Enter/回车直接确认）。
 /// 任何 dismiss（点空白、系统返回、Esc）行为均视为同意；只有显式点击「暂不允许」才回退。
@@ -80,18 +79,12 @@ class _LocationPermissionDialogBodyState
                       height: 1.5,
                     ),
                   ),
-                  const SizedBox(height: 12),
-                  Text(
-                    "「始终允许」= 系统定位权限选「始终允许 / 允许所有时间」+ 位置变化时后台告知 Agent（进出常去地点、到点提醒依赖它）。",
-                    style: TextStyle(
-                      color: AppPalette.locationDialogMuted,
-                      fontSize: 12.5,
-                      height: 1.4,
-                    ),
-                  ),
                   const SizedBox(height: 20),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
+                  // Wrap 防溢出：窄屏放不下三个按钮时自动换行，不再撑出卡片。
+                  Wrap(
+                    alignment: WrapAlignment.end,
+                    spacing: 8,
+                    runSpacing: 8,
                     children: <Widget>[
                       TextButton(
                         onPressed: () => Navigator.pop(context, LocationConsentChoice.deny),
@@ -99,18 +92,6 @@ class _LocationPermissionDialogBodyState
                           foregroundColor: AppPalette.locationDialogMuted,
                         ),
                         child: const Text("暂不允许"),
-                      ),
-                      const SizedBox(width: 8),
-                      OutlinedButton(
-                        onPressed: () =>
-                            Navigator.pop(context, LocationConsentChoice.alwaysResident),
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: AppPalette.locationDialogButtonFg,
-                          side: BorderSide(
-                            color: AppPalette.locationDialogButtonBg.withValues(alpha: 0.6),
-                          ),
-                        ),
-                        child: const Text("始终允许"),
                       ),
                       const SizedBox(width: 8),
                       FilledButton(

@@ -111,6 +111,13 @@ export class SiteSessionStore {
   pruneExpired(): void {
     this.open().prepare("DELETE FROM site_sessions WHERE expires_at <= ?").run(new Date().toISOString());
   }
+
+  /** 关闭底层连接（测试/优雅退出用；下次访问会自动重新打开）。 */
+  close(): void {
+    if (!this.db) return;
+    this.db.close();
+    this.db = null;
+  }
 }
 
 export const SITE_SESSION_MAX_AGE_SECONDS = Math.floor(SESSION_ABSOLUTE_MS / 1000);

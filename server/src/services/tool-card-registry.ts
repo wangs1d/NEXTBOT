@@ -9,7 +9,7 @@
  * 与既有确定性路径的分工：
  *   - travel.plan-itinerary → attachTravelItineraryCard（双面板卡，含冷层回捞）
  *   - 媒体搜索 → mediaCards 结构化字段（chat.assistant_done 独立下发）
- *   - 网页搜索（search_web / info.search）**不出卡**：搜索回执只喂给模型做整合，
+ *   - 网页搜索（search_web）**不出卡**：搜索回执只喂给模型做整合，
  *     由模型自己总结成正文（2026-11-05 用户定稿，两端一致，禁止搜索结果卡/来源列表）
  * 新工具按需在 BUILDERS 注册即可，builder 返回 null（结构异常/空数据）时
  * 自动回退既有文本路由，零破坏。
@@ -174,7 +174,7 @@ function shortTime(value: unknown): string {
 
 const BUILDERS: Record<string, ToolCardBuilder> = {
   /**
-   * 注意（2026-11-05 用户定稿）：search_web / info.search **不再注册 builder**。
+   * 注意（2026-11-05 用户定稿）：search_web **不再注册 builder**。
    * 搜索回执只作为模型上下文，正文由模型自己总结；不允许出现「搜索结果」卡、
    * 来源清单或原始条目（桌面端与手机端一致）。历史上这里曾直接从 items 建
    * search_result 卡，已整体退役——不要再加回来。
@@ -1274,6 +1274,9 @@ function buildRideQuoteCard(r: Record<string, unknown>): ToolCardPayload | null 
   const scheduleAt = str(req.scheduleAt);
   const provider = str(r.provider);
   const providerLabel = rideProviderLabel(r);
+  // 加值信息（2026-11-20）：滴图驾车路线（里程/耗时/轨迹）+ 滴滴 App 深链
+  const routeRaw = (r.route ?? null) as Record<string, unknown> | null;
+  const rideAppLink = str(r.rideAppLink);
 
   const items: ToolCardItem[] = [];
   const rideOptions: Array<Record<string, unknown>> = [];
@@ -1329,6 +1332,16 @@ function buildRideQuoteCard(r: Record<string, unknown>): ToolCardPayload | null 
   }
   if (items.length === 0) return null;
 
+  // 驾车路线摘要行（第一行，2026-11-20）：让用户下单前心里有数
+  const routeDistance = str(routeRaw?.distanceText);
+  const routeDuration = str(routeRaw?.durationText);
+  if (routeDistance || routeDuration) {
+    items.unshift({
+      type: "check",
+      text: ["驾车路线", routeDistance, routeDuration].filter(Boolean).join(" · "),
+    });
+  }
+
   const note = str(r.note) || str(r.pickupNote);
   const footer = [
     providerLabel,
@@ -1338,6 +1351,18 @@ function buildRideQuoteCard(r: Record<string, unknown>): ToolCardPayload | null 
   ]
     .filter(Boolean)
     .join(" · ");
+
+  // 轨迹点压缩下发（前端画线用）：>400 点截断，[lat,lng] 对比对象省 40% 体积
+  const rawPoints = Array.isArray(routeRaw?.points) ? (routeRaw!.points as Array<{ lat: number; lng: number }>) : [];
+  const route = routeRaw
+    ? {
+        distanceText: routeDistance,
+        durationText: routeDuration,
+        ...(rawPoints.length > 0
+          ? { points: rawPoints.slice(0, 400).map((p) => [p.lat, p.lng] as [number, number]) }
+          : {}),
+      }
+    : null;
 
   return {
     title: pickup && dropoff ? `叫车报价 · ${pickup} → ${dropoff}` : "叫车报价",
@@ -1353,6 +1378,8 @@ function buildRideQuoteCard(r: Record<string, unknown>): ToolCardPayload | null 
         scheduleAt,
         note,
         options: rideOptions,
+        ...(route ? { route } : {}),
+        ...(rideAppLink ? { rideAppLink } : {}),
       },
     },
   };

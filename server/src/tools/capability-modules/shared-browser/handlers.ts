@@ -185,8 +185,7 @@ export function registerSharedBrowserTools(
       if (action === "type" && !String(input.text ?? "").trim()) {
         return { ok: false, error: "可信输入须提供 text" };
       }
-      // 敏感输入门（2026-09-19 P1-1）：与 desktop.run_input type 同口径——
-      // 可信输入是 isTrusted=true 的真实键盘事件，金融/个人敏感信息一律不代打。
+      // 敏感输入门：可信输入是 isTrusted=true 的真实键盘事件，金融/个人敏感信息一律不代打。
       if (action === "type") {
         const sens = isSensitiveTypedText(String(input.text ?? ""));
         if (sens.sensitive) {

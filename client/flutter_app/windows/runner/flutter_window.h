@@ -69,13 +69,6 @@ class FlutterWindow : public Win32Window {
       const flutter::MethodCall<flutter::EncodableValue>& call,
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
 
-  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
-      desktop_bridge_channel_;
-
-  void HandleDesktopBridgeMethodCall(
-      const flutter::MethodCall<flutter::EncodableValue>& call,
-      std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
-
   // pai/incoming_call MethodChannel —— 控制独立来电悬浮窗
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
       incoming_call_channel_;

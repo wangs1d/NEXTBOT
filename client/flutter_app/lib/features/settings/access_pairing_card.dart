@@ -1,14 +1,18 @@
 import "dart:async";
 
 import "package:flutter/material.dart";
+import "package:flutter/services.dart";
 
-import "../../core/config/api_config.dart";
 import "../../core/services/access_auth_api.dart";
 
-/// 「设备配对」卡：本机访问凭据（设备 token）的获取、代签与吊销。
+/// 「设备配对」卡：已配对状态的展示与本机凭据（设备 token）的解绑。
 ///
 /// 服务端开周界鉴权（ACCESS_AUTH_REQUIRED=1）后，每台设备必须先配对才取得到
 /// 自己的数据；凭据只落本机文件，服务端只存 sha256 哈希、永不回吐明文。
+///
+/// 产品形态上配对不在手机端发起：本卡只呈现「已配对」面板——绑定账号、
+/// 为其他设备代签一次性配对码、已配对设备列表（可吊销）、解绑本机；
+/// 未配对时只给一行状态说明，不提供任何配对流程入口。
 class AccessPairingCard extends StatefulWidget {
   const AccessPairingCard({super.key, this.margin, this.api});
 
@@ -24,8 +28,6 @@ class AccessPairingCard extends StatefulWidget {
 
 class _AccessPairingCardState extends State<AccessPairingCard> {
   late final AccessAuthApi _api = widget.api ?? AccessAuthApi();
-  final TextEditingController _pairingCodeCtrl = TextEditingController();
-  final TextEditingController _emailCodeCtrl = TextEditingController();
 
   AccessAuthStatus? _status;
   List<AccessDevice> _devices = const <AccessDevice>[];
@@ -33,8 +35,6 @@ class _AccessPairingCardState extends State<AccessPairingCard> {
   /// 本机代签出来的配对码（给另一台设备输入用）。
   String? _issuedCode;
 
-  /// 邮箱所有权验证码已发出（才显示验证码输入框）。
-  bool _otpSent = false;
   bool _busy = false;
   String? _message;
   bool _messageIsError = false;
@@ -45,15 +45,6 @@ class _AccessPairingCardState extends State<AccessPairingCard> {
     unawaited(_refresh());
   }
 
-  @override
-  void dispose() {
-    _pairingCodeCtrl.dispose();
-    _emailCodeCtrl.dispose();
-    super.dispose();
-  }
-
-  /// 登录邮箱（编译期 USER_ID / sessionId 形态不是邮箱，走不了自证通道）。
-  String get _email => ApiConfig.runtimeUserId ?? "";
   bool get _isBound => AccessCredentialStore.instance.hasCredentials;
 
   Future<void> _refresh() async {
@@ -89,91 +80,6 @@ class _AccessPairingCardState extends State<AccessPairingCard> {
     }
   }
 
-  /// 配对码 → 本机 token（另一台设备生成的码输入这里）。
-  Future<void> _bindWithPairingCode() async {
-    final String code = _pairingCodeCtrl.text.trim();
-    if (code.isEmpty) {
-      _say("请先输入配对码", isError: true);
-      return;
-    }
-    await _guard(() async {
-      final AccessAuthResult<AccessDeviceBinding> res = await _api.bind(code: code);
-      if (!res.ok) {
-        _say(res.error ?? "配对失败", isError: true);
-        return;
-      }
-      await AccessCredentialStore.instance.save(res.value!);
-      _pairingCodeCtrl.clear();
-      _say("配对成功：HTTP 已带上凭据，长连接重连后生效");
-      await _refresh();
-    });
-  }
-
-  /// 服务端尚无绑定设备（或还没开鉴权）→ 不需要任何证明，本机直接领凭据。
-  Future<void> _bindDirectly() async {
-    await _guard(() async {
-      final AccessAuthResult<String> issued = await _api.issuePairingCode();
-      if (!issued.ok) {
-        _say(issued.error ?? "无法获取配对码", isError: true);
-        return;
-      }
-      final AccessAuthResult<AccessDeviceBinding> res =
-          await _api.bind(code: issued.value!);
-      if (!res.ok) {
-        _say(res.error ?? "配对失败", isError: true);
-        return;
-      }
-      await AccessCredentialStore.instance.save(res.value!);
-      _say("配对成功：HTTP 已带上凭据，长连接重连后生效");
-      await _refresh();
-    });
-  }
-
-  Future<void> _sendEmailOtp() async {
-    await _guard(() async {
-      final AccessAuthResult<void> res = await _api.startEmailOtp(email: _email);
-      if (!res.ok) {
-        _say(res.error ?? "验证码发送失败", isError: true);
-        return;
-      }
-      setState(() => _otpSent = true);
-      _say("验证码已发到 $_email（10 分钟内有效）");
-    });
-  }
-
-  /// 新设备自证：邮箱验证码换配对码，再用配对码绑本机。
-  Future<void> _bindWithEmailCode() async {
-    final String code = _emailCodeCtrl.text.trim();
-    if (code.isEmpty) {
-      _say("请输入邮箱里的 6 位验证码", isError: true);
-      return;
-    }
-    await _guard(() async {
-      final AccessAuthResult<String> issued = await _api.issuePairingCode(
-        emailCode: code,
-        userId: _email,
-      );
-      if (!issued.ok) {
-        _say(issued.error ?? "邮箱验证未通过", isError: true);
-        return;
-      }
-      final AccessAuthResult<AccessDeviceBinding> res =
-          await _api.bind(code: issued.value!);
-      if (!res.ok) {
-        _say(res.error ?? "配对失败", isError: true);
-        return;
-      }
-      await AccessCredentialStore.instance.save(res.value!);
-      _emailCodeCtrl.clear();
-      setState(() {
-        _otpSent = false;
-        _issuedCode = null;
-      });
-      _say("配对成功：HTTP 已带上凭据，长连接重连后生效");
-      await _refresh();
-    });
-  }
-
   Future<void> _issueForOtherDevice() async {
     await _guard(() async {
       final AccessAuthResult<String> res = await _api.issuePairingCode();
@@ -182,7 +88,7 @@ class _AccessPairingCardState extends State<AccessPairingCard> {
         return;
       }
       setState(() => _issuedCode = res.value);
-      _say("在另一台设备的「设备配对」里输入上面这码");
+      _say("配对码已生成，在另一台设备输入即可");
     });
   }
 
@@ -226,48 +132,30 @@ class _AccessPairingCardState extends State<AccessPairingCard> {
     );
   }
 
+  // ─────────────────────────────────────────────
+  // 构建
+  // ─────────────────────────────────────────────
+
   @override
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
+    final bool bound = _isBound;
     return Card(
       margin: widget.margin ?? EdgeInsets.zero,
+      clipBehavior: Clip.antiAlias,
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(18),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
-            Row(
-              children: <Widget>[
-                const Icon(Icons.key_outlined, size: 18),
-                const SizedBox(width: 8),
-                Text("设备配对", style: Theme.of(context).textTheme.titleMedium),
-                const Spacer(),
-                Text(
-                  _isBound ? "已配对" : "未配对",
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: _isBound ? cs.primary : cs.onSurfaceVariant,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 6),
-            Text(_serverLine, style: Theme.of(context).textTheme.bodySmall),
-            const SizedBox(height: 14),
-            if (_isBound) ...<Widget>[
-              _buildBoundBody(cs),
-            ] else ...<Widget>[
-              _buildUnboundBody(cs),
-            ],
+            _buildHeader(cs, bound),
+            const SizedBox(height: 12),
+            _buildStatusLine(cs),
+            const SizedBox(height: 18),
+            if (bound) _buildBoundBody(cs) else _buildUnboundHint(cs),
             if (_message != null) ...<Widget>[
-              const SizedBox(height: 10),
-              Text(
-                _message!,
-                style: TextStyle(
-                  fontSize: 12,
-                  color: _messageIsError ? cs.error : cs.onSurfaceVariant,
-                ),
-              ),
+              const SizedBox(height: 14),
+              _messageBanner(cs),
             ],
           ],
         ),
@@ -275,203 +163,366 @@ class _AccessPairingCardState extends State<AccessPairingCard> {
     );
   }
 
-  /// 服务端那一头的真实状态（开闸与否 / 是否已有设备），不猜、不粉饰。
-  String get _serverLine {
-    final AccessAuthStatus? st = _status;
-    if (st == null) return "正在读取云端鉴权状态…";
-    if (!st.authRequired) {
-      return "云端暂未开启访问鉴权。现在配对，开闸后这台设备不会掉线。";
-    }
-    if (!st.bound) {
-      return "云端已开启访问鉴权，且还没有任何设备绑定 —— 这台就是首台。";
-    }
-    return "云端已开启访问鉴权，凭据随每个请求自动附带。";
+  /// 头部：图标 + 标题 + 状态角标（形状 + 文字双通道，不只靠颜色表意）。
+  Widget _buildHeader(ColorScheme cs, bool bound) {
+    return Row(
+      children: <Widget>[
+        Container(
+          width: 38,
+          height: 38,
+          decoration: BoxDecoration(
+            color: cs.surfaceContainerHighest,
+            borderRadius: BorderRadius.circular(11),
+          ),
+          child: Icon(
+            bound ? Icons.link_rounded : Icons.link_off_rounded,
+            size: 18,
+            color: cs.onSurfaceVariant,
+          ),
+        ),
+        const SizedBox(width: 11),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text("设备配对",
+                  style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                      color: cs.onSurface)),
+              const SizedBox(height: 2),
+              Text(bound ? "这台设备已接入" : "让这台设备访问你的 NEXTBOT",
+                  style: TextStyle(fontSize: 11.5, color: cs.onSurfaceVariant)),
+            ],
+          ),
+        ),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+          decoration: BoxDecoration(
+            color: bound ? cs.primary : cs.surfaceContainerHighest,
+            borderRadius: BorderRadius.circular(20),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Container(
+                width: 6,
+                height: 6,
+                decoration: BoxDecoration(
+                  color: bound ? cs.onPrimary : cs.onSurfaceVariant,
+                  shape: BoxShape.circle,
+                ),
+              ),
+              const SizedBox(width: 5),
+              Text(bound ? "已配对" : "未配对",
+                  style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: bound ? cs.onPrimary : cs.onSurfaceVariant)),
+            ],
+          ),
+        ),
+      ],
+    );
   }
 
+  /// 一行说清服务端状态：开没开鉴权 / 是不是首台。不粉饰、不堆术语。
+  Widget _buildStatusLine(ColorScheme cs) {
+    final AccessAuthStatus? st = _status;
+    late final IconData icon;
+    late final String text;
+    if (st == null) {
+      icon = Icons.sync_rounded;
+      text = "正在读取云端鉴权状态…";
+    } else if (!st.authRequired) {
+      icon = Icons.info_outline;
+      text = "云端暂未开启访问鉴权 · 现在配对，开闸后不会掉线";
+    } else if (!st.bound) {
+      icon = Icons.rocket_launch_outlined;
+      text = "云端已开启鉴权 · 这台设备将成为首台";
+    } else if (!_isBound) {
+      icon = Icons.lock_outline;
+      text = "云端已开启鉴权且已有设备 · 配对后这台才能访问";
+    } else {
+      icon = Icons.verified_outlined;
+      text = "凭据随每个请求自动附带，无需手动操作";
+    }
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerLowest,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        children: <Widget>[
+          Icon(icon, size: 14, color: cs.onSurfaceVariant),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(text,
+                style: TextStyle(
+                    fontSize: 11.5, color: cs.onSurfaceVariant, height: 1.4)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 未配对：不提供任何配对流程入口，只给一行状态说明。
+  Widget _buildUnboundHint(ColorScheme cs) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerLowest,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Text(
+        "这台设备尚未配对 · 在已配对的设备上完成配对后，这里会显示接入状态",
+        style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant, height: 1.5),
+      ),
+    );
+  }
+
+  /// 已配对：主操作是「发配对码给新设备」，设备列表可管理，解绑沉到底部。
   Widget _buildBoundBody(ColorScheme cs) {
     final String userId = AccessCredentialStore.instance.userId ?? "";
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
-        Text("已配对账号：$userId", style: const TextStyle(fontSize: 12.5)),
-        const SizedBox(height: 12),
         Row(
           children: <Widget>[
-            FilledButton(
-              onPressed: _busy ? null : _issueForOtherDevice,
-              child: const Text(
-                "为其他设备生成配对码",
-                style: TextStyle(fontSize: 13),
-              ),
-            ),
-            const SizedBox(width: 10),
-            OutlinedButton(
-              onPressed: _busy ? null : _unbindLocal,
+            Icon(Icons.account_circle_outlined,
+                size: 15, color: cs.onSurfaceVariant),
+            const SizedBox(width: 7),
+            Expanded(
               child: Text(
-                "解绑本机",
-                style: TextStyle(fontSize: 13, color: cs.error),
-              ),
+                  userId.isEmpty ? "本机凭据已就绪" : "已绑定账号 $userId",
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
             ),
           ],
         ),
+        const SizedBox(height: 18),
+        _stepHeader(
+            cs, "", "配对新设备", "生成一次性配对码，在另一台设备输入"),
+        const SizedBox(height: 12),
+        SizedBox(
+          width: double.infinity,
+          height: 44,
+          child: FilledButton.icon(
+            onPressed: _busy ? null : _issueForOtherDevice,
+            icon: const Icon(Icons.qr_code_2_outlined, size: 16),
+            label: const Text("生成配对码",
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+          ),
+        ),
         if (_issuedCode != null) ...<Widget>[
           const SizedBox(height: 12),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-            decoration: BoxDecoration(
-              color: cs.surfaceContainerHighest.withValues(alpha: 0.5),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Row(
-              children: <Widget>[
-                SelectableText(
-                  _issuedCode!,
-                  style: const TextStyle(
-                    fontSize: 22,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 6,
-                    fontFeatures: <FontFeature>[FontFeature.tabularFigures()],
-                  ),
-                ),
-                const SizedBox(width: 12),
-                const Expanded(
-                  child: Text(
-                    "10 分钟内有效，只用一次",
-                    style: TextStyle(fontSize: 12),
-                  ),
-                ),
-              ],
-            ),
-          ),
+          _issuedCodePanel(cs),
         ],
         if (_devices.isNotEmpty) ...<Widget>[
-          const SizedBox(height: 14),
-          const Text(
-            "已配对设备",
-            style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600),
-          ),
-          const SizedBox(height: 4),
+          const SizedBox(height: 20),
+          _stepHeader(cs, "", "已配对设备（${_devices.length}）",
+              "不再使用的设备可以从这里吊销"),
+          const SizedBox(height: 6),
           for (final AccessDevice d in _devices) _deviceRow(cs, d),
         ],
+        const SizedBox(height: 18),
+        Divider(height: 1, color: cs.outlineVariant),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton.icon(
+            onPressed: _busy ? null : _unbindLocal,
+            icon: Icon(Icons.link_off_rounded, size: 15, color: cs.error),
+            label: Text("解绑本机",
+                style: TextStyle(fontSize: 12, color: cs.error)),
+          ),
+        ),
       ],
+    );
+  }
+
+  /// 配对码：大号等宽 + 一键复制，10 分钟一次性。
+  Widget _issuedCodePanel(ColorScheme cs) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 10, 8, 12),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: cs.outlineVariant),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Text("配对码",
+                  style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+              const Spacer(),
+              IconButton(
+                onPressed: () {
+                  unawaited(Clipboard.setData(ClipboardData(text: _issuedCode!)));
+                  _say("配对码已复制");
+                },
+                icon: const Icon(Icons.copy_all_outlined, size: 16),
+                tooltip: "复制配对码",
+                constraints:
+                    const BoxConstraints(minWidth: 36, minHeight: 36),
+                padding: EdgeInsets.zero,
+                color: cs.onSurfaceVariant,
+              ),
+            ],
+          ),
+          SelectableText(
+            _issuedCode!,
+            style: TextStyle(
+              fontSize: 26,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 7,
+              color: cs.onSurface,
+              fontFeatures: const <FontFeature>[FontFeature.tabularFigures()],
+            ),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: <Widget>[
+              Icon(Icons.schedule, size: 12, color: cs.onSurfaceVariant),
+              const SizedBox(width: 5),
+              Text("10 分钟内有效 · 仅可使用一次",
+                  style: TextStyle(fontSize: 11.5, color: cs.onSurfaceVariant)),
+            ],
+          ),
+        ],
+      ),
     );
   }
 
   Widget _deviceRow(ColorScheme cs, AccessDevice d) {
     final bool isLocal = d.tokenId == AccessCredentialStore.instance.tokenId;
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 2),
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      decoration: BoxDecoration(
+        border: Border(
+          bottom: BorderSide(color: cs.outlineVariant.withValues(alpha: 0.6)),
+        ),
+      ),
       child: Row(
         children: <Widget>[
-          Icon(
-            isLocal ? Icons.laptop_mac : Icons.devices_other,
-            size: 15,
-            color: cs.onSurfaceVariant,
+          Container(
+            width: 32,
+            height: 32,
+            decoration: BoxDecoration(
+              color: cs.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(9),
+            ),
+            child: Icon(Icons.devices_rounded,
+                size: 16, color: cs.onSurfaceVariant),
           ),
-          const SizedBox(width: 8),
+          const SizedBox(width: 10),
           Expanded(
-            child: Text(
-              "${d.deviceLabel} · 最近使用 ${_formatSeen(d.lastSeenAt)}",
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(fontSize: 12.5),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Text(d.deviceLabel.isEmpty ? "未命名设备" : d.deviceLabel,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w500,
+                        color: cs.onSurface)),
+                const SizedBox(height: 2),
+                Text("最近使用 ${_formatSeen(d.lastSeenAt)}",
+                    style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+              ],
             ),
           ),
           if (isLocal)
-            Text(
-              "本机",
-              style: TextStyle(fontSize: 12, color: cs.primary),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                color: cs.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Text("本机",
+                  style: TextStyle(fontSize: 10.5, color: cs.onSurfaceVariant)),
             )
           else
             TextButton(
               onPressed: _busy ? null : () => _revoke(d),
-              child: const Text("吊销", style: TextStyle(fontSize: 12)),
+              child: Text("吊销", style: TextStyle(fontSize: 12, color: cs.error)),
             ),
         ],
       ),
     );
   }
 
-  Widget _buildUnboundBody(ColorScheme cs) {
-    // 首台设备（或还没开闸）不需要任何证明；已有别的设备时必须自证或输入配对码。
-    final AccessAuthStatus? st = _status;
-    final bool canBindDirectly = st != null && (!st.authRequired || !st.bound);
-    final bool hasEmail = _email.contains("@");
-    return Column(
+  /// 步骤小标题：序号圆点 + 标题 + 说明。
+  Widget _stepHeader(ColorScheme cs, String step, String title, String subtitle) {
+    return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
-        if (canBindDirectly) ...<Widget>[
-          FilledButton(
-            onPressed: _busy ? null : _bindDirectly,
-            child: const Text("配对本机", style: TextStyle(fontSize: 13)),
+        if (step.isNotEmpty) ...<Widget>[
+          Container(
+            width: 19,
+            height: 19,
+            decoration: BoxDecoration(color: cs.primary, shape: BoxShape.circle),
+            alignment: Alignment.center,
+            child: Text(step,
+                style: TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w700,
+                    color: cs.onPrimary)),
           ),
-          const SizedBox(height: 14),
+          const SizedBox(width: 9),
         ],
-        Row(
-          children: <Widget>[
-            Expanded(
-              child: TextField(
-                controller: _pairingCodeCtrl,
-                textCapitalization: TextCapitalization.characters,
-                maxLength: 6,
-                style: const TextStyle(
-                  fontSize: 14,
-                  letterSpacing: 3,
-                  fontWeight: FontWeight.w600,
-                ),
-                decoration: const InputDecoration(
-                  labelText: "配对码",
-                  hintText: "另一台设备生成的 6 位码",
-                  counterText: "",
-                  isDense: true,
-                ),
-              ),
-            ),
-            const SizedBox(width: 10),
-            FilledButton(
-              onPressed: _busy ? null : _bindWithPairingCode,
-              child: const Text("配对", style: TextStyle(fontSize: 13)),
-            ),
-          ],
-        ),
-        if (hasEmail) ...<Widget>[
-          const SizedBox(height: 10),
-          if (!_otpSent)
-            TextButton.icon(
-              onPressed: _busy ? null : _sendEmailOtp,
-              icon: const Icon(Icons.mark_email_unread_outlined, size: 16),
-              label: Text("没有配对码？验证码发到我邮箱（$_email）",
-                  style: const TextStyle(fontSize: 12.5)),
-            )
-          else
-            Row(
-              children: <Widget>[
-                Expanded(
-                  child: TextField(
-                    controller: _emailCodeCtrl,
-                    keyboardType: TextInputType.number,
-                    maxLength: 6,
-                    style: const TextStyle(fontSize: 14, letterSpacing: 2),
-                    decoration: const InputDecoration(
-                      labelText: "邮箱验证码",
-                      counterText: "",
-                      isDense: true,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                FilledButton(
-                  onPressed: _busy ? null : _bindWithEmailCode,
-                  child: const Text("配对本机", style: TextStyle(fontSize: 13)),
-                ),
-              ],
-            ),
-        ] else
-          Text(
-            "当前登录身份不是邮箱，只能输入另一台设备生成的配对码。",
-            style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text(title,
+                  style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: cs.onSurface)),
+              const SizedBox(height: 2),
+              Text(subtitle,
+                  style: TextStyle(
+                      fontSize: 11.5, color: cs.onSurfaceVariant, height: 1.4)),
+            ],
           ),
+        ),
       ],
+    );
+  }
+
+  /// 结果提示：带图标的提示条，错误/成功双态。
+  Widget _messageBanner(ColorScheme cs) {
+    final bool err = _messageIsError;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: err ? cs.errorContainer : cs.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Icon(
+            err ? Icons.error_outline : Icons.check_circle_outline,
+            size: 14,
+            color: err ? cs.error : cs.primary,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(_message!,
+                style: TextStyle(
+                    fontSize: 11.5,
+                    height: 1.5,
+                    color: err ? cs.error : cs.onSurfaceVariant)),
+          ),
+        ],
+      ),
     );
   }
 

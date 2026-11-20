@@ -8,7 +8,7 @@
  *   - CHAT_LANE_CORE_NAMES：普通对话轮常驻（感知只读 + 单步轻动作 + 控制工具）
  *   - TASK_LANE_CORE_NAMES：仅**后台任务执行器**（task_plane：task.dispatch
  *     派发的重活 / 计划续跑）使用的执行主力清单，不进普通对话轮
- *   - 其余工具全部进延迟目录，经 tool_discover / tool_search / tool_request 到达
+ *   - 其余工具全部进延迟目录，经 tool_discover / tool_request 到达
  *
  * 回滚：AGENT_TOOL_ARCH=legacy 恢复旧路径（见 isStaticToolArchEnabled）。
  */
@@ -16,6 +16,7 @@
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 import { bm25HitsForQuery, domainVotesForQuery, topToolMatchesForQuery } from "../tools/tool-search/index.js";
 import { firstSentence } from "../tools/tool-search/schema-slim.js";
+import { residentNamesForLane } from "../tools/exposure/residency.js";
 import {
   domainsForTool,
   isExplicitDomain,
@@ -43,46 +44,8 @@ export function isStaticToolArchEnabled(): boolean {
  * 按名解析自注册表，注册表缺失的工具自动跳过（生产/测试环境差异容错）。
  * brain.recall 由 setMemoryChatTools 在 bootstrap 注入，测试环境缺省属正常。
  */
-export const CHAT_LANE_CORE_NAMES: readonly string[] = [
-  // 时间/位置（感知）
-  "clock.get_user_location",
-  // 2026-10-07：此前只在 task 车道，chat 车道模型看不到天气工具，
-  // 实证会嘴硬「没有联网天气接口的访问权限」而非 discover——天气是对话高频
-  // 动作，提为 chat 常驻（profile.update 同款教训）。2026-11 起天气/行情/检索
-  // 统一走复合 web_search（action=weather/quote/web），一个 schema 覆盖三态。
-  // 2026-11-06：行情报价常驻。事故链：行情走 search_web → 新闻快照无日期
-  // 新旧混杂 → 11·5 大跌被答成「大涨」。报价类事实必须走行情接口直出，
-  // 常驻可见才能保证模型不先抓搜索（价格高频变动，快照永远慢一拍）。
-  // 联网信息（只读）
-  // 2026-10-21 工具面收敛：媒体/热榜三件套移入延迟目录——它们是低频按需检索，
-  // 且 media 域有 BM25 域预载兜底（"找张图/猫咪视频/热搜"会确定性带回来），
-  // 每轮常驻约 850 字符并不划算。web_search/web_fetch 仍是对话刚需，常驻。
-  "web_search",
-  "web_fetch",
-  // 日程/提醒（轻动作，唯一入口 calendar）
-  "calendar",
-  // 通讯（轻动作）
-  // phone 复合（action=number）保留常驻（2026-10-21 实测）：「我的手机号」这类口语
-  // 召回不稳（BM25 top-10 缺位），而它一旦进目录，模型会直接嘴硬"查不到号码"。
-  // 228 字符换掉一次"没权限"事故，划算。
-  "phone",
-  "world.link",
-  // 记忆（感知）
-  "brain.recall",
-  // 用户画像自编辑（2026-09-29）：「越来越了解用户」是对话基本动作；
-  // 进延迟目录模型会忘记搜索、直接嘴硬说记了（真机实证），须常驻可见。
-  "profile.update",
-  // 持续感知回溯（只读）——2026-10-22 移出常驻：主动感知模块（SensorKernel/
-  // 世界板/晨报）会**主动**推送感知信号，"我刚才在干嘛"属低频回查，留在延迟
-  // 目录由 BM25 召回（描述含「我刚才在干嘛/你看到什么了」，词面可命中）。
-  // 自我/能力（模型自救入口）
-  // agent 复合（action=capabilities）必须常驻：它是模型"以为没权限"时的自救入口。
-  "agent",
-  // 重活逃生门（委派后台）+ 委派闭环（查询/取消，2026-09-19 P0-2）
-  "task.dispatch",
-  "task.status",
-  "task.cancel",
-];
+/** 每轮可见面（chat 车道）——派生自 tools/exposure/residency.ts（单一声明源），禁止在本文件新增名单。 */
+export const CHAT_LANE_CORE_NAMES: readonly string[] = residentNamesForLane("chat");
 
 /**
  * 后台任务执行器 Core（task_plane 专用）：在 chat 常驻基础上换进执行主力
@@ -90,45 +53,15 @@ export const CHAT_LANE_CORE_NAMES: readonly string[] = [
  * 本清单只服务 task.dispatch 派发的后台重活与计划续跑。
  * 长尾（购物订单、智能家居、财务域等）留在延迟目录。
  */
-export const TASK_LANE_CORE_NAMES: readonly string[] = [
-  // 搜索全档（web/deep/images/images_batch/videos/find_video/parse_video/hot/
-  // weather/quote 全部收在 web_search 的 action 里）
-  "web_search",
-  // 深读/站点导航/原始 HTTP
-  "web_fetch",
-  "browser.session.list",
-  // 感知
-  "clock.get_user_location",
-  // 日程/提醒
-  "calendar",
-  // 通讯
-  "world.link",
-  // 桌面（桥/本机视觉离线时由调用方过滤）
-  "desktop.visual.screenshot",
-  // 代码沙箱（缺失自动跳过）
-  "code.run",
-  "code.write_file",
-  "code.read_file",
-  // 记忆/能力
-  "brain.recall",
-  "agent",
-  // 持续感知回溯（只读，2026-09-19 P0-1）
-  "perception.overview",
-  // ObservationPack 读回（压缩补偿，常驻才有意义）
-  "obs_recall",
-  // 元工具桥 + 逃生门 + 委派闭环（2026-09-19 P0-2）
-  "tool_discover",
-  "task.dispatch",
-  "task.status",
-  "task.cancel",
-];
+/** 任务车道执行主力 —— 派生自 tools/exposure/residency.ts（单一声明源）。 */
+export const TASK_LANE_CORE_NAMES: readonly string[] = residentNamesForLane("task");
 
 /**
  * task 执行器暴露模式（2026-09-23 token 优化）：router-first（默认）。
  *
  * 背景：task Core 36 个全量 schema ≈ 5.1k token/轮，占 light 档单次输入
  * （API 实测均值 8.2k）的一半以上，而 light 档 2-3 波的编排深度根本用不满
- * 36 个工具。router-first 下可见集只留桥工具（tool_discover/tool_call 由
+ * 36 个工具。router-first 下可见集只留桥工具（tool_discover 由
  * prepareToolsWithToolSearch 自动注入），全量语料进 BM25 延迟目录按需召回；
  * 质量护栏：意图预召回（top-1 高置信工具免 discover 直转正）+ <tool_request>
  * 请求卡 + 高频调用自动晋升（PROMOTE_THRESHOLD=3）。普通对话轮不受影响。
@@ -313,7 +246,7 @@ export function buildDomainPreloadTools(
 
   // 1. BM25 点信号优先：单个工具与 query 的强匹配先占位，域族随后补齐。
   //    去掉别名直取后，这是唯一的「点信号」通道；它完全由检索算法产生，
-  //    不含任何意图规则。先放点信号再放族，避免大族（12 个 desktop 工具）
+  //    不含任何意图规则。先放点信号再放族，避免大族
   //    把 cap 占满、把真正命中的单个工具 slice 掉。
   for (const match of topToolMatchesForQuery(trimmed, corpus, DOMAIN_PRELOAD_TOPK, excludeNames)) {
     const tool = byName.get(match.name);
@@ -461,9 +394,7 @@ export function isRouterFirstLaneTurn(prepared: {
 
 /** 元工具/能力查询桥：任何集合都保留，保证延迟目录可达。 */
 export const CAPABILITY_BRIDGE_TOOLS: ReadonlySet<string> = new Set([
-  "tool_search",
   "tool_discover",
-  "tool_describe",
   "agent",
 ]);
 

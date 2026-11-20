@@ -7,8 +7,8 @@
  * 三个消费点：束投影（路由预载）、域卡（能力面展示）、域拉取（tool_discover
  * 按域确定性取族）。
  *
- * 等价性约束（test/domain-registry.test.ts 锁定）：search/media/write/desktop
- * 四束的域投影结果 ⊇ 旧前缀表结果（search 束有意识的超集 = internet.* 归入）。
+ * 等价性约束（test/domain-registry.test.ts 锁定）：search/media/write
+ * 三束的域投影结果 ⊇ 旧前缀表结果（search 束有意识的超集 = internet.* 归入）。
  * 无前缀命中的工具落 misc 兜底域（卡片仍可见，测试限制 misc 规模防堆积）。
  */
 
@@ -70,12 +70,6 @@ export const DOMAIN_REGISTRY: DomainDef[] = [
     secondaryTools: [],
   },
   {
-    name: "reminder",
-    summary: "提醒/闹钟/定时通知",
-    prefixes: ["reminder."],
-    secondaryTools: ["phone.call_user"],
-  },
-  {
     name: "geofence",
     summary: "位置围栏（到家/离家触发提醒）",
     prefixes: ["geofence", "geofence."],
@@ -86,12 +80,6 @@ export const DOMAIN_REGISTRY: DomainDef[] = [
     summary: "地点语义与行程（家/公司/常去地点、今天去了哪、出行习惯）",
     prefixes: ["place"],
     secondaryTools: ["geofence"],
-  },
-  {
-    name: "care",
-    summary: "长期关怀（重要日期/节奏习惯）",
-    prefixes: ["care.", "care"],
-    secondaryTools: [],
   },
   {
     name: "email",
@@ -116,18 +104,8 @@ export const DOMAIN_REGISTRY: DomainDef[] = [
     summary: "钱包/支付/账单/转账",
     prefixes: ["wallet.", "payment.", "alipay."],
     secondaryTools: [
-      "budget.calculate",
-      "payment.pay",
-      "payment.pay_confirm",
-      "payment.pay_resume",
-      "payment.pay_status",
-      "payment.refund",
-      "payment.receipt",
-      "payment.authorization_status",
-      "payment.authorization_link",
-      "payment.revoke_authorization",
-      "payment.create_order",
-      "payment.query_order",
+      "payment",
+      "finance",
       "alipay.check-wallet",
       "alipay.apply-wallet",
       "alipay.submit-payment",
@@ -172,12 +150,6 @@ export const DOMAIN_REGISTRY: DomainDef[] = [
     name: "surface",
     summary: "桌面浮层展示（召唤/收起悬浮卡）",
     prefixes: ["surface."],
-    secondaryTools: [],
-  },
-  {
-    name: "desktop",
-    summary: "桌面自动化（开应用/截图/UIA操作/shell）",
-    prefixes: ["desktop", "screen"],
     secondaryTools: [],
   },
   {
@@ -227,6 +199,12 @@ export const DOMAIN_REGISTRY: DomainDef[] = [
     secondaryTools: [],
   },
   {
+    name: "ride_hailing",
+    summary: "打车/网约车（叫车报价、两阶段确认下单、行程追踪/取消）",
+    prefixes: ["ride_hailing"],
+    secondaryTools: [],
+  },
+  {
     name: "travel",
     summary: "行程规划/POI/路线/目的地信息（技能注册，生产环境可见）",
     prefixes: ["travel."],
@@ -270,7 +248,7 @@ export const DERIVED_DOMAIN_SUMMARIES: Record<string, string> = {
 };
 
 /** 桥接元工具：不参与任何域归属（可见性由 prepareTools 控制） */
-const BRIDGE_TOOL_NAMES = new Set(["tool_search", "tool_discover", "tool_describe", "tool_call"]);
+const BRIDGE_TOOL_NAMES = new Set(["tool_discover"]);
 
 /**
  * 前缀派生域（2026-10-10 根修）：注册表显式前缀都没命中时，取注册名的首段
@@ -339,7 +317,7 @@ export function resolveDomainDef(name: string): DomainDef {
 
 /**
  * 路由能力束 → 域集合（束投影=预载的域全族）。
- * 等价性（相对旧前缀表）：media/write/desktop 精确等价；search 为有意识超集
+ * 等价性（相对旧前缀表）：media/write 精确等价；search 为有意识超集
  * （internet.* 归入检索域——realtime 轮可用情报核实工具，质量增益）。
  */
 export const ROUTE_BEAM_DOMAINS: Record<string, string[]> = {
@@ -347,7 +325,6 @@ export const ROUTE_BEAM_DOMAINS: Record<string, string[]> = {
   media: ["media"],
   write: [
     "calendar",
-    "reminder",
     "voice",
     "phone",
     "shopping",
@@ -356,7 +333,6 @@ export const ROUTE_BEAM_DOMAINS: Record<string, string[]> = {
     "surface",
     "smart_home",
   ],
-  desktop: ["desktop", "browser", "shared_browser"],
   full: [],
 };
 

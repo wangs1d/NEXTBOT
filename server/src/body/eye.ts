@@ -1,7 +1,7 @@
 // Agent Body Center — Eye 眼/视觉传感器
 //
 // 与人体器官对照：眼睛。统一封装「看」的感知通道：
-//  - 桌面截屏（desktop.visual.screenshot）→ 委托 DesktopVisualPort 或 desktop bridge
+//  - 桌面截屏（desktop.visual.screenshot）→ 委托 DesktopVisualPort
 //  - 桌面 VLM 描述（desktop.visual.describe）→ 委托 DesktopVisualPort.describe
 //  - 摄像头拍照（camera.take_photo）→ 委托 DeviceRegistry.invoke
 //  - 摄像头视频流（camera.start_stream）→ 委托 DeviceRegistry.openStream 异步迭代
@@ -45,26 +45,6 @@ export interface DesktopVisualLike {
 }
 
 /**
- * 桌面桥接子系统（DesktopBridgeCoordinator）的最小化结构接口。
- * 用于在 DesktopVisualPort 不可用时透传到桥接客户端（电脑端）。
- */
-export interface DesktopBridgeLike {
-  runTask?(opts: {
-    task: string;
-    region?: [number, number, number, number] | null;
-    [key: string]: unknown;
-  }): Promise<unknown>;
-  screenshot?(input?: {
-    region?: [number, number, number, number];
-  }): Promise<{
-    base64?: string;
-    url?: string;
-    width?: number;
-    height?: number;
-  }>;
-}
-
-/**
  * 设备注册表子系统（DeviceRegistry）的最小化结构接口。
  * 仅暴露视觉皮层用到的 camera 设备检索 / 调用 / 流式订阅能力。
  */
@@ -82,16 +62,13 @@ export interface DeviceRegistryLike {
   ): AsyncIterable<{ type: string; payload: Record<string, unknown> }>;
 }
 
-// ---- Eye 依赖 ----
-
 /**
  * Eye 依赖注入参数。
- * bodyBus 必填；其余三个子系统均可选，缺失时对应工具返回 ok=false 优雅降级。
+ * bodyBus 必填；其余子系统均可选，缺失时对应工具返回 ok=false 优雅降级。
  */
 export interface EyeDeps {
   bodyBus: BodyBus;
   desktopVisualPort?: DesktopVisualLike;
-  desktopBridge?: DesktopBridgeLike;
   deviceRegistry?: DeviceRegistryLike;
 }
 
@@ -122,7 +99,7 @@ interface CameraInfo {
  *
  * 三条接入路径：
  *   1. desktop.visual.screenshot → DesktopVisualPort.screenshot 优先，
- *      缺失时回退到 DesktopBridge.screenshot；再缺失返回 ok=false
+ *      缺失时返回 ok=false
  *   2. desktop.visual.describe   → DesktopVisualPort.describe（如存在）
  *   3. camera.take_photo         → DeviceRegistry.invoke(deviceId, "camera.take_photo", params)
  *   4. camera.start_stream       → DeviceRegistry.openStream 异步迭代
@@ -145,7 +122,6 @@ export class Eye implements BodyModuleLike {
 
   private readonly bodyBus: BodyBus;
   private readonly desktopVisualPort: DesktopVisualLike | null;
-  private readonly desktopBridge: DesktopBridgeLike | null;
   private readonly deviceRegistry: DeviceRegistryLike | null;
 
   private started = false;
@@ -154,7 +130,6 @@ export class Eye implements BodyModuleLike {
   constructor(deps: EyeDeps) {
     this.bodyBus = deps.bodyBus;
     this.desktopVisualPort = deps.desktopVisualPort ?? null;
-    this.desktopBridge = deps.desktopBridge ?? null;
     this.deviceRegistry = deps.deviceRegistry ?? null;
   }
 
@@ -249,8 +224,7 @@ export class Eye implements BodyModuleLike {
   /**
    * desktop.visual.screenshot：截屏一次。
    *
-   * 优先委托 desktopVisualPort.screenshot；缺失时回退到 desktopBridge.screenshot；
-   * 两者均缺失或返回失败时返回 ok=false。
+   * 委托 desktopVisualPort.screenshot；缺失或返回失败时返回 ok=false。
    * 成功时发布 body.eye.frame 信号（含 base64/url + width/height + capturedAt）。
    */
   private async actScreenshot(
@@ -284,36 +258,10 @@ export class Eye implements BodyModuleLike {
       }
     }
 
-    // 回退到 desktopBridge
-    if (this.desktopBridge?.screenshot) {
-      try {
-        const shot = await this.desktopBridge.screenshot(
-          region ? { region } : undefined,
-        );
-        const frame = this.normalizeFrame(shot, "desktop");
-        this.publishDesktopFrame(frame);
-        return {
-          ok: true,
-          base64: frame.base64,
-          url: frame.url,
-          width: frame.width,
-          height: frame.height,
-          capturedAt: frame.capturedAt,
-          source: "desktop-bridge",
-        };
-      } catch (err) {
-        return {
-          ok: false,
-          error: err instanceof Error ? err.message : String(err),
-          source: "desktop-bridge",
-        };
-      }
-    }
-
     return {
       ok: false,
       error:
-        "Eye: 桌面截屏不可用（desktopVisualPort 与 desktopBridge 均未注入或无 screenshot 方法）",
+        "Eye: 桌面截屏不可用（desktopVisualPort 未注入或无 screenshot 方法）",
     };
   }
 
@@ -569,39 +517,12 @@ export class Eye implements BodyModuleLike {
       }
     }
 
-    const db = this.desktopBridge;
-    if (db?.screenshot) {
-      try {
-        const shot = await db.screenshot(region ? { region } : undefined);
-        const frame = this.normalizeFrame(shot, "desktop");
-        return {
-          ok: true,
-          data: {
-            base64: frame.base64,
-            url: frame.url,
-            width: frame.width,
-            height: frame.height,
-            capturedAt: frame.capturedAt,
-            source: "desktop-bridge",
-          },
-          module: "eye",
-        };
-      } catch (err) {
-        return {
-          ok: false,
-          data: {},
-          module: "eye",
-          errorMessage: err instanceof Error ? err.message : String(err),
-        };
-      }
-    }
-
     return {
       ok: false,
       data: {},
       module: "eye",
       errorMessage:
-        "Eye: 桌面截屏不可用（desktopVisualPort 与 desktopBridge 均未注入或无 screenshot 方法）",
+        "Eye: 桌面截屏不可用（desktopVisualPort 未注入或无 screenshot 方法）",
     };
   }
 
@@ -673,9 +594,7 @@ export class Eye implements BodyModuleLike {
 
   /** sense: eye.status → 返回桌面 + cameras 状态 */
   private async senseStatus(): Promise<BodySenseResult> {
-    const desktopOnline = Boolean(
-      this.desktopVisualPort?.screenshot || this.desktopBridge?.screenshot,
-    );
+    const desktopOnline = Boolean(this.desktopVisualPort?.screenshot);
 
     const cameras: CameraInfo[] = [];
     if (this.deviceRegistry?.listByCapability) {
@@ -695,7 +614,6 @@ export class Eye implements BodyModuleLike {
         desktopOnline,
         cameras,
         desktopVisualPortAvailable: this.desktopVisualPort !== null,
-        desktopBridgeAvailable: this.desktopBridge !== null,
         deviceRegistryAvailable: this.deviceRegistry !== null,
       },
       module: "eye",
@@ -708,7 +626,6 @@ export class Eye implements BodyModuleLike {
   snapshot(): BodyModuleSnapshot {
     const subsystems: string[] = [];
     if (this.desktopVisualPort) subsystems.push("desktop-visual-port");
-    if (this.desktopBridge) subsystems.push("desktop-bridge");
     if (this.deviceRegistry) subsystems.push("device-registry");
 
     return {
@@ -791,7 +708,7 @@ export class Eye implements BodyModuleLike {
 
   /**
    * 把截屏子系统的返回值归一成 VisualFrame。
-   * 同时接受 base64/imageBase64 与 url 字段（兼容 DesktopVisualPort 与 DesktopBridge）。
+   * 同时接受 base64/imageBase64 与 url 字段（兼容 DesktopVisualPort）。
    */
   private normalizeFrame(
     shot: {

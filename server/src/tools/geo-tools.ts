@@ -392,10 +392,6 @@ export function registerGeoTools(registry: ToolRegistry, deps: GeoToolDeps = {})
       walkingMinutes: Math.round(meters / WALK_SPEED_MPS / 60),
       drivingMinutes: Math.round(meters / DRIVE_SPEED_MPS / 60),
       coordSystem: "gcj02",
-      note:
-        fromAccuracy != null && fromAccuracy > 100
-          ? `定位精度约 ${Math.round(fromAccuracy)} 米，距离误差同量级，请如实说明`
-          : undefined,
     };
   });
 }

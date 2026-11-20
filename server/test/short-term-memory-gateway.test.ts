@@ -9,7 +9,7 @@ import { ShortTermMemoryGatewayService } from "../src/services/short-term-memory
 // 存储文件放进系统临时目录，避免测试数据散落到仓库（见项目记忆：测试文件统一管理）
 const storePath = join(mkdtempSync(join(tmpdir(), "short-term-memory-")), "test-short-term-memory.json");
 
-test("buildPromptContext carries mission, open loops, and recent context across turns", () => {
+test("buildPromptContext 只带原文窗口与当前任务，不再注入 mission/待办/偏好副本", () => {
   const service = new ShortTermMemoryGatewayService(storePath);
   const sessionId = "session-memory-test";
 
@@ -22,12 +22,13 @@ test("buildPromptContext carries mission, open loops, and recent context across 
 
   const promptContext = service.buildPromptContext(sessionId, "continue that fix");
   assert.ok(promptContext);
-  assert.match(promptContext!, /current-mission:/);
-  // 2026-11-12 权威源收敛：会话层不再存 preferences/facts 副本（权威位置分别是
-  // USER_PROFILE.md 画像与 structured_facts 档案字段），session-preferences 行退役。
+  // 这些槽由 ContextCompiler 统一从权威库编译，STM 不再重复注入
+  assert.doesNotMatch(promptContext!, /current-mission:/);
   assert.doesNotMatch(promptContext!, /session-preferences:/);
-  assert.match(promptContext!, /open-loops:/);
-  assert.match(promptContext!, /agent-commitments:/);
+  assert.doesNotMatch(promptContext!, /session-facts:/);
+  assert.doesNotMatch(promptContext!, /open-loops:/);
+  assert.doesNotMatch(promptContext!, /agent-commitments:/);
+  assert.match(promptContext!, /current-focus:/);
   assert.match(promptContext!, /recent-context:/);
 });
 

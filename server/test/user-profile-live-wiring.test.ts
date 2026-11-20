@@ -1,9 +1,8 @@
 /**
  * 用户画像根修接线测试（2026-09-29 P0-1/P0-2/P1/P2 落地配套）。
  *
- * 覆盖四个新机制：
+ * 覆盖：
  *  - hasRealProfileContent：模板画像判定（prompt 注入闸——模板不注入）
- *  - mergeUserProfilePromptSources：文件画像 + manager 派生摘要合并（互斥改合并）
  *  - shouldExtractNow：抽取 token 闸（highSignal/个人陈述预筛，寒暄轮跳过）
  *  - UserProfileStore.deleteAll：隐私闭环级联删除
  */
@@ -20,7 +19,6 @@ import {
   isNoisyProfileLine,
   sanitizeProfileMarkdown,
 } from "../src/services/user-personalization/user-profile-store.js";
-import { mergeUserProfilePromptSources } from "../src/agent/prompt-context-builder.js";
 import { UserProfileAggregator, applyProfileOps } from "../src/brain/user-profile-aggregator.js";
 
 /* ── hasRealProfileContent：模板/样板行不算真实事实 ── */
@@ -48,29 +46,6 @@ test("模板判定：任一真实内容行（称呼/爱好）= 有真实内容",
 test("模板判定：占位括号行不算（LLM 写的「（待补充）」变体）", () => {
   const p = defaultUserProfileMarkdown("u1").replace("- （待了解）", "- （待补充）");
   assert.equal(hasRealProfileContent(p), false);
-});
-
-/* ── mergeUserProfilePromptSources：互斥改合并 ── */
-
-test("合并：文件画像为主位，manager 摘要非重复行追加", () => {
-  const file = "## 基本信息\n- 称呼：周明远\n- 所在地：成都";
-  const manager = "- 称呼：周明远\n- 职业：消防员";
-  const merged = mergeUserProfilePromptSources(file, manager);
-  assert.ok(merged!.includes("称呼：周明远"));
-  assert.equal(merged!.match(/称呼：周明远/g)!.length, 1, "重复行去重");
-  assert.ok(merged!.includes("职业：消防员"), "manager 独有行保留");
-});
-
-test("合并：只有文件画像 / 只有 manager 摘要 / 双空", () => {
-  assert.equal(mergeUserProfilePromptSources("A", undefined), "A");
-  assert.equal(mergeUserProfilePromptSources(undefined, "B"), "B");
-  assert.equal(mergeUserProfilePromptSources(undefined, undefined), undefined);
-});
-
-test("合并：manager 摘要全部重复时不追加空尾巴", () => {
-  const file = "- 称呼：周明远";
-  const merged = mergeUserProfilePromptSources(file, "- 称呼：周明远");
-  assert.equal(merged, file);
 });
 
 /* ── 确定性净噪器：写入门槛（2026-10-20） ── */

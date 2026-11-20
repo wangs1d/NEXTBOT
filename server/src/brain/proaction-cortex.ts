@@ -46,7 +46,6 @@ const SIGNAL_PRIORITY_MAP: Record<string, number> = {
   friend_request_received: 7,
   mood_shift: 4,
   // ProactivityHub 多元触发 kind（proactivity-types.ts ProactiveIntentKind）
-  overwork_care: 7,
   task_celebration: 6,
   followup: 4,
   interest_share: 3,

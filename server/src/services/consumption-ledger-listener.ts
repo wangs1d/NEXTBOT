@@ -1,7 +1,7 @@
 // ConsumptionLedgerListener —— 消费管家闭环（Task 16 场景B）
 //
 // 链路：工具执行成功 → HookBus "tool.executed" 事件 → 本监听器：
-//   1. 消费类工具（payment.* / meituan.* / shopping.order.place）
+//   1. 消费类工具（payment.* / shopping.order.place 等）
 //      → finance-deep 自动入账（金额/分类按工具类型映射/来源工具/时间）
 //   2. 入账后检测：预算 warning（80%）/ exceeded（100%）分级提醒
 //      （getBudgetStatus level）+ 异常消费检测（≥ 近30天同分类均值 3 倍且 ≥ ¥100）
@@ -21,7 +21,7 @@ import type {
 
 /** 消费类工具判定（正则；仅这些工具成功后入账，查询/取消类不重复入账） */
 const CONSUMPTION_TOOL_RE =
-  /^(payment\.create_order|meituan\.create_order|shopping\.order\.place|ride_hailing\.book|home_service\.book|restaurant\.book)$/;
+  /^(payment\.create_order|shopping\.order\.place|ride_hailing\.book|home_service\.book|restaurant\.book)$/;
 
 /** 消费管家依赖（装配层注入，全部可 mock） */
 export interface ConsumptionLedgerListenerDeps {
@@ -108,18 +108,6 @@ export function extractLedgerEntry(info: {
         category: "购物",
         description: String(result.description ?? input.description ?? "扫码支付"),
         source: "payment_tool",
-      };
-    }
-    case "meituan.create_order": {
-      // 跑腿订单：入账配送总费用（totalFee 优先，缺省 deliveryFee）
-      const amount = amountOf(result.totalFee ?? result.deliveryFee);
-      if (!amount) return null;
-      return {
-        amount,
-        type: "expense",
-        category: "交通",
-        description: `美团跑腿：${String(result.itemDescription ?? input.itemDescription ?? "代跑腿")}`,
-        source: "meituan_tool",
       };
     }
     case "shopping.order.place": {

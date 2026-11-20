@@ -7,6 +7,21 @@ export type ProactiveImportance = "critical" | "high" | "medium" | "low";
 
 export type PresenceState = "active" | "idle" | "offline";
 
+/**
+ * 「通知即界面」里一条按钮的**语义声明**（2026-11-19 用户拍板"选项按内容动态生成"）。
+ *
+ * 触发源按本条消息的真实内容声明「放哪两个按钮、按钮写什么」，通知层只渲染、不再
+ * 硬编码万能三按钮。`action` 是语义角色（映射到已注册的真执行器，绝不是骗人的按钮），
+ * `label` 是随内容生成的动作短语。最多两项 —— 见 MAX_NOTIFY_ACTIONS。
+ */
+export type ProposalNotifyOption = {
+  action: "acknowledge" | "snooze" | "dismiss" | "approve" | "decline";
+  /** 动作短语 2–5 字，随内容动态生成（禁止「选项1 / 确定」这类无信息文案） */
+  label: string;
+  /** snooze 专用：推迟重投的间隔 ms，缺省 30 分钟 */
+  delayMs?: number;
+};
+
 /** 效用评估元数据：声明了 utility 的提案在仲裁链最前面过三分支判定（方案 A/B） */
 export type ProposalUtilityMeta = {
   risk: RiskDimensions;
@@ -64,6 +79,12 @@ export type ProactiveProposal = {
   utility?: ProposalUtilityMeta;
   /** 提案级确认（ask_first）：确认文案投递后登记待确认，批准回调 onProposalApproved */
   confirmAction?: { label: string };
+  /**
+   * 提案自带的「需要你拍板」按钮（2026-11-19 用户拍板：按内容动态生成，最多两个）。
+   * 有值 → 通知层直接渲染这两项；无值 → 通知层按 confirmAction 走通用默认。
+   * 每项 action 必须映射到 notification-actions 里已注册的真执行器。
+   */
+  notifyOptions?: ProposalNotifyOption[];
   /**
    * 定向投递（2026-10-13）：缺省 = 全部在线设备 fan-out（旧行为）；声明为
    * "mobile" 时投递只面向手机端——桌面在线不构成对手机的送达，也不让桌面

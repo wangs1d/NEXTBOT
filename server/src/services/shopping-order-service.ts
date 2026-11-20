@@ -24,6 +24,7 @@ import {
   detectHumanRequired,
   detectLoginPage,
   getLoginWaitMs,
+  hasLoginCookieMarker,
   isPlatformLoggedIn,
   waitForLogin,
   type BrowserPageLease,
@@ -184,6 +185,21 @@ const PLATFORM_LOGIN_URLS: Record<string, string> = {
   douyin: "https://www.douyin.com/login",
 };
 
+/**
+ * 只对这些平台「直达登录页」——云端实测（2026-11-20）：
+ *   · 拼多多：直达 3.4s，走搜索页 9.9s（差 3 倍，明显赚）
+ *   · 京东：直达 goto 2.4~4.9s（passport 页面重且波动大），走搜索页稳定
+ *     6.2s；直达两次测量 7.0s / 8.3s，**没有变快**，所以不切。
+ * 结论：只给实测更快的站点开直达，别一刀切（截图快慢取决于对方站点本身）。
+ */
+const DIRECT_LOGIN_ENTRY_PLATFORMS = new Set<string>(["pdd"]);
+
+/** 取该平台的首选入口：实测更快的站点直达登录页，其余仍走搜索页。 */
+function platformEntryUrl(platform: string, searchUrl: string): string {
+  if (!DIRECT_LOGIN_ENTRY_PLATFORMS.has(platform)) return searchUrl;
+  return PLATFORM_LOGIN_URLS[platform] ?? searchUrl;
+}
+
 export class ShoppingOrderService {
   private readonly pendingConfirmations = new Map<string, PendingConfirmation>();
   /**
@@ -200,6 +216,27 @@ export class ShoppingOrderService {
   private readonly browserExecutor: BrowserRuntime;
   /** 通用二维码/图片推送（登录页截图等）；未注入时按 imageStore 构造（单测兼容） */
   private readonly qrAssist: QrAssistService;
+  /**
+   * 登录墙预检顺手截下的二维码（key=`actor:platform`，TTL 90s）。
+   *
+   * 预检本来就已经导航到登录页并确认「要登录」——那一刻就是最鲜活的码。以前
+   * 推码阶段会把每家的登录页重新开一遍（再导航一次 + 再撞一次风控），云端实测
+   * 单家 5~8s，一轮三四家就吃掉整个工具时间预算，重导航失败还会让用户「被通
+   * 知去扫码却一张码都没收到」。现在预检命中即截码缓存，推码阶段直接复用。
+   */
+  private readonly loginProbePngs = new Map<string, { png: Buffer; at: number }>();
+  /**
+   * 推码后**留驻等扫码**的页面（key=`actor:platform`）。
+   *
+   * 为什么必须留（2026-11-20 用户反馈「点进 App 没反应 / 扫了也没登录」）：
+   * 平台登录页靠页面里的 JS 轮询 `check` 接口，用户扫码确认后由轮询把登录
+   * Cookie 写进浏览器。截完码就把页面关了，扫码确认就永远落不回浏览器——
+   * 用户看到的是「App 里点了确认，回来还是没登录」。留驻到码过期为止。
+   */
+  private readonly qrWaitPages = new Map<
+    string,
+    { lease: BrowserPageLease; timer: NodeJS.Timeout; preview?: BrowserPreviewHandle }
+  >();
 
   constructor(
     private readonly deps: {
@@ -491,8 +528,13 @@ export class ShoppingOrderService {
       );
       return result;
     } finally {
-      preview?.stop();
-      if (!leaseTransferred) await lease.release();
+      // 页面转交 pendingLogins（等用户扫码）时**不收流**：登录页还活着，用户
+      // 要一直看得到 Agent 停在哪一步，直到最终回复给出来（2026-11-19 用户
+      // 要求「浏览器框到最后信息给出再关闭，不要一 handoff 就关」）。
+      if (!leaseTransferred) {
+        preview?.stop();
+        await lease.release();
+      }
     }
   }
 
@@ -595,9 +637,9 @@ export class ShoppingOrderService {
     ctx: ToolContext,
     platforms: string[],
     query: string,
-  ): Promise<Map<string, { imageUrl: string; qrLink?: string; qrLinkFallback?: string }>> {
+  ): Promise<Map<string, { imageUrl: string; qrLink?: string; qrLinkFallback?: string; issuedAt: number }>> {
     const items = await this.captureBatchLoginPngs(ctx, platforms, query);
-    if (items.length === 0) return new Map<string, { imageUrl: string; qrLink?: string; qrLinkFallback?: string }>();
+    if (items.length === 0) return new Map<string, { imageUrl: string; qrLink?: string; qrLinkFallback?: string; issuedAt: number }>();
     const labels = items.map((i) => i.label);
     return await this.qrAssist.pushBatchQrCards(
       ctx,
@@ -607,10 +649,9 @@ export class ShoppingOrderService {
           items.length === 1
             ? `请登录${labels[0]}`
             : `请登录（${labels.join("、")}）`,
-        caption:
-          items.length === 1
-            ? `点各平台下的「点码登录」按钮拉起 App 确认（或扫码），登录完我会自动继续比价，最长等待 ${Math.round(getLoginWaitMs() / 1000)} 秒`
-            : `点各平台下的「点码登录」按钮拉起 App 确认（或扫码），登录完我会自动继续比价`,
+        // 文案只留一句（2026-11-19 用户：卡片里重复说明太多）：点码能启 App
+        // 这件事由按钮本身承载，不必在正文再讲一遍「不用存图」。
+        caption: items.length === 1 ? "点码或扫码登录，完了我接着比价" : "任意扫一个，登录完我接着比",
       },
     );
   }
@@ -628,7 +669,7 @@ export class ShoppingOrderService {
     ctx: ToolContext,
     platforms: string[],
     query: string,
-  ): Promise<Array<{ platform: string; label: string; imageUrl: string; width?: number; height?: number; qrLink?: string; qrLinkFallback?: string }>> {
+  ): Promise<Array<{ platform: string; label: string; imageUrl: string; width?: number; height?: number; qrLink?: string; qrLinkFallback?: string; issuedAt: number }>> {
     const items = await this.captureBatchLoginPngs(ctx, platforms, query);
     if (items.length === 0) return [];
     return await this.qrAssist.saveBatchQrPngs(ctx, items);
@@ -647,16 +688,30 @@ export class ShoppingOrderService {
   ): Promise<Array<{ platform: string; label: string; png: Buffer | null }>> {
     const items: Array<{ platform: string; label: string; png: Buffer | null }> = [];
     if (platforms.length === 0) return items;
+    const actorId = resolveActorId(ctx);
     for (const platform of platforms) {
       const adapter = this.requireAdapter(platform);
       if (!adapter) continue;
       const label = this.platformLabel(platform);
+      // 1) 预检刚截到的码优先：同一次登录页、码还新鲜（90s 内），直接用。
+      //    但**必须有留驻页在轮询这张码**（2026-11-20）：码 PNG 只是图，
+      //    扫码后的「同意登录」要靠留驻页轮询 token 才能落成 Cookie——
+      //    页面不在（预检页已过期释放/旧进程遗留），这张码就是死码，
+      //    用户扫了也白扫。此时弃缓存，走下面的重开页路径出一张活码。
+      const cached = this.takeCachedLoginPng(actorId, platform);
+      if (cached && this.qrWaitPages.has(`${actorId}:${platform}`)) {
+        items.push({ platform, label, png: cached });
+        console.log(`[shop-qr] ${platform} 复用预检二维码 ${cached.length}B（留驻页在轮询）`);
+        continue;
+      }
+      // 2) 没缓存才重新开页面探一次（续跑/重推码路径）。
       let lease: BrowserPageLease | null = null;
+      let preview: BrowserPreviewHandle | null = null;
       try {
-        const cookieResult = await this.getCookieAndSiteId(resolveActorId(ctx), platform);
+        const cookieResult = await this.getCookieAndSiteId(actorId, platform);
         lease = await this.browserExecutor.acquirePage(
-          resolveActorId(ctx),
-          adapter.searchUrl(query, {}),
+          actorId,
+          platformEntryUrl(platform, adapter.searchUrl(query, {})),
           {
             siteId: platform,
             cookies: cookieResult.ok ? cookieResult.cookies : [],
@@ -665,24 +720,177 @@ export class ShoppingOrderService {
             allowAnonymous: true,
           },
         );
-        // 登录跳转常由 JS 延迟触发，落页稳定后再判一次
-        await lease.page.waitForTimeout(2_000).catch(() => {});
+        // 出码过程也推到手机悬浮窗：用户能亲眼看到「登录页长什么样」，
+        // 而不是只收到一张孤零零的二维码。
+        if (lease.mode === "headless") {
+          preview = startBrowserPreviewStream(ctx, lease.page, {
+            mode: lease.mode,
+            sessionId: `qr-${platform}-${Date.now()}`,
+          });
+        }
+        // 落页稳定（直达登录页后 800ms 足够；真正的渲染等待在 captureQrFocused 里）
+        await lease.page.waitForTimeout(800).catch(() => {});
         const det = await detectLoginPage(platform, lease.page);
         if (!det.isLogin) {
           // 没撞登录墙（可能匿名可读或已登录）→ 不需要推码
+          console.log(`[shop-qr] ${platform} 未撞登录墙，不出码`);
           await lease.release().catch(() => {});
           lease = null;
           continue;
         }
         const png = await this.qrAssist.captureQrPng(lease.page);
+        console.log(
+          `[shop-qr] ${platform} 撞登录墙（${det.reason ?? "?"}），截图 ${png ? `${png.length}B` : "失败"}`,
+        );
         items.push({ platform, label, png });
-      } catch {
-        /* 探不到就算了，不阻断其余平台 */
+        // 截到码就把页面留驻到码过期：扫码后的确认要靠页面轮询才落 Cookie
+        if (png) {
+          this.holdQrPage(ctx, actorId, platform, lease);
+          lease = null; // 交给留驻逻辑管，finally 不再 release
+        }
+      } catch (err) {
+        // 探不到就如实记一笔，不阻断其余平台——但绝不能悄悄失败（用户会收到
+        // 「二维码已推送」却一张没有，2026-11-19 真机事故）。
+        console.log(
+          `[shop-qr] ${platform} 出码失败：${err instanceof Error ? err.message.slice(0, 160) : String(err)}`,
+        );
       } finally {
+        preview?.stop();
         if (lease) await lease.release().catch(() => {});
       }
     }
     return items;
+  }
+
+  /** 预检命中登录墙时顺手截码入缓存（best-effort，失败不影响预检结论）。 */
+  private async captureQrIntoCache(
+    actorId: string,
+    platform: string,
+    page: Page,
+  ): Promise<void> {
+    try {
+      const png = await this.qrAssist.captureQrPng(page);
+      if (!png) {
+        console.log(`[shop-qr] ${platform} 预检截码失败（页面无码/截图异常）`);
+        return;
+      }
+      this.loginProbePngs.set(`${actorId}:${platform}`, { png, at: Date.now() });
+      console.log(`[shop-qr] ${platform} 预检已截码 ${png.length}B（推码阶段直接复用）`);
+    } catch (err) {
+      console.log(
+        `[shop-qr] ${platform} 预检截码异常：${err instanceof Error ? err.message.slice(0, 120) : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * 登录会话归属校验（2026-11-20）。
+   *
+   * token 虽然是随机 UUID，但「只靠难猜」不是隔离：卡片可能被转发、日志可能
+   * 带出 token、多端同账号时也不该互相顶掉。这里强制 session.actorId 必须等于
+   * 当前请求的用户，否则一律当作「已失效」（不泄露是否存在别人的会话）。
+   */
+  private ownLoginSession(ctx: ToolContext, token: string): PendingLogin | null {
+    const session = this.pendingLogins.get(token);
+    if (!session || session.closed) return null;
+    if (session.actorId !== resolveActorId(ctx)) {
+      console.warn(
+        `[shop-login] 登录会话归属不符，已拒绝：token=${token.slice(0, 8)}… 持有者=${session.actorId}`,
+      );
+      return null;
+    }
+    return session;
+  }
+
+  /**
+   * 留驻一个「已出码」的登录页，等用户扫码（TTL 到点自动关）。
+   *
+   * 页面里的 JS 轮询是扫码生效的唯一通道：关了页面，用户的「确认登录」不会
+   * 落到浏览器，下一步校验必然说「还没识别到登录」。
+   *
+   * 画面同步续上（2026-11-20）：留驻期间继续向手机端推预览帧，节奏放稀
+   * （画面是静止的登录页）。否则用户扫码那几十秒里悬浮窗「无帧超时」熄灭，
+   * 看起来像 Agent 已经收工——用户要求「整件事做完才关」。
+   */
+  private holdQrPage(
+    ctx: ToolContext,
+    actorId: string,
+    platform: string,
+    lease: BrowserPageLease,
+  ): void {
+    const key = `${actorId}:${platform}`;
+    const prev = this.qrWaitPages.get(key);
+    if (prev) {
+      clearTimeout(prev.timer);
+      prev.preview?.stop();
+      void prev.lease.release().catch(() => {});
+    }
+    // TTL（2026-11-20 对齐）：客户端登录卡的二维码倒计时是 150s（ShoppingLoginCard
+    // _qrTtlMs），留驻页必须**活过**倒计时——用户在倒计时内扫码，平台侧码仍有效、
+    // 页面仍在轮询；旧值 120s 比客户端还短 30s，用户扫晚一点页面已经没了，
+    // 「同意登录」落不下来，点「我扫好了」永远说没识别到。
+    const ttlMs = Math.max(210_000, getLoginWaitMs());
+    const preview =
+      lease.mode === "headless"
+        ? startBrowserPreviewStream(ctx, lease.page, {
+            mode: lease.mode,
+            sessionId: `qr-hold-${platform}-${Date.now()}`,
+            intervalMs: 4_000,
+            maxLifetimeMs: ttlMs + 30_000,
+            sendEndOnStop: true,
+          })
+        : undefined;
+    const timer = setTimeout(() => {
+      this.qrWaitPages.delete(key);
+      preview?.stop();
+      void lease.release().catch(() => {});
+      console.log(`[shop-qr] ${platform} 留驻页面已释放（${Math.round(ttlMs / 1000)}s 到期）`);
+    }, ttlMs);
+    timer.unref?.();
+    this.qrWaitPages.set(key, { lease, timer, preview });
+    console.log(`[shop-qr] ${platform} 页面留驻 ${Math.round(ttlMs / 1000)}s 等扫码`);
+  }
+
+  /** 用户已登录成功后，立刻释放这家留驻的等待页（不再白占内存）。 */
+  private releaseQrPage(actorId: string, platform: string): void {
+    const key = `${actorId}:${platform}`;
+    const held = this.qrWaitPages.get(key);
+    if (!held) return;
+    clearTimeout(held.timer);
+    this.qrWaitPages.delete(key);
+    held.preview?.stop();
+    void held.lease.release().catch(() => {});
+  }
+
+  /**
+   * 留驻页是否已离开登录页（无 Cookie 标记平台的登录判定兜底，2026-11-20）。
+   *
+   * 语义与 checkLoginHandoff 的 URL 逃逸一致：扫码确认成功后登录页会跳转，
+   * detectLoginPage 判不出登录页 = 已登录。页面不在留驻（已释放/从未留驻）
+   * 或已关闭 → 判不了，返回 false（如实报 pending，不猜）。
+   */
+  private async heldQrPageLeftLogin(
+    actorId: string,
+    platform: string,
+  ): Promise<boolean> {
+    const held = this.qrWaitPages.get(`${actorId}:${platform}`);
+    if (!held || held.lease.page.isClosed()) return false;
+    try {
+      const det = await detectLoginPage(platform, held.lease.page);
+      return !det.isLogin;
+    } catch {
+      return false;
+    }
+  }
+
+  /** 取预检缓存的码（90s 内有效，取走即删）。 */
+  private takeCachedLoginPng(actorId: string, platform: string): Buffer | null {
+    const key = `${actorId}:${platform}`;
+    const hit = this.loginProbePngs.get(key);
+    if (!hit) return null;
+    this.loginProbePngs.delete(key);
+    if (Date.now() - hit.at > 90_000) return null;
+    return hit.png;
   }
 
   /**
@@ -770,7 +978,8 @@ export class ShoppingOrderService {
       const cookieResult = await this.getCookieAndSiteId(actorId, platform);
       lease = await this.browserExecutor.acquirePage(
         actorId,
-        adapter.searchUrl(query, {}),
+        // 登录族平台直达登录页：比「搜索页 → 302 登录」少两次重定向
+        platformEntryUrl(platform, adapter.searchUrl(query, {})),
         {
           siteId: platform,
           cookies: cookieResult.ok ? cookieResult.cookies : [],
@@ -785,10 +994,25 @@ export class ShoppingOrderService {
           sessionId: `probe-${platform}-${Date.now()}`,
         });
       }
-      // 登录跳转常由 JS 延迟触发，落页稳定后再补检一次
-      await lease.page.waitForTimeout(1_500).catch(() => {});
+      // 落页稳定后再判一次（约 700ms：直达登录页时 URL 已能定论）
+      await lease.page.waitForTimeout(700).catch(() => {});
       const det = await detectLoginPage(platform, lease.page);
-      if (det.isLogin) return { required: true, reason: "login", evidence: det.reason };
+      if (det.isLogin) {
+        // 命中即截码（现成的登录页，别浪费）：推码阶段直接复用，省一次重导航。
+        await this.captureQrIntoCache(actorId, platform, lease.page);
+        // 留驻页面（2026-11-20 修「扫码同意了仍显示未登录」的根因）：
+        // 预检截完码就把页面放掉，推码阶段命中缓存复用 PNG 时又不开新页——
+        // 用户扫的那张码背后**没有任何页面在轮询 token**，手机上的「同意登录」
+        // 永远不会落成浏览器 Cookie，「我扫好了」必然失败。这里把探针页
+        // 原地留驻（页面上就是刚截的那张码，token 一一对应），推码阶段
+        // 缓存命中时直接搭这趟车。
+        const heldPng = this.loginProbePngs.get(`${actorId}:${platform}`)?.png ?? null;
+        if (ctx.pushMediaCards != null && heldPng) {
+          this.holdQrPage(ctx, actorId, platform, lease);
+          lease = null; // 交给留驻逻辑管，finally 不再 release
+        }
+        return { required: true, reason: "login", evidence: det.reason };
+      }
       return { required: false };
     } catch {
       // 探针失败不当登录墙
@@ -1123,9 +1347,54 @@ export class ShoppingOrderService {
     const actorId = resolveActorId(ctx);
     const withCookie = await this.listPlatformsWithCookies(actorId, platforms)
       .catch(() => [] as string[]);
-    const ready = platforms.filter((p) => withCookie.includes(p));
-    const pending = platforms.filter((p) => !withCookie.includes(p));
-    return { ready, pending };
+    const ready = new Set(withCookie.filter((p) => platforms.includes(p)));
+
+    // 库里没有不代表没登录（2026-11-20 修「扫了码还说没识别到」）：
+    // 多平台登录卡是截完码就关页面的，用户扫码后 Cookie 只落在常驻 context
+    // 里，从未落库 → 点「我扫好了」永远 pending。这里先读 context 的实时
+    // Cookie 判定，判到登录就（在用户已授权的前提下）顺手落库。
+    for (const platform of platforms) {
+      if (ready.has(platform)) continue;
+      const cookies = await this.browserExecutor
+        .readContextCookies(actorId, platform)
+        .catch(() => []);
+      if (cookies.length > 0 && hasLoginCookieMarker(platform, cookies)) {
+        ready.add(platform);
+        this.releaseQrPage(actorId, platform);
+        try {
+          const consent = await this.deps.browserSessionService.getCaptureConsent(actorId, platform);
+          if (consent === "allow") {
+            await this.deps.browserSessionService.updateCookiesFromLogin(
+              actorId,
+              platform,
+              cookies,
+              { agentAllowed: true },
+            );
+            console.log(`[shop-login] ${platform} 扫码登录已生效并落库（${cookies.length} 条）`);
+          } else {
+            console.log(
+              `[shop-login] ${platform} 扫码登录已生效（consent=${consent ?? "unset"}，本轮不落库）`,
+            );
+          }
+        } catch {
+          /* 落库失败不影响本轮判定 */
+        }
+        continue;
+      }
+      // 留驻页 URL 探测兜底（2026-11-20）：Cookie 标记没覆盖的平台（点评/
+      // 飞猪/去哪儿等），看留驻页是否已**离开登录页**——扫码确认成功后页面
+      // 会跳走；与 checkLoginHandoff 的 URL 逃逸判定同一语义。页面还挂在
+      // 登录域就如实报 pending，不猜。
+      if (await this.heldQrPageLeftLogin(actorId, platform)) {
+        ready.add(platform);
+        this.releaseQrPage(actorId, platform);
+        console.log(`[shop-login] ${platform} 扫码登录已生效（留驻页已离开登录页，无 Cookie 标记平台）`);
+      }
+    }
+
+    const readyList = platforms.filter((p) => ready.has(p));
+    const pending = platforms.filter((p) => !ready.has(p));
+    return { ready: readyList, pending };
   }
 
   async checkLoginHandoff(
@@ -1135,8 +1404,8 @@ export class ShoppingOrderService {
     | { ok: true; needsConsent: boolean }
     | { ok: false; stillWaiting: boolean; error: string }
   > {
-    const session = this.pendingLogins.get(token);
-    if (!session || session.closed) {
+    const session = this.ownLoginSession(ctx, token);
+    if (!session) {
       return { ok: false, stillWaiting: false, error: "这次登录已经失效了，重新点一次商品就行" };
     }
     if (Date.now() > session.expiresAt) {
@@ -1195,8 +1464,8 @@ export class ShoppingOrderService {
     token: string,
     save: boolean,
   ): Promise<{ ok: boolean; error?: string }> {
-    const session = this.pendingLogins.get(token);
-    if (!session || session.closed) {
+    const session = this.ownLoginSession(ctx, token);
+    if (!session) {
       return { ok: false, error: "这次登录已经失效了，重新点一次商品就行" };
     }
     if (save) {
@@ -1473,7 +1742,8 @@ export class ShoppingOrderService {
       return { ok: false, error: "阶段二缺少 confirmationToken" };
     }
     const pending = this.pendingConfirmations.get(confirmationToken);
-    if (!pending) {
+    if (!pending || pending.actorId !== resolveActorId(ctx)) {
+      // 归属不符与不存在同一文案：不泄露「别人的 token 存在」
       return { ok: false, error: "确认 token 无效或已过期，请重新发起下单（confirm=false）", retryable: true };
     }
     if (Date.now() > pending.expiresAt) {
@@ -1799,7 +2069,7 @@ export class ShoppingOrderService {
     // 阶段二
     if (confirm) {
       const pending = confirmationToken ? this.pendingConfirmations.get(confirmationToken) : null;
-      if (!pending) {
+      if (!pending || pending.actorId !== actorId) {
         return { ok: false, error: "取消确认 token 无效或已过期，请重新发起取消（confirm=false）", retryable: true };
       }
       if (Date.now() > pending.expiresAt) {

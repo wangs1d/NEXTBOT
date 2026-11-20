@@ -136,6 +136,9 @@ class WsEventRouter {
     "agent.proactive_voice": WsEventRoute.chatOnly,
     "agent.voice.alarm": WsEventRoute.chatOnly,
     "agent.voice.speak": WsEventRoute.chatOnly,
+    // 语音条（voice.send_message）：可重播气泡必须落手机聊天控制器，
+    // 否则只进桌面根分发器的 _messages，手机端收不到实时消息。
+    "agent.voice.message": WsEventRoute.chatOnly,
 
     // ── 定位：一次事件只允许发一次 GPS 请求 / 一次回包 ──
     "agent.location_request": WsEventRoute.chatOnly,

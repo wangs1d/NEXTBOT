@@ -26,7 +26,6 @@ import { createExternalChatProviderFromEnv } from "./external-model/index.js";
 import { serverRoot } from "./config/paths.js";
 import { createAppServices } from "./bootstrap/create-app-services.js";
 import { initializeRuntimeState } from "./bootstrap/initialize-runtime-state.js";
-import { startDesktopBridgeAutoClient } from "./services/desktop-bridge-auto-starter.js";
 import { startOpenClawModelSyncWatcher } from "./services/openclaw-config-sync.js";
 import { isWechatClawBridgeEnabled } from "./services/wechat-claw-bridge-service.js";
 import { startAdaptiveConcurrency } from "./services/concurrency-limiter.js";
@@ -89,10 +88,6 @@ services.hookBus.emit("agent.online", {
 
 startAdaptiveConcurrency();
 
-const stopDesktopBridge = startDesktopBridgeAutoClient({
-  port: topology.runtimeHttpPort,
-  log: (line) => console.log(line),
-});
 const stopOpenClawModelSync = isWechatClawBridgeEnabled(process.env)
   ? () => {}
   : startOpenClawModelSyncWatcher(process.env);
@@ -105,7 +100,6 @@ const performShutdown = (): void => {
   });
   services.webhookService.stop();
   stopClientUpdatePusher();
-  stopDesktopBridge();
   stopOpenClawModelSync();
   void linkServer.close().finally(() => {
     void services.app.close().finally(() => process.exit(0));

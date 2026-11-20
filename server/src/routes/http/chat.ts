@@ -117,28 +117,7 @@ export function registerChatRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
       toolsPath: "/chat/tools",
       legacyToolsPath: "/tools",
       skillsLibraryPath: "/chat/skills",
-      desktopBridgeSyncPath: "/chat/desktop-bridge/sync",
     };
-  });
-
-  app.get("/chat/desktop-bridge/sync", async (request, reply) => {
-    const q = request.query as Record<string, unknown> | undefined;
-    const actorKey = resolveActorKey(q);
-    if (!actorKey) {
-      return reply.code(400).send({ ok: false, message: "需要 userId 或 sessionId" });
-    }
-    const { desktopBridgeCoordinator } = deps;
-    if (!desktopBridgeCoordinator.isBridgeFeatureEnabled()) {
-      return {
-        ok: true,
-        bridgeFeatureEnabled: false,
-        bridgeOnline: false,
-        updatedAt: null,
-        lastTask: null,
-      };
-    }
-    const body = desktopBridgeCoordinator.getSyncPayload(actorKey);
-    return { ok: true, bridgeFeatureEnabled: true, ...body };
   });
 
   app.get("/chat/tools", async (request) => {

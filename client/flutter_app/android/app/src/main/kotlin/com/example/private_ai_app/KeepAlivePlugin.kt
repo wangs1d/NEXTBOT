@@ -169,35 +169,7 @@ class KeepAlivePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             // 真实运行态（服务 onDestroy 会置假）：诊断信标与 60s 自愈都靠它，
             // 不能再把「请求过启动」当成「正在运行」。
             "isRunning" -> result.success(MessageBridgeForegroundService.running)
-            /**
-             * 电池优化豁免（2026-11-12）：部分 ROM 即使进程挂着前台服务，
-             * 仍会按「电池优化白名单」之外的标准把 App 冻结/回收——保活服务
-             * 在就等于没开。这里在未豁免时拉起系统确认对话框（用户点一次
-             * 「允许」永久生效）；已豁免时空转返回 true。
-             */
-            "ensureBatteryExempt" -> {
-                val ctx = context
-                if (ctx == null) {
-                    result.success(false)
-                    return
-                }
-                try {
-                    val pm = ctx.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
-                    if (pm.isIgnoringBatteryOptimizations(ctx.packageName)) {
-                        result.success(true)
-                        return
-                    }
-                    val intent =
-                        Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
-                            .setData(android.net.Uri.parse("package:${ctx.packageName}"))
-                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    ctx.startActivity(intent)
-                    result.success(true)
-                } catch (e: Exception) {
-                    android.util.Log.w("KeepAlive", "request battery exemption failed", e)
-                    result.success(false)
-                }
-            }
+            // 只读查询电池优化豁免状态（诊断信标用），不拉起系统对话框。
             "isBatteryExempt" -> {
                 val ctx = context
                 if (ctx == null) {
@@ -206,6 +178,47 @@ class KeepAlivePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 }
                 val pm = ctx.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
                 result.success(pm.isIgnoringBatteryOptimizations(ctx.packageName))
+            }
+            /**
+             * 「始终允许」定位引导页（2026-11-20）：Android 11+ 运行时弹窗没有
+             * 「始终允许」选项（Google 刻意移除），最终授权只能用户在系统设置里点。
+             * Android 12+ 深链直达本应用的「位置权限」单页（含「允许所有时间」，
+             * 少点 3 层）；Android 10-11 回退应用详情页；失败由 Dart 侧兜底
+             * geolocator.openAppSettings。
+             */
+            "openAlwaysLocationSettings" -> {
+                val ctx = context
+                if (ctx == null) {
+                    result.success(false)
+                    return
+                }
+                try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        // compileSdk 低于 31 时无这两个常量，用字符串字面量等价
+                        // （ACTION_MANAGE_APP_PERMISSIONS = "android.settings.MANAGE_APP_PERMISSIONS"，
+                        //   EXTRA_PERMISSION_NAME = "android.provider.extra.PERMISSION_NAME"），
+                        // 本分支已有 SDK_INT >= S 守卫，运行时必然可解析。
+                        val intent =
+                            Intent("android.settings.MANAGE_APP_PERMISSIONS")
+                                .putExtra(
+                                    "android.provider.extra.PERMISSION_NAME",
+                                    android.Manifest.permission.ACCESS_BACKGROUND_LOCATION,
+                                )
+                                .putExtra(Intent.EXTRA_PACKAGE_NAME, ctx.packageName)
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        ctx.startActivity(intent)
+                    } else {
+                        ctx.startActivity(
+                            Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                                .setData(android.net.Uri.parse("package:${ctx.packageName}"))
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                        )
+                    }
+                    result.success(true)
+                } catch (e: Exception) {
+                    android.util.Log.w("KeepAlive", "open always-location settings failed", e)
+                    result.success(false)
+                }
             }
             else -> result.notImplemented()
         }

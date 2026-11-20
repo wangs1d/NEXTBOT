@@ -13,6 +13,8 @@
 
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
+import { BILL_PARCEL_CHAT_TOOLS } from "../tools/bill-parcel-tools.js";
+import { FINANCE_DEEP_CHAT_TOOLS } from "../tools/capability-modules/finance-deep/chat-tools.js";
 import type { ToolHandler, ToolRegistry } from "../tools/tool-registry.js";
 
 interface ActionSpec {
@@ -24,6 +26,8 @@ interface ActionSpec {
   keywords: string[];
   /** 该分支独有、可用于兜底判定的参数名 */
   params?: string[];
+  /** 底层执行器自身也有 action 字段时，用本分支值覆盖（复合 action 会被剔除） */
+  forwardAction?: string;
 }
 
 interface CompositeSpec {
@@ -70,6 +74,21 @@ function buildSchema(spec: CompositeSpec): ChatCompletionTool {
 function withoutAction(input: Record<string, unknown>): Record<string, unknown> {
   const { action: _action, ...rest } = input;
   return rest;
+}
+
+function collectToolProperties(tools: ChatCompletionTool[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const tool of tools) {
+    if (tool.type !== "function") continue;
+    const params = tool.function.parameters as
+      | { properties?: Record<string, unknown> }
+      | undefined;
+    for (const [key, value] of Object.entries(params?.properties ?? {})) {
+      if (key === "action" || key in out) continue;
+      out[key] = value;
+    }
+  }
+  return out;
 }
 
 function hasValue(value: unknown): boolean {
@@ -377,36 +396,6 @@ const COMPOSITE_SPECS: CompositeSpec[] = [
     },
   },
   {
-    name: "care",
-    description: "重要日期管理：记生日/纪念日、查看、删除。日常节律提醒由后台调度，不在这里建。",
-    defaultAction: "list",
-    actions: {
-      add: {
-        tool: "care.set_important_date",
-        desc: "记一个重要的日子",
-        keywords: ["记住", "记一下", "记下", "帮我记", "添加"],
-        params: ["date"],
-      },
-      list: {
-        tool: "care.get_important_dates",
-        desc: "查看已记的重要日期",
-        keywords: ["重要日期", "重要日子", "记了哪些", "有哪些纪念日"],
-      },
-      delete: {
-        tool: "care.delete_important_date",
-        desc: "删掉某条",
-        keywords: ["删掉", "删除", "取消", "不用记", "去掉"],
-        params: ["id"],
-      },
-    },
-    properties: {
-      name: { type: "string", description: "日期名称，如「妈妈生日」" },
-      date: { type: "string", description: "日期，YYYY-MM-DD 或 MM-DD" },
-      relation: { type: "string", description: "与用户的关系" },
-      id: { type: "string", description: "要删除的记录 id" },
-    },
-  },
-  {
     name: "device",
     description: "已绑定设备：列设备、下发指令、取实时画面流。",
     defaultAction: "list",
@@ -498,6 +487,309 @@ const COMPOSITE_SPECS: CompositeSpec[] = [
       answer: { type: "string", description: "挑战答案" },
     },
   },
+  {
+    name: "finance",
+    description:
+      "账本与账单的统一入口：导入交易、消费分析、预算、对账、分类、报表、订阅、账单、邮件/短信账单快递台账。凡是「这个月花了多少」「设个预算」「退订阅」「有哪些账单/快递」都走这里。",
+    defaultAction: "analyze",
+    actions: {
+      import: {
+        tool: "finance.import_transactions",
+        desc: "导入支付宝/微信/银行交易记录",
+        keywords: ["导入", "账单导入", "银行流水", "交易记录", "记账"],
+        params: ["data"],
+      },
+      analyze: {
+        tool: "finance.analyze_spending",
+        desc: "按类别/月份分析支出与收入",
+        keywords: ["花了多少", "消费分析", "支出", "开销", "消费趋势", "哪个类别"],
+        params: ["from", "to"],
+      },
+      set_budget: {
+        tool: "finance.set_budget",
+        desc: "设置月度/类别预算",
+        keywords: ["预算", "设预算", "每月不超过", "限额"],
+        params: ["category", "amount"],
+      },
+      budget_status: {
+        tool: "finance.get_budget_status",
+        desc: "查看预算执行进度",
+        keywords: ["预算还剩", "预算进度", "超支了吗", "预算情况"],
+        params: ["month"],
+      },
+      budget_estimate: {
+        tool: "budget.calculate",
+        desc: "按收入与固定支出做一次性粗略测算",
+        keywords: ["粗略算", "收支测算", "还能剩多少", "收入支出"],
+        params: ["income"],
+      },
+      reconcile: {
+        tool: "finance.reconcile",
+        desc: "账单与账本对账，找差异",
+        keywords: ["对账", "核对", "差异", "对不上"],
+      },
+      categorize: {
+        tool: "finance.categorize",
+        desc: "给一笔交易自动分类",
+        keywords: ["分类", "归到哪类", "这笔算什么"],
+        params: ["description", "amount"],
+      },
+      export_report: {
+        tool: "finance.export_report",
+        desc: "导出财务报告（markdown/csv/json）",
+        keywords: ["导出", "报表", "财务报告", "月度报告"],
+        params: ["format"],
+      },
+      list_subscriptions: {
+        tool: "finance.list_subscriptions",
+        desc: "盘点自动续费订阅",
+        keywords: ["订阅", "自动续费", "会员", "包月"],
+      },
+      confirm_subscription: {
+        tool: "finance.confirm_subscription",
+        desc: "确认或登记一个订阅",
+        keywords: ["登记订阅", "确认订阅", "这个订阅"],
+        params: ["merchant", "amount"],
+      },
+      update_subscription: {
+        tool: "finance.update_subscription",
+        desc: "更新订阅状态或下次续费日",
+        keywords: ["改订阅", "订阅状态", "下次续费"],
+        params: ["subscriptionId"],
+      },
+      cancel_subscription: {
+        tool: "finance.cancel_subscription",
+        desc: "识别低使用订阅并退订",
+        keywords: ["退订", "取消订阅", "不续费", "退掉会员"],
+        params: ["subscriptionId", "merchant"],
+      },
+      savings_summary: {
+        tool: "finance.savings_summary",
+        desc: "统计退订省下的钱",
+        keywords: ["省了多少钱", "退订省钱", "省钱统计"],
+      },
+      add_bill: {
+        tool: "finance.add_bill",
+        desc: "登记一笔定期账单",
+        keywords: ["记一笔账单", "每月房租", "定期账单", "账单提醒"],
+        params: ["name", "amount"],
+      },
+      list_bills: {
+        tool: "finance.list_bills",
+        desc: "查看账单到期与状态",
+        keywords: ["账单", "要交的账单", "到期", "固定支出"],
+      },
+      update_bill: {
+        tool: "finance.update_bill",
+        desc: "修改账单信息",
+        keywords: ["改账单", "账单调整", "改金额"],
+        params: ["billId"],
+      },
+      pay_bill: {
+        tool: "finance.pay_bill",
+        desc: "登记账单已缴并入账",
+        keywords: ["交了", "缴费", "已付账单", "还了"],
+        params: ["billId"],
+      },
+      sync_bills: {
+        tool: "finance.bills.sync_now",
+        desc: "立即用支付宝登录态拉取账单并入账",
+        keywords: ["同步账单", "拉支付宝流水", "更新账单"],
+      },
+      auto_fetch_on: {
+        tool: "finance.bills.auto_fetch",
+        desc: "开启后台自动同步支付宝账单",
+        keywords: ["自动同步账单", "以后自动拉账单", "开启账单同步"],
+        params: ["intervalMin", "hour"],
+        forwardAction: "on",
+      },
+      auto_fetch_off: {
+        tool: "finance.bills.auto_fetch",
+        desc: "关闭后台自动同步",
+        keywords: ["别自动拉账单", "关闭账单同步", "停止同步账单"],
+        forwardAction: "off",
+      },
+      auto_fetch_status: {
+        tool: "finance.bills.auto_fetch",
+        desc: "查看账单自动同步开关与最近结果",
+        keywords: ["账单自动同步开着吗", "同步状态"],
+        forwardAction: "status",
+      },
+      bill_parcel_list: {
+        tool: "bill_parcel.list",
+        desc: "查邮件/短信识别出的账单与快递条目",
+        keywords: ["快递", "取件码", "物流", "账单明细"],
+        params: ["category", "days"],
+      },
+      bill_parcel_summary: {
+        tool: "bill_parcel.summary",
+        desc: "汇总账单金额与快递件数",
+        keywords: ["话费扣了多少", "快递几件", "账单汇总"],
+        params: ["days"],
+      },
+    },
+    properties: {
+      ...collectToolProperties(FINANCE_DEEP_CHAT_TOOLS),
+      ...collectToolProperties(BILL_PARCEL_CHAT_TOOLS),
+      income: { type: "number", description: "budget_estimate 的月收入" },
+      rent: { type: "number", description: "budget_estimate 的房租" },
+      food: { type: "number", description: "budget_estimate 的餐饮支出" },
+      transport: { type: "number", description: "budget_estimate 的交通支出" },
+    },
+  },
+  {
+    name: "payment",
+    description:
+      "支付与钱包统一入口：授权状态、发起支付、确认超限支付、查支付结果、退款、支付记录、授权开关，以及历史商户收款码通道。Agent 不代持资金；未授权先给授权链接，超免密额度必须用户明确确认。",
+    defaultAction: "authorization_status",
+    actions: {
+      pay: {
+        tool: "payment.pay",
+        desc: "发起一笔支付（自动走授权→额度→确认→渠道下单）",
+        keywords: ["支付", "付款", "买单", "结账", "代付", "扫码付"],
+        params: ["amount", "subject"],
+      },
+      confirm: {
+        tool: "payment.pay_confirm",
+        desc: "用户明确同意后确认超限支付",
+        keywords: ["确认支付", "同意付款", "就付这个", "确认扣款"],
+        params: ["confirmToken"],
+      },
+      resume: {
+        tool: "payment.pay_resume",
+        desc: "恢复一笔待继续的支付",
+        keywords: ["继续支付", "接着付", "恢复支付"],
+        params: ["intentId"],
+      },
+      status: {
+        tool: "payment.pay_status",
+        desc: "向渠道核对支付结果",
+        keywords: ["付了吗", "到账没有", "支付状态", "订单状态"],
+        params: ["intentId"],
+      },
+      refund: {
+        tool: "payment.refund",
+        desc: "原路退款",
+        keywords: ["退款", "退钱", "退回", "退掉这笔"],
+        params: ["intentId"],
+      },
+      receipt: {
+        tool: "payment.receipt",
+        desc: "查看支付记录与合计",
+        keywords: ["支付记录", "消费记录", "花了多少", "账单"],
+        params: ["limit"],
+      },
+      authorization_status: {
+        tool: "payment.authorization_status",
+        desc: "查看支付授权、额度与渠道可用性",
+        keywords: ["授权状态", "额度", "免密", "能不能代付"],
+      },
+      revoke_authorization: {
+        tool: "payment.revoke_authorization",
+        desc: "撤销一条支付授权",
+        keywords: ["撤销授权", "取消额度", "别再代付"],
+        params: ["authorizationId"],
+      },
+      authorization_link: {
+        tool: "payment.authorization_link",
+        desc: "生成支付授权页链接",
+        keywords: ["授权链接", "开通额度", "去授权"],
+        params: ["channel", "amount"],
+      },
+      merchant_create: {
+        tool: "payment.create_order",
+        desc: "历史商户收款码通道：按商户号创建订单并出二维码",
+        keywords: ["收款码", "商户下单", "二维码支付", "微信支付", "支付宝支付"],
+        params: ["amount", "description"],
+      },
+      merchant_query: {
+        tool: "payment.query_order",
+        desc: "历史商户订单查询",
+        keywords: ["商户订单", "订单号查询", "查这笔订单"],
+        params: ["outTradeNo", "provider"],
+      },
+      methods: {
+        tool: "payment.list_methods",
+        desc: "查看可用支付方式与护栏",
+        keywords: ["支付方式", "支持哪些支付", "能用什么付"],
+      },
+    },
+    properties: {
+      amount: { type: "number", description: "金额（元）" },
+      subject: { type: "string", description: "付款事由（如「打车费」）" },
+      category: { type: "string", description: "类别，用于授权与护栏判定" },
+      bizDomain: {
+        type: "string",
+        enum: ["travel", "ride", "delivery", "dining", "express", "utility", "shopping", "recharge", "service", "other"],
+        description: "业务域",
+      },
+      bizRefId: { type: "string", description: "业务单据号（幂等/对账用）" },
+      merchant: { type: "string", description: "收款方名称" },
+      channel: { type: "string", description: "支付渠道；不传为 auto" },
+      cashierUrl: { type: "string", description: "已有收银台链接" },
+      idempotencyKey: { type: "string", description: "幂等键" },
+      intentId: { type: "string", description: "支付意图 id" },
+      confirmToken: { type: "string", description: "确认令牌" },
+      sync: { type: "boolean", description: "status 时是否向渠道实时同步，默认 true" },
+      reason: { type: "string", description: "退款原因" },
+      limit: { type: "integer", description: "receipt 返回条数，默认 20" },
+      authorizationId: { type: "string", description: "授权 id" },
+      provider: { type: "string", enum: ["wechat", "alipay"], description: "历史商户通道的支付提供商" },
+      method: { type: "string", enum: ["native", "h5"], description: "历史商户通道的支付方式" },
+      description: { type: "string", description: "历史商户通道的商品描述" },
+      outTradeNo: { type: "string", description: "历史商户通道的订单号" },
+      metadata: { type: "object", description: "历史商户通道的附加元数据" },
+    },
+  },
+  {
+    name: "ride_hailing",
+    description:
+      "打车统一入口：报价、下单、查订单、取消。用户说「叫个车/打车去某地」时先走 quote 报价。\n" +
+      "调用时机铁律：用户表达打车意图且给出目的地后**立即 quote**，目的地抄用户原话；" +
+      "起点未指定时系统自动推送「选上车点」卡让用户点选，**禁止用文字追问起点/你在哪**。\n" +
+      "book 为两阶段确认：先 confirm=false 拿订单摘要+token 并复述给用户，用户明确同意后再 confirm=true+token 真实下单。" +
+      "BOOKING_MODE=mock（默认）结果为模拟（simulated=true），必须如实告知用户不是真实订单；Agent 不代付。",
+    defaultAction: "quote",
+    actions: {
+      quote: {
+        tool: "ride_hailing.quote",
+        desc: "叫车报价：车型（经济/舒适/商务）+ 预估价，下单前必先报价",
+        keywords: ["打车", "叫车", "网约车", "车费", "报价", "去机场", "送我去"],
+        params: ["dropoff", "scheduleAt"],
+      },
+      book: {
+        tool: "ride_hailing.book",
+        desc: "下单叫车（两阶段确认；optionId 来自 quote 返回）",
+        keywords: ["下单", "叫车出发", "订车", "确认叫车"],
+        params: ["optionId", "confirm", "confirmationToken", "passengerPhone"],
+      },
+      status: {
+        tool: "ride_hailing.status",
+        desc: "查行程进度/司机与车牌；不传 orderId 返回最近订单",
+        keywords: ["司机到哪", "车牌", "订单状态", "行程进度", "接到我了吗"],
+        params: ["orderId"],
+      },
+      cancel: {
+        tool: "ride_hailing.cancel",
+        desc: "取消订单（两阶段确认）",
+        keywords: ["取消订单", "不坐了", "取消叫车"],
+        params: ["reason"],
+      },
+    },
+    properties: {
+      pickup: { type: "string", description: "上车点；仅用户明说了具体地点才传，缺省系统推送「选上车点」卡" },
+      dropoff: { type: "string", description: "目的地地址，抄用户原话" },
+      city: { type: "string", description: "城市（可选，提高地理编码准确度）" },
+      scheduleAt: { type: "string", description: "用车时间（ISO 时间）；缺省立即" },
+      provider: { type: "string", description: "provider key（可选，缺省自动选择）" },
+      optionId: { type: "string", description: "报价返回的车型选项 id（如 eco/comfort/business）" },
+      passengerPhone: { type: "string", description: "乘客电话（live 模式需要；须用户明确提供）" },
+      confirm: { type: "boolean", description: "true=阶段二执行；缺省/false=阶段一返回摘要+token" },
+      confirmationToken: { type: "string", description: "阶段一返回的确认 token（confirm=true 时必填）" },
+      orderId: { type: "string", description: "本地订单号（bkg_ 开头）" },
+      reason: { type: "string", description: "取消原因（可选）" },
+    },
+  },
 ];
 
 /**
@@ -573,7 +865,7 @@ export const COMPOSITE_ABSORBED_TOOL_NAMES: ReadonlySet<string> = new Set(
  *
  * 语义判断交给模型：分支适用场景写在 schema 描述里，模型按描述选择。
  * 这里只保留两类确定性证据——模型显式给出的 action，以及模型已经结构化
- * 填进参数的意图（date→care.add、question→web_fetch.inspect）。
+ * 填进参数的意图（url→parse_video、question→web_fetch.inspect）。
  * 不再按自然语言关键词打分：措辞歧义应由模型重选，服务端猜只会掩盖问题。
  */
 export function resolveCompositeAction(
@@ -658,8 +950,11 @@ export function registerCompositeTools(registry: ToolRegistry): void {
           error: `未知 action: ${String(input.action ?? "(空)")}，可用: ${Object.keys(spec.actions).join(" / ")}`,
         };
       }
-      const targetTool = spec.actions[action]!.tool;
-      const forwardInput = adaptForwardInput(targetTool, withoutAction(input));
+      const actionSpec = spec.actions[action]!;
+      const targetTool = actionSpec.tool;
+      const rawForwardInput = withoutAction(input);
+      if (actionSpec.forwardAction) rawForwardInput.action = actionSpec.forwardAction;
+      const forwardInput = adaptForwardInput(targetTool, rawForwardInput);
       const result = await registry.execute(targetTool, forwardInput, context);
       // 透传底层 ok：被收编执行器失败时，复合层不能伪装成功（否则不重试、不报错）。
       // 仅显式 ok:false 视为失败，兼容旧 handler 返回裸结果的形态。

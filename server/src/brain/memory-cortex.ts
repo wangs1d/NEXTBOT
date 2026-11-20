@@ -49,7 +49,6 @@ import {
 } from "../agentic-memory/env.js";
 import { memoryDecayFactor, semanticFingerprint } from "../services/memory-record-utils.js";
 import { sanitizeMemoryLinesForPrompt } from "../agent/memory-line-hygiene.js";
-import { recallMemorySummaryByTopic } from "../agent/prompt-builder.js";
 import {
   classifyMemorySourceRole,
   isAssistantVoiceQuery,
@@ -280,19 +279,6 @@ interface MemoryManagerLike {
     rememberedCount: number;
     fadedCount: number;
   }>;
-  /**
-   * 把命中的 forgotten 行移回 memory_summary（forgotten 自动恢复）。
-   * 当 recall 命中 memory_summary_forgotten 中的行且判定与当前 query 相关时调用。
-   * 实现内部用 applyPatch 原子读写，避免并发覆盖。
-   */
-  restoreForgottenLines?(actorId: string, lines: string[]): Promise<void>;
-  /**
-   * 语义化 forgotten 召回（方案 A）：
-   * 用 embedding 计算 query 与 forgotten 行的 cosine 相似度，> 阈值视为命中；
-   * embedding 无命中时降级到 LLM 批量语义判断。
-   * 返回与 query 语义相关的 forgotten 行（用于补充主召回 + 自动恢复）。
-   */
-  recallForgottenSemantic?(actorId: string, query: string): Promise<string[]>;
 }
 
 // 夜间调度器外观（NightlyMemoryTaskService 子集）
@@ -370,15 +356,6 @@ function inferDomain(kind: MemoryItemKind): MemoryDomainKind {
 /** 单条 MemoryRecallItem.text 的最大字符数，超出则截断并追加省略标记 */
 const MAX_RECALL_ITEM_TEXT_LENGTH = 800;
 
-/**
- * kvSummary 召回通道的上限（2026-11-13）。
- *
- * 与 prompt 侧【持久记忆】块同口径（600 字符 / 4 行）：这条通道与 prompt
- * 侧读的是同一个 KV 键，若这里放开上限，同一份记忆会在同一轮上下文里出现
- * 两次且内容不一致（prompt 侧净化+过滤，工具侧原本是全量）。
- */
-const KV_SUMMARY_MAX_CHARS = 600;
-const KV_SUMMARY_MAX_LINES = 4;
 
 /** 数值 clamp 到 [0, 1]，用于反馈回灌与反馈调整后的分数归一。 */
 function clamp01(n: number): number {
@@ -1594,8 +1571,6 @@ export class MemoryCortex {
       channels.push({ channel: "lifeModel", items: lifeModelItems });
     }
 
-    // forgotten 仅在主通道稀疏（<3 条）时主动补（语义检索归档），避免每轮扫归档。
-    const sparseMainRecall = agenticItems.length < 3;
     const learningPromise = (async (): Promise<MemoryRecallItem[]> => {
       if (!this.experienceLearningLoop) return [];
       try {
@@ -1610,13 +1585,12 @@ export class MemoryCortex {
       }
     })();
 
-    const [narrativeText, kvSummaryText, associationItems, relSummary, learningItems, forgottenHits] =
+    const [narrativeText, associationItems, relSummary, learningItems] =
       await Promise.all([
         // bridge 存在时 narrative 文本与融合候选同源（Mem0+图），跳过避免重复计入
         this.narrative && !this.bridge
           ? this.safeRecall(() => this.narrative!.buildNarrativeRecall(actorId, query))
           : Promise.resolve<string | null>(null),
-        this.kvSummary ? this.safeKvSnapshot(actorId, query) : Promise.resolve<string | null>(null),
         this.buildAssociationRecallItems(actorId, query),
         // relationship：与 query 无关的环境性关系摘要（单条通道 → 归一化保留原始分，
         // 不会被 min-max 抬升），统一纳入仲裁参与去重/配额/阈值。
@@ -1624,9 +1598,6 @@ export class MemoryCortex {
           ? this.safeRecall(() => this.relationshipGraph!.getRelationshipSummary(actorId))
           : Promise.resolve<string | null>(null),
         learningPromise,
-        sparseMainRecall && this.kvSummary && this.memoryManager?.recallForgottenSemantic
-          ? this.safeRecall(() => this.memoryManager!.recallForgottenSemantic!(actorId, query))
-          : Promise.resolve<string[] | null>(null),
       ]);
 
     if (narrativeText) {
@@ -1634,22 +1605,6 @@ export class MemoryCortex {
       if (narrativeItems.length > 0) {
         channels.push({ channel: "narrative", items: narrativeItems });
       }
-    }
-
-    if (kvSummaryText) {
-      // P0 修复：不再用召回时刻冒充记忆发生时间（旧实现 timestamp: now 是假时间元数据）；
-      // kvSummary 通道无逐条时间，留空让仲裁器走"无时间信息"折中路径。
-      channels.push({
-        channel: "kvSummary",
-        items: [
-          {
-            content: kvSummaryText,
-            domain: "semantic" as MemoryDomainKind,
-            source: "kv_summary",
-            score: 0.5,
-          },
-        ],
-      });
     }
 
     if (associationItems.length > 0) {
@@ -1665,15 +1620,6 @@ export class MemoryCortex {
 
     if (learningItems.length > 0) {
       channels.push({ channel: "experienceLearning", items: learningItems });
-    }
-
-    if (forgottenHits && forgottenHits.length > 0) {
-      // 命中即异步恢复（把行从 forgotten 移回 memory_summary），不阻塞当前 recall
-      void this.memoryManager?.restoreForgottenLines?.(actorId, forgottenHits).catch(() => {});
-      const forgottenItems = this.textToRecallItems(forgottenHits.join("\n"), "semantic");
-      if (forgottenItems.length > 0) {
-        channels.push({ channel: "forgotten", items: forgottenItems });
-      }
     }
 
     if (shortCircuit) {
@@ -2726,40 +2672,6 @@ export class MemoryCortex {
       }
     } catch (err) {
       console.log(`[MemoryCortex] 再唤醒触发失败（忽略）: ${err}`);
-    }
-  }
-
-  /**
-   * 安全读取 KV summary 快照，捕获异常并返回 null（用于仲裁通道并行召回）。
-   *
-   * 2026-11-13：这里原先返回**整段未过滤**的 memory_summary，作为单条 item
-   * 进仲裁，再原样进 tool 消息——与 prompt 侧【持久记忆】块是同一份数据、
-   * 同一来源，却是**超集**：没有话题过滤、没有行级净化、没有条数上限。
-   * 实测后果有两条：
-   *   ① 逐字对话行与 `[RENDER_HINT:structured]` 残留直接进工具消息（污染）；
-   *   ② 同一轮里模型先读到净化后的 4 行、调用 brain.recall 又读到未净化的
-   *      全量（1355+ 字符），两份内容重复且质量不一致。
-   * 现在与 prompt 侧同口径：净化 → 话题过滤 → 限行限字。
-   */
-  private safeKvSnapshot(actorId: string, query?: string): string | null {
-    if (!this.kvSummary) return null;
-    try {
-      const snapshot = this.kvSummary.getSnapshot(actorId, ["memory_summary"]);
-      const summary = snapshot.entries.memory_summary;
-      if (typeof summary !== "string" || !summary.trim()) return null;
-      const clean = sanitizeMemoryLinesForPrompt(summary).text;
-      if (!clean.trim()) return null;
-      const picked = recallMemorySummaryByTopic(
-        clean,
-        KV_SUMMARY_MAX_CHARS,
-        KV_SUMMARY_MAX_LINES,
-        query,
-        { minRelevance: 0.2 },
-      );
-      return picked.trim() ? picked : null;
-    } catch (err) {
-      console.log(`[MemoryCortex] kvSummary.getSnapshot 失败: ${err}`);
-      return null;
     }
   }
 

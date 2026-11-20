@@ -456,27 +456,8 @@ export class MemoryConsolidationService {
       }
     }
 
-    // KV summary 行：fast_path 候选沿用旧行为——无论决策结果都落一行（记录决策）；
-    // 其他来源仅 remember/overwrite 时落行。KV 行失败只告警不回灌（非记忆本体）。
-    if (this.deps.kvSync) {
-      for (const d of decided) {
-        const isFastPath = d.candidate.source === "chat:fast_path";
-        if (!isFastPath && d.decision.decision === "reject") continue;
-        try {
-          this.deps.kvSync.appendMemorySummaryLine(
-            actorId,
-            `[fast-path][${d.decision.decision}][${d.decision.semanticClass}] ${d.candidate.text}`,
-            d.candidate.topicHint,
-            "MemoryConsolidationService",
-          );
-        } catch (err) {
-          console.warn(
-            "[memory-consolidation] KV summary 行写入失败（忽略）:",
-            err instanceof Error ? err.message : err,
-          );
-        }
-      }
-    }
+    // KV memory_summary 已下线（2026-11-20）：候选只入 L0 事件/长期图，
+    // 读侧由 ContextCompiler 从权威库重建当前状态，不再维护平行摘要槽。
     return egressFailed;
   }
 

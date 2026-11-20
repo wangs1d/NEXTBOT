@@ -1,7 +1,6 @@
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
 import { Bm25Index, buildToolSearchText, buildCharacterTrigrams, tokenize } from "./bm25.js";
-import { isCoreToolRegistryName } from "./core-tool-library.js";
 import { getToolSearchConfig } from "./env.js";
 import { getToolIntentMetadata } from "./intent-metadata.js";
 import { ToolEmbeddingIndex } from "./tool-embedding-index.js";
@@ -62,22 +61,6 @@ export type DeferredToolSearchMatch = {
   requiredParameters: string[];
   parameters?: Record<string, unknown>;
 };
-
-export function splitCoreAndDeferredTools(
-  tools: ChatCompletionTool[],
-  _coreNames?: ReadonlySet<string>,
-): { core: ChatCompletionTool[]; deferred: ChatCompletionTool[] } {
-  const core: ChatCompletionTool[] = [];
-  const deferred: ChatCompletionTool[] = [];
-
-  for (const tool of tools) {
-    if (!isFunctionTool(tool)) continue;
-    if (isCoreToolRegistryName(tool.function.name)) core.push(tool);
-    else deferred.push(tool);
-  }
-
-  return { core, deferred };
-}
 
 function extractParameterSummary(parameters: unknown): {
   parameterNames: string[];

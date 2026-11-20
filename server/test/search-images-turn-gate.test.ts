@@ -42,7 +42,7 @@ function makeSearchService(emptyOnlyFirst = false) {
 
 function makeRegistry(service: UpstreamSearchService) {
   const registry = new ToolRegistry();
-  // infoHubService 仅 info.search 等工具需要；本文件不调用，传占位
+  // infoHubService 仅 inspect/navigate 等工具需要；本文件不调用，传占位
   registerWebTools(registry, {} as never, service);
   return registry;
 }

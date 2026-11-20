@@ -5,6 +5,15 @@ import type { NarrativeMemoryPort } from "./narrative-memory-port.js";
 import type { UnifiedExtraction } from "../agentic-memory/unified-extractor.js";
 import { isReverseAddressClaim } from "../agentic-memory/unified-extractor.js";
 import type { StructuredFactStore } from "../agentic-memory/structured-fact-store.js";
+import { tailCategoryFor, tailKindOf } from "../agentic-memory/structured-fact-store.js";
+import { extractFactSubject, type UserFactKind } from "./user-fact-store.js";
+import {
+  compileRunInputHash,
+  getMemoryCompileLedger,
+  normalizeCompileDay,
+  type CompileOp,
+  type MemoryCompileLedger,
+} from "../agentic-memory/memory-compile-ledger.js";
 import {
   detectProfileFieldFromText,
   normalizeDetectedProfileFact,
@@ -53,6 +62,12 @@ export type NightlySleepAgentReport = {
     rejectedOps: number;
     duplicates: number;
     themes: number;
+  };
+  /** 编译账本差异：已应用 / 幂等跳过 / 重放整段 */
+  compile?: {
+    appliedOps: number;
+    duplicatedOps: number;
+    replayedRuns: number;
   };
   reports: Array<{
     actorId: string;
@@ -238,6 +253,234 @@ export function deriveDeterministicFacts(transcript: string): {
   return { facts: facts.slice(0, 24), duplicates };
 }
 
+/**
+ * legacy user-facts JSON 长尾 → structured_facts(category=tail:*)，按值去重幂等。
+ * 夜间固化与一次性迁移脚本共用这一份落库逻辑（写权限归本服务）。
+ */
+export async function migrateLegacyTailFactValues(
+  structured: StructuredFactStore,
+  actorId: string,
+  facts: ReadonlyArray<{ kind: UserFactKind; subject: string; value: string; confidence?: number }>,
+  writer: string,
+): Promise<number> {
+  let migrated = 0;
+  for (const fact of facts) {
+    const value = fact.value.trim();
+    if (!value) continue;
+    // 幂等与同义合并全部交给写入口的判重闸（同值 touch、近义 ignored=duplicate）
+    const applied = structured.applyFact(
+      {
+        actorId,
+        field: fact.subject || extractFactSubject(fact.kind, value),
+        value,
+        confidence: fact.confidence,
+        sourceRef: "migrate:user-facts-json",
+        category: tailCategoryFor(fact.kind),
+      },
+      writer,
+    );
+    if (applied?.changed) migrated += 1;
+  }
+  return migrated;
+}
+
+// ─── 经历沉淀（episodic → semantic）────────────────────────────────────────
+// 夜间把 life_episodes 里「用户说过的话」提炼成长期事实。只做确定性判定：
+// 自称/显式偏好直接收，行为重复要求跨 ≥2 个不同日期；一次性提醒、动作指令、
+// 口头禅一律不收。写入走 applyFact（同值 touch，不做同义猜测），零新增模型调用。
+
+export interface SedimentEpisodeRow {
+  id: string;
+  observation: string;
+  sourceKind?: string | null;
+  createdAt: string;
+}
+
+export type SedimentReason =
+  | "declaration"
+  | "preference"
+  | "recurrence"
+  | "noise"
+  | "one_shot"
+  | "instruction"
+  | "covered"
+  | "deferred"
+  | "insufficient_evidence";
+
+export interface SedimentDecision {
+  text: string;
+  core: string;
+  kind: UserFactKind;
+  episodeIds: string[];
+  days: string[];
+  accepted: boolean;
+  reason: SedimentReason;
+}
+
+export interface SedimentStats {
+  decisions: SedimentDecision[];
+  applied: number;
+  covered: number;
+  rejected: number;
+  /** 本轮因单轮上限未写、下轮再判的条数 */
+  deferred: number;
+}
+
+/** 长尾事实入图的最小外观（HumanLikeMemoryService.linkTailFactNodes 结构兼容即可） */
+export type TailFactLinker = (
+  actorId: string,
+  facts: ReadonlyArray<{
+    id: string;
+    value: string;
+    field: string;
+    kind: string | null;
+    confidence: number | null;
+  }>,
+) => Promise<{ linked: number; alreadyLinked: number; skipped: number }>;
+
+/** 认知图孤立节点重连的最小外观（HumanLikeMemoryService.relinkIsolatedNodes） */
+export type GraphRelinker = (
+  actorId: string,
+  limit?: number,
+) => Promise<{ relinked: number; remaining: number }>;
+
+const GRAPH_RELINK_LIMIT = 150;
+
+const SEDIMENT_WINDOW_DAYS = 30;
+const SEDIMENT_MAX_PER_RUN = 3;
+/** 自称/声明：讲「我是谁/我要什么」，不是一次性动作 */
+const SEDIMENT_DECLARATION_RE =
+  /(?:我|本人)(?:(?:老婆|老公|女朋友|男朋友|对象)(?:是|叫)|住在|住[^哪？?\s]|喜欢|习惯|不吃|过敏|是[^谁什哪？?\s]{2,})/;
+const SEDIMENT_PREFERENCE_RE = /(?:喜欢|偏好|讨厌|不爱|习惯|每次|总是|以后都|以后别|别再|最怕)/;
+const SEDIMENT_IMPERATIVE_RE = /^(?:帮|请|给我|打开|查|搜|看|来几|比一|提醒)/;
+const SEDIMENT_NOISE_RE = /^(?:[?？!！。.…~～]+|弟|完成了吗|好的?|嗯+|哦+|在吗|你好|哈哈+|嘿嘿+)$/;
+
+/** 片段 observation → 用户当时的请求原话（工具轨迹取 userRequest，事件行取「用户问：」） */
+export function extractEpisodeRequest(observation: string): string {
+  const text = (observation ?? "").trim();
+  if (!text) return "";
+  const quoted = text.match(/userRequest="([^"]{1,160})"/);
+  if (quoted?.[1]) return quoted[1].trim();
+  if (/^用户问[：:]/.test(text)) {
+    return text
+      .replace(/^用户问[：:]\s*/, "")
+      .replace(/（路由[：:][^）]*）\s*$/, "")
+      .trim();
+  }
+  if (/^Tool interaction\b/i.test(text)) return "";
+  return text;
+}
+
+export function classifySedimentEpisodes(
+  episodes: ReadonlyArray<SedimentEpisodeRow>,
+  now: Date = new Date(),
+): SedimentDecision[] {
+  const cutoff = now.getTime() - SEDIMENT_WINDOW_DAYS * 86_400_000;
+  const decisions: SedimentDecision[] = [];
+  const groups = new Map<string, { text: string; ids: string[]; days: Set<string> }>();
+  for (const ep of episodes) {
+    const at = Date.parse(ep.createdAt);
+    if (!Number.isFinite(at) || at < cutoff) continue;
+    const day = ep.createdAt.slice(0, 10);
+    const request = extractEpisodeRequest(ep.observation).replace(/\s+/g, " ").trim();
+    const core = request.replace(/[\s，。！？!?、；;,.]/g, "");
+    if (!request || core.length < 3 || SEDIMENT_NOISE_RE.test(request) || CONSOLIDATE_NOISE_RE.test(request)) {
+      decisions.push({
+        text: request || ep.observation.slice(0, 40),
+        core,
+        kind: "fact",
+        episodeIds: [ep.id],
+        days: [day],
+        accepted: false,
+        reason: "noise",
+      });
+      continue;
+    }
+    const group = groups.get(core) ?? { text: request, ids: [], days: new Set<string>() };
+    if (!group.ids.includes(ep.id)) group.ids.push(ep.id);
+    group.days.add(day);
+    groups.set(core, group);
+  }
+
+  for (const group of groups.values()) {
+    const days = [...group.days].sort();
+    let kind: UserFactKind = "fact";
+    let accepted = false;
+    let reason: SedimentReason;
+    if (SEDIMENT_DECLARATION_RE.test(group.text)) {
+      accepted = true;
+      reason = "declaration";
+    } else if (SEDIMENT_PREFERENCE_RE.test(group.text)) {
+      accepted = true;
+      reason = "preference";
+      kind = "preference";
+    } else if (ONE_SHOT_REMINDER_TEXT_RE.test(group.text)) {
+      reason = "one_shot";
+    } else if (ACTION_VERB_RE.test(group.text) || SEDIMENT_IMPERATIVE_RE.test(group.text)) {
+      reason = "instruction";
+    } else if (days.length >= 2) {
+      accepted = true;
+      reason = "recurrence";
+    } else {
+      reason = "insufficient_evidence";
+    }
+    decisions.push({
+      text: group.text,
+      core: group.text.replace(/[\s，。！？!?、；;,.]/g, ""),
+      kind,
+      episodeIds: group.ids,
+      days,
+      accepted,
+      reason,
+    });
+  }
+  return decisions;
+}
+
+export function sedimentEpisodesToFacts(
+  structured: StructuredFactStore,
+  actorId: string,
+  episodes: ReadonlyArray<SedimentEpisodeRow>,
+  writer: string,
+  now: Date = new Date(),
+): SedimentStats {
+  const decisions = classifySedimentEpisodes(episodes, now);
+  let applied = 0;
+  let covered = 0;
+  let rejected = 0;
+  let deferred = 0;
+  for (const d of decisions) {
+    if (!d.accepted) {
+      rejected += 1;
+      continue;
+    }
+    if (applied >= SEDIMENT_MAX_PER_RUN) {
+      d.reason = "deferred";
+      deferred += 1;
+      continue;
+    }
+    const result = structured.applyFact(
+      {
+        actorId,
+        field: extractFactSubject(d.kind, d.text),
+        value: d.text,
+        confidence: d.reason === "recurrence" ? 0.62 : 0.78,
+        sourceRef: `sediment:${d.episodeIds.slice(0, 4).join(",")}`,
+        category: tailCategoryFor(d.kind),
+      },
+      writer,
+    );
+    // 值与夜间抽取同一种形态（用户原话，不加「用户说过：」前缀）：两种写法
+    // 各存一份才是重复条目的来源，改源头比在库里猜同义便宜。
+    if (result?.changed) applied += 1;
+    else {
+      d.reason = "covered";
+      covered += 1;
+    }
+  }
+  return { decisions, applied, covered, rejected, deferred };
+}
+
 function loadNightConfig(): NightModeConfig {
   return {
     ...DEFAULT_CONFIG,
@@ -271,6 +514,13 @@ export class NightlyMemoryTaskService {
   private readonly actorsInFlight = new Set<string>();
   private memoryManager: MemoryManagerService | null = null;
   private factStore: UserFactStore | null = null;
+  /** 经历片段来源（life_episodes）；未注入时跳过经历沉淀 */
+  private lifeModel: { loadEpisodes(actorId: string): SedimentEpisodeRow[] } | null = null;
+  /**
+   * 长尾事实入认知图（装配层注入 HumanLikeMemoryService.linkTailFactNodes）。
+   * 增量写入由事实库的写后钩子入图，这里只补改动之前留下的存量。
+   */
+  private tailFactLinker: TailFactLinker | null = null;
   private memorySync: AgentMemorySyncService | null = null;
   private narrativeMemory: NarrativeMemoryPort | null = null;
   /**
@@ -302,7 +552,16 @@ export class NightlyMemoryTaskService {
   private lastJournalFixation: NightlySleepAgentReport["journalFixation"] | null = null;
   /** 本轮结构化抽取指标（M4 报告用） */
   private lastExtractionMetrics: NonNullable<NightlySleepAgentReport["extraction"]> | null = null;
+  /** 本轮编译账本差异（已应用 / 幂等跳过 / 整段重放） */
+  private lastCompileMetrics: NonNullable<NightlySleepAgentReport["compile"]> | null = null;
+  private compileLedgerService: MemoryCompileLedger | null = null;
   private recentReports: NightlySleepAgentReport[] = [];
+
+  /** 编译账本惰性打开；SQLite 不可用时夜间照常跑（降级为不幂等）。 */
+  private compileLedger(): MemoryCompileLedger {
+    if (!this.compileLedgerService) this.compileLedgerService = getMemoryCompileLedger();
+    return this.compileLedgerService;
+  }
 
   constructor(config?: Partial<NightModeConfig>) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -406,10 +665,14 @@ export class NightlyMemoryTaskService {
     };
     this.lastJournalFixation = null;
     this.lastExtractionMetrics = null;
+    this.lastCompileMetrics = { appliedOps: 0, duplicatedOps: 0, replayedRuns: 0 };
 
     try {
       await this.extractFactsFromJournals();
       await this.consolidateUserProfiles();
+      await this.sedimentEpisodicFacts();
+      await this.linkExistingTailFacts();
+      await this.relinkIsolatedGraphNodes();
       // 顺序修复（M1-②）：memory_summary 巩固必须先读当天 journal 行；
       // consolidateDailyJournals 固化成功后会删除 journal md，放到后面就再也读不到。
       await this.consolidateSummaries();
@@ -624,6 +887,7 @@ export class NightlyMemoryTaskService {
     // 先占位避免并发重入；失败时回滚，允许下一次补跑
     for (const id of candidates) this.actorsInFlight.add(id);
     this.lastJournalFixation = null;
+    this.lastCompileMetrics = { appliedOps: 0, duplicatedOps: 0, replayedRuns: 0 };
 
     console.log(`[NightlyMemory] Running night tasks for ${candidates.join(",")} (${today})`);
 
@@ -638,6 +902,7 @@ export class NightlyMemoryTaskService {
       await this.consolidateSummaries(candidates);
       await this.consolidateDailyJournals(candidates);
       await this.runDreamPhase(candidates);
+      await this.migrateLegacyTailFacts(candidates);
       // M3：提交后不变量自检（同 kind+subject 不得双 active / active 必须有非空证据值）。
       await this.auditFactStoreInvariants(candidates);
       await this.cleanupOldStorage();
@@ -670,15 +935,24 @@ export class NightlyMemoryTaskService {
    */
   private async auditFactStoreInvariants(actorIds: string[]): Promise<void> {
     try {
-      const store = this.getFactStore();
+      const structured = await this.getStructuredFactStore();
+      const legacy = this.getFactStore();
       for (const actorId of actorIds) {
-        const facts = await store.getFacts(actorId);
+        // 长尾事实的家是 structured_facts（category=tail:*）；JSON 库只在
+        // 结构化库不可用时才是写入侧，此时按同一口径审计它的存量。
+        const facts = structured
+          ? structured
+              .getTailFacts(actorId)
+              .map((f) => ({ key: f.field, value: f.value }))
+          : (await legacy.getFacts(actorId)).map((f) => ({
+              key: `${f.kind}:${f.subject}`,
+              value: f.value,
+            }));
         const seen = new Set<string>();
         let anomalies = 0;
         for (const fact of facts) {
-          const key = `${fact.kind}:${fact.subject}`;
-          if (seen.has(key)) anomalies += 1;
-          seen.add(key);
+          if (seen.has(fact.key)) anomalies += 1;
+          seen.add(fact.key);
           if (!fact.value.trim()) anomalies += 1;
         }
         if (anomalies > 0) {
@@ -693,24 +967,33 @@ export class NightlyMemoryTaskService {
   }
 
   /**
-   * memory_summary 巩固（原 runDreamPhase 内的 consolidateNow 循环，提前到
-   * journal 固化之前）。独立成方法是为了保证读 journal 的顺序正确。
+   * 存量收敛：legacy user-facts JSON 里的长尾事实搬进 structured_facts
+   * （category=tail:<kind>）。幂等——按值去重，已存在的跳过；JSON 不再被
+   * 写入，迁移完成后只是只读历史。
    */
-  private async consolidateSummaries(actorIds?: string[]): Promise<void> {
-    const candidates = actorIds ?? this.getAllActorIds();
-    for (const actorId of candidates.slice(0, this.config.consolidationBatchSize)) {
+  private async migrateLegacyTailFacts(actorIds: string[]): Promise<void> {
+    const structured = await this.getStructuredFactStore();
+    if (!structured) return;
+    let migrated = 0;
+    for (const actorId of actorIds) {
       try {
-        const result = await this.memoryManager?.consolidateNow(actorId);
-        if (result && (result.entriesMerged > 0 || result.entriesRemoved > 0)) {
-          console.log(
-            `[NightlyMemory] Summary consolidation actor=${actorId} merged=${result.entriesMerged} removed=${result.entriesRemoved} remembered=${result.rememberedCount} faded=${result.fadedCount}`,
-          );
-        }
+        migrated += await migrateLegacyTailFactValues(
+          structured,
+          actorId,
+          await this.getFactStore().getFacts(actorId),
+          "NightlyMemoryTaskService",
+        );
       } catch (err) {
-        console.error(`[NightlyMemory] Summary consolidation failed for ${actorId}:`, err);
+        console.warn(`[NightlyMemory] 长尾事实迁移失败（actor=${actorId}）:`, err);
       }
     }
+    if (migrated > 0) {
+      console.log(`[NightlyMemory] 长尾事实迁移: ${migrated} 条 user-facts JSON → structured_facts(tail:* )`);
+    }
   }
+
+  /** memory_summary 已下线：夜间不再维护该槽，当前状态由读侧编译器从权威库重建。 */
+  private async consolidateSummaries(_actorIds?: string[]): Promise<void> {}
 
   /**
    * 灵魂周级反思：复用夜间事实提炼阶段拼好的精简流水（零额外读盘）。
@@ -784,6 +1067,12 @@ export class NightlyMemoryTaskService {
     if (!journal || !this.narrativeMemory) return;
 
     const targets = actorIds ?? this.getAllActorIds();
+    const ledger = this.compileLedger();
+    const compile = (this.lastCompileMetrics ??= {
+      appliedOps: 0,
+      duplicatedOps: 0,
+      replayedRuns: 0,
+    });
     let totalIngested = 0;
     let totalEventLines = 0;
     let totalFailed = 0;
@@ -838,6 +1127,29 @@ export class NightlyMemoryTaskService {
               continue;
             }
             seenSolidified.add(dedupeKey);
+            // 幂等键：同一 actor 同一天同一行（时间+角色+归一内容）只固化一次。
+            // 失败路径不落账本，原文保持 pending，下轮会重试。
+            const fixationOp: CompileOp = {
+              actorId,
+              day: dateKey,
+              stage: "fixate",
+              opType: "journal.line",
+              target: `${time}|${role}|${dedupeKey}`,
+              eventTime: `${dateKey}T${time}:00`,
+            };
+            if (ledger.hasOp(fixationOp)) {
+              duplicateSkipped += 1;
+              compile.duplicatedOps += 1;
+              continue;
+            }
+            // 白天统一写入已存过同一句话 → 夜间固化不再写第二份（仍记 op，
+            // 避免第二天把同一行当成未处理重跑）。
+            if (this.narrativeMemory.wasRecentlyWritten?.(actorId, content)) {
+              ledger.markOp(fixationOp);
+              duplicateSkipped += 1;
+              compile.duplicatedOps += 1;
+              continue;
+            }
             const roleLabel = role === "U" ? "用户" : role === "A" ? "助手" : role;
             const isEventLine = provenance.sourceEventIds !== undefined;
             const highSignal = role === "prefer" || role === "fact" || role === "commit";
@@ -868,6 +1180,8 @@ export class NightlyMemoryTaskService {
               );
               // 只有真正落库（或未配置落库侧）才允许后续删除 journal 原文
               if (outcome === undefined || outcome.persisted) {
+                ledger.markOp(fixationOp);
+                compile.appliedOps += 1;
                 ingested += 1;
                 if (isEventLine) eventLines += 1;
               } else {
@@ -1076,6 +1390,112 @@ export class NightlyMemoryTaskService {
     this.factStore = store;
   }
 
+  /** 注入经历片段来源（LifeModelStore），启用夜间「经历 → 长期事实」沉淀。 */
+  setLifeModelStore(store: { loadEpisodes(actorId: string): SedimentEpisodeRow[] } | null): void {
+    this.lifeModel = store;
+  }
+
+  /** 注入长尾事实入图回调（HumanLikeMemoryService），启用夜间存量补节点。 */
+  setTailFactLinker(linker: TailFactLinker | null): void {
+    this.tailFactLinker = linker;
+  }
+
+  /**
+   * 经历沉淀：把近 30 天片段里用户明确说过的偏好/自称沉淀为长尾事实。
+   * 只做确定性判定，零模型调用；一次性指令与口头禅在闸门处丢弃。
+   */
+  private async sedimentEpisodicFacts(actorIds?: string[]): Promise<void> {
+    const structured = await this.getStructuredFactStore();
+    if (!structured || !this.lifeModel) return;
+    for (const actorId of actorIds ?? this.getAllActorIds()) {
+      try {
+        const episodes = this.lifeModel.loadEpisodes(actorId);
+        if (episodes.length === 0) continue;
+        const stats = sedimentEpisodesToFacts(
+          structured,
+          actorId,
+          episodes,
+          "NightlyMemoryTaskService",
+        );
+        const byReason = stats.decisions.reduce<Record<string, number>>((acc, d) => {
+          acc[d.reason] = (acc[d.reason] ?? 0) + 1;
+          return acc;
+        }, {});
+        console.log(
+          `[NightlyMemory] 经历沉淀: actor=${actorId} 片段=${episodes.length} ` +
+            `新增=${stats.applied} 已覆盖=${stats.covered} 未采纳=${stats.rejected}` +
+            (stats.deferred > 0 ? ` 顺延=${stats.deferred}` : "") +
+            ` 依据=${JSON.stringify(byReason)}`,
+        );
+      } catch (err) {
+        console.error(`[NightlyMemory] 经历沉淀失败（跳过该 actor） ${actorId}:`, err);
+      }
+    }
+  }
+
+  /**
+   * 存量长尾事实补建认知图节点（幂等、零模型调用）。
+   * 增量在事实库写后钩子里就入图了；这一步只负责把钩子接通之前留下的历史补齐，
+   * 已建过节点的由 linkTailFactNodes 自己按 tailFactId 跳过。
+   */
+  private async linkExistingTailFacts(actorIds?: string[]): Promise<void> {
+    const linker = this.tailFactLinker;
+    if (!linker) return;
+    const structured = await this.getStructuredFactStore();
+    if (!structured) return;
+    for (const actorId of actorIds ?? this.getAllActorIds()) {
+      try {
+        const tails = structured.getTailFacts(actorId);
+        if (tails.length === 0) continue;
+        const stats = await linker(
+          actorId,
+          tails.map((f) => ({
+            id: f.id,
+            value: f.value,
+            field: f.field,
+            kind: tailKindOf(f.category),
+            confidence: f.confidence,
+          })),
+        );
+        console.log(
+          `[NightlyMemory] 长尾入图: actor=${actorId} 长尾=${tails.length} ` +
+            `新建节点=${stats.linked} 已有=${stats.alreadyLinked} 跳过=${stats.skipped}`,
+        );
+      } catch (err) {
+        console.error(`[NightlyMemory] 长尾事实入图失败（跳过该 actor） ${actorId}:`, err);
+      }
+    }
+  }
+
+  /**
+   * 存量孤立节点重连（幂等、零模型调用）：图侧建边过去只看最近 200 个候选，
+   * 老记忆因此拿不到边、联想路到不了。这里把零边的活跃节点重连一遍。
+   */
+  private async relinkIsolatedGraphNodes(actorIds?: string[]): Promise<void> {
+    const relinker = this.graphRelinker;
+    if (!relinker) return;
+    for (const actorId of actorIds ?? this.getAllActorIds()) {
+      try {
+        const stats = await relinker(actorId, GRAPH_RELINK_LIMIT);
+        if (stats.relinked > 0) {
+          console.log(
+            `[NightlyMemory] 孤立节点重连: actor=${actorId} 重连=${stats.relinked}` +
+              (stats.remaining > 0 ? ` 待收敛=${stats.remaining}` : ""),
+          );
+        }
+      } catch (err) {
+        console.error(`[NightlyMemory] 孤立节点重连失败（跳过该 actor） ${actorId}:`, err);
+      }
+    }
+  }
+
+  /** 注入孤立节点重连口（HumanLikeMemoryService）。 */
+  setGraphRelinker(relinker: GraphRelinker | null): void {
+    this.graphRelinker = relinker;
+  }
+
+  private graphRelinker: GraphRelinker | null = null;
+
   /**
    * 注入画像批抽取口（T2，2026-10-22 三层写入调度）。缺省用
    * profile-write-scheduler 的默认实现（UserProfileAggregator 唯一写入路径）。
@@ -1146,12 +1566,30 @@ export class NightlyMemoryTaskService {
       themes: 0,
     };
     this.lastExtractionMetrics = metrics;
+    const ledger = this.compileLedger();
+    const compile = { appliedOps: 0, duplicatedOps: 0, replayedRuns: 0 };
+    this.lastCompileMetrics = compile;
 
     const targets = actorIds ?? this.getAllActorIds();
     for (const actorId of targets) {
       try {
         const built = await this.buildNightlyTranscript(journal, actorId);
         if (!built) continue;
+
+        // 幂等水位：同一批日志（inputHash 相同）已完整抽取过 → 整段跳过，
+        // 不再重复调用 LLM，也不会把同一条事实二次落库。
+        const day = normalizeCompileDay(built.observedOn);
+        const run = ledger.beginRun({
+          actorId,
+          day,
+          stage: "extract",
+          inputHash: compileRunInputHash(built.transcript),
+        });
+        if (run.replay) {
+          compile.replayedRuns += 1;
+          console.log(`[NightlyMemory] fact extraction 重放跳过: actor=${actorId} day=${day}`);
+          continue;
+        }
 
         let facts: NightlyExtractedFact[] = [];
         if (llm) {
@@ -1175,7 +1613,11 @@ export class NightlyMemoryTaskService {
           metrics.duplicates += derived.duplicates;
           facts = derived.facts;
         }
-        if (facts.length === 0) continue;
+        if (facts.length === 0) {
+          ledger.finishRun(run.runId, { applied: 0, duplicated: 0 });
+          ledger.advanceWatermark(actorId, day);
+          continue;
+        }
 
         // M4 去重：批内重复不再重复落库。
         const seen = new Set<string>();
@@ -1189,14 +1631,31 @@ export class NightlyMemoryTaskService {
           seen.add(key);
           unique.push(fact);
         }
-        if (unique.length === 0) continue;
+        if (unique.length === 0) {
+          ledger.finishRun(run.runId, { applied: 0, duplicated: 0 });
+          ledger.advanceWatermark(actorId, day);
+          continue;
+        }
 
-        const { canonical, commitments } = await this.applyNightlyFacts(actorId, unique);
+        const { canonical, commitments, duplicated } = await this.applyNightlyFacts(
+          actorId,
+          unique,
+          day,
+          ledger,
+        );
         // 口径分离：承诺归 commitments 表，不进事实主库，也不算「事实已落库」。
         // 旧实现把两者相加计入 factsApplied，报告里的数字比真实落库事实高一倍。
         appliedCounts.set(actorId, canonical);
         metrics.factsApplied += canonical;
         metrics.commitmentsRouted += commitments;
+        metrics.duplicates += duplicated;
+        compile.appliedOps += canonical + commitments;
+        compile.duplicatedOps += duplicated;
+        ledger.finishRun(run.runId, {
+          applied: canonical + commitments,
+          duplicated,
+        });
+        ledger.advanceWatermark(actorId, day);
       } catch (err) {
         console.error(`[NightlyMemory] fact extraction failed for ${actorId}:`, err);
       }
@@ -1219,38 +1678,97 @@ export class NightlyMemoryTaskService {
   private async applyNightlyFacts(
     actorId: string,
     facts: NightlyExtractedFact[],
-  ): Promise<{ canonical: number; commitments: number; profileRouted: number }> {
+    day: string,
+    ledger: MemoryCompileLedger,
+  ): Promise<{ canonical: number; commitments: number; profileRouted: number; duplicated: number }> {
     let canonical = 0;
     let commitments = 0;
     let profileRouted = 0;
+    let duplicated = 0;
     for (const fact of facts) {
       const text = fact.text.trim().slice(0, 200);
       if (!text) continue;
+      const normalized = normalizeFactText(text);
       if (fact.kind === "preference" || fact.kind === "fact") {
         // 档案字段优先：模型给的字段优先，认不出才从句式里兜底识别。
         const detected = fact.profile ?? detectProfileFieldFromText(text);
         if (detected) {
+          const op: CompileOp = {
+            actorId,
+            day,
+            stage: "extract",
+            opType: "fact.profile",
+            target: detected.field,
+            value: detected.value,
+          };
+          if (ledger.hasOp(op)) {
+            duplicated += 1;
+            continue;
+          }
           const applied = await this.applyProfileFact(actorId, detected.field, detected.value, text);
           if (applied) {
+            ledger.markOp(op);
             profileRouted += 1;
             canonical += 1;
             continue; // 权威库已持有，不再往行式库存第二份
           }
         }
-        // 稳定偏好/事实 → 长尾事实库（subject 归一 + provenance，冲突即替换）。
-        // 档案字段类已在上面被识别并落权威库，这里只剩认不出的长尾。
-        await this.getFactStore().upsertFact(actorId, {
-          kind: fact.kind,
+        // 稳定偏好/事实 → 长尾事实（structured_facts category=tail:<kind>）。
+        // subject 归一 + latest-wins 与档案字段同规则；档案字段类已在上面
+        // 被识别并落权威库，这里只剩认不出的长尾，不会顶掉档案字段值。
+        const tailOp: CompileOp = {
+          actorId,
+          day,
+          stage: "extract",
+          opType: "fact.tail",
+          target: normalized,
           value: text,
-          source: "nightly-extract",
-          confidence: 0.7,
-        });
+        };
+        if (ledger.hasOp(tailOp)) {
+          duplicated += 1;
+          continue;
+        }
+        const structuredStore = await this.getStructuredFactStore();
+        const tailWritten = structuredStore
+          ? structuredStore.applyFact(
+              {
+                actorId,
+                field: extractFactSubject(fact.kind, text),
+                value: text,
+                confidence: 0.7,
+                sourceRef: "nightly-extract",
+                category: tailCategoryFor(fact.kind),
+              },
+              "NightlyMemoryTaskService",
+            ) !== null
+          : false;
+        if (!tailWritten) {
+          // 降级：结构化事实库不可用（未启用/被拒）时才退回行式 JSON 库。
+          await this.getFactStore().upsertFact(actorId, {
+            kind: fact.kind,
+            value: text,
+            source: "nightly-extract",
+            confidence: 0.7,
+          });
+        }
+        ledger.markOp(tailOp);
         canonical += 1;
       } else {
         // 承诺/待办（时效性内容）：权威源是 commitments 表（状态机 + 截止时间）。
-        // 2026-11-12：不再写进 memory_summary——任务内容进长期记忆会永久常驻，
-        // 正是「比价每轮出现」的事故形态。白天 writeDecided 已把承诺写入
-        // commitments 表，这里只统计数量，供报告观察。
+        // 白天 writeDecided 已把承诺写入 commitments 表，这里只统计数量，
+        // 账本仍登记 op，避免同一批日志重复累加报告数字。
+        const op: CompileOp = {
+          actorId,
+          day,
+          stage: "extract",
+          opType: "commitment.observed",
+          target: normalized,
+        };
+        if (ledger.hasOp(op)) {
+          duplicated += 1;
+          continue;
+        }
+        ledger.markOp(op);
         commitments += 1;
       }
     }
@@ -1265,7 +1783,7 @@ export class NightlyMemoryTaskService {
     } else if (commitments > 0) {
       console.log(`[NightlyMemory] 事实提炼: actor=${actorId} 承诺 ${commitments} 条归 commitments`);
     }
-    return { canonical, commitments, profileRouted };
+    return { canonical, commitments, profileRouted, duplicated };
   }
 
   /**
@@ -1481,7 +1999,7 @@ export class NightlyMemoryTaskService {
         })
       : null;
     const hasSleepReports = Array.isArray(sleepReports) && sleepReports.length > 0;
-    if (hasSleepReports || this.lastJournalFixation) {
+    if (hasSleepReports || this.lastJournalFixation || this.lastCompileMetrics) {
       await this.recordSleepAgentReport(targets, hasSleepReports ? sleepReports : [], this.lastJournalFixation);
     }
     return pipeline;
@@ -1509,6 +2027,7 @@ export class NightlyMemoryTaskService {
       actorIds,
       ...(journalFixation ? { journalFixation } : {}),
       ...(this.lastExtractionMetrics ? { extraction: { ...this.lastExtractionMetrics } } : {}),
+      ...(this.lastCompileMetrics ? { compile: { ...this.lastCompileMetrics } } : {}),
       reports,
     };
     this.latestReport = payload;
@@ -1529,6 +2048,14 @@ export class NightlyMemoryTaskService {
    * 这里只负责把升级前遗留的旧文件按 30 天 TTL 清掉，之后该目录不再产生新文件。
    */
   private async cleanupOldStorage(): Promise<void> {
+    try {
+      const prunedOps = this.compileLedger().prune();
+      if (prunedOps > 0) {
+        console.log(`[NightlyMemory] 编译账本裁剪: ${prunedOps} 条过期 op`);
+      }
+    } catch (err) {
+      console.log(`[NightlyMemory] 编译账本裁剪失败（忽略）: ${err}`);
+    }
     // 清理过期的长期存储归档（升级前存量；保留近期文件以免误删刚升级的数据）
     try {
       const longTermDir = join(getDataDir(), "long-term-memory");

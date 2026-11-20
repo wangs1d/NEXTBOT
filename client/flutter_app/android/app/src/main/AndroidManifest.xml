@@ -239,5 +239,12 @@
         <intent>
             <action android:name="android.intent.action.TTS_SERVICE"/>
         </intent>
+        <!-- 支付宝 App 支付（2026-11-19）：检测是否安装支付宝，并允许 alipays
+             scheme 唤起原生收银台；未安装时客户端回退到浏览器 wap 收银台。 -->
+        <package android:name="com.eg.android.AlipayGphone"/>
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:scheme="alipays"/>
+        </intent>
     </queries>
 </manifest>

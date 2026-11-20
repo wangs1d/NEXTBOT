@@ -36,7 +36,7 @@ import type { DeferredToolCatalog } from "../src/tools/tool-search/catalog.js";
 const prepared = prepareToolsWithToolSearch([], getBuiltinAgentChatTools());
 const catalog: DeferredToolCatalog = prepared.deferredCatalog;
 
-const BRIDGE_TOOLS = new Set(["tool_discover", "tool_search", "tool_describe"]);
+const BRIDGE_TOOLS = new Set(["tool_discover"]);
 
 /** 工具名的用户口语化形式：calendar.create_task → "calendar create task" */
 function humanizeName(name: string): string {

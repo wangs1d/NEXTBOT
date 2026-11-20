@@ -20,7 +20,6 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
  * 与现有能力的边界：
  *   - browser.fetch_page：只读抓单页 + 价格正则，无状态；本工具支持多步交互
  *   - shopping.order.*：仅限购物平台业务流程；本工具是通用网页操作
- *   - desktop.visual.run_task：操控用户桌面软件；本工具在服务端无头浏览器
  *
  * 安全护栏：
  *   - 任意 https URL 允许 open（http 仅限 localhost），所有操作走审计日志

@@ -73,7 +73,7 @@ export function createTravelCommuteBuiltinSkills(deps: Deps): SkillDefinition[] 
         "结合实时路况与天气建议几点出发（返回耗时、天气、缓冲与最晚出发时刻；起点可省略=按用户实时定位，用户没说从哪出发时别反问，直接调用）。" +
         "给了期望到达时间就按它倒推「最晚几点出门」，没给则给「现在出发几点到」；短距自动步行，用户说开车/走路用 mode 指定。" +
         "适用表达：「明天几点出门」「现在走来得及吗」「去机场/高铁站怎么安排出发」「X点前要到Y，几点走」「下雨要不要早出门」。" +
-        "边界：只问两点距离/耗时、不需要天气与出发时刻倒推时用 travel.compute-route；叫车报价或下单用 ride_hailing.*。",
+        "边界：只问两点距离/耗时、不需要天气与出发时刻倒推时用 travel.compute-route；叫车报价或下单用 ride_hailing（action=quote/book）。",
       kind: "builtin",
       tags: ["travel", "通勤", "路况", "天气", "出发时间", "commute", "当前位置", "几点出门"],
       icon: "🚦",

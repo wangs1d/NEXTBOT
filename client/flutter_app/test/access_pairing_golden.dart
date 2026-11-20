@@ -2,8 +2,8 @@
 ///
 /// 运行 `flutter test --update-goldens test/access_pairing_golden.dart`
 /// 生成 test/goldens/ 下 PNG：
-///  - pairing_desktop_free.png    未配对 · 云端未开鉴权（可一键配对本机）
-///  - pairing_desktop_locked.png  未配对 · 云端已开鉴权且已有设备（配对码/邮箱自证）
+///  - pairing_desktop_free.png    未配对 · 云端未开鉴权（仅状态说明）
+///  - pairing_desktop_locked.png  未配对 · 云端已开鉴权且已有设备（仅状态说明）
 ///  - pairing_desktop_bound.png   已配对（代签配对码 + 设备列表 + 解绑）
 ///  - pairing_mobile.png          手机端版面里的这张卡
 ///
@@ -192,9 +192,6 @@ void main() {
       AccessPairingCard(api: _api(authRequired: true, boundOnServer: true)),
     ));
     await _settle(tester);
-    // 展开邮箱自证那一层（效果图要看全三种入口）
-    await tester.tap(find.textContaining("验证码发到我邮箱"));
-    await _settle(tester);
 
     if (autoUpdateGoldenFiles) {
       await expectLater(
@@ -226,7 +223,7 @@ void main() {
       AccessPairingCard(api: _api(authRequired: true, boundOnServer: true)),
     ));
     await _settle(tester);
-    await tester.tap(find.text("为其他设备生成配对码"));
+    await tester.tap(find.text("生成配对码"));
     await _settle(tester);
 
     expect(find.text("K7M2QD"), findsOneWidget);

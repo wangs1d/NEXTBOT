@@ -9,7 +9,6 @@ import "package:http/http.dart" as http;
 import "../app/ambient_feeds_controller.dart";
 import "../core/config/api_config.dart";
 import "../core/services/image_preview_launcher.dart";
-import "../core/services/keep_alive_service.dart";
 import "../core/services/nb_http.dart";
 import "../core/services/schedule_api_client.dart";
 import "../core/services/side_chat_api.dart";
@@ -165,54 +164,10 @@ class MobileHomePageState extends State<MobileHomePage>
     // 「进页面后一张张浮出来」。
     WidgetsBinding.instance.addPostFrameCallback((_) {
       StartupMediaPrefetch.scheduleWarm();
-      // 首启保活强引导（2026-11-18）：电池优化未豁免时，系统会在后台冻结
-      // 进程，用户感知就是「老是重连」。每个进程提示一次，直到两项都正常。
-      unawaited(_maybePromptKeepAlive());
       // 其余 3 个 tab 空闲期预构建（2026-11-13）：点击时只切 index，不再
       // 「点下去卡一下 + 转圈等网络」。
       unawaited(_prewarmRemainingTabs());
     });
-  }
-
-  /// 进程内只提示一次（用户点「暂不」后不反复骚扰；下次冷启动再提醒）。
-  static bool _keepAlivePrompted = false;
-
-  /// 首启保活强引导：前台服务/电池优化任一缺失就解释清楚并给一键开启。
-  ///
-  /// 只针对 Android：iOS 没有电池优化豁免概念，`isBatteryExempt` 恒 false，
-  /// 不加平台判断会每次启动都弹。
-  Future<void> _maybePromptKeepAlive() async {
-    if (_keepAlivePrompted || !Platform.isAndroid) return;
-    _keepAlivePrompted = true;
-    final bool running = await KeepAliveService.isRunning();
-    final bool exempt = await KeepAliveService.isBatteryExempt();
-    if (running && exempt) return;
-    if (!mounted) return;
-    final bool? go = await showDialog<bool>(
-      context: context,
-      builder: (BuildContext ctx) => AlertDialog(
-        title: const Text("让消息在后台也能到达"),
-        content: const Text(
-          "系统当前可能冻结本应用：切到后台后聊天连接会被掐断，表现就是「时断时续」。\n\n"
-          "开启前台服务与电池优化豁免后，后台连接才能保持稳定。"
-          "华为/小米/OPPO/vivo 还需在系统设置里允许自启动与后台运行。",
-          style: TextStyle(height: 1.5),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(false),
-            child: const Text("暂不"),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(true),
-            child: const Text("去开启"),
-          ),
-        ],
-      ),
-    );
-    if (go != true) return;
-    await KeepAliveService.start();
-    await KeepAliveService.ensureBatteryExemption();
   }
 
   /// agent 名称变化时失效对话 tab 缓存：IndexedStack 保活的 MobileChatPage

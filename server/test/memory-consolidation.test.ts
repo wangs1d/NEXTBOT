@@ -157,7 +157,7 @@ function submitCandidate(service: MemoryConsolidationService, partial: Partial<M
   });
 }
 
-test("统一写入者: 高信号候选 → 单次决策 → writeDecided + KV 行", { timeout: 30_000 }, async () => {
+test("统一写入者: 高信号候选 → 单次决策 → writeDecided（KV summary 已下线）", { timeout: 30_000 }, async () => {
   resetMemoryConsolidationForTests();
   resetMemoryEchoGuard();
   const dir = await mkdtemp(join(tmpdir(), "consolidation-"));
@@ -184,9 +184,8 @@ test("统一写入者: 高信号候选 → 单次决策 → writeDecided + KV �
     assert.equal(calls.length, 1);
     assert.equal(calls[0]!.actorId, "actor-x");
     assert.ok(calls[0]!.text.includes("花生"));
-    // KV summary 行按旧格式落一行（含决策标签）
-    assert.equal(kvLines.length, 1);
-    assert.match(kvLines[0]!, /^\[fast-path\]\[(remember|overwrite|decay)\]/);
+    // memory_summary 已下线：候选只落长期图，不再维护平行摘要槽
+    assert.equal(kvLines.length, 0);
   } finally {
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   }
@@ -221,7 +220,7 @@ test("统一写入者: 来源事件随候选透传到 writeDecided（LTM 可追�
   }
 });
 
-test("统一写入者: reject 候选不落长期图但 KV 行仍记录决策", { timeout: 30_000 }, async () => {
+test("统一写入者: reject 候选既不入长期图也不写 KV", { timeout: 30_000 }, async () => {
   resetMemoryConsolidationForTests();
   resetMemoryEchoGuard();
   const dir = await mkdtemp(join(tmpdir(), "consolidation-reject-"));
@@ -241,8 +240,7 @@ test("统一写入者: reject 候选不落长期图但 KV 行仍记录决策", {
     await service.flushAll();
 
     assert.equal(calls.length, 0);
-    assert.equal(kvLines.length, 1);
-    assert.match(kvLines[0]!, /\[fast-path\]\[reject\]/);
+    assert.equal(kvLines.length, 0);
   } finally {
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   }

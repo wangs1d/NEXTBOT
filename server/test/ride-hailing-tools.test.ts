@@ -71,15 +71,33 @@ async function withRegistry(
   }
 }
 
-test("ride-hailing tools - 位置联动报价 + 两阶段下单 + 状态 + 取消", async () => {
+test("ride-hailing tools - 显式起点报价 + 两阶段下单 + 状态 + 取消", async () => {
   await withRegistry(async (registry) => {
     const ctx = makeContext();
 
-    // 报价：pickup 缺省 → 自动取 clientLocation
-    const quote = await registry.execute("ride_hailing.quote", { dropoff: "首都机场T3" }, ctx);
+    // 未指定 pickup：一律推「选上车点」卡，返回 PICKUP_UNRESOLVED（不再用定位兜底直接报价）
+    const pushed: Array<{ cardType?: string }> = [];
+    const noPickupCtx = makeContext({
+      pushMediaCards: (cards) => {
+        pushed.push(...(cards as unknown as Array<{ cardType?: string }>));
+        return true;
+      },
+    });
+    const unresolved = await registry.execute("ride_hailing.quote", { dropoff: "首都机场T3" }, noPickupCtx);
+    assert.equal(unresolved.ok, true);
+    assert.equal(unresolved.result.ok, false);
+    assert.equal(unresolved.result.code, "PICKUP_UNRESOLVED");
+    assert.equal(pushed.length, 1);
+    assert.equal(pushed[0].cardType, "ride_pickup");
+
+    // 显式给了上车点 → 正常报价
+    const quote = await registry.execute(
+      "ride_hailing.quote",
+      { dropoff: "首都机场T3", pickup: "九华园1号门" },
+      ctx,
+    );
     assert.equal(quote.ok, true);
     assert.equal(quote.result.ok, true);
-    assert.match(String(quote.result.pickupNote ?? ""), /当前位置/);
     const options = quote.result.options as Array<{ id: string }>;
     assert.ok(options.length >= 3);
 
@@ -255,16 +273,21 @@ test("ride-hailing tools - 阶段二确认不再触发定位请求", async () =>
       },
     });
 
-    // quote + 阶段一各解析一次起点（无 GPS、requestLocation 返回 null → 兜底「当前位置」）
-    const quote = await registry.execute("ride_hailing.quote", { dropoff: "首都机场T3" }, ctx);
+    // 报价显式给起点不请求定位；阶段一无起点 → 解析一次（requestLocation 返回 null → 兜底「当前位置」）
+    const quote = await registry.execute(
+      "ride_hailing.quote",
+      { dropoff: "首都机场T3", pickup: "九华园1号门" },
+      ctx,
+    );
     assert.equal(quote.result.ok, true);
+    assert.equal(locationCalls, 0);
     const stage1 = await registry.execute(
       "ride_hailing.book",
       { dropoff: "首都机场T3", optionId: (quote.result.options as Array<{ id: string }>)[0].id },
       ctx,
     );
     assert.equal(stage1.result.ok, true);
-    assert.equal(locationCalls, 2);
+    assert.equal(locationCalls, 1);
 
     // 阶段二：token 草稿已带起点，不再请求定位
     const stage2 = await registry.execute(
@@ -273,7 +296,7 @@ test("ride-hailing tools - 阶段二确认不再触发定位请求", async () =>
       ctx,
     );
     assert.equal(stage2.result.ok, true);
-    assert.equal(locationCalls, 2);
+    assert.equal(locationCalls, 1);
   });
 });
 

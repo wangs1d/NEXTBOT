@@ -1,6 +1,4 @@
-﻿import "package:flutter/foundation.dart"
-    show defaultTargetPlatform, kIsWeb, TargetPlatform;
-import "../../core/ui/card_metrics.dart";
+﻿import "../../core/ui/card_metrics.dart";
 import "package:flutter/material.dart";
 import "package:flutter/rendering.dart" show ScrollCacheExtent;
 import "package:flutter/services.dart";
@@ -13,7 +11,6 @@ import "../../core/presentation/agent_avatar_catalog.dart";
 import "../../core/presentation/voice_call_ui_labels.dart";
 import "../../core/utils/agent_result_parser.dart";
 import "../../core/utils/content_summary_parser.dart";
-import "../../core/services/speech_service.dart";
 import "../../core/services/image_preview_launcher.dart";
 import "../../core/theme/app_typography.dart";
 import "../../core/theme/app_theme.dart";
@@ -24,6 +21,7 @@ import "media_disk_cache.dart";
 import "image_preview_panel.dart";
 import "voice_message_bubble.dart";
 import "message_body_renderer.dart";
+import "followup_bubbles.dart";
 import "agent_result_card.dart";
 import "evening_digest_card.dart";
 import "plan_steps_card.dart";
@@ -295,7 +293,6 @@ class _StableExtentChildDelegate extends SliverChildBuilderDelegate {
 
 class _ChatPageState extends State<ChatPage>
     with SingleTickerProviderStateMixin {
-  final SpeechService _speechService = SpeechService();
   final bool _isListening = false;
   final String _recognizedText = "";
   final ScrollController _scrollController = ScrollController();
@@ -492,10 +489,10 @@ class _ChatPageState extends State<ChatPage>
   @override
   void initState() {
     super.initState();
-    // Windows SAPI 在启动阶段预初始化会触发原生崩溃 (0xC0000409)，改为用户点麦克风时按需初始化
-    if (kIsWeb || defaultTargetPlatform != TargetPlatform.windows) {
-      _speechService.initialize();
-    }
+    // 麦克风权限不在进聊天页时申请：语音输入走 Agent 球的 VoiceWakeService /
+    // MultimodalRecognitionService，用户真正点语音/开启唤醒时才按需 request。
+    // 旧实现在这里 initialize() SpeechService（内部直接 Permission.microphone.request）
+    // 会导致一进主壳就弹麦克风，与其他权限「按需弹」策略冲突，已移除。
     // 空态问候语的称呼：取首启向导存的画像事实（field=称呼），进程内只查一次
     _loadAppellation();
     // 初始化呼吸动画：agent 工作中输入框的白色光晕靠这个 0~1 的脉动驱动，
@@ -955,7 +952,6 @@ class _ChatPageState extends State<ChatPage>
       ImagePreviewLauncher.beforeOpen = null;
     }
     _breathingController?.dispose();
-    _speechService.cancel();
     _appellationRetry?.cancel();
     _endPreviewAnchorSession();
     _scrollController.dispose();
@@ -2337,7 +2333,7 @@ class _HoverableMessageWidget extends StatelessWidget {
     /// 「选择型卡片」按钮点击回调(可选,透传至内容渲染)
     this.onUserAction,
 
-    /// 「接下来你可以」接续建议点击回调（透传至内容渲染；null 不渲染建议行）
+    /// 接续建议点击回调（气泡外独立气泡；null 不渲染建议）
     this.onFollowupTap,
 
     /// 取消后台任务回调（任务回执 hover 取消按钮）
@@ -2409,7 +2405,7 @@ class _HoverableMessageWidget extends StatelessWidget {
   final void Function(AgentResultAction action,
       {required AgentResultData cardData})? onUserAction;
 
-  /// 「接下来你可以」接续建议点击回调(透传至消息正文渲染)
+  /// 接续建议点击回调(气泡外独立气泡;null 不渲染建议)
   final void Function(String prompt)? onFollowupTap;
 
   @override
@@ -2520,7 +2516,7 @@ class _HoverableMessageContent extends StatefulWidget {
   final void Function(AgentResultAction action,
       {required AgentResultData cardData})? onUserAction;
 
-  /// 「接下来你可以」接续建议点击回调(透传至消息正文渲染)
+  /// 接续建议点击回调(气泡外独立气泡;null 不渲染建议)
   final void Function(String prompt)? onFollowupTap;
 
   /// 取消后台任务回调（任务回执 hover 取消按钮）
@@ -2818,6 +2814,10 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
         (!widget.isUser && _agentResult?.cardType == "travel_itinerary")
             ? _agentResult
             : null;
+    final List<String> followUps =
+        widget.isUser || widget.onFollowupTap == null
+            ? const <String>[]
+            : (widget.mainMessage.followUpPrompts ?? const <String>[]);
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment:
@@ -2834,6 +2834,16 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
           _buildTravelCardMessageHeader(),
           AgentResultCard(data: travelCard),
         ],
+        // 接续建议：不进助手气泡，逐条渲染成助手侧小泡挂在消息正下方
+        //（左对齐，点击即发送）。
+        if (followUps.isNotEmpty)
+          FollowUpBubbles(
+            prompts: followUps,
+            onTap: widget.onFollowupTap!,
+            bubbleColor: widget.cs.surfaceContainerHigh,
+            textColor: widget.cs.onSurface,
+            maxWidthFactor: 0.95,
+          ),
       ],
     );
   }
@@ -3186,7 +3196,6 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
             isUser: true,
             contentSummary: widget.contentSummary,
             onUserAction: widget.onUserAction,
-            onFollowupTap: widget.onFollowupTap,
           ),
           isTail: true,
         ),
@@ -3325,7 +3334,6 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
                 isUser: widget.isUser,
                 contentSummary: widget.contentSummary,
                 onUserAction: widget.onUserAction,
-                onFollowupTap: widget.onFollowupTap,
               ),
               // 边说边出图：流式阶段 `chat.media_ready` 推送的临时照片，
               // 插在正在打字的正文下方实时展示；`chat.assistant_done` 到达后
@@ -3368,9 +3376,6 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
     void Function(AgentResultAction action,
             {required AgentResultData cardData})?
         onUserAction,
-
-    /// 「接下来你可以」接续建议点击回调（null 不渲染建议行）
-    void Function(String prompt)? onFollowupTap,
   }) {
     return buildMessageBody(
       context,
@@ -3379,7 +3384,6 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
       isUser: isUser,
       contentSummary: contentSummary,
       onUserAction: onUserAction,
-      onFollowupTap: onFollowupTap,
       // 行程卡由消息行在气泡外独立渲染（第二条消息形态），body 内不再重复。
       excludeTravelCard: true,
     );

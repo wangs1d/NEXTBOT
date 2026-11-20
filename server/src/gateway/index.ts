@@ -27,15 +27,11 @@ export {
 
 // 常用下游工具的重导出（调用方无需感知 tool-search 内部路径）
 export {
-  CORE_TOOL_LIBRARY,
-  classifyToolExposureTier,
   estimateToolsSchemaTokens,
-  isCoreToolRegistryName,
   isToolSearchBridgeName,
   invalidateFullCatalogCache,
   type DeferredToolCatalog,
   type ResidentToolInfo,
-  type ToolExposureTier,
   type ToolSearchBridgeResult,
   type ToolSearchPreparedTurn,
 } from "../tools/tool-search/index.js";

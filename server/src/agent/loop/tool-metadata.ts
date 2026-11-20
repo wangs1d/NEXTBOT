@@ -5,7 +5,7 @@
  * STATE_MACHINE_TOOL_ALLOWLIST / ALWAYS_INCLUDED_TOOLS / TOOL_RESULT_PRESET_MAX_CHARS），
  * 并新增 `alternatives` 字段声明同类替代关系，供 RecoveryPolicy 做"确定性换工具"决策。
  *
- * P2 阶段：alternatives 覆盖高频失败工具（desktop/web/shopping），
+ * P2 阶段：alternatives 覆盖高频失败工具（web/shopping），
  * 其余工具 fallthrough 到原 prompt 路径（buildToolFailureReminder 返回空）。
  *
  * 详见 docs/loop-orchestrator-architecture.md §5 Phase 2
@@ -22,7 +22,6 @@ export type ToolCategory =
   | "clock"
   | "life"
   | "capability"
-  | "desktop"
   | "programming"
   | "world"
   | "aip"
@@ -63,7 +62,6 @@ const TOOL_TO_CATEGORY: Record<string, ToolCategory> = {
   web_search: "web",
   // web（复合：read/inspect/navigate/raw）
   web_fetch: "web",
-  "info.search": "web",
   // calendar
   "calendar": "calendar",
   // phone（复合：number/call）
@@ -75,20 +73,6 @@ const TOOL_TO_CATEGORY: Record<string, ToolCategory> = {
   // life
   "budget.calculate": "life",
   "shopping.suggest": "life",
-  // desktop
-  "desktop.visual.screenshot": "desktop",
-  "desktop.visual.run_task": "desktop",
-  "desktop.open": "desktop",
-  "desktop.run_preset": "desktop",
-  "desktop.run_shell": "desktop",
-  "desktop.uia_query": "desktop",
-  "desktop.run_input": "desktop",
-  "desktop.run_automation": "desktop",
-  "desktop.http_get": "desktop",
-  "desktop.web_search": "desktop",
-  "desktop.web_fetch": "desktop",
-  "desktop.window": "desktop",
-  "desktop.clipboard": "desktop",
   // agent_browser（Playwright 无头浏览器，复合工具 action 分流）
   "agent_browser": "web",
   // shared_browser（用户与 Agent 共用客户端浏览器，WS 桥转发）
@@ -103,6 +87,8 @@ const TOOL_TO_CATEGORY: Record<string, ToolCategory> = {
   "shopping.order.place": "life",
   "shopping.order.track": "life",
   "shopping.order.cancel": "life",
+  // ride（复合：quote/book/status/cancel）
+  "ride_hailing": "life",
   // smart_home
   "smart_home": "smart_home",
   // 复合工具（细分入口已收编进各自 action）
@@ -110,7 +96,6 @@ const TOOL_TO_CATEGORY: Record<string, ToolCategory> = {
   "world.link": "world",
   world: "world",
   proactivity: "proactivity",
-  care: "care",
   device: "device",
   aip: "aip",
 };
@@ -121,35 +106,24 @@ const TOOL_TO_CATEGORY: Record<string, ToolCategory> = {
 
 /**
  * 高频失败工具的确定性替代链。
- * 来源：buildToolFailureReminder 现有 desktop.open 建议 + TOOL_CATEGORY_MAPPINGS 同类工具。
- * P2 初期只覆盖 desktop/web/shopping，其余靠同类 category 自动兜底。
+ * 来源：buildToolFailureReminder 现有建议 + TOOL_CATEGORY_MAPPINGS 同类工具。
+ * P2 初期只覆盖 web/shopping，其余靠同类 category 自动兜底。
  */
 const TOOL_ALTERNATIVES: Record<string, string[]> = {
-  // desktop.open 失败 → 截图确认状态 / run_preset 查找 / run_shell 直接启动
-  // （对齐 buildToolFailureReminder L427-428 现有建议）
-  "desktop.open": ["desktop.visual.screenshot", "desktop.run_preset", "desktop.run_shell"],
-  // web_search 失败 → web_fetch 直接抓取 / info.search 换引擎
-  web_search: ["web_fetch", "info.search"],
+  // web_search 失败 → web_fetch 直接抓取
+  web_search: ["web_fetch"],
   // web_fetch 失败 → web_search 先搜再抓（复合内 action=read/inspect 可换方式）
-  web_fetch: ["web_search", "info.search"],
+  web_fetch: ["web_search"],
   // shopping.order.place 失败 → search 先确认商品再重试
   "shopping.order.place": ["shopping.order.search"],
   // 统一预订层（方案 A）：book 失败 → 先 quote/search 确认选项再重试
   "ride_hailing.book": ["ride_hailing.quote"],
   "home_service.book": ["home_service.search"],
   "restaurant.book": ["restaurant.search"],
-  // desktop.uia_query 失败（selector 找不到）→ 截图切视觉策略
-  // （对齐状态机 prompt "uia_query count:0 时切视觉策略"）
-  "desktop.uia_query": ["desktop.visual.screenshot"],
-  // desktop.run_automation 失败（Electron 等读不到控件）→ 坐标路径兜底
-  "desktop.run_automation": ["desktop.uia_query", "desktop.run_input", "desktop.visual.screenshot"],
 };
 
 // 需要"禁止假成功"强约束的工具（用户易感知成败）
 const HONEST_FAILURE_TOOLS = new Set<string>([
-  "desktop.open",
-  "desktop.run_preset",
-  "desktop.run_shell",
   "shopping.order.place",
   // 提醒/日程创建（2026-10-12）：matched=false（时间解析不出/周期需确认）时
   // 严禁转述成「已设置」——用户据此以为到点会提醒，实际什么都没创建
@@ -218,10 +192,10 @@ export function hasExternalSideEffect(toolName: string): boolean {
 }
 
 function inferRiskLevel(toolName: string): ToolMetadata["riskLevel"] {
-  if (/shopping\.order\.place|ride_hailing\.book|home_service\.book|restaurant\.book|desktop\.run_shell|desktop\.run_input|desktop\.run_automation|phone\.call/.test(toolName)) {
+  if (/shopping\.order\.place|ride_hailing\.book|home_service\.book|restaurant\.book|phone\.call/.test(toolName)) {
     return "high";
   }
-  if (/desktop\.open|desktop\.run_preset|agent_browser|smart_home\.control/.test(toolName)) {
+  if (/agent_browser|smart_home\.control/.test(toolName)) {
     return "medium";
   }
   return "low";

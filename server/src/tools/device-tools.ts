@@ -24,7 +24,7 @@ export const DEVICE_CHAT_TOOLS: ChatCompletionTool[] = [
       name: "device.list",
       description:
         "列出当前用户的所有在线终端设备及其能力清单。用户问「我有哪些设备」「设备状态」「能控制什么」时调用。" +
-        "返回设备名、kind（phone/tablet/desktop/glasses/camera/home 等）、在线状态、能力清单（capabilities）。" +
+        "返回设备名、kind（phone/tablet/glasses/camera/home 等）、在线状态、能力清单（capabilities）。" +
         "home:default 是全局智能家居网关，所有用户共享。",
       parameters: {
         type: "object",
@@ -45,14 +45,14 @@ export const DEVICE_CHAT_TOOLS: ChatCompletionTool[] = [
       description:
         "调用某台设备的某个能力。如 device.use('phone:abc', 'camera.take_photo') 拍照、" +
         "device.use('home:default', 'actuator.light.turn_on', {entityId:'light.keting'}) 开灯、" +
-        "device.use('desktop:xyz', 'screen_capture.screenshot') 截屏。" +
+        "device.use('camera:xyz', 'camera.take_photo') 拍照。" +
         "可用的 action 在 device.list 返回的 capabilities[].actions 里。",
       parameters: {
         type: "object",
         properties: {
           device_id: {
             type: "string",
-            description: "设备 ID，从 device.list 结果中选取（如 phone:abc123 / home:default / desktop:xyz）",
+            description: "设备 ID，从 device.list 结果中选取（如 phone:abc123 / home:default / camera:xyz）",
           },
           action: {
             type: "string",

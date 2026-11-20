@@ -218,6 +218,22 @@ export class MemoryExperienceLearningLoop {
     };
 
     const state = this.getState(actorId);
+    // 同一观察反复喂进来（重放/重启补扫）不产生新片段：24h 内同 kind + 同
+    // 内容视为同一次经历，只抬高置信度。片段表的用途是「经历过什么」，
+    // 重复行只会稀释召回与容量。
+    const observationKey = stableToken(episode.observation);
+    const duplicate = state.episodes.find(
+      (e) =>
+        e.sourceKind === episode.sourceKind &&
+        stableToken(e.observation) === observationKey &&
+        Date.parse(e.updatedAt) > Date.now() - 24 * 3_600_000,
+    );
+    if (duplicate) {
+      duplicate.confidence = Math.max(duplicate.confidence, episode.confidence);
+      duplicate.updatedAt = now;
+      this.persist(actorId, state);
+      return duplicate;
+    }
     state.episodes.unshift(episode);
     state.episodes = state.episodes.slice(0, MAX_EPISODES_PER_ACTOR);
     this.upsertBeliefFromEpisode(state, episode, outcome, item);

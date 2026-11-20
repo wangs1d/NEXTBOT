@@ -8,10 +8,7 @@ export function masterChatSessionId(actorId: string): string {
   return `${MASTER_CHAT_SESSION_PREFIX}${actorId}`;
 }
 
-/**
- * 笔记/学习专用对话线程 id：与主会话独立存储。Agent 可在主会话里通过
- * `notes_chat.recall_main` / `notes.recall_history` 跨上下文查阅。
- */
+/** 笔记/学习专用对话线程 id：与主会话独立存储。 */
 export function notesChatSessionId(actorId: string): string {
   return `${NOTES_CHAT_SESSION_PREFIX}${actorId}`;
 }

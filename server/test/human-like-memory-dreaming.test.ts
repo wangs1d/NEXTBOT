@@ -205,8 +205,7 @@ test("daily candidates are consumed and cursor advances without dream: ingest", 
         ingested.push({ text, highSignal: opts?.highSignal });
       },
     } as NarrativeMemoryPort;
-    // 记忆架构收敛：当天待整理内容改由 DailyJournal 承载（原 RAM pending queue 已删除），
-    // 通过构造函数注入临时目录的 journal 服务。
+    // 当日原文由 DailyJournal 承载（L0）；白天整理不回灌长期图、不改写 KV 摘要。
     const journal = new DailyJournalService(join(dir, "journal"));
     const manager = new MemoryManagerService(narrative, sync, {
       consolidationIntervalMs: 60_000,
@@ -217,17 +216,13 @@ test("daily candidates are consumed and cursor advances without dream: ingest", 
       journal.appendTurn("user-buffer", "sess-buffer", "Please remember that I prefer quiet mornings.", "I will remember that.");
       await sleep(80);
       await manager.consolidateNow("user-buffer");
-      // 等待 journal/sync 的 fire-and-forget 写链落盘，再清理临时目录
       await sleep(80);
 
-      // 新设计（M1-③）：consolidateNow 只维护 memory_summary / 画像，不再通过
-      // dream:replay / dream:reinforce 逐行 ingest 到 narrative memory（那些行
-      // 会重复触发 LLM 抽取）；长期记忆固化统一由 journal 固化路径完成。
-      assert.equal(ingested.length, 0);
-      // journal 消费游标已推进 = 当天行已被 memory_summary 消费
-      const cursor = (manager as unknown as { journalConsumeCursor: Map<string, { lines: number }> })
-        .journalConsumeCursor.get("user-buffer");
-      assert.ok(cursor && cursor.lines >= 1, "journal 行应已被消费");
+      assert.equal(ingested.length, 0, "白天整理不得逐行回灌长期图");
+      const rows = await journal.readTodayLines("user-buffer");
+      assert.ok(rows.length >= 1, "journal 原文保留给夜间编译");
+      const entries = sync.getSnapshot("user-buffer", ["memory_summary"]).entries;
+      assert.equal(entries.memory_summary, undefined, "KV 摘要槽已下线");
     } finally {
       journal.close();
     }
@@ -255,13 +250,11 @@ test("daily buffer survives a failed Dreaming ingest", withScrubbedLlmEnv(async 
     try {
       journal.appendTurn("user-failure", "sess-failure", "Remember my weekly planning habit.", "Understood.");
       await sleep(80);
-      // 新设计：consolidateNow 内部用 try/catch 和 .catch(() => {}) 吞掉 ingest 错误，
-      // 不再向上抛出；journal 消费游标正常推进，原始行保留在 journal 文件中（夜间固化兜底）。
+      // 白天整理不调用 narrative.ingest，失败注入器不会波及；原文留在 journal。
       await manager.consolidateNow("user-failure");
       await sleep(80);
-      const cursor = (manager as unknown as { journalConsumeCursor: Map<string, { lines: number }> })
-        .journalConsumeCursor.get("user-failure");
-      assert.ok(cursor && cursor.lines >= 1, "消费游标应推进（journal 行保留作夜间固化兜底）");
+      const rows = await journal.readTodayLines("user-failure");
+      assert.ok(rows.length >= 1, "journal 原文保留作夜间编译输入");
     } finally {
       journal.close();
     }

@@ -1,7 +1,7 @@
 /// 工具名 → 用户能懂的进行时文案。
 ///
 /// 服务端 `tool.call` 下发的是内部工具名（如 `shopping.compare.prices`、
-/// `desktop_uia_query`），直接亮给用户等于泄露工程实现。此表把每个工具族
+/// `calendar.create`），直接亮给用户等于泄露工程实现。此表把每个工具族
 /// 映射成一句进行时短语；**匹配必须走 `friendlyToolLabel`**，任何展示路径
 /// 都不允许直接渲染原始工具名。
 ///
@@ -21,15 +21,12 @@ const List<(String, String)> kToolFriendlyLabels = <(String, String)>[
   ("shopping.order", "我处理下订单"),
   ("shopping.pay", "正在走支付这一步"),
   ("shopping.suggest", "我挑几个给你看"),
-  ("budget.calculate", "我算算这笔"),
   ("finance.analyze", "我看看钱都花哪儿了"),
   ("finance.", "我把账单理一下"),
   // ── 日程 / 提醒 / 时间 ──
   ("calendar.", "我看下你怎么排的"),
   ("calendar_query", "我查下你的日程"),
   ("reminder.plan", "我想想什么时候叫你"),
-  ("care.", "我记一下重要的日子"),
-  ("period.", "正在更新生理期记录"),
   // 时间族只剩 clock.get_user_location（定位），文案按「在哪」而不是「几点」。
   ("clock.", "我看下你在哪"),
   // ── 任务 / 计划 / 委派 ──
@@ -67,31 +64,11 @@ const List<(String, String)> kToolFriendlyLabels = <(String, String)>[
   ("fetch_page", "我读读搜到的内容"),
   ("info.inspect_webpage", "我看看搜到的这页写了什么"),
   ("info.navigate_site", "我去这个站里转转"),
-  ("info.search", "我上网查查"),
   ("browser.fetch_page", "我读读搜到的内容"),
   ("agent_browser", "我用浏览器打开看看"),
   ("shared_browser", "我用浏览器打开看看"),
   ("browser_navigate", "我在网页里翻一下"),
   ("browser.", "我在网页里翻一下"),
-  // ── 桌面操作（点号与下划线两代命名并存）──
-  ("desktop.visual.screenshot", "我截一下你的屏幕看看"),
-  ("desktop.visual.run_task", "我动一下你的电脑"),
-  ("desktop.uia_query", "我看下你屏上有什么"),
-  ("desktop_uia_query", "我看下你屏上有什么"),
-  ("desktop.web_search", "我上网查查"),
-  ("desktop.web_fetch", "我读读搜到的内容"),
-  ("desktop.http_get", "我读读搜到的内容"),
-  ("desktop.run_shell", "我跑一下这个命令"),
-  ("desktop_run_shell", "我跑一下这个命令"),
-  ("desktop.run_input", "我替你敲两下"),
-  ("desktop_run_input", "我替你敲两下"),
-  ("desktop.run_automation", "我按预设走一遍"),
-  ("desktop.run_preset", "我按预设走一遍"),
-  ("desktop.open", "我把那个应用打开"),
-  ("desktop_open", "我把那个应用打开"),
-  ("desktop.window", "我挪一下窗口"),
-  ("desktop.clipboard", "我看下你剪贴板里的东西"),
-  ("desktop.", "我动一下你的电脑"),
   // ── 手机 / 通话 ──
   ("phone.call_user", "我打过去"),
   ("phone.dial", "我拨号"),
@@ -143,9 +120,6 @@ const List<(String, String)> kToolFriendlyLabels = <(String, String)>[
   ("perception.", "我感受下周围"),
   ("embodiment.", "我动一下"),
   // ── 生活服务 ──
-  ("health.get", "我看下你的身体数据"),
-  ("health.query", "我看下你的身体数据"),
-  ("health.", "我记一笔身体数据"),
   ("body.", "我看下你的状态"),
   ("home_service.search", "我找下家政"),
   ("home_service.", "我处理下家政这单"),
@@ -163,9 +137,6 @@ const List<(String, String)> kToolFriendlyLabels = <(String, String)>[
   ("interest.manage", "我记一下你的喜好"),
   ("geofence.", "我设个到地方的提醒"),
   // ── 安全 ──
-  ("safety.sos", "正在发起紧急求助"),
-  ("safety.fake_call", "正在模拟来电"),
-  ("safety.", "正在设置紧急联系人"),
   // ── 文件 / 代码 ──
   ("file.parse", "我把这份文档读进来"),
   ("file.", "我处理下这个文件"),
@@ -191,8 +162,6 @@ const List<(String, String)> kToolFriendlyLabels = <(String, String)>[
   ("weather.", "我看下外头天气"),
   // ── 模块 / 领域名（能力模块名、子 Agent 角色名也可能落到这里）──
   ("finance_deep", "我把账再往细里理一遍"),
-  ("health_fitness", "我看下你的运动和身体"),
-  ("period_care", "正在更新生理期记录"),
   ("memory_governance", "我整理一下咱聊过的"),
   ("goal_planning", "我把这事拆成几步"),
   ("media_music", "我放一下"),
@@ -202,7 +171,6 @@ const List<(String, String)> kToolFriendlyLabels = <(String, String)>[
   ("shopping_compare", "我去比比哪儿便宜"),
   ("shopping_order", "我处理下订单"),
   ("social_outreach", "我给他发一句"),
-  ("safety_guard", "我正在设置紧急联系人"),
   ("code_sandbox", "我跑一下这段代码"),
   ("file_doc", "我处理下这个文件"),
   ("email_sms", "我发条短信"),
@@ -211,12 +179,9 @@ const List<(String, String)> kToolFriendlyLabels = <(String, String)>[
   ("agent", "我想想这事怎么办"),
   ("aip", "我叫另一个我去办"),
   ("browser", "我用浏览器打开看看"),
-  ("budget", "我算算这笔"),
   ("calendar", "我查下你的日程"),
-  ("care", "我记一下重要的日子"),
   ("clock", "我看下你在哪"),
   ("code", "我改下这些文件"),
-  ("desktop", "我动一下你的电脑"),
   ("device", "我连一下设备"),
   ("email", "我把邮件发出去"),
   ("geofence", "我设个到地方的提醒"),

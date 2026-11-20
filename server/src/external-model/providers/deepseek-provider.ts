@@ -85,7 +85,6 @@ export class DeepSeekProvider extends AbstractChatProvider {
         tools: Boolean(ctx.tools && !ctx.overrideSys),
         masterSubAgentDelegate: ctx.streamOpts?.masterSubAgentDelegate,
         agentAccessMode: ctx.streamOpts?.agentAccessMode,
-        desktopBridgeOnline: ctx.streamOpts?.desktopBridgeOnline,
         phoneBridgeOnline: ctx.streamOpts?.phoneBridgeOnline,
         ...(ctx.suppressSuffixes
           ? {

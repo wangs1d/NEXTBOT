@@ -43,9 +43,9 @@ test("习惯挖掘：同工具同时段重复使用产出候选，低风险只�
   // 2026-08-21 / 08-28 / 09-04 都是周五 10 点档
   const at = (iso: string) => new Date(iso).getTime();
   const observations = [
-    { actorId: "u1", tool: "meituan.create_order", at: at("2026-08-21T10:05:00") },
-    { actorId: "u1", tool: "meituan.create_order", at: at("2026-08-28T10:10:00") },
-    { actorId: "u1", tool: "meituan.create_order", at: at("2026-09-04T10:15:00") },
+    { actorId: "u1", tool: "restaurant.book", at: at("2026-08-21T10:05:00") },
+    { actorId: "u1", tool: "restaurant.book", at: at("2026-08-28T10:10:00") },
+    { actorId: "u1", tool: "restaurant.book", at: at("2026-09-04T10:15:00") },
     { actorId: "u1", tool: "weather.get_local", at: at("2026-08-21T08:00:00") },
     { actorId: "u1", tool: "weather.get_local", at: at("2026-08-28T08:00:00") },
     { actorId: "u1", tool: "weather.get_local", at: at("2026-09-04T08:00:00") },
@@ -54,7 +54,7 @@ test("习惯挖掘：同工具同时段重复使用产出候选，低风险只�
   assert.equal(candidates.length, 1);
   assert.equal(candidates[0].trigger.kind, "tool_pattern");
   if (candidates[0].trigger.kind === "tool_pattern") {
-    assert.equal(candidates[0].trigger.toolName, "meituan.create_order");
+    assert.equal(candidates[0].trigger.toolName, "restaurant.book");
   }
 });
 
@@ -132,9 +132,9 @@ test("习惯闭环：挖掘一键落库默认 confirm_each 且按名称去重", 
     now: () => now,
   });
   (service as unknown as { toolObservations: Array<{ actorId: string; tool: string; at: number }> }).toolObservations.push(
-    { actorId: "u2", tool: "meituan.create_order", at: new Date("2026-08-21T19:05:00").getTime() },
-    { actorId: "u2", tool: "meituan.create_order", at: new Date("2026-08-28T19:05:00").getTime() },
-    { actorId: "u2", tool: "meituan.create_order", at: new Date("2026-09-04T19:05:00").getTime() },
+    { actorId: "u2", tool: "restaurant.book", at: new Date("2026-08-21T19:05:00").getTime() },
+    { actorId: "u2", tool: "restaurant.book", at: new Date("2026-08-28T19:05:00").getTime() },
+    { actorId: "u2", tool: "restaurant.book", at: new Date("2026-09-04T19:05:00").getTime() },
   );
   const first = await service.mine("u2", true);
   assert.ok(first.created.length >= 1);

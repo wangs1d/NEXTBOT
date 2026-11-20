@@ -78,6 +78,10 @@ export function classifyToolSensitivity(
     if (action === "use") return "act_external";
     if (["list", "stream"].includes(action)) return "read";
   }
+  if (name === "ride_hailing") {
+    if (action === "book" || action === "cancel") return "act_external";
+    if (["quote", "status"].includes(action)) return "read";
+  }
   if (EXTERNAL_TOOL_PREFIXES.some((p) => name.startsWith(p))) return "act_external";
   if (READ_TOOL_PREFIXES.some((p) => name.startsWith(p))) return "read";
   return "act_internal";

@@ -35,7 +35,6 @@ test("media.play fails honestly when client did not declare mediaPlayback", asyn
   assert.equal(result.ok, false);
   if (!result.ok) {
     assert.match(result.error, /mediaPlayback/);
-    assert.match(result.error, /desktop\.open/);
   }
   assert.equal(sent.length, 0, "不得向不支持播放的客户端推送播放事件");
 });

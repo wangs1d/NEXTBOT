@@ -107,6 +107,30 @@ function resolveBearerEmail(req: FastifyRequest, deps: HttpRouteDeps): string | 
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ? email : null;
 }
 
+/** 统一身份：App 用 Bearer access token，网页用充值站 Cookie 会话。 */
+function resolveRechargeEmail(req: FastifyRequest, deps: HttpRouteDeps): string | null {
+  return resolveBearerEmail(req, deps) ?? resolveSessionEmail(req);
+}
+
+type RechargePayChannel = "page" | "wap" | "app";
+
+/**
+ * 统一支付通道选择：
+ *  - 显式 channel 优先（App 检测到已安装支付宝后传 app）；
+ *  - Bearer 客户端默认 wap（未安装支付宝也能用浏览器付）；
+ *  - 手机浏览器 UA → wap；桌面 → page（电脑网页收银台）。
+ */
+function resolvePayChannel(
+  req: FastifyRequest,
+  explicit: unknown,
+  bearerAuth: boolean,
+): RechargePayChannel {
+  const raw = String(explicit ?? "").trim();
+  if (raw === "page" || raw === "wap" || raw === "app") return raw;
+  if (bearerAuth || isMobileClient(req)) return "wap";
+  return "page";
+}
+
 export function registerRechargeRoutes(app: FastifyInstance, deps: HttpRouteDeps): void {
   const otpEnabled = isEmailOtpEnforced(deps);
   const otpService = deps.emailOtpService ?? null;
@@ -181,6 +205,12 @@ export function registerRechargeRoutes(app: FastifyInstance, deps: HttpRouteDeps
       otpEnabled,
       payConfigured: Boolean(config),
       payEnv: config?.env ?? null,
+      // 收银台能力：支付宝已全链路接入；微信 App 支付尚未接入（仅凭证存在也不可用），
+      // 客户端据此置灰，避免用户点到一个必然失败的通道。
+      providers: {
+        alipay: Boolean(config),
+        wechat: false,
+      },
     };
   });
 
@@ -252,8 +282,8 @@ export function registerRechargeRoutes(app: FastifyInstance, deps: HttpRouteDeps
   });
 
   app.get("/api/recharge/me", async (req, reply) => {
-    const email = resolveSessionEmail(req);
-    if (!email) return reply.code(401).send({ ok: false, message: "未登录" });
+    const email = resolveRechargeEmail(req, deps);
+    if (!email) return reply.code(401).send({ ok: false, message: "登录已失效，请重新登录" });
     const balanceCents = getWebpayStore().getRechargeBalanceCents(email);
     return { ok: true, ...maskFor(email), balance: centsToAmount(BigInt(balanceCents)) };
   });
@@ -327,29 +357,43 @@ export function registerRechargeRoutes(app: FastifyInstance, deps: HttpRouteDeps
     };
   });
 
-  app.post("/api/recharge/orders", async (req, reply) => {
-    if (!hasCsrfHeader(req)) return reply.code(403).send({ ok: false, message: "CSRF check failed" });
-    const email = resolveSessionEmail(req);
-    if (!email) return reply.code(401).send({ ok: false, message: "请先登录" });
-    const body = (req.body ?? {}) as { amount?: unknown };
+  // ── 统一支付入口：网页与 App 共用 ──
+  // 身份按 Bearer（App）或 Cookie（网页）自动识别；通道按客户端能力选择：
+  // 电脑网页 page、手机浏览器 wap、已安装支付宝的 App app（唤起原生收银台）。
+
+  app.post("/api/recharge/payments", async (req, reply) => {
+    const bearerEmail = resolveBearerEmail(req, deps);
+    const cookieEmail = bearerEmail ? null : resolveSessionEmail(req);
+    if (!bearerEmail && !cookieEmail) {
+      return reply.code(401).send({ ok: false, message: "登录已失效，请重新登录" });
+    }
+    // Cookie 会话请求沿用 CSRF 头；Bearer 请求不需要（浏览器不会自动携带凭证）。
+    if (!bearerEmail && !hasCsrfHeader(req)) {
+      return reply.code(403).send({ ok: false, message: "CSRF check failed" });
+    }
+    const email = bearerEmail ?? cookieEmail!;
+    const body = (req.body ?? {}) as { amount?: unknown; channel?: unknown };
     const cents = parseAmountToCents(body.amount);
     if (cents === null || cents < MIN_CENTS || cents > MAX_CENTS) {
       return reply.code(400).send({ ok: false, message: "充值金额需为 1 ~ 100000 元、最多两位小数" });
     }
     const config = loadWebpayConfig();
     if (!config) return reply.code(503).send({ ok: false, message: "支付通道尚未配置" });
+    const channel = resolvePayChannel(req, body.channel, Boolean(bearerEmail));
     try {
       const result = getWebpayService().createOrder({
         amount: centsToAmount(cents),
         subject: "NEXTBOT 额度充值",
         accountId: email,
         returnUrl: `${config.baseUrl}/recharge/return`,
-        payMode: isMobileClient(req) ? "wap" : "page",
+        payMode: channel,
       });
       return {
         ok: true,
         outTradeNo: result.outTradeNo,
         amount: centsToAmount(cents),
+        channel,
+        orderStr: result.orderStr ?? null,
         paymentHtml: result.paymentHtml,
         paymentUrl: result.paymentUrl ?? null,
       };
@@ -361,67 +405,12 @@ export function registerRechargeRoutes(app: FastifyInstance, deps: HttpRouteDeps
     }
   });
 
-  app.get("/api/recharge/orders/:outTradeNo", async (req, reply) => {
-    const email = resolveSessionEmail(req);
-    if (!email) return reply.code(401).send({ ok: false, message: "未登录" });
+  app.get("/api/recharge/payments/:outTradeNo", async (req, reply) => {
+    const email = resolveRechargeEmail(req, deps);
+    if (!email) return reply.code(401).send({ ok: false, message: "登录已失效，请重新登录" });
     const { outTradeNo } = req.params as { outTradeNo: string };
     const snap = await orderSnapshot(outTradeNo, email);
     // 非本人订单按不存在处理，不泄露他人订单信息
-    if (!snap) return reply.code(404).send({ ok: false, message: "订单不存在" });
-    return { ok: true, ...snap };
-  });
-
-  // ── App 内购额度：Bearer 登录态直连，不再跳网页、不再重复邮箱验证码 ──
-  // 支付仍走同一套支付宝 webpay 下单与验签记账，只是入口与 UI 在 App 内。
-
-  app.get("/api/recharge/app/me", async (req, reply) => {
-    const email = resolveBearerEmail(req, deps);
-    if (!email) return reply.code(401).send({ ok: false, message: "登录已失效，请重新登录" });
-    return {
-      ok: true,
-      ...maskFor(email),
-      balance: centsToAmount(BigInt(getWebpayStore().getRechargeBalanceCents(email))),
-    };
-  });
-
-  app.post("/api/recharge/app/orders", async (req, reply) => {
-    const email = resolveBearerEmail(req, deps);
-    if (!email) return reply.code(401).send({ ok: false, message: "登录已失效，请重新登录" });
-    const body = (req.body ?? {}) as { amount?: unknown };
-    const cents = parseAmountToCents(body.amount);
-    if (cents === null || cents < MIN_CENTS || cents > MAX_CENTS) {
-      return reply.code(400).send({ ok: false, message: "充值金额需为 1 ~ 100000 元、最多两位小数" });
-    }
-    const config = loadWebpayConfig();
-    if (!config) return reply.code(503).send({ ok: false, message: "支付通道尚未配置" });
-    try {
-      const result = getWebpayService().createOrder({
-        amount: centsToAmount(cents),
-        subject: "NEXTBOT 额度充值",
-        accountId: email,
-        returnUrl: `${config.baseUrl}/recharge/return`,
-        // App 内购固定走手机网站收银台：由系统浏览器拉起支付宝 App 完成支付
-        payMode: "wap",
-      });
-      return {
-        ok: true,
-        outTradeNo: result.outTradeNo,
-        amount: centsToAmount(cents),
-        paymentUrl: result.paymentUrl ?? null,
-      };
-    } catch (err) {
-      if (err instanceof WebpayNotConfiguredError) {
-        return reply.code(503).send({ ok: false, message: "支付通道尚未配置" });
-      }
-      return reply.code(400).send({ ok: false, message: err instanceof Error ? err.message : String(err) });
-    }
-  });
-
-  app.get("/api/recharge/app/orders/:outTradeNo", async (req, reply) => {
-    const email = resolveBearerEmail(req, deps);
-    if (!email) return reply.code(401).send({ ok: false, message: "登录已失效，请重新登录" });
-    const { outTradeNo } = req.params as { outTradeNo: string };
-    const snap = await orderSnapshot(outTradeNo, email);
     if (!snap) return reply.code(404).send({ ok: false, message: "订单不存在" });
     return { ok: true, ...snap };
   });

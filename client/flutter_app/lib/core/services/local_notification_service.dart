@@ -31,24 +31,28 @@ class LocalNotificationService {
   /// 通知点按回调（main.dart 注入：回传 outcome 反馈）
   static void Function(String deliveryId, String outcome)? onOutcome;
 
-  static Future<void> init() async {
+  /// [requestNotificationPermission] 默认 true，保持既有调用语义。
+  /// 手机端冷启动传 false：通知权限改到「注册/登录成功进入主壳」时再申请
+  /// （main.dart 的 _ensureMobileNotificationPermission），避免在登录门禁页
+  /// 就弹系统权限框。插件初始化与通知渠道照常建好，不影响离线推送。
+  static Future<void> init({bool requestNotificationPermission = true}) async {
     if (_initialized || kIsWeb || !(Platform.isAndroid || Platform.isIOS)) {
       return;
     }
     const AndroidInitializationSettings androidInit =
         AndroidInitializationSettings("@mipmap/ic_launcher");
-    const DarwinInitializationSettings iosInit = DarwinInitializationSettings(
-      requestAlertPermission: true,
-      requestBadgePermission: true,
-      requestSoundPermission: true,
+    final DarwinInitializationSettings iosInit = DarwinInitializationSettings(
+      requestAlertPermission: requestNotificationPermission,
+      requestBadgePermission: requestNotificationPermission,
+      requestSoundPermission: requestNotificationPermission,
     );
     await _plugin.initialize(
-      settings: const InitializationSettings(android: androidInit, iOS: iosInit),
+      settings: InitializationSettings(android: androidInit, iOS: iosInit),
       onDidReceiveNotificationResponse: _onTap,
       // 后台 isolate 回调：App 被杀时点通知栏按钮仍能执行（2026-11-13）
       onDidReceiveBackgroundNotificationResponse: localNotificationActionBackground,
     );
-    if (Platform.isAndroid) {
+    if (Platform.isAndroid && requestNotificationPermission) {
       // Android 13+ 运行时通知权限
       final PermissionStatus status = await Permission.notification.request();
       debugPrint("[local-notification] permission=$status");

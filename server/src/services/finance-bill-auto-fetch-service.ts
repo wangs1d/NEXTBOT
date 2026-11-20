@@ -542,13 +542,11 @@ export function createPlaywrightAlipayBillFetcher(browserSessions: BillSessionSt
       // 页面内 fetch：自动携带 Cookie/Referer/CSRS token 环境与页面一致
       const rows = (await page.evaluate(
         async ({ queryUrl, days }) => {
-          const fmt = (d: Date) =>
-            `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} 00:00:00`;
           const end = new Date();
           const start = new Date(end.getTime() - days * 86_400_000);
           const body = new URLSearchParams({
-            queryStartTime: fmt(start),
-            queryEndTime: fmt(end),
+            queryStartTime: `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, "0")}-${String(start.getDate()).padStart(2, "0")} 00:00:00`,
+            queryEndTime: `${end.getFullYear()}-${String(end.getMonth() + 1).padStart(2, "0")}-${String(end.getDate()).padStart(2, "0")} 00:00:00`,
             billType: "millennium",
             contentType: "json",
             pageNum: "1",

@@ -61,18 +61,6 @@ export type ToolSchemaProvider = () => Array<{ type: "function"; function: { nam
 
 /** 状态机允许的工具白名单(状态机模式下始终暴露这些,绕过 contextual 筛选) */
 export const STATE_MACHINE_TOOL_ALLOWLIST: string[] = [
-  // 桌面自动化
-  "desktop.open",
-  "desktop.run_preset",
-  "desktop.run_shell",
-  "desktop.uia_query",
-  "desktop.run_input",
-  "desktop.run_automation",
-  "desktop.http_get",
-  "desktop.web_search",
-  "desktop.web_fetch",
-  "desktop.visual.screenshot",
-  // 服务端联网工具（复合入口 + 被收编执行器名都保留，兼容历史回执判断）
   "web_search",
   "web_fetch",
   "search_web",
@@ -173,11 +161,11 @@ export class AgentTaskOrchestrator {
   }
 
   /**
-   * 创建并后台执行一个「通用复杂任务」（非桌面自动化状态机）。
+   * 创建并后台执行一个「通用复杂任务」。
    *
    * 与 createAndRun 共享「后台 fire-and-forget + 任务持久化 + WS 事件推送」骨架，
    * 但执行逻辑由 executor 决定（子 Agent 委派 / plan_execute 等），
-   * 不经过 runLoop 的桌面自动化状态机（planning→executing→verifying）。
+   * 不经过 runLoop 的状态机（planning→executing→verifying）。
    *
    * executor 内部应通过 options.onAssistantDelta 流式推送最终回复，
    * 通过 options.onToolExecuteStart / onToolExecuted 推送工具进度。
@@ -322,7 +310,6 @@ export class AgentTaskOrchestrator {
       systemPromptOverride: systemPrompt,
       toolLoop: { maxRounds: 1 },
       agentAccessMode: "full",
-      desktopBridgeOnline: true,
       phoneBridgeOnline: false,
       pinnedToolNames: STATE_MACHINE_TOOL_ALLOWLIST,
     };
@@ -373,7 +360,6 @@ export class AgentTaskOrchestrator {
               userId: task.actorId,
               chatUserMessageId: task.chatUserMessageId,
               agentAccessMode: "full",
-              desktopBridgeOnline: true,
             });
 
             const durationMs = Date.now() - startTime;
@@ -499,50 +485,6 @@ ${input.recentHistory.length > 0 ? input.recentHistory.join("\n") : "(暂无历�
 4. 上一步工具结果未达预期时,反思原因并调整策略(换 selector / 换工具 / 换路径)
 5. **禁止重复无效查询**:对同一 selector 调用 uia_query 超过 2 次仍无结果,必须换策略
 6. 完成当前子任务后,在文本里说"子任务完成"
-7. 全部子任务完成后,在文本里说"任务完成"
-8. 遇到不可恢复的错误,在文本里说"任务失败: <原因>"
-
-## 桌面自动化操作策略(核心)
-
-桌面应用分两类,必须先判断再用对应策略:
-
-### A. 标准 Win32/WPF/WinForms 应用(支持 UIA 控件树,优先走原生控件)
-- **优先用 desktop.run_automation**(零鼠标零截图零前台要求,最稳定)
-  - selector 支持 name/name_contains/control_type/class_name/automation_id
-  - 点按钮/菜单: action=click (调 InvokePattern)
-  - 输入文本框: action=set_value (调 ValuePattern.SetValue,无需窗口在前台)
-  - 读文本框: action=get_value
-  - 复选框/单选: action=toggle
-- 仅当 run_automation 返回 ok:false(元素不支持 pattern)时,降级到 run_input 按 bbox 坐标操作
-
-### B. 自绘 UI 应用(uia_query/run_automation 返回 count:0 或 ok:false)
-微信新版(mmui)、QQ、腾讯视频、抖音、Electron 应用等自绘框架,UIA 只能看到顶层窗口,读不到内部控件,**run_automation 一定走不通**。
-当 uia_query/run_automation 返回 count:0 时,**立即切换到视觉策略**:
-1. desktop.visual.screenshot 截图看清屏幕当前状态
-2. 根据截图内容判断当前界面(登录页/主界面/搜索框/聊天列表等)
-3. 用 desktop.run_input 按坐标点击/输入(坐标基于截图中的元素位置)
-4. 每次操作后重新截图验证效果
-
-### C. 前置状态处理(应用未就绪)
-打开应用后可能遇到前置状态(登录窗口/引导页/弹窗等),这是任务的一部分,必须先处理:
-- 看到登录窗口 → 截图判断登录方式(扫码/账号密码/手机验证)
-  - 扫码登录:提示"请在屏幕上扫码登录",然后每 5-10 秒截图一次,等待登录完成后继续
-  - 按钮登录:点击对应按钮
-- 看到引导页/弹窗 → 点击关闭或跳过
-- 前置状态处理完成后,重新截图确认进入主界面,再继续原任务
-
-## 桌面自动化工具使用要点
-- desktop.open {target, path}: 打开软件/文件/网页(自动跨盘搜索,WeChat↔Weixin 别名)
-- desktop.run_automation {action, selector, value?}: **UIA 友好应用首选**,不模拟鼠标,不抢焦点
-- desktop.uia_query {mode, selector}: UIA 只读查询(探查控件树,判断应用是否支持 UIA)
-- desktop.run_input {action, x, y, text, key, keys}: 键鼠模拟(click/type/key/shortcut),坐标来自截图或 uia_query 的 bbox
-- desktop.run_preset {preset}: 预设命令(list_dir/processes)
-- desktop.run_shell {command}: 受控 shell
-- desktop.http_get {url, headers?, timeoutMs?}: **原生 HTTP GET,替代 shell curl**。调外部 API 获取实时信息(天气/股价/翻译/汇率等)。仅 GET,带 SSRF 防护
-- desktop.web_search {query, limit?}: **桌面端联网搜索**(Bing CN),返回标题+URL+摘要。子任务需要查资料时首选
-- desktop.web_fetch {url}: **桌面端抓取网页正文**,返回标题+摘要+纯文本。search 拿到 URL 后用此读全文
-- desktop.visual.screenshot {}: 截屏看清当前状态,自绘 UI 应用的主要感知手段
-
 ## 联网能力(服务端工具)
 当任务需要"上网查信息"时,优先用以下工具,不要用 shell curl:
 - web_search {action: web|deep|images|images_batch|videos|hot|weather|quote, query}: **服务端联网检索**（web=标题+URL+摘要，支持多查询并行；images=图片搜索，返回可预览图片 URL + 来源页；videos=视频搜索，返回标题+播放页+缩略图）

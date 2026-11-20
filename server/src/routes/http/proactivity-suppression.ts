@@ -15,7 +15,6 @@ const ALLOWED_KINDS = new Set([
   "interest_alert",
   "followup",
   "task_celebration",
-  "overwork_care",
   "weather_alert",
   "life_reminder",
   "monthly_report",

@@ -14,7 +14,6 @@
  *
  * 与相近能力的边界：
  *   - shopping.order.place：电商购物，走浏览器 adapter，不复用本层
- *   - meituan.create_order：美团跑腿开放 API，独立工具
  *   - alipay.*：支付通道，不是预订编排
  */
 
@@ -109,7 +108,8 @@ export interface BookingProviderRef {
   providerOrderId: string;
 }
 
-export type BookingProviderResult<T> = { ok: true } & T | { ok: false; error: string; retryable?: boolean };
+/** 结构化失败码（如 PICKUP_UNRESOLVED）：上层据此做确定性动作（推选点卡），不只靠 error 文本猜 */
+export type BookingProviderResult<T> = { ok: true } & T | { ok: false; error: string; retryable?: boolean; code?: string };
 
 export interface BookingProviderBookPayload {
   providerOrderId?: string;

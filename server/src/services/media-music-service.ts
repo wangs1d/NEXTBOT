@@ -381,14 +381,13 @@ export class MediaMusicService {
     if (!trackId) return { ok: false, error: "trackId 不能为空" };
     if (!actorId) return { ok: false, error: "actorId 不能为空" };
     // 能力门控：客户端未声明 mediaPlayback 时不会消费 agent.media.play 事件，
-    // 此处如实失败，让模型改走 desktop.open 等真实可达路径。
+    // 此处如实失败。
     if (!clientSupportsCapability(actorId, "mediaPlayback")) {
       return {
         ok: false,
         error:
           "当前客户端未声明媒体播放能力（session.init capabilities.mediaPlayback），" +
-          "下发播放指令不会真正出声。可改用 desktop.open 打开音乐应用播放，" +
-          "或先在客户端接入媒体播放能力后再试。",
+          "下发播放指令不会真正出声。请先在客户端接入媒体播放能力后再试。",
       };
     }
 

@@ -109,6 +109,14 @@ export interface RenderEnvelopeInput {
   failures?: string[];
   /** 生成前预决策命中的场景（由调用方注入，出口不重复猜） */
   preSceneIds?: string[];
+  /**
+   * 工具执行中途推送过的**结构化卡**（购物登录、支付扫码等 `type=card` 的
+   * ToolMediaCard）。这些卡没有图片地址，不能被当图片塞进 mediaCards；但客户端
+   * 的独立卡渲染只认信封 blocks，所以必须在这里编成 card 块——否则卡片只在
+   * 流式阶段闪一下，done 定稿就消失（2026-11-19 用户投诉「说二维码推了却
+   * 一张都看不到」的根因）。
+   */
+  pushedCards?: Array<Record<string, unknown>>;
 }
 
 const CARD_START = "[AGENT_RESULT_CARD_START]";
@@ -276,6 +284,20 @@ export function buildRenderEnvelope(input: RenderEnvelopeInput): RenderEnvelope 
   // raw 为空 → 不改变 finalText 投影。
   if (!blocks.some((b) => b.type === "text")) {
     blocks.push({ type: "text", text: "", raw: "" });
+  }
+
+  // 中途推送的结构化卡：编成 card 块，位置在正文之后、媒体之前。
+  //
+  // raw 故意置空：finalText 是 blocks 的文本投影，若把卡片 JSON 投影进正文，
+  // 用户会看到「[AGENT_RESULT_CARD_START]{"cardType":...}」这堵墙。这类卡不是
+  // 模型写进正文的东西，只有 blocks 通道需要它（客户端独立卡渲染读 blocks）。
+  for (const card of input.pushedCards ?? []) {
+    blocks.push({
+      type: "card",
+      card,
+      cardType: typeof card.cardType === "string" ? card.cardType : "",
+      raw: "",
+    });
   }
 
   const mediaCards = input.mediaCards ?? [];
