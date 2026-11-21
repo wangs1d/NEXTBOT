@@ -28,7 +28,6 @@ import type {
   ReActObservation,
   SafetyCheckResult,
   SensoryFrame,
-  SensoryLookResult,
   SensorySpeakResult,
   SynapseEnvelope,
   SynapseMessage,
@@ -36,7 +35,6 @@ import type {
   TonePolicyResult,
   UserActivityState,
   UserMentalState,
-  VisualInput,
   PersonalityCore,
   InferenceClue,
   InferenceResult,
@@ -135,7 +133,6 @@ interface ProactionCortexLike {
 interface SensoryCortexLike {
   start?(): Promise<void>;
   stop?(): Promise<void>;
-  look(opts?: VisualInput): Promise<SensoryLookResult>;
   speak(
     text: string,
     opts?: { voiceId?: string; channel?: string },
@@ -147,7 +144,7 @@ interface SensoryCortexLike {
     emotion?: EmotionVector;
     activity?: UserActivityState;
   }): SensoryFrame;
-  getStats(): { totalLook: number; totalSpeak: number };
+  getStats(): { totalSpeak: number };
 }
 
 // 记忆皮层外观接口
@@ -1152,16 +1149,12 @@ export class BrainCenter {
     }
 
     const [
-      visualResult,
       recallResult,
       emotion,
       anticipatedIntent,
       bodySense,
       situation,
     ] = await Promise.all([
-      input.visual && this.sensory
-        ? this.sensory.look(input.visual).catch(() => null)
-        : Promise.resolve(null),
       // 记忆架构重构：recall 通道受白名单门控（recall-gate），
       // 未触发时直接返回 null（不检索长期记忆），query 扩展仅在触发时执行。
       this.memory && recallGate.trigger
@@ -1205,13 +1198,12 @@ export class BrainCenter {
     ]);
 
     // === 阶段 1.5：组装多模态融合帧（SensoryFrame）===
-    // 将 visualResult/emotion/userActivity 融合为统一感知帧，
+    // 将 emotion/userActivity 融合为统一感知帧，
     // 让认知 LLM 一次拿到完整的多模态上下文。
     // Phase 4：若 MultimodalFusionCortex 已注册且启用，则用 fuse() 做结构化冲突检测；
     // BRAIN_MULTIMODAL_FUSION_ENABLED=0 时降级回 buildSensoryFrame（保持纯规则、无额外 token）。
     const fusionInputs = {
       actorId,
-      visualDescription: visualResult?.description,
       emotion: emotion ?? undefined,
       activity: userActivity ?? undefined,
     };
@@ -1231,7 +1223,6 @@ export class BrainCenter {
       userActivity: userActivity ?? null,
       capabilities: capabilities ?? [],
       recentDecisions: recentDecisions ?? [],
-      visualDescription: visualResult?.description,
       sensoryFrame,
       recentConversationHistory: recentConversationHistory || undefined,
       // Step 7 扩展：阶段 1 大并行已收集的字段（方案 B 合并）
@@ -1602,26 +1593,6 @@ export class BrainCenter {
       };
     }
     return this.proaction.decide(signal);
-  }
-
-  /** 看：委托 SensoryCortex.look 截屏并生成视觉描述；缺失时返回空结果 */
-  async look(opts?: VisualInput): Promise<SensoryLookResult> {
-    if (!this.sensory) {
-      console.log("[BrainCenter] look: SensoryCortex 缺失");
-      return {
-        processedAt: new Date().toISOString(),
-        error: "SensoryCortex 未注册",
-      };
-    }
-    try {
-      return await this.sensory.look(opts);
-    } catch (err) {
-      console.log(`[BrainCenter] look 调用失败: ${err}`);
-      return {
-        processedAt: new Date().toISOString(),
-        error: "SensoryCortex 未注册",
-      };
-    }
   }
 
   /** 说：委托 SensoryCortex.speak 合成并投递语音；缺失时返回投递失败 */

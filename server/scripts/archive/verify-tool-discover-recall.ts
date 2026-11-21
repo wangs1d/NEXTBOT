@@ -63,14 +63,6 @@ const FAKE_TOOLS = [
   {
     type: "function",
     function: {
-      name: "desktop.visual.screenshot",
-      description: "截取当前屏幕画面，用于桌面视觉理解。",
-      parameters: { type: "object", properties: {} },
-    },
-  },
-  {
-    type: "function",
-    function: {
       name: "shopping.order.search",
       description: "搜索外卖/购物订单。",
       parameters: { type: "object", properties: { keyword: { type: "string" } } },
@@ -104,11 +96,6 @@ const CASES: Array<{ query: string; expect: string[]; negative: string[] }> = [
   {
     query: "查一下今天的新闻",
     expect: ["search_web"],
-    negative: [],
-  },
-  {
-    query: "截个屏",
-    expect: ["desktop.visual.screenshot"],
     negative: [],
   },
 ];

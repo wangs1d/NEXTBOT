@@ -133,7 +133,7 @@ export interface BrainSnapshot {
   // 神经解剖扩展（可选）
   sensory?: {
     lastFrame?: SensoryFrame;
-    stats?: { totalLook?: number; totalSpeak?: number };
+    stats?: { totalSpeak?: number };
   };
   memory?: {
     recentItems?: MemoryItem[];
@@ -193,22 +193,6 @@ export interface AudioBufferRef {
   format: "mp3" | "wav" | "pcm" | "ogg";
   sampleRate?: number;
   channels?: number;
-}
-
-// 视觉输入
-export interface VisualInput {
-  source: "screenshot" | "file" | "url";
-  region?: { x: number; y: number; width: number; height: number };
-  path?: string;                // 文件路径（file/url 时）
-  capture?: boolean;            // 是否要触发截屏
-}
-
-// 感官「看」结果
-export interface SensoryLookResult {
-  screenshot?: string;          // base64 或路径
-  description?: string;         // VLM 描述
-  processedAt: string;
-  error?: string;               // 子系统缺失或调用失败时的错误信息
 }
 
 // 感官「说」结果
@@ -581,7 +565,6 @@ export interface SystemRouteDecision {
 export interface CognitiveInput {
   actorId: string;
   text?: string;               // 用户文本消息
-  visual?: VisualInput;       // 视觉输入
   signal?: BrainSignalInput;  // 主动信号（被动认知时为空）
   sessionId?: string;
   /**

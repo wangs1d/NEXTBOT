@@ -10,7 +10,6 @@
  *  3. 卡片与拉取一致性：卡片上某域列出的工具 ⊆ 该域拉取可达（同名目录）。
  */
 process.env.AGENT_TOOL_SEARCH_ENABLED = "on";
-process.env.DESKTOP_VISUAL_ENABLED = "1";
 
 import assert from "node:assert/strict";
 import test from "node:test";

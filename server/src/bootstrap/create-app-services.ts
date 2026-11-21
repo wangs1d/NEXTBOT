@@ -328,7 +328,6 @@ import { WechatClawBridgeService } from "../services/wechat-claw-bridge-service.
 import { MessageHubService, type MessageHubPlatform } from "../services/message-hub-service.js";
 import { MessagePlatformGateway } from "../services/message-platform-gateway.js";
 import { MessageBridgeService } from "../services/message-bridge-service.js";
-import { createDesktopVisualFromEnv } from "../services/desktop-visual-subprocess.js";
 import { registerPhoneBridgeTools } from "../tools/phone-bridge-tools.js";
 import { PhoneBridgeCoordinator } from "../services/phone-bridge-coordinator.js";
 import { PhoneCallCoordinator } from "../services/phone-call-coordinator.js";
@@ -3793,8 +3792,6 @@ export async function createAppServices(
 
   app.log.info(`[AgentRuntime] ${formatAgentRuntimeConfigSummary(getAgentRuntimeConfig())}`);
 
-  const desktopVisual = createDesktopVisualFromEnv();
-
   // 按需位置协调器：Agent 需要位置（位置类工具）时向客户端请求实时 GPS。
   const locationCoordinator = new LocationCoordinator();
   agentCore.setLocationCoordinator(locationCoordinator);
@@ -4219,7 +4216,6 @@ export async function createAppServices(
     //     直接注册到 ToolRegistry，经 BodyGateway fallback 兜底，不再有器官门面。
     const eye = new Eye({
       bodyBus,
-      desktopVisualPort: desktopVisual,
       deviceRegistry: deviceRegistryAdapter,
     });
 
@@ -4338,7 +4334,6 @@ export async function createAppServices(
     const sensoryCortex = new SensoryCortex();
     sensoryCortex.registerVoiceDialogue(voiceDialogueService);
     sensoryCortex.registerVoiceCapability(voiceCapabilityService);
-    sensoryCortex.registerDesktopVisual(desktopVisual);
     sensoryCortex.registerSynapseBus(synapseBus);
     brainCenter.registerSensory(sensoryCortex);
 
@@ -4348,8 +4343,6 @@ export async function createAppServices(
     if (bodyCenter) {
       const bodyBus = bodyCenter.getBus();
       bodyBus.bridgeToSynapse(synapseBus);
-      // SensoryCortex 订阅 BodyBus 的 body.eye.frame / body.ear.transcript
-      sensoryCortex.attachBodyBus(bodyBus);
       // AwarenessCortex 订阅 body.homeostasis.battery_low / body.skin.device_change / body.vestibular.device_switch
       awarenessCortex?.attachBodyBus(bodyBus);
     }
@@ -4512,9 +4505,6 @@ export async function createAppServices(
       const brainStem = new BrainStem();
       brainStem.registerLifeSignalHub(lifeSignalHubService);
       brainStem.registerAwareness(awarenessCortex);
-      // Stage 3 Task 1：注入 SensoryCortex，使脑干心跳扫描时能调 look()
-      // 周期性获取屏幕描述（busy 时每 5 分钟一次），发布 desktop_app_focus 信号。
-      brainStem.registerSensory(sensoryCortex);
       brainStem.registerUserPersonalization(userPersonalizationService);
       // 人格/情绪簇集成：注入 MemoryCortex 引用，使 PersonalityAdjuster
       // 能在 observeTurnAsync 中读写 MemoryCortex.personalityCache
@@ -5479,21 +5469,19 @@ export async function createAppServices(
   const proactivityFabricPath = join(getDataDir(), "proactivity");
   /** 管道 outcome 存储（提升为命名引用：CostCalibrator 定时读取） */
   let outcomesStoreForCalibrator: InstanceType<typeof OutcomeStore> | null = null;
-  // 统一模块层 · 方案 B 第三步（2026-11-19）：感知内核核心簇（屏幕/日程/文件/
-  // 剪贴板传感器 + goal/message feeder + presence 追踪）装配收口到
+  // 统一模块层 · 方案 B 第三步（2026-11-19）：感知内核核心簇（日程/文件
+  // 传感器 + goal/message feeder + presence 追踪）装配收口到
   // proactivity/module-factory.ts 的 createSensorLayer（逐字迁移）。
   // 邮件/ICS/账本传感器与运行期设备 feeder 的依赖在后段才就绪，仍经 kernel.register
   // 晚注册（行为不变）。
   const proactivitySensors = createSensorLayer({
     dataPath: proactivityFabricPath,
-    desktopVisual,
     scheduleTasks: scheduleTaskService,
     toolRegistry,
     hub: proactivityHub,
     presence: proactivityPresence,
   });
   const sensorKernel = proactivitySensors.kernel;
-  const screenSensor = proactivitySensors.screenSensor;
   const scheduleSensor = proactivitySensors.scheduleSensor;
   const goalFeeder = proactivitySensors.goalFeeder;
   /** 入站消息 feeder（MessageHub onInbound 推送） */
@@ -5651,7 +5639,7 @@ export async function createAppServices(
     lastConversationAt: (actorId) => proactivityHub.lastInteractionAtOf(actorId) ?? null,
     screenFocus: (actorId) =>
       (worldBoardRef.current?.read<{ kind?: string }>(actorId, "current", "screenFocus")
-        ?.kind as ScreenFocusKind | undefined) ?? screenSensor.latest(),
+        ?.kind as ScreenFocusKind | undefined) ?? null,
     nextEventMin: (actorId) => {
       const runAt = worldBoardRef.current?.read<{ runAt?: number }>(actorId, "obligations", "nextEvent")
         ?.runAt;

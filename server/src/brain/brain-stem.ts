@@ -22,10 +22,8 @@
 import type { LifeSignal, LifeSignalEvidenceWindow } from "../services/life-signal-types.js";
 import type { BehaviorBaseline } from "../services/user-personalization/user-personalization-service.js";
 import type {
-  SensoryLookResult,
   UserActivityKind,
   UserActivityState,
-  VisualInput,
 } from "./types.js";
 import type { SequencePatternMiner, Pattern } from "../services/sequence-pattern-miner.js";
 import { PredictiveActionSynthesizer } from "./predictive-action-synthesizer.js";
@@ -45,14 +43,6 @@ export interface BrainStemHubLike {
 /** AwarenessCortex 的最小化结构接口（BrainStem 只需 observe 读当前活动状态） */
 export interface BrainStemAwarenessLike {
   observe(actorId: string): UserActivityState | null;
-}
-
-/**
- * SensoryCortex 的最小化结构接口。
- * BrainStem 周期性视觉感知只用到 look()：触发截屏 + VLM 描述。
- */
-export interface BrainStemSensoryLike {
-  look(opts?: VisualInput): Promise<SensoryLookResult>;
 }
 
 /** UserPersonalizationService 的最小化结构接口（BrainStem 只需 getBehaviorBaseline 读行为基线） */
@@ -116,12 +106,6 @@ const LATE_NIGHT_RECENT_MS = 10 * 60_000;
 const SUPPRESS_SAME_KIND_MS = 30 * 60_000;
 /** recentSignals 拉取条数 */
 const SWEEP_SIGNAL_LIMIT = 50;
-/**
- * 周期性视觉感知最小间隔（5 分钟）。
- * busy 时每 5 分钟调一次 SensoryCortex.look() + describe() 获取屏幕描述，
- * sleeping/idle 不调（节省 VLM 成本）。
- */
-const VISUAL_CHECK_INTERVAL_MS = 5 * 60_000;
 
 // ---- 注意力焦点（Step 4 扩展：事件驱动 + 注意力调度）---------------------
 
@@ -177,7 +161,6 @@ type EventTriggerHandler = (actorId?: string) => void;
 export class BrainStem {
   private hub: BrainStemHubLike | null = null;
   private awareness: BrainStemAwarenessLike | null = null;
-  private sensory: BrainStemSensoryLike | null = null;
   private userPersonalizationService: BrainStemUserPersonalizationLike | null = null;
   /** 工作记忆引用，用于定期 decay */
   private workingMemory: BrainStemWorkingMemoryLike | null = null;
@@ -209,8 +192,6 @@ export class BrainStem {
   private readonly lastSyntheticAt = new Map<string, number>();
   /** "actorId:action" → 上次预测时间戳（ms）;用于预测信号按动作去重（30 分钟） */
   private readonly lastPredictionTime = new Map<string, number>();
-  /** actor → 上次周期性视觉感知时间戳（ms）;用于控制 look() 调用频率（5 分钟） */
-  private readonly lastVisualCheck = new Map<string, number>();
   /** 统计：累计发出的合成信号数 */
   private syntheticEmitted = 0;
   /** 最近一次扫描时间 */
@@ -252,12 +233,6 @@ export class BrainStem {
   registerAwareness(a: BrainStemAwarenessLike): void {
     this.awareness = a;
     console.log("[BrainStem] 已注册 AwarenessCortex");
-  }
-
-  /** 注册感官皮层，使心跳扫描时能调 look() 获取屏幕描述 */
-  registerSensory(s: BrainStemSensoryLike): void {
-    this.sensory = s;
-    console.log("[BrainStem] 已注册 SensoryCortex");
   }
 
   registerUserPersonalization(s: BrainStemUserPersonalizationLike): void {
@@ -502,7 +477,6 @@ export class BrainStem {
       this.sweepTimer = null;
     }
     this.busySince.clear();
-    this.lastVisualCheck.clear();
     // Step 4 扩展：清理事件驱动 + 注意力调度相关状态
     this.attentionFocus.clear();
     this.lastEventTriggerAt.clear();
@@ -853,14 +827,6 @@ export class BrainStem {
         },
       });
     }
-
-    // 5. 周期性视觉感知：busy 时调 SensoryCortex.look() + describe() 获取屏幕描述，
-    //    发布为 desktop_app_focus 信号；sleeping/idle 不调（节省 VLM 成本）。
-    //    同 actor 在 VISUAL_CHECK_INTERVAL_MS（5 分钟）内不重复调用。
-    //    异步触发不阻塞本次扫描。
-    void this.periodicVisualCheck(actorId, activity?.activity).catch((e) => {
-      console.error(`[BrainStem] periodicVisualCheck ${actorId} 异常:`, e);
-    });
   }
 
   // ---- 合成信号回流 ----------------------------------------------------
@@ -906,69 +872,6 @@ export class BrainStem {
     this.syntheticEmitted += 1;
     console.log(`[BrainStem] 合成信号回流: ${def.kind} -> ${actorId} (${def.title})`);
     return true;
-  }
-
-  // ---- 周期性视觉感知 --------------------------------------------------
-
-  /**
-   * 周期性视觉感知：busy 时调 SensoryCortex.look() 获取屏幕截图 + VLM 描述，
-   * 将描述发布为 desktop_app_focus 信号回流 hub。
-   *
-   * 调用频率控制：
-   *  - busy 时每 VISUAL_CHECK_INTERVAL_MS（5 分钟）调一次
-   *  - sleeping / idle / unknown 等非 busy 状态不调（节省 VLM 成本）
-   *  - sensoryCortex 未注册或 look() 失败时不阻塞后续扫描
-   *
-   * 发布的信号 source="desktop"（区别于 agent_inference 合成信号），
-   * kind="desktop_app_focus"，metadata 携带 VLM 描述。
-   */
-  private async periodicVisualCheck(
-    actorId: string,
-    activityState: UserActivityKind | undefined,
-  ): Promise<void> {
-    if (!this.sensory) return;
-    // 仅 busy 时触发视觉感知；sleeping / idle 等不调，节省 VLM 成本
-    if (activityState !== "busy") return;
-    const now = Date.now();
-    const last = this.lastVisualCheck.get(actorId);
-    if (last !== undefined && now - last < VISUAL_CHECK_INTERVAL_MS) {
-      return; // 5 分钟内已调过
-    }
-    this.lastVisualCheck.set(actorId, now);
-
-    let result: SensoryLookResult;
-    try {
-      result = await this.sensory.look();
-    } catch (e) {
-      console.error(`[BrainStem] sensory.look 调用失败 ${actorId}:`, e);
-      return;
-    }
-    if (result.error) {
-      console.log(`[BrainStem] periodicVisualCheck ${actorId} look 失败: ${result.error}`);
-      return;
-    }
-    const description = result.description?.trim();
-    if (!description) return; // 无 VLM 描述，无可发布内容
-    if (!this.hub) return;
-
-    const signal: LifeSignal = {
-      id: `brainstem:${actorId}:desktop_app_focus:${now}`,
-      actorId,
-      source: "desktop",
-      kind: "desktop_app_focus",
-      title: "桌面应用焦点",
-      summary: description,
-      tags: ["desktop_app_focus", "visual"],
-      importance: "low",
-      evidence: [`visual_description=${description.slice(0, 200)}`],
-      metadata: {
-        description,
-        ...(result.screenshot ? { screenshot: result.screenshot } : {}),
-      },
-      occurredAt: new Date().toISOString(),
-    };
-    this.hub.publish(signal);
-    console.log(`[BrainStem] 周期视觉感知: desktop_app_focus -> ${actorId}`);
   }
 
   // ---- 行为预测 --------------------------------------------------------

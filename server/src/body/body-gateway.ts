@@ -106,7 +106,7 @@ export class BodyGateway {
   // 已注册的 BodyModule，按 module.name 索引
   private modules: Map<BodyModuleKind, BodyModuleLike> = new Map();
 
-  // 工具前缀路由表：prefix（如 "desktop.visual."）→ module kind
+  // 工具前缀路由表：prefix（如 "camera."）→ module kind
   // Task 12 会填充实际映射，Task 1 仅提供机制
   private routeTable: Map<string, BodyModuleKind> = new Map();
 
@@ -129,7 +129,7 @@ export class BodyGateway {
   /**
    * 注册工具前缀到 BodyModule 的路由。
    *
-   * @param prefix 工具名前缀，如 "desktop.visual." / "tts."
+   * @param prefix 工具名前缀，如 "camera." / "tts."
    * @param module 对应的 BodyModule kind
    *
    * Task 12 会按归属批量调用此方法填充 routeTable。
@@ -155,8 +155,8 @@ export class BodyGateway {
   /** 内部：按 tool name 查找对应的 BodyModule（前缀最长匹配） */
   private resolveModule(tool: string): BodyModuleLike | null {
     // 前缀最长匹配：优先匹配更具体的前缀
-    // 例如 "desktop.visual.run_task" 同时匹配 "desktop." 和 "desktop.visual."，
-    // 应选 "desktop.visual."（更具体）
+    // 例如 "camera.take_photo" 同时匹配 "camera." 与其他更长前缀时，
+    // 应选更长（更具体）的前缀
     let bestPrefix = "";
     for (const prefix of this.routeTable.keys()) {
       if (tool.startsWith(prefix) && prefix.length > bestPrefix.length) {
@@ -332,9 +332,9 @@ export class BodyGateway {
       // 2. 按 kind 前缀路由（kind 形如 "eye.desktop_frame" / "ear.transcript"）
       const kind = query.kind;
       for (const [prefix, modKind] of this.routeTable.entries()) {
-        // 把路由前缀（如 "desktop.visual."）转为 sense 域前缀（如 "eye."）
+        // 把路由前缀（如 "camera."）转为 sense 域前缀（如 "eye."）
       // 简化策略：取 prefix 的第一段作为 sense 域
-      // 例：routeTable["desktop.visual."] → sense 域 "eye"
+      // 例：routeTable["camera."] → sense 域 "eye"
         const senseDomain = this.extractSenseDomain(prefix);
         if (senseDomain && kind.startsWith(`${senseDomain}.`)) {
           module = this.modules.get(modKind) ?? null;
@@ -421,7 +421,7 @@ export class BodyGateway {
 
   /**
    * 从路由前缀提取 sense 域。
-   * 例："desktop.visual." → "eye"；"tts." → "mouth"（特殊映射）
+   * 例："camera." → "eye"；"tts." → "mouth"（特殊映射）
    *
    * Task 1 实现简化版本：取前缀最后一段。Task 12 会改为基于 BodyModule 自描述的 tools 列表路由。
    */

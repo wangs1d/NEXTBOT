@@ -1,4 +1,4 @@
-// 主动性架构单测：传感内核 / 屏幕分类 / 状态板+映射规则 / 仲裁 V2 / 模板 / 直达车道。
+// 主动性架构单测：传感内核 / 状态板+映射规则 / 仲裁 V2 / 模板 / 直达车道。
 // 全部零 LLM 断言——LLM 不参与其中任何决策（2026-09-24 架构定稿）。
 import assert from "node:assert/strict";
 import { test, beforeEach } from "node:test";
@@ -7,7 +7,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { SensorKernel, registerFeeder } from "../src/proactivity/sensors/kernel.js";
-import { ScreenSensor, classifyWindow, screenFocusLabel } from "../src/proactivity/sensors/screen-sensor.js";
 import { ScheduleSensor } from "../src/proactivity/sensors/schedule-sensor.js";
 import { WorldBoard } from "../src/proactivity/world-board.js";
 import { MappingExecutor, type AttentionEvent } from "../src/proactivity/mapping-executor.js";
@@ -82,14 +81,6 @@ test("SensorKernel: 连续失败熔断 + 半开恢复", async () => {
   fails = false;
   await kernel.pollOnce(); // 冷却期内不重试
   assert.equal(kernel.health()[0].tripped, true);
-});
-
-test("ScreenSensor: 零 LLM app 分类", () => {
-  assert.equal(classifyWindow({ processName: "Code.exe", title: "main.ts - VS Code" }), "coding");
-  assert.equal(classifyWindow({ processName: "Weixin.exe", title: "微信" }), "chat");
-  assert.equal(classifyWindow({ processName: "msedge", title: "Bilibili - 搜索" }), "video");
-  assert.equal(classifyWindow({ processName: "unknown.exe", title: "" }), "idle");
-  assert.equal(screenFocusLabel("coding"), "写代码");
 });
 
 test("ScheduleSensor: 只在 24h 日程集变化时产出，nextEventMin 可读", () => {

@@ -15,7 +15,6 @@
  * skillManifestToChatTool（生产同款桥），不再手写 schema。
  */
 process.env.AGENT_TOOL_SEARCH_ENABLED = "on";
-process.env.DESKTOP_VISUAL_ENABLED = "1";
 
 import assert from "node:assert/strict";
 import test from "node:test";

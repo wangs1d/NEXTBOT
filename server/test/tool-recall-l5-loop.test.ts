@@ -7,7 +7,6 @@
  * L3 盲区观测：参数级失败指标口径（方向六）。
  */
 process.env.AGENT_TOOL_SEARCH_ENABLED = "on";
-process.env.DESKTOP_VISUAL_ENABLED = "1";
 // 持久化路径指向临时文件（必须在首次访问前设置；node:test 每文件独立进程）
 process.env.AGENT_TOOL_PROMOTION_STATE_PATH = new URL("./tmp-tool-promotion-state.json", import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1");
 

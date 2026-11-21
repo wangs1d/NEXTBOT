@@ -454,41 +454,6 @@ export function registerBrainTools(
     }
   });
 
-  // ---- brain.look ----
-  registry.register("brain.look", async (input) => {
-    try {
-      const regionX = typeof input.regionX === "number" ? input.regionX : null;
-      const regionY = typeof input.regionY === "number" ? input.regionY : null;
-      const regionWidth = typeof input.regionWidth === "number" ? input.regionWidth : null;
-      const regionHeight = typeof input.regionHeight === "number" ? input.regionHeight : null;
-
-      const result = await brainCenter.look(
-        regionX != null
-          ? {
-              source: "screenshot" as const,
-              region: {
-                x: regionX,
-                y: regionY ?? 0,
-                width: regionWidth ?? 0,
-                height: regionHeight ?? 0,
-              },
-            }
-          : undefined,
-      );
-      return {
-        ok: true,
-        screenshot: result.screenshot,
-        description: result.description,
-        processedAt: result.processedAt,
-      };
-    } catch (err) {
-      return {
-        ok: false,
-        error: `brain.look 失败：${err instanceof Error ? err.message : String(err)}`,
-      };
-    }
-  });
-
   // ---- brain.speak ----
   registry.register("brain.speak", async (input) => {
     try {

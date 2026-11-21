@@ -22,7 +22,6 @@ import { fileURLToPath } from "node:url";
 
 // 与 golden 测试同款钉死：词面确定性，排除 sidecar/网络波动
 process.env.AGENT_TOOL_SEARCH_ENABLED = "on";
-process.env.DESKTOP_VISUAL_ENABLED = "1";
 process.env.AGENT_TOOL_EMBEDDING_PROVIDER = "openai";
 process.env.AGENT_NEURAL_SIDECAR_URL = "http://127.0.0.1:1";
 process.env.AGENT_NEURAL_EMBED_ENABLED = "off";

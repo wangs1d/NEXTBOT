@@ -86,7 +86,7 @@ export interface WorldState {
  * 便于世界模型在 predict 时考虑动作上下文。
  */
 export interface WorldAction {
-  /** 工具名（如 "desktop.visual.click" / "agent_browser.navigate"） */
+  /** 工具名（如 "agent_browser.click" / "agent_browser.navigate"） */
   tool: string;
   /** 工具参数 */
   args: Record<string, unknown>;
@@ -259,8 +259,8 @@ export interface WorldModel {
  * 默认规则世界模型：基于工具语义的纯规则预测。
  *
  * 不调 LLM，不训练神经网络。预测逻辑：
- *   - desktop.visual.click / agent_browser.click → 焦点变化（perceptualSlots 更新）
- *   - desktop.visual.type / agent_browser.type → 文本输入（taskContext 更新）
+ *   - agent_browser.click → 焦点变化（perceptualSlots 更新）
+ *   - agent_browser.type → 文本输入（taskContext 更新）
  *   - file_doc.write → 文件创建（success=true）
  *   - code_sandbox.run_python → 代码执行（success=true，changes=["代码已执行"]）
  *   - 其他工具 → 保守预测（confidence=0.3，changes=["环境可能变化"]）

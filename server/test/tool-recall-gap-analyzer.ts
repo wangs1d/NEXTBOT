@@ -21,7 +21,6 @@
  *      人工审核后合入 data/tool-intent-metadata.json 的 rules —— 半自动）
  */
 process.env.AGENT_TOOL_SEARCH_ENABLED = "on";
-process.env.DESKTOP_VISUAL_ENABLED = "1";
 
 import { readFileSync, writeFileSync } from "node:fs";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";

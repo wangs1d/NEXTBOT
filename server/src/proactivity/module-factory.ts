@@ -621,19 +621,14 @@ export function createLocationTriggers(deps: LocationTriggersDeps): LocationTrig
 import type { SensorKernel } from "./sensors/kernel.js";
 import { SensorKernel as SensorKernelImpl, registerFeeder } from "./sensors/kernel.js";
 import type { Signal } from "./sensors/types.js";
-import { ScreenSensor as ScreenSensorImpl } from "./sensors/screen-sensor.js";
-import type { ScreenSensor } from "./sensors/screen-sensor.js";
 import { ScheduleSensor as ScheduleSensorImpl } from "./sensors/schedule-sensor.js";
 import { FileWatcherSensor as FileWatcherSensorImpl } from "./sensors/file-watcher.js";
-import { ClipboardSensor as ClipboardSensorImpl, isClipboardSensorEnabled } from "./sensors/clipboard-sensor.js";
 import { registerPerceptionOverviewTool } from "../tools/perception-tools.js";
 import type { PresenceService } from "./presence-service.js";
 
 export interface SensorLayerDeps {
   /** 内核 signals 日志落盘目录（原 proactivityFabricPath） */
   dataPath: string;
-  /** 桌面视觉端口（屏幕/剪贴板传感器的画面采样源） */
-  desktopVisual: ConstructorParameters<typeof ScreenSensorImpl>[0]["visualPort"];
   scheduleTasks: ScheduleTaskService;
   /** 感知回溯查询工具挂载面（toolRegistry） */
   toolRegistry: Parameters<typeof registerPerceptionOverviewTool>[0];
@@ -643,7 +638,6 @@ export interface SensorLayerDeps {
 
 export interface SensorLayer {
   kernel: SensorKernel;
-  screenSensor: ScreenSensor;
   /** 日程传感器（触达决策的「距下一安排分钟数」读点） */
   scheduleSensor: ScheduleSensorImpl;
   /** 目标板 feeder（goalBoard 产出→ goal 流） */
@@ -663,22 +657,17 @@ export function createSensorLayer(deps: SensorLayerDeps): SensorLayer {
   const kernel = new SensorKernelImpl({ dataPath: deps.dataPath });
   // 屏幕状态条件化信号源：内核 signals 日志（落盘持久，重启不丢；最近 600 条覆盖数日窗口）
   const recentScreenSignals = (n: number) => kernel.recentLog(n);
-  const screenSensor = new ScreenSensorImpl({ visualPort: deps.desktopVisual });
   const scheduleSensor = new ScheduleSensorImpl({ listTasks: () => deps.scheduleTasks.listAllTasks() });
-  kernel.register(screenSensor);
   kernel.register(scheduleSensor);
-  // ─── 持续感知补全（2026-09-19 P0-1）：文件系统 + 剪贴板传感器 ───
+  // ─── 持续感知补全：文件系统传感器 ───
   // file_watcher：fs.watch 递归监听（env AGENT_FILE_WATCH_DIRS，缺省下载目录），
-  //   只报文件名/动作不读内容；clipboard_watch：30s 哈希比对，只落预览+长度。
+  //   只报文件名/动作不读内容。
   //   感知回溯查询经 perception.overview 工具暴露给对话面。
   const fileWatcherSensor = new FileWatcherSensorImpl();
   kernel.register(fileWatcherSensor);
-  if (isClipboardSensorEnabled()) {
-    kernel.register(new ClipboardSensorImpl({ visualPort: deps.desktopVisual }));
-  }
   registerPerceptionOverviewTool(deps.toolRegistry, {
     kernel,
-    screenFocus: () => screenSensor.latest(),
+    screenFocus: () => null,
   });
   const goalFeeder = registerFeeder(kernel, "goal_board", "goal");
   const messageFeeder = registerFeeder(kernel, "message_hub", "message");
@@ -718,7 +707,6 @@ export function createSensorLayer(deps: SensorLayerDeps): SensorLayer {
   });
   return {
     kernel,
-    screenSensor,
     scheduleSensor,
     goalFeeder,
     messageFeeder,

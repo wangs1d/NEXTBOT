@@ -8,7 +8,6 @@
  * 总开关：AGENT_TOOL_RECALL=off 一键回基线。
  */
 process.env.AGENT_TOOL_SEARCH_ENABLED = "on";
-process.env.DESKTOP_VISUAL_ENABLED = "1";
 // 晋升持久化对单测关闭：防进程退出 flush 把假 actor 计数写进生产状态文件
 // （server/data/tool-promotion-state.json）。持久化语义单独用 tmp 路径测。
 process.env.AGENT_TOOL_PROMOTION_STATE_PATH = "off";

@@ -36,7 +36,6 @@
 | `task.cancel` | chat+task | 任务取消 |
 | `perception.overview` | task | 感知总览 |
 | `browser.session.list` | task | 后台浏览器会话 |
-| `desktop.visual.screenshot` | task | 桌面截图 |
 | `code.run` | task | 代码执行 |
 | `code.write_file` | task | 写文件 |
 | `code.read_file` | task | 读文件 |

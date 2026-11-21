@@ -15,7 +15,6 @@
  * 生产语料还会多出少量技能注册工具，此处取的是保守下界。
  */
 process.env.AGENT_TOOL_SEARCH_ENABLED = "on";
-process.env.DESKTOP_VISUAL_ENABLED = "1";
 // 基准进程退出 flush 会把模拟 actor 计数写进生产状态文件，持久化置 off
 process.env.AGENT_TOOL_PROMOTION_STATE_PATH = "off";
 

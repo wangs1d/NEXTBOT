@@ -11,7 +11,6 @@
  * 构造了生产不存在的描述，回归测不到真实装配 bug。
  */
 process.env.AGENT_TOOL_SEARCH_ENABLED = "on";
-process.env.DESKTOP_VISUAL_ENABLED = "1";
 
 import assert from "node:assert/strict";
 import test from "node:test";

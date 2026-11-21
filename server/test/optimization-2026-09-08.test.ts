@@ -152,7 +152,7 @@ test("B1：API 真实 usage 进入聚合与落盘，task_plane_* stage 正确分
 
 /* ---------------- A3：分域单飞 + 后台任务全局并发闸 ---------------- */
 
-test("A3：desktop.* 具身域工具全局单飞（第二个并发调用必须等待）", async () => {
+test("A3：browser.* 具身域工具全局单飞（第二个并发调用必须等待）", async () => {
   let running = 0;
   let maxObserved = 0;
   const job = async (ms: number) => {
@@ -163,12 +163,12 @@ test("A3：desktop.* 具身域工具全局单飞（第二个并发调用必须�
   };
 
   await Promise.all([
-    executeWithToolLimit("desktop.open", () => job(60)),
-    executeWithToolLimit("desktop.open", () => job(60)),
-    executeWithToolLimit("desktop.visual.run_task", () => job(60)),
+    executeWithToolLimit("browser.click", () => job(60)),
+    executeWithToolLimit("browser.click", () => job(60)),
+    executeWithToolLimit("browser.navigate", () => job(60)),
   ]);
 
-  assert.equal(maxObserved, 1, "desktop 域内任意工具同时只能有一个在执行");
+  assert.equal(maxObserved, 1, "browser 域内任意工具同时只能有一个在执行");
 });
 
 test("A3：名单外工具不受限流影响（零开销直通）", async () => {

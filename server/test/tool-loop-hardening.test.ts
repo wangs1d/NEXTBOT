@@ -368,14 +368,14 @@ describe("reportChatToolDrift", () => {
   test("schema 无执行器 → schemaOnly；别名归一后命中不算漂移", () => {
     const schemas = [
       { type: "function", function: { name: "calendar.create_from_text", parameters: {} } },
-      { type: "function", function: { name: "desktop_visual_screenshot", parameters: {} } },
+      { type: "function", function: { name: "camera_take_photo", parameters: {} } },
       { type: "function", function: { name: "tool_discover", parameters: {} } },
     ] as never[];
     const report = reportChatToolDrift({
       schemas,
-      registeredToolNames: ["calendar.create_from_text", "desktop.visual.screenshot", "orphan_executor"],
+      registeredToolNames: ["calendar.create_from_text", "camera.take_photo", "orphan_executor"],
     });
-    assert.deepEqual(report.schemaOnly, [], "别名归一（desktop_visual_screenshot→desktop.visual.screenshot）不应报漂移");
+    assert.deepEqual(report.schemaOnly, [], "别名归一（camera_take_photo→camera.take_photo）不应报漂移");
     assert.ok(report.executorOnly.includes("orphan_executor"), "无 schema 的执行器应被点名");
   });
 

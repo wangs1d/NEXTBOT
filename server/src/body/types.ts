@@ -37,7 +37,7 @@ export type BodyModuleKind =
  * 由 BrainCenter.ActionExecutor 委托到 BodyGateway.execute(action) 时构造。
  */
 export interface BodyAction {
-  /** 工具名，如 "desktop.visual.run_task" / "tts.speak" */
+  /** 工具名，如 "camera.take_photo" / "tts.speak" */
   tool: string;
   /** 工具参数 */
   args: Record<string, unknown>;
@@ -163,7 +163,7 @@ export interface BodyModuleSnapshot {
   tools: string[];
   /** 模块是否在线（start 成功且未 stop） */
   online: boolean;
-  /** 子系统标识列表（如 ["desktop-visual-port", "agent-browser"]） */
+  /** 子系统标识列表（如 ["device-registry", "agent-browser"]） */
   subsystems: string[];
   /** 最近一次活动时间（ISO timestamp，无活动时为 null） */
   lastActivityAt: string | null;

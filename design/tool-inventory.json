@@ -32,7 +32,6 @@
    "task.cancel",
    "perception.overview",
    "browser.session.list",
-   "desktop.visual.screenshot",
    "code.run",
    "code.write_file",
    "code.read_file",

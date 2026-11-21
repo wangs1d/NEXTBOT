@@ -120,29 +120,6 @@ export function registerBrainRoutes(app: FastifyInstance, deps: HttpRouteDeps): 
 
   // ---- 感官皮层（SensoryCortex）----
 
-  // 感官「看」：调用 SensoryCortex.look 截屏并生成视觉描述
-  app.post("/brain/sensory/look", async (request, reply) => {
-    try {
-      if (!deps.brainCenter) {
-        return reply.code(503).send({ ok: false, error: "Brain Center not enabled" });
-      }
-      const body = (request.body ?? {}) as Record<string, unknown>;
-      const region = body.region as
-        | { x: number; y: number; width: number; height: number }
-        | undefined;
-      const result = await deps.brainCenter.look(
-        region ? { source: "screenshot", region } : undefined,
-      );
-      if (result.error) {
-        return reply.code(503).send({ ok: false, error: result.error });
-      }
-      return reply.send({ ok: true, result });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return reply.code(500).send({ ok: false, error: message });
-    }
-  });
-
   // 感官「说」：调用 SensoryCortex.speak 合成并投递语音
   app.post("/brain/sensory/speak", async (request, reply) => {
     try {

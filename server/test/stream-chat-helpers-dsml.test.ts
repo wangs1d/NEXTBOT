@@ -28,7 +28,7 @@ const dsmlCallsVariant =
   '< | | DSML | | calls>\n' +
   '< | | DSML | | invoke name="tool_call">\n' +
   '< | | DSML | | parameter name="arguments" string="false">{"mode": "full"}</ | | DSML | | parameter>\n' +
-  '< | | DSML | | parameter name="name" string="true">desktop.visual.screenshot</ | | DSML | | parameter>\n' +
+  '< | | DSML | | parameter name="name" string="true">camera.take_photo</ | | DSML | | parameter>\n' +
   '</ | | DSML | | invoke>\n' +
   '</ | | DSML | | calls>';
 
@@ -50,7 +50,7 @@ test("extractDsmlToolCalls parses calls-wrapper bridge variant (2026-09-11 leak)
   assert.equal(calls[0]?.name, "tool_call");
   assert.deepEqual(JSON.parse(calls[0]?.argumentsChunk ?? "{}"), {
     arguments: '{"mode": "full"}',
-    name: "desktop.visual.screenshot",
+    name: "camera.take_photo",
   });
 });
 
@@ -113,7 +113,7 @@ test("consumeNormalizedStream never streams DSML markup through onContentDelta",
   const streamed = deltas.join("");
   assert.equal(streamed.includes("DSML"), false, `delta 泄漏协议标记: ${streamed}`);
   assert.equal(
-    streamed.includes("desktop.visual.screenshot"),
+    streamed.includes("camera.take_photo"),
     false,
     `delta 泄漏工具名: ${streamed}`,
   );
@@ -136,7 +136,7 @@ test("createStreamDsmlSanitizer keeps prose around a closed DSML block", () => {
   assert.equal(out.includes(before), true, `丢失块前正文: ${out}`);
   assert.equal(out.includes(after.trim()), true, `丢失块后正文: ${out}`);
   assert.equal(out.includes("DSML"), false);
-  assert.equal(out.includes("desktop.visual.screenshot"), false);
+  assert.equal(out.includes("camera.take_photo"), false);
 });
 
 test("createStreamDsmlSanitizer drops unclosed protocol block to end of stream", () => {
@@ -145,7 +145,7 @@ test("createStreamDsmlSanitizer drops unclosed protocol block to end of stream",
   const out =
     guard.feed(lead) +
     guard.feed('< | | DSML | | invoke name="tool_call">\n') +
-    guard.feed('< | | DSML | | parameter name="name" string="true">desktop.visual.screenshot');
+    guard.feed('< | | DSML | | parameter name="name" string="true">camera.take_photo');
 
   assert.equal(out, lead);
   // 未闭合块：flush 丢弃残段，不吐协议
@@ -156,13 +156,13 @@ test("createStreamDsmlSanitizer handles fullwidth pipe variant", () => {
   const guard = createStreamDsmlSanitizer();
   const fullwidth =
     '<｜｜DSML｜｜calls><｜｜DSML｜｜invoke name="tool_call">' +
-    '<｜｜DSML｜｜parameter name="name" string="true">desktop.visual.screenshot' +
+    '<｜｜DSML｜｜parameter name="name" string="true">camera.take_photo' +
     '</｜｜DSML｜｜parameter></｜｜DSML｜｜invoke></｜｜DSML｜｜calls>';
 
   const out = guard.feed(fullwidth) + guard.flush();
 
   assert.equal(out.includes("DSML"), false);
-  assert.equal(out.includes("desktop.visual.screenshot"), false);
+  assert.equal(out.includes("camera.take_photo"), false);
 });
 
 test("createStreamDsmlSanitizer passes comparison prose through", () => {
@@ -194,7 +194,7 @@ const dsmlFullwidthLeak =
   '<｜｜DSML｜｜ calls>\n' +
   '<｜｜DSML｜｜ invoke name="tool_call">\n' +
   '<｜｜DSML｜｜ parameter name="arguments" string="false">{"mode": "full"}</｜｜DSML｜｜ parameter>\n' +
-  '<｜｜DSML｜｜ parameter name="name" string="true">desktop.visual.screenshot</｜｜DSML｜｜ parameter>\n' +
+  '<｜｜DSML｜｜ parameter name="name" string="true">camera.take_photo</｜｜DSML｜｜ parameter>\n' +
   '</｜｜DSML｜｜ invoke>\n' +
   '</｜｜DSML｜｜ calls>';
 
@@ -205,7 +205,7 @@ test("extractDsmlToolCalls parses fullwidth-pipe calls variant (2026-09-12 task 
   assert.equal(calls[0]?.name, "tool_call");
   assert.equal(
     JSON.parse(calls[0]?.argumentsChunk ?? "{}").name,
-    "desktop.visual.screenshot",
+    "camera.take_photo",
   );
 });
 
@@ -217,7 +217,7 @@ test("pickVisibleText reasoning fallback strips DSML markup (reasoner draft leak
   const visible = pickVisibleText("", reasoning);
 
   assert.equal(visible.includes("DSML"), false);
-  assert.equal(visible.includes("desktop.visual.screenshot"), false);
+  assert.equal(visible.includes("camera.take_photo"), false);
   assert.equal(visible.includes("invoke"), false);
 });
 

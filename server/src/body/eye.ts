@@ -1,15 +1,13 @@
 // Agent Body Center — Eye 眼/视觉传感器
 //
 // 与人体器官对照：眼睛。统一封装「看」的感知通道：
-//  - 桌面截屏（desktop.visual.screenshot）→ 委托 DesktopVisualPort
-//  - 桌面 VLM 描述（desktop.visual.describe）→ 委托 DesktopVisualPort.describe
 //  - 摄像头拍照（camera.take_photo）→ 委托 DeviceRegistry.invoke
 //  - 摄像头视频流（camera.start_stream）→ 委托 DeviceRegistry.openStream 异步迭代
 //
 // 设计原则（与 SensoryCortex 一致）：
 //   1. 子系统缺失时方法优雅降级（返回带 error 的结果），不抛异常阻断调用方
-//   2. 截图/拍照/流帧到达时通过 BodyBus 发布 body.eye.frame / body.eye.camera_frame 信号
-//   3. 三个 *Like 接口仅声明本模块实际用到的方法，结构兼容即可
+//   2. 拍照/流帧到达时通过 BodyBus 发布 body.eye.camera_frame 信号
+//   3. *Like 接口仅声明本模块实际用到的方法，结构兼容即可
 
 import type { BodyBus } from "./body-bus.js";
 import type {
@@ -23,26 +21,6 @@ import type {
 } from "./types.js";
 
 // ---- 子系统最小化外观接口（结构兼容真实服务即可）----------------------
-
-/**
- * 桌面视觉子系统（DesktopVisualPort）的最小化结构接口。
- * 截屏方法 region 用 [left, top, width, height] 元组（与 pyautogui 一致）。
- * describe 为可选的 VLM 描述方法，存在时用于生成截图的文字描述。
- */
-export interface DesktopVisualLike {
-  screenshot?(input?: {
-    region?: [number, number, number, number];
-  }): Promise<{
-    base64?: string;
-    url?: string;
-    width?: number;
-    height?: number;
-  }>;
-  describe?(image: {
-    base64?: string;
-    url?: string;
-  }): Promise<{ text: string; tags?: string[] }>;
-}
 
 /**
  * 设备注册表子系统（DeviceRegistry）的最小化结构接口。
@@ -68,20 +46,19 @@ export interface DeviceRegistryLike {
  */
 export interface EyeDeps {
   bodyBus: BodyBus;
-  desktopVisualPort?: DesktopVisualLike;
   deviceRegistry?: DeviceRegistryLike;
 }
 
 // ---- 辅助类型 ----
 
-/** 视觉帧统一返回结构（截屏 / 摄像头帧通用） */
+/** 视觉帧统一返回结构（摄像头帧） */
 interface VisualFrame {
   base64?: string;
   url?: string;
   width?: number;
   height?: number;
   capturedAt: string;
-  source: "desktop" | "camera";
+  source: "camera";
   deviceId?: string;
   streamId?: string;
 }
@@ -97,15 +74,11 @@ interface CameraInfo {
 /**
  * 眼/视觉传感器：统一封装「看」的感知通道。
  *
- * 三条接入路径：
- *   1. desktop.visual.screenshot → DesktopVisualPort.screenshot 优先，
- *      缺失时返回 ok=false
- *   2. desktop.visual.describe   → DesktopVisualPort.describe（如存在）
- *   3. camera.take_photo         → DeviceRegistry.invoke(deviceId, "camera.take_photo", params)
- *   4. camera.start_stream       → DeviceRegistry.openStream 异步迭代
+ * 两条接入路径：
+ *   1. camera.take_photo   → DeviceRegistry.invoke(deviceId, "camera.take_photo", params)
+ *   2. camera.start_stream → DeviceRegistry.openStream 异步迭代
  *
- * 每次截图/拍照/流帧到达时，通过 BodyBus 发布：
- *   - body.eye.frame        桌面截屏帧
+ * 每次拍照/流帧到达时，通过 BodyBus 发布：
  *   - body.eye.camera_frame 摄像头帧
  *
  * 任一子系统缺失时方法优雅降级（返回带 error 的结果），不抛异常阻断调用方。
@@ -113,15 +86,9 @@ interface CameraInfo {
 export class Eye implements BodyModuleLike {
   readonly name = "eye" as const;
   readonly label = "眼/视觉传感器";
-  readonly tools = [
-    "desktop.visual.screenshot",
-    "desktop.visual.describe",
-    "camera.take_photo",
-    "camera.start_stream",
-  ];
+  readonly tools = ["camera.take_photo", "camera.start_stream"];
 
   private readonly bodyBus: BodyBus;
-  private readonly desktopVisualPort: DesktopVisualLike | null;
   private readonly deviceRegistry: DeviceRegistryLike | null;
 
   private started = false;
@@ -129,7 +96,6 @@ export class Eye implements BodyModuleLike {
 
   constructor(deps: EyeDeps) {
     this.bodyBus = deps.bodyBus;
-    this.desktopVisualPort = deps.desktopVisualPort ?? null;
     this.deviceRegistry = deps.deviceRegistry ?? null;
   }
 
@@ -170,10 +136,8 @@ export class Eye implements BodyModuleLike {
    * 执行视觉动作。
    *
    * 按 action.tool 路由到对应子系统能力：
-   *   - desktop.visual.screenshot → 截屏
-   *   - desktop.visual.describe   → VLM 描述
-   *   - camera.take_photo         → 摄像头拍照
-   *   - camera.start_stream       → 摄像头视频流（异步迭代 + 逐帧发布到 BodyBus）
+   *   - camera.take_photo   → 摄像头拍照
+   *   - camera.start_stream → 摄像头视频流（异步迭代 + 逐帧发布到 BodyBus）
    */
   async act(action: BodyAction): Promise<BodyActionResult> {
     const startedAt = Date.now();
@@ -182,12 +146,6 @@ export class Eye implements BodyModuleLike {
     try {
       let result: Record<string, unknown>;
       switch (tool) {
-        case "desktop.visual.screenshot":
-          result = await this.actScreenshot(args);
-          break;
-        case "desktop.visual.describe":
-          result = await this.actDescribe(args);
-          break;
         case "camera.take_photo":
           result = await this.actTakePhoto(args);
           break;
@@ -217,91 +175,6 @@ export class Eye implements BodyModuleLike {
         result: {},
         errorMessage,
         durationMs: Date.now() - startedAt,
-      };
-    }
-  }
-
-  /**
-   * desktop.visual.screenshot：截屏一次。
-   *
-   * 委托 desktopVisualPort.screenshot；缺失或返回失败时返回 ok=false。
-   * 成功时发布 body.eye.frame 信号（含 base64/url + width/height + capturedAt）。
-   */
-  private async actScreenshot(
-    args: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    const region = this.parseRegion(args["region"]);
-
-    // 优先走 desktopVisualPort
-    if (this.desktopVisualPort?.screenshot) {
-      try {
-        const shot = await this.desktopVisualPort.screenshot(
-          region ? { region } : undefined,
-        );
-        const frame = this.normalizeFrame(shot, "desktop");
-        this.publishDesktopFrame(frame);
-        return {
-          ok: true,
-          base64: frame.base64,
-          url: frame.url,
-          width: frame.width,
-          height: frame.height,
-          capturedAt: frame.capturedAt,
-          source: "desktop-visual-port",
-        };
-      } catch (err) {
-        return {
-          ok: false,
-          error: err instanceof Error ? err.message : String(err),
-          source: "desktop-visual-port",
-        };
-      }
-    }
-
-    return {
-      ok: false,
-      error:
-        "Eye: 桌面截屏不可用（desktopVisualPort 未注入或无 screenshot 方法）",
-    };
-  }
-
-  /**
-   * desktop.visual.describe：对图像做 VLM 描述。
-   *
-   * 委托 desktopVisualPort.describe（如存在）。输入图像来自 args.image（含 base64 或 url）
-   * 或 args.base64 / args.url 顶层字段。describe 不存在时返回 ok=false。
-   */
-  private async actDescribe(
-    args: Record<string, unknown>,
-  ): Promise<Record<string, unknown>> {
-    if (!this.desktopVisualPort?.describe) {
-      return {
-        ok: false,
-        error:
-          "Eye: VLM 描述不可用（desktopVisualPort 未注入或无 describe 方法）",
-      };
-    }
-
-    const imageInput = this.parseImageInput(args);
-    if (!imageInput) {
-      return {
-        ok: false,
-        error:
-          "Eye: describe 缺少图像输入（需提供 image.base64 或 image.url）",
-      };
-    }
-
-    try {
-      const result = await this.desktopVisualPort.describe(imageInput);
-      return {
-        ok: true,
-        text: result.text,
-        tags: result.tags ?? [],
-      };
-    } catch (err) {
-      return {
-        ok: false,
-        error: err instanceof Error ? err.message : String(err),
       };
     }
   }
@@ -446,11 +319,10 @@ export class Eye implements BodyModuleLike {
    * 感官查询。
    *
    * 支持 query.kind：
-   *   - eye.desktop_frame：截一次桌面屏，返回 { base64/url, width, height, capturedAt }
    *   - eye.camera_frame ：从 camera 设备取一帧
-   *   - eye.status       ：返回 { desktopOnline, cameras: [...] }
+   *   - eye.status       ：返回 { cameras: [...] }
    *
-   * query.params 可携带 deviceId / region 等参数。
+   * query.params 可携带 deviceId 等参数。
    */
   async sense(query: BodySenseQuery): Promise<BodySenseResult> {
     const kind = query.kind ?? "";
@@ -458,8 +330,6 @@ export class Eye implements BodyModuleLike {
 
     try {
       switch (kind) {
-        case "eye.desktop_frame":
-          return await this.senseDesktopFrame(params);
         case "eye.camera_frame":
           return await this.senseCameraFrame(params);
         case "eye.status":
@@ -482,48 +352,6 @@ export class Eye implements BodyModuleLike {
         errorMessage,
       };
     }
-  }
-
-  /** sense: eye.desktop_frame → 截一次桌面屏 */
-  private async senseDesktopFrame(
-    params: Record<string, unknown>,
-  ): Promise<BodySenseResult> {
-    const region = this.parseRegion(params["region"]);
-
-    const dv = this.desktopVisualPort;
-    if (dv?.screenshot) {
-      try {
-        const shot = await dv.screenshot(region ? { region } : undefined);
-        const frame = this.normalizeFrame(shot, "desktop");
-        return {
-          ok: true,
-          data: {
-            base64: frame.base64,
-            url: frame.url,
-            width: frame.width,
-            height: frame.height,
-            capturedAt: frame.capturedAt,
-            source: "desktop-visual-port",
-          },
-          module: "eye",
-        };
-      } catch (err) {
-        return {
-          ok: false,
-          data: {},
-          module: "eye",
-          errorMessage: err instanceof Error ? err.message : String(err),
-        };
-      }
-    }
-
-    return {
-      ok: false,
-      data: {},
-      module: "eye",
-      errorMessage:
-        "Eye: 桌面截屏不可用（desktopVisualPort 未注入或无 screenshot 方法）",
-    };
   }
 
   /** sense: eye.camera_frame → 从 camera 设备取一帧 */
@@ -592,10 +420,8 @@ export class Eye implements BodyModuleLike {
     }
   }
 
-  /** sense: eye.status → 返回桌面 + cameras 状态 */
+  /** sense: eye.status → 返回 cameras 状态 */
   private async senseStatus(): Promise<BodySenseResult> {
-    const desktopOnline = Boolean(this.desktopVisualPort?.screenshot);
-
     const cameras: CameraInfo[] = [];
     if (this.deviceRegistry?.listByCapability) {
       try {
@@ -611,9 +437,7 @@ export class Eye implements BodyModuleLike {
     return {
       ok: true,
       data: {
-        desktopOnline,
         cameras,
-        desktopVisualPortAvailable: this.desktopVisualPort !== null,
         deviceRegistryAvailable: this.deviceRegistry !== null,
       },
       module: "eye",
@@ -625,7 +449,6 @@ export class Eye implements BodyModuleLike {
   /** 模块快照（标准实现，无额外元数据） */
   snapshot(): BodyModuleSnapshot {
     const subsystems: string[] = [];
-    if (this.desktopVisualPort) subsystems.push("desktop-visual-port");
     if (this.deviceRegistry) subsystems.push("device-registry");
 
     return {
@@ -641,8 +464,7 @@ export class Eye implements BodyModuleLike {
   // ---- registerTools ----
 
   /**
-   * 把 desktop.visual.screenshot / desktop.visual.describe /
-   * camera.take_photo / camera.start_stream 工具挂到外部 ToolRegistry，
+   * 把 camera.take_photo / camera.start_stream 工具挂到外部 ToolRegistry，
    * handler 内部委托 this.act()。
    *
    * actorId 暂时无法获取（BodyToolRegistry 接口未传 context），保持 undefined。
@@ -673,42 +495,9 @@ export class Eye implements BodyModuleLike {
 
   // ---- 内部工具 ----
 
-  /** 解析 region 参数为 [left, top, width, height] 元组；非法时返回 undefined */
-  private parseRegion(
-    value: unknown,
-  ): [number, number, number, number] | undefined {
-    if (
-      !Array.isArray(value) ||
-      value.length !== 4 ||
-      !value.every((x) => typeof x === "number" && Number.isFinite(x))
-    ) {
-      return undefined;
-    }
-    return [value[0], value[1], value[2], value[3]];
-  }
-
-  /** 从 args 中提取图像输入（base64 或 url） */
-  private parseImageInput(
-    args: Record<string, unknown>,
-  ): { base64?: string; url?: string } | null {
-    const imageField = args["image"];
-    if (imageField && typeof imageField === "object") {
-      const obj = imageField as Record<string, unknown>;
-      const base64 =
-        typeof obj["base64"] === "string" ? obj["base64"] : undefined;
-      const url = typeof obj["url"] === "string" ? obj["url"] : undefined;
-      if (base64 || url) return { base64, url };
-    }
-    const topBase64 =
-      typeof args["base64"] === "string" ? args["base64"] : undefined;
-    const topUrl = typeof args["url"] === "string" ? args["url"] : undefined;
-    if (topBase64 || topUrl) return { base64: topBase64, url: topUrl };
-    return null;
-  }
-
   /**
-   * 把截屏子系统的返回值归一成 VisualFrame。
-   * 同时接受 base64/imageBase64 与 url 字段（兼容 DesktopVisualPort）。
+   * 把帧数据归一成 VisualFrame。
+   * 同时接受 base64/imageBase64 与 url 字段。
    */
   private normalizeFrame(
     shot: {
@@ -717,7 +506,6 @@ export class Eye implements BodyModuleLike {
       width?: number;
       height?: number;
     } | undefined,
-    source: "desktop" | "camera",
     deviceId?: string,
   ): VisualFrame {
     const raw = (shot ?? {}) as Record<string, unknown>;
@@ -737,7 +525,7 @@ export class Eye implements BodyModuleLike {
       width,
       height,
       capturedAt: new Date().toISOString(),
-      source,
+      source: "camera",
       deviceId,
     };
   }
@@ -761,30 +549,8 @@ export class Eye implements BodyModuleLike {
         height:
           typeof src["height"] === "number" ? (src["height"] as number) : undefined,
       },
-      "camera",
       deviceId,
     );
-  }
-
-  /** 发布 body.eye.frame 桌面帧信号 */
-  private publishDesktopFrame(frame: VisualFrame): void {
-    try {
-      this.bodyBus.publish({
-        kind: "body.eye.frame",
-        module: "eye",
-        payload: {
-          base64: frame.base64,
-          url: frame.url,
-          width: frame.width,
-          height: frame.height,
-          capturedAt: frame.capturedAt,
-          source: frame.source,
-        },
-        timestamp: new Date().toISOString(),
-      });
-    } catch (err) {
-      console.log(`[Eye] publishDesktopFrame 异常: ${err}`);
-    }
   }
 
   /** 发布 body.eye.camera_frame 摄像头帧信号 */

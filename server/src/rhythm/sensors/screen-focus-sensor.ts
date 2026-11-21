@@ -5,7 +5,7 @@ import type { RhythmObservation, RhythmSensor } from "../types.js";
 /**
  * 屏幕状态条件化传感器（主动感知的第二条腿：不只学「几点」，还学「什么状态下」）。
  *
- * 数据链路：proactivity 内核 ScreenSensor 前台分类（开会/写代码/玩游戏…，
+ * 数据链路：proactivity 内核 screen 流信号的前台分类（开会/写代码/玩游戏…，
  * 变化即出信号 + 15min 心跳）→ 内核 signals 日志落盘 → 本传感器按小时去重
  * 转成节律观察 → 喂给 receptivity 维度：正事/游戏占用时段以弱负信号把对应
  * 小时的可打扰度拉向 0（与 location_movement 同一先例：移动中人大概率忽略
@@ -31,7 +31,7 @@ function isScreenSignal(signal: Signal): signal is Signal & {
 export class ScreenFocusSensor implements RhythmSensor {
   readonly id = "screen-focus";
   readonly dimensions = ["receptivity" as const];
-  /** 屏幕信号由 ScreenSensor 持续产出（15min 心跳兜底），零观察=采样链疑断 */
+  /** 屏幕信号由 screen 流持续产出（15min 心跳兜底），零观察=采样链疑断 */
   readonly expectsObservations = true;
 
   constructor(
