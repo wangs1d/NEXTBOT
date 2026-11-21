@@ -6,7 +6,7 @@ import { evaluateReach } from "../src/proactivity/reach-decision.js";
 import { ReachDecisionService } from "../src/proactivity/reach-decision-service.js";
 
 const NOW = new Date(2026, 10, 19, 10, 0, 0);
-const CLEAN_CTX = { contextCost: 0, quietHours: false, online: true, recentBurst: 0 };
+const CLEAN_CTX = { contextCost: 0, online: true, recentBurst: 0 };
 
 function ask(overrides: Partial<Parameters<ReachDecisionService["decide"]>[0]> = {}) {
   return {
@@ -55,9 +55,8 @@ test("负反馈压低 p → U 转负 → 抑制（算法本身负责降温）", 
   }
 });
 
-test("守卫仍生效：静默/高成本/离线/突发 即使 p=0.95 也拦下", () => {
+test("守卫仍生效：高成本/离线/突发 即使 p=0.95 也拦下", () => {
   const cases = [
-    [{ ...CLEAN_CTX, quietHours: true }, "quiet_hours_defer", "defer"],
     [{ ...CLEAN_CTX, contextCost: 8 }, "high_context_cost", "defer"],
     [{ ...CLEAN_CTX, online: false }, "offline_defer", "defer"],
     [{ ...CLEAN_CTX, recentBurst: 5 }, "burst_breaker", "batch"],

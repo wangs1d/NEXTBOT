@@ -94,7 +94,7 @@ function makeHarness() {
   const spoken: Array<{ kind: string; title: string }> = [];
   const pipeline = new ProactivePipeline({
     dataPath: dir,
-    governor: new FrequencyGovernor({ ignoreEnv: true, disableQuietHours: true, dailyBudget: 20 }),
+    governor: new FrequencyGovernor({ ignoreEnv: true, dailyBudget: 20 }),
     suppression: { isSuppressed: () => ({ suppressed: false, reason: "" }) },
     presence,
     delivery: new ProactiveDeliveryService({

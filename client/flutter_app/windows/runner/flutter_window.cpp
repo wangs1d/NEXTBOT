@@ -20,7 +20,6 @@
 #include <string>
 #include <vector>
 
-#include "desktop_screen_capture.h"
 #include "glass_notify_window.h"
 #include "single_instance.h"
 #include "window_position_store.h"

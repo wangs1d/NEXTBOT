@@ -9,8 +9,9 @@
  *   - decodeQrLink：qrcode 生成 → jsQR 解码 roundtrip；坏图/非二维码图返回
  *     null 而不是抛错（best-effort，绝不影响推码主流程）；
  *   - toAppLaunchLink：App scheme 原样透传；https 按平台包装（taobao/tmall
- *     走 tbopen、jd 走 openapp.jdmobile、pdd 走 pinduoduo 宿主路径）；
- *     纯 token 串/无已知 scheme 的平台返回 null——不出「点码登录」，纯扫码兜底。
+ *     走 tbopen、jd 走 openapp.jdmobile）；pdd 不返回深链（down_scan 落地页
+ *     跳 App 到不了确认页，2026-11-21 实测）；纯 token 串/无已知 scheme 的
+ *     平台返回 null——不出「点码登录」，纯扫码兜底。
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -83,16 +84,14 @@ test("toAppLaunchLink：jd 的 https 包装成 openapp.jdmobile 深链（不回�
   assert.equal(link.fallback, undefined);
 });
 
-test("toAppLaunchLink：pdd 的 https 包装成拼多多 App 深链（不打浏览器兜底）", () => {
+test("toAppLaunchLink：pdd 不返回深链（down_scan 是落地页，跳 App 到不了确认页）", () => {
   // 拼多多扫码登录码的真实内容（2026-11-20 云端解码所得）
   const url =
     "https://mobile.yangkeduo.com/down_scan.html?secret_key=abc&pdd_biz_scene=AUTH_LOGIN&app_id=512";
-  const pdd = toAppLaunchLink("pdd", url);
-  assert.ok(pdd);
-  assert.equal(pdd.link, `pinduoduo://com.xunmeng.pinduoduo/${url}`);
-  assert.equal(pdd.fallback, `pddopen://?h5Url=${encodeURIComponent(url)}`);
-  // 网页绝不能作为首选：打开 https 只会落到「打开拼多多APP」下载页
-  assert.notEqual(pdd.link, url);
+  // 2026-11-21 用户实测定稿：pinduoduo:// 宿主 / pddopen:// 都只落到下载页或
+  // 首页，到不了登录确认界面——这条路是死的。返回 null → 客户端存相册走
+  // App 扫一扫，服务端后台自动检测登录态。
+  assert.equal(toAppLaunchLink("pdd", url), null);
 });
 
 test("toAppLaunchLink：没有已知 scheme 的平台返回 null（不出「点码登录」）", () => {

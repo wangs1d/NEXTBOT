@@ -128,13 +128,11 @@ class _RidePickupCardState extends State<RidePickupCard> {
       setState(() => _selected = _fromCandidate(hit));
       return;
     }
-    final String coord =
-        "${center.longitude.toStringAsFixed(4)}, ${center.latitude.toStringAsFixed(4)}";
     setState(() => _selected = _SelectedPickup(
           "自定义上车点",
           best != null
-              ? "近「${shopStr(best["name"])}」· $coord"
-              : "拖到这里就选这里 · $coord",
+              ? "近「${shopStr(best["name"])}」"
+              : "拖到这里就选这里",
           center.latitude,
           center.longitude,
         ));

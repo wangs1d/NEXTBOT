@@ -20,7 +20,7 @@ import {
   type ReachDecisionInput,
 } from "../src/proactivity/reach-decision.js";
 
-const CLEAN_CTX = { contextCost: 0, quietHours: false, online: true, recentBurst: 0 };
+const CLEAN_CTX = { contextCost: 0, online: true, recentBurst: 0 };
 
 function input(overrides: Partial<ReachDecisionInput> = {}): ReachDecisionInput {
   // importance 被覆盖时，value 同步派生——否则 fixture 会出现"importance=low 但 stakes=medium"
@@ -113,13 +113,7 @@ test("规则2: 离线 → defer，交管道挂起", () => {
   assert.match(d.reason, /offline_defer/);
 });
 
-test("规则3: 静默时段 → defer", () => {
-  const d = evaluateReach(input({ context: { ...CLEAN_CTX, quietHours: true } }));
-  assert.equal(d.action, "defer");
-  assert.match(d.reason, /quiet_hours_defer/);
-});
-
-test("规则4: 高上下文成本 → defer 等 pause", () => {
+test("规则3: 高上下文成本 → defer 等 pause", () => {
   const d = evaluateReach(
     input({ context: { ...CLEAN_CTX, contextCost: DEFER_CONTEXT_COST * CONTEXT_COST_DIVISOR } }),
   );
@@ -127,7 +121,7 @@ test("规则4: 高上下文成本 → defer 等 pause", () => {
   assert.match(d.reason, /high_context_cost/);
 });
 
-test("规则5: 突发熔断 → batch", () => {
+test("规则4: 突发熔断 → batch", () => {
   const d = evaluateReach(input({ context: { ...CLEAN_CTX, recentBurst: BURST_BREAKER } }));
   assert.equal(d.action, "batch");
   assert.match(d.reason, /burst_breaker/);

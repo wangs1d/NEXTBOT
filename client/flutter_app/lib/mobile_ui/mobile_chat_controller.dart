@@ -917,6 +917,18 @@ class MobileChatController extends ChangeNotifier {
     );
   }
 
+  /// 本地删除单条消息（2026-11-20 语音条长按菜单「删除」接线）：
+  /// 从当前线程移除 + 本地历史落盘同步删除（fire-and-forget）。
+  void removeMessage(String messageId) {
+    messages.removeWhere((ChatMessage m) => m.messageId == messageId);
+    unawaited(
+      _store.deleteMessage(messageId).catchError((Object e) {
+        debugPrint("[MobileChatController] 消息删除落盘失败: $e");
+      }),
+    );
+    notifyListeners();
+  }
+
   /// 服务端线程历史拉取：主会话走 WAL 全量（`full=1`），旁聊走 `sessionId=`
   /// 指定的独立线程（服务端只读该线程最近一段）。按 user 锚去重后落本地。
   Future<int> _pullServerHistoryFor(String key) async {
@@ -1558,6 +1570,11 @@ class MobileChatController extends ChangeNotifier {
         // 主动性消息（2026-11-07）：引导开场白等告知类文本落文字气泡，
         // 服务端按分泡节奏连推两条即两泡。
         _handleProactiveMessageEvent(payload);
+      case "agent.shopping_auto_ready":
+        // 比价登录自动闭环（2026-11-21）：后台检测到扫码登录成功 → 自动续跑
+        // 比价 → 服务端主动推来结果卡。落一条完整 assistant 消息（正文 + 卡），
+        // 与正常比价回复同形态，用户不用回来点任何按钮。
+        _handleShoppingAutoReady(payload);
       case "agent.proactive_voice":
         // Agent 语音联系：手机端唯一 owner——TTS 播放与后台系统通知都在
         // 这里完成（桌面端由根分发器处理，见归属表）。
@@ -1994,6 +2011,36 @@ class MobileChatController extends ChangeNotifier {
     }
     _mainThreadMessages.add(proactive);
     _persist(proactive);
+    notifyListeners();
+  }
+
+  /// 比价登录自动闭环结果卡（agent.shopping_auto_ready，2026-11-21）。
+  ///
+  /// 服务端后台检测到扫码登录成功、自动续跑比价后主动推来。落一条完整
+  /// assistant 消息：正文 + 比价卡。卡按 [AGENT_RESULT_CARD_START] 标记块
+  /// + envelopeBlocks 双写，与 card.update / done 帧同一约定——渲染层、
+  /// 历史回放、复制三处一致，不把卡 JSON 漏进纯文本气泡。
+  void _handleShoppingAutoReady(Map<String, dynamic> payload) {
+    final String text = payload["text"]?.toString() ?? "登录搞定，价格帮你比好了——";
+    final Object? card = payload["card"];
+    if (card is! Map) return;
+    final Map<String, dynamic> cardMap = Map<String, dynamic>.from(card);
+    final String block =
+        "[AGENT_RESULT_CARD_START]\n${jsonEncode(cardMap)}\n[AGENT_RESULT_CARD_END]";
+    final String serverMessageId = payload["messageId"]?.toString() ??
+        "shopping-auto-${DateTime.now().microsecondsSinceEpoch}";
+    final ChatMessage msg = ChatMessage(
+      messageId: serverMessageId,
+      sessionId: _mainSessionKey,
+      role: "assistant",
+      text: "$text\n$block",
+      timestamp: DateTime.now(),
+      envelopeBlocks: <Map<String, dynamic>>[
+        <String, dynamic>{"type": "card", "card": cardMap},
+      ],
+    );
+    _mainThreadMessages.add(msg);
+    _persist(msg);
     notifyListeners();
   }
 

@@ -64,12 +64,14 @@ void main() {
       "chat.assistant_done",
       "evening.digest",
       "card.update",
+      // 比价登录自动闭环的结果卡：手机端由聊天控制器落流（桌面端回落根）
+      "agent.shopping_auto_ready",
     ]) {
       await dispatchOne(type);
     }
 
     expect(rootTypes, isEmpty, reason: "chatOnly 事件不得再被根分发器处理（会重复落盘/双通知/双 ack）");
-    expect(chatTypes.length, 8);
+    expect(chatTypes.length, 9);
   });
 
   test("手机端：rootOnly 事件只进根通道（闹钟/浏览器/来电等全局动作）", () async {
@@ -118,8 +120,13 @@ void main() {
 
     await dispatchOne("agent.proactive_message");
     await dispatchOne("chat.assistant_done");
+    await dispatchOne("agent.shopping_auto_ready");
 
-    expect(rootTypes, <String>["agent.proactive_message", "chat.assistant_done"]);
+    expect(rootTypes, <String>[
+      "agent.proactive_message",
+      "chat.assistant_done",
+      "agent.shopping_auto_ready",
+    ], reason: "自动比价结果卡必须在桌面端回落到根分发器，否则桌面看不到结果");
     expect(chatTypes, isEmpty);
   });
 

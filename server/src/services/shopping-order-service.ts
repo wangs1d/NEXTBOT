@@ -10,6 +10,8 @@ import type { BrowserSessionService } from "./browser-session-service.js";
 import { BROWSER_SESSION_SITES, type BrowserSessionSiteId } from "./browser-session-sites.js";
 import type { ImportedBrowserCookie } from "./browser-session-types.js";
 import { CAPTURE_CONSENT_ALL_SITES } from "./browser-session-types.js";
+import { isBrowserSessionSiteId } from "./browser-session-sites.js";
+import { parseCookieHeaderText } from "./cookie-text-parser.js";
 import { startBrowserPreviewStream, type BrowserPreviewHandle } from "./browser-preview-stream.js";
 import {
   localDateKey,
@@ -23,8 +25,10 @@ import {
   BrowserRuntime,
   detectHumanRequired,
   detectLoginPage,
+  getLoginCookieMarkerNames,
   getLoginWaitMs,
   hasLoginCookieMarker,
+  hasLoginCookieMarkerNames,
   isPlatformLoggedIn,
   waitForLogin,
   type BrowserPageLease,
@@ -1358,6 +1362,12 @@ export class ShoppingOrderService {
       const cookies = await this.browserExecutor
         .readContextCookies(actorId, platform)
         .catch(() => []);
+      // 诊断（2026-11-21）：只记 Cookie **名字**，不记值。用户反馈「手机显示
+      // 登录、云端没变化」时，靠这行判断云端 context 到底有没有兑现登录态，
+      // 以及登录后落的 Cookie 名是不是我们 marker 表里认的那几个。
+      console.log(
+        `[shop-login] ${platform} context Cookie 诊断：${cookies.length} 条 [${cookies.map((c) => c.name).join(", ")}]；marker=${JSON.stringify(getLoginCookieMarkerNames(platform))}`,
+      );
       if (cookies.length > 0 && hasLoginCookieMarker(platform, cookies)) {
         ready.add(platform);
         this.releaseQrPage(actorId, platform);
@@ -1381,14 +1391,20 @@ export class ShoppingOrderService {
         }
         continue;
       }
-      // 留驻页 URL 探测兜底（2026-11-20）：Cookie 标记没覆盖的平台（点评/
-      // 飞猪/去哪儿等），看留驻页是否已**离开登录页**——扫码确认成功后页面
-      // 会跳走；与 checkLoginHandoff 的 URL 逃逸判定同一语义。页面还挂在
-      // 登录域就如实报 pending，不猜。
-      if (await this.heldQrPageLeftLogin(actorId, platform)) {
+      // 留驻页 URL 逃逸兜底（2026-11-21 收紧）：**只对没有 Cookie marker 的平台**
+      // 生效（点评/飞猪/去哪儿等无强信号可用）。对有 marker 的平台（pdd/jd/
+      // taobao…），页面跳走可能是扫码落地页 down_scan.html / 超时 / 风控跳转，
+      // 并不等于拿到登录态——2026-11-21 用户「手机显示登录、云端没变化」就是
+      // 被这里的假成功骗了：context 无 PDDUserID，却报「已离开登录页=成功」。
+      // 这类平台必须读到真实登录 Cookie 才算，宁可如实报 pending，不猜。
+      if (!hasLoginCookieMarkerNames(platform) && await this.heldQrPageLeftLogin(actorId, platform)) {
         ready.add(platform);
         this.releaseQrPage(actorId, platform);
-        console.log(`[shop-login] ${platform} 扫码登录已生效（留驻页已离开登录页，无 Cookie 标记平台）`);
+        console.log(`[shop-login] ${platform} 扫码登录已生效（留驻页已离开登录页，无 Cookie marker 平台）`);
+      } else if (hasLoginCookieMarkerNames(platform) && await this.heldQrPageLeftLogin(actorId, platform)) {
+        console.log(
+          `[shop-login] ${platform} 留驻页已离开登录页，但 context 无登录 Cookie marker——判为未登录（不误报成功；扫码落地页跳转/风控都会让页面跳走）`,
+        );
       }
     }
 
@@ -2400,6 +2416,101 @@ export class ShoppingOrderService {
           : `获取 ${platform} Cookie 失败：${message}`,
       };
     }
+  }
+
+  /**
+   * 手动导入 Cookie · 第一步：解析 + 软校验（2026-11-21）。
+   *
+   * 扫码授权被平台风控拦死（拼多多只把登录态发给「看起来像真人」的浏览器，
+   * 无头 context 永远拿不到 Cookie），登录入口改为「用户在自己浏览器导出
+   * Cookie → 粘贴导入」。这里只解析文本并检查是否含登录标记，**不落库**——
+   * 保存与否由用户在「是否保存」卡上表态后走 {@link applyCookieImport}。
+   */
+  prepareCookieImport(
+    platform: string,
+    cookieText: string,
+  ):
+    | { ok: true; cookies: ImportedBrowserCookie[]; markerFound: boolean; markerNames: string[] }
+    | { ok: false; error: string } {
+    const parsed = parseCookieHeaderText(cookieText);
+    if (!parsed.ok) return parsed;
+    const markerNames = getLoginCookieMarkerNames(platform);
+    const found = parsed.cookies.filter((c) => markerNames.includes(c.name));
+    return {
+      ok: true,
+      cookies: parsed.cookies,
+      markerFound: markerNames.length === 0 || found.length > 0,
+      markerNames: found.map((c) => c.name),
+    };
+  }
+
+  /**
+   * 手动导入 Cookie · 第二步：应用（用户对「是否保存」表态后调用）。
+   *
+   * save=true → `importCookies(agentAllowed:true)` 落库：AES 加密持久化、
+   *   立即授权 Agent，之后每轮比价 `getCookiesForAgent` 自动取用，免扫码。
+   * save=false → 不落库，直接灌进常驻浏览器 context：本轮比价与登录检测
+   *   立刻可见，进程重启即失效。
+   */
+  async applyCookieImport(
+    actorId: string,
+    platform: string,
+    cookies: ImportedBrowserCookie[],
+    save: boolean,
+  ): Promise<{ ok: true; saved: boolean } | { ok: false; error: string }> {
+    if (!isBrowserSessionSiteId(platform)) {
+      return { ok: false, error: `不支持的平台：${platform}` };
+    }
+    const siteId: BrowserSessionSiteId = platform;
+    if (save) {
+      try {
+        await this.deps.browserSessionService.importCookies(actorId, siteId, cookies, {
+          agentAllowed: true,
+        });
+        return { ok: true, saved: true };
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        return { ok: false, error: `保存 Cookie 失败：${message}` };
+      }
+    }
+    const homeUrl = BROWSER_SESSION_SITES[siteId].homeUrl;
+    const primed = await this.browserExecutor
+      .primeContextCookies(actorId, siteId, homeUrl, cookies)
+      .catch(() => false);
+    if (!primed) {
+      return { ok: false, error: "云端浏览器暂时不可用，稍后再试，或选择「保存并永久使用」" };
+    }
+    return { ok: true, saved: false };
+  }
+
+  /**
+   * 统一保存闸 · 读（2026-11-21 用户定稿）。
+   *
+   * 「是否保存登录 Cookie」不再是每次导入 / 每次登录各问一遍，而是一个统一
+   * 闸：allow = 已同意（所有平台登录态默认保存，不再问）；deny = 已拒绝
+   * （不保存也不再问）；ask = 未表态（弹统一授权卡，问这一次）。
+   * 读的是 browserSessionService 的 captureConsents——与扫码登录
+   * {@link checkMultiPlatformLogin}/{@link checkLoginHandoff} 用的是**同一把闸**，
+   * 导入路和扫码路不会各问各的。
+   */
+  async getCookieSaveConsent(
+    actorId: string,
+    platform: string,
+  ): Promise<"allow" | "deny" | "ask"> {
+    return this.deps.browserSessionService.getCaptureConsent(actorId, platform);
+  }
+
+  /**
+   * 统一保存闸 · 落笔：写全局授权键（{@link CAPTURE_CONSENT_ALL_SITES}），
+   * 一次答复对所有平台生效（单平台的显式答复仍优先）。持久化在 actor 的
+   * browser-sessions JSON 里，进程重启不丢。
+   */
+  async recordCookieSaveConsent(actorId: string, allowed: boolean): Promise<void> {
+    await this.deps.browserSessionService.setCaptureConsent(
+      actorId,
+      CAPTURE_CONSENT_ALL_SITES,
+      allowed,
+    );
   }
 
   private async audit(

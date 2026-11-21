@@ -141,6 +141,7 @@ export class ToolContextFactory {
 
   private toToolContext(base: ToolExecutionBase, signal?: AbortSignal): ToolContext {
     return {
+      actorId: base.actorId,
       sessionId: base.sessionId,
       userId: base.userId,
       chatUserMessageId: base.chatUserMessageId,

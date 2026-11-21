@@ -130,6 +130,10 @@ class WsEventRouter {
 
     // ── 主动消息 / 提醒弹窗：落手机对话流 + 系统通知 + ack，只允许一次 ──
     "agent.proactive_message": WsEventRoute.chatOnly,
+    // 比价登录自动闭环（2026-11-21）：后台检测到登录成功、自动续跑比价后
+    // 主动推来的结果卡，落手机对话流。桌面端回落根分发器（结果卡由桌面自己的
+    // 消息流渲染，这里只保证手机端唯一 owner 是聊天控制器）。
+    "agent.shopping_auto_ready": WsEventRoute.chatOnly,
     "reminder_popup": WsEventRoute.chatOnly,
 
     // ── 语音类：手机端由控制器播 TTS 并弹通知（桌面端回落根分发器）──

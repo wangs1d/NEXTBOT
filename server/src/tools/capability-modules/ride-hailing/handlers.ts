@@ -23,11 +23,17 @@ export interface RideHailingModuleDeps {
   mcp?: McpClientService;
 }
 
+/** 纯坐标串（如「113.8033,31.5705」）不是地名，不能当上车点文案透出给用户。 */
+function isCoordOnlyLabel(label: string): boolean {
+  return /^\s*-?\d+(?:\.\d+)?\s*[,，]\s*-?\d+(?:\.\d+)?\s*$/.test(label);
+}
+
 function formatLocationLabel(loc: ClientLocationWire): string {
-  if (loc.label?.trim()) return loc.label.trim();
+  const label = loc.label?.trim() ?? "";
+  if (label && !isCoordOnlyLabel(label)) return label;
   const area = [loc.district, loc.city].filter(Boolean).join("");
   if (area) return area;
-  return `${loc.latitude.toFixed(4)},${loc.longitude.toFixed(4)}`;
+  return "当前位置";
 }
 
 async function resolvePickup(
@@ -41,15 +47,16 @@ async function resolvePickup(
   if (typeof pickupInput === "string" && pickupInput.trim()) {
     return { pickup: pickupInput.trim() };
   }
-  if (context.clientLocation) {
-    const label = formatLocationLabel(context.clientLocation);
-    return {
-      pickup: label,
-      note: `起点自动取当前位置：${label}`,
-      location: context.clientLocation,
-    };
-  }
-  const requested = (await context.requestLocation?.("叫车需要获取当前位置作为起点")) ?? null;
+  // 上车点只认「当下实时 GPS」：不读随消息上报的 context.clientLocation，
+  // 也不缓存兜底。真机实证：缓存里的旧坐标（湖北随州 113.8,31.57）曾冒充
+  // 兴义的实时位置，导致地图中心错、候选错、city 错三连故障。
+  // maxAgeMs=0 让 locationCoordinator 无条件绕过复用缓存、向手机现拉一次；
+  // maxAccuracyMeters=10 与客户端精度门槛对齐。拉不到就返回空，由 quote
+  // handler 推纯地图选点卡——宁可让用户手动拖，绝不用旧坐标冒充实时。
+  const requested = (await context.requestLocation?.(
+    "叫车需要获取当前位置作为上车点",
+    { maxAgeMs: 0, maxAccuracyMeters: 10 },
+  )) ?? null;
   if (requested) {
     const label = formatLocationLabel(requested);
     return {
@@ -58,7 +65,7 @@ async function resolvePickup(
       location: requested,
     };
   }
-  return { pickup: "当前位置", note: "未获取到定位，起点按「当前位置」处理" };
+  return { pickup: "", note: "未获取到实时定位" };
 }
 
 /**
@@ -192,19 +199,16 @@ export function createRideQuoteHandler(
       ...(city ? { city } : {}),
       ...(scheduleAt ? { scheduleAt } : null),
     };
+    // 地图中心只认本次实时定位。绝不回退 context.clientLocation（随消息上报、
+    // 可能是几小时前的磁盘缓存坐标）——拿不到实时定位就是 null，卡片走全国
+    // 视野纯地图选点，用户自己拖到目的地附近，也不会被错坐标误导。
     const origin = resolvedPickup.location
       ? {
           lat: resolvedPickup.location.latitude,
           lng: resolvedPickup.location.longitude,
           label: resolvedPickup.pickup,
         }
-      : context.clientLocation
-        ? {
-            lat: context.clientLocation.latitude,
-            lng: context.clientLocation.longitude,
-            label: formatLocationLabel(context.clientLocation),
-          }
-        : null;
+      : null;
 
     // 设计稿范式（2026-11-20 用户定稿）：**只要用户没指定具体上车点，一律推
     // 「选上车点」卡**——有 GPS 就带滴图周边候选 + 地图居中定位点（预选态），

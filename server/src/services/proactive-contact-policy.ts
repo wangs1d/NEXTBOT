@@ -81,23 +81,17 @@ export function defaultContactPreferenceState(): ProactiveContactPreferenceState
 export class ProactiveContactPolicyService {
   decide(input: ProactiveContactDecisionInput): ProactiveContactDecision {
     const now = input.now ?? new Date();
-    const hour = now.getHours();
     const preference = input.preference ?? defaultPreference(input.timeRhythm);
-    const quietHours = isHourWithinRange(
-      hour,
-      normalizeHour(preference.quietHoursStart, 23),
-      normalizeHour(preference.quietHoursEnd, 8),
-    );
+    // 禁音时段已移除（2026-11-20）：contact 决策不再按时段拦截。
+    // quietHours 字段保留恒为 false，供个性化学习链路（learnPreference）兼容。
     const emergency =
       input.category === "warning" || input.urgency >= 8.8 || input.tags.includes("risk");
     const proactiveTolerance = input.relationship?.proactiveTolerance ?? 0.5;
     const rapport = input.relationship?.rapport ?? 0.35;
-    const lateNightTolerance = input.timeRhythm?.lateNightTolerance ?? 0.35;
 
     const disturbanceScore = clamp(
       input.recentContactCountHour * 0.18 +
         input.recentContactCountDay * 0.07 +
-        (quietHours ? 0.22 : 0) +
         (1 - proactiveTolerance) * 0.18 +
         (rapport < 0.4 ? 0.08 : 0) +
         (input.wsConnected ? 0 : 0.1),
@@ -110,19 +104,8 @@ export class ProactiveContactPolicyService {
       `confidence=${input.confidence.toFixed(2)}`,
       `recentHour=${input.recentContactCountHour}`,
       `recentDay=${input.recentContactCountDay}`,
-      quietHours ? "quiet_hours" : "active_window",
+      "active_window",
     ];
-
-    if (quietHours && !emergency && lateNightTolerance < 0.55 && input.confidence < 0.84) {
-      return {
-        allowed: false,
-        channel: "websocket",
-        quietHours,
-        disturbanceScore,
-        reason: "quiet_hours_hold",
-        rationale,
-      };
-    }
 
     // 质量驱动：移除每日配额硬限。
     // 真实有价值的信号（高 urgency / warning 类）不再被 daily_contact_budget_exceeded 拦截。
@@ -132,7 +115,7 @@ export class ProactiveContactPolicyService {
       return {
         allowed: false,
         channel: "websocket",
-        quietHours,
+        quietHours: false,
         disturbanceScore,
         reason: "disturbance_score_too_high",
         rationale,
@@ -167,15 +150,10 @@ export class ProactiveContactPolicyService {
       rationale.push("prefer_text_for_direct_planning");
     }
 
-    if (quietHours && channel === "phone_call" && !emergency && input.urgency < 9.4) {
-      channel = "voice";
-      rationale.push("downgraded_during_quiet_hours");
-    }
-
     return {
       allowed: true,
       channel,
-      quietHours,
+      quietHours: false,
       disturbanceScore,
       reason: "contact_allowed",
       rationale,

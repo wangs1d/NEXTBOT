@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { arbitrate, DELIVERY_RETRY_MS, nextQuietEnd, type ArbiterContext } from "../src/proactivity/arbiter.js";
+import { arbitrate, DELIVERY_RETRY_MS, type ArbiterContext } from "../src/proactivity/arbiter.js";
 import { ProactiveDeliveryService } from "../src/proactivity/delivery-service.js";
 import type { OpenedBody } from "../src/proactivity/discovery-layer.js";
 import { FrequencyGovernor } from "../src/proactivity/frequency-governor.js";
@@ -80,28 +80,16 @@ test("arbiter: 负反馈抑制优先", () => {
   assert.equal(d.verdict, "suppressed");
 });
 
-test("arbiter: 静默时段 critical/high 豁免当场投递（2026-10-01：时效性事务 defer 到早晨=没提醒）", () => {
-  // high 豁免（与 governor「静默仅 high 放行」口径对齐）——验证码/传票类当场说
+test("arbiter: 静默时段限制已移除——深夜提案照常仲裁（2026-11-20）", () => {
+  // 静默时段 defer 已删除：深夜 medium 提案不在场时只走离线挂起，不再 defer 到早晨
   const h = arbitrate(proposal({ importance: "high", tier: "social" }), ctx({ now: NIGHT }));
   assert.equal(h.verdict, "delivered");
-  // critical 原有豁免不变
-  const c = arbitrate(proposal({ importance: "critical" }), ctx({ now: NIGHT }));
-  assert.equal(c.verdict, "delivered");
-});
-
-test("arbiter: 静默时段 medium/low 且用户不在场 defer 到早晨而非丢弃", () => {
   const d = arbitrate(
     proposal({ importance: "medium", tier: "social" }),
     ctx({ now: NIGHT, presence: "offline" }),
   );
   assert.equal(d.verdict, "deferred");
-  assert.equal(d.reasonChain[0], "quiet_hours_defer_to_morning");
-  assert.equal(d.deliverAfter, nextQuietEnd(new Date(NIGHT)));
-  const l = arbitrate(
-    proposal({ importance: "low", tier: "social" }),
-    ctx({ now: NIGHT, presence: "offline" }),
-  );
-  assert.equal(l.verdict, "deferred");
+  assert.ok(!d.reasonChain.some((r) => String(r).includes("quiet_hours")));
 });
 
 test("arbiter: must 层绕过社交预算（预算耗尽仍可达）", () => {
@@ -283,7 +271,7 @@ type Harness = {
 function makeHarness(opts: { now?: number; dailyBudget?: number; failSend?: boolean; confirmations?: PendingConfirmationStore; onProposalApproved?: (p: ProactiveProposal) => void } = {}): Harness {
   const dir = mkdtempSync(join(tmpdir(), "proactive-pipe-"));
   const presence = new PresenceService();
-  const governor = new FrequencyGovernor({ ignoreEnv: true, disableQuietHours: true, dailyBudget: opts.dailyBudget ?? 6 });
+  const governor = new FrequencyGovernor({ ignoreEnv: true, dailyBudget: opts.dailyBudget ?? 6 });
   const delivered: Array<{ actorId: string; json: string }> = [];
   const spoken: ProactiveProposal[] = [];
   const flags = { failSend: opts.failSend ?? false };

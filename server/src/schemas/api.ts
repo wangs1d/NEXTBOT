@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isBrowserSessionSiteId } from "../services/browser-session-sites.js";
 
 // chat turn 相关 schema 已抽到 @nextbot/agent-protocol（外壳/runtime 共用契约），
 // 此处 re-export 保持既有引用路径不变。
@@ -642,7 +643,12 @@ export const messageBridgeInboundBodySchema = z.object({
   autoReply: z.boolean().optional(),
 });
 
-const browserSessionSiteIdSchema = z.enum(["ctrip", "taobao", "jd", "qunar", "fliggy"]);
+// 站点白名单收敛到 BROWSER_SESSION_SITES 单一真相源（2026-11-21）：旧枚举
+// 只放行 5 个站点，拼多多/美团/抖音等被 400 挡在门外，而底层与比价链路
+// 早就支持 15 个——手动导入 Cookie 的平台不该比取价消费的平台少。
+const browserSessionSiteIdSchema = z
+  .string()
+  .refine((v) => isBrowserSessionSiteId(v), { message: "不支持的站点 siteId" });
 
 const browserSessionCookieSchema = z.object({
   name: z.string().min(1).max(512),

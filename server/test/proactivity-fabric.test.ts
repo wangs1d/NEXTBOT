@@ -328,12 +328,13 @@ function baseSnapshot(over: Partial<Parameters<typeof interruptCost>[0]> = {}) {
   };
 }
 
-test("仲裁: 打断成本公式 —— 会议/对话/深夜叠加", () => {
+test("仲裁: 打断成本公式 —— 会议/对话叠加（深夜加权已移除）", () => {
   assert.equal(interruptCost(baseSnapshot()), 1); // receptivity 0.5 → +1
   assert.ok(interruptCost(baseSnapshot({ screenFocus: "meeting" })) >= 5);
   assert.ok(interruptCost(baseSnapshot({ inConversation: true, screenFocus: "coding" })) >= 7);
   assert.equal(interruptCost(baseSnapshot({ presence: "offline" })), 10);
-  assert.ok(interruptCost(baseSnapshot({ quietHours: true })) >= 4);
+  // 禁音时段已移除：深夜不额外加权，成本与白天同口径
+  assert.equal(interruptCost(baseSnapshot({ quietHours: true })), 1);
 });
 
 test("仲裁: 低成本直投 / 高成本挂起 / pause 后放行", () => {
@@ -437,7 +438,7 @@ test("直达车道: hub.submitIntent → SpeechHub light 话术 → 管道（统
     publishSignal: () => assert.fail("直达车道开启时 speak 不应再走 LifeSignal 路径"),
     executeTool: async () => ({ ok: true, result: {} }),
     // 测试确定性：禁用静默时段（否则 23-7 点 importance<high 全被频控拦截）
-    frequencyGovernor: new FrequencyGovernor({ disableQuietHours: true, ignoreEnv: true }),
+    frequencyGovernor: new FrequencyGovernor({ ignoreEnv: true }),
     // 统一话术层（2026-10-27 模板删除）：stub speechHub 返回 LLM 话术
     speechHub: {
       speak: async (req) => {
@@ -473,7 +474,7 @@ test("直达车道: 话术层返回空 → 沉默留痕（绝不吐系统态原�
   const hub = new ProactivityHub({
     publishSignal: () => assert.fail("话术为空时应沉默，而不是回退 LifeSignal"),
     executeTool: async () => ({ ok: true, result: {} }),
-    frequencyGovernor: new FrequencyGovernor({ disableQuietHours: true, ignoreEnv: true }),
+    frequencyGovernor: new FrequencyGovernor({ ignoreEnv: true }),
     speechHub: { speak: async () => "" } as unknown as SpeechHub,
   });
   let delivered = 0;
@@ -501,7 +502,7 @@ test("直达车道关闭时回退 LifeSignal 路径（向后兼容）", async ()
       published += 1;
     },
     executeTool: async () => ({ ok: true, result: {} }),
-    frequencyGovernor: new FrequencyGovernor({ disableQuietHours: true, ignoreEnv: true }),
+    frequencyGovernor: new FrequencyGovernor({ ignoreEnv: true }),
   });
   hub.submitIntent({
     actorId: "user-1",

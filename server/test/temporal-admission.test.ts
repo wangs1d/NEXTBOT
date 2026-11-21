@@ -198,7 +198,7 @@ function makeHub() {
   const hub = new ProactivityHub({
     publishSignal: (s) => signals.push(s as Signal),
     executeTool: async () => ({ ok: true, result: {} }),
-    frequencyGovernor: new FrequencyGovernor({ ignoreEnv: true, disableQuietHours: true }),
+    frequencyGovernor: new FrequencyGovernor({ ignoreEnv: true, }),
     silenceLog,
   });
   return { hub, signals, silenceLog };

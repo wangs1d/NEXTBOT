@@ -119,8 +119,7 @@ class ChatPage extends StatefulWidget {
     /// 挂在输入框上的技能（引导 chip 选中后由父级注入）；非 null 时
     /// 输入框上方渲染可移除的技能胶囊，占位提示改为该技能要补的参数。
     this.composerSkill,
-    this.onClearComposerSkill,
-  });
+    this.onClearComposerSkill,  });
 
   final List<ChatMessage> messages;
   final TextEditingController controller;
@@ -134,6 +133,7 @@ class ChatPage extends StatefulWidget {
   /// 本地历史存储：「为你推荐」出现时机治理（频控/已知能力集合）的
   /// 持久化通道；null 时横滑条退化为纯内存治理。
   final LocalHistoryStore? localStore;
+
 
   /// 用户在「选择型卡片」底部按钮上点击某个 action 的回调。
   /// 父级负责把 action 转成 user message 并发送到后端。
@@ -2675,6 +2675,9 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
                       ? widget.mainMessage.text
                       : null),
               isRead: true,
+              onDelete: widget.onDeleteMessage == null
+                  ? null
+                  : () => widget.onDeleteMessage!(widget.mainMessage.messageId),
             ),
           );
         },

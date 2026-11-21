@@ -273,7 +273,7 @@ const COMPOSITE_SPECS: CompositeSpec[] = [
   {
     name: "voice",
     description:
-      "语音输出：把一段文字说出来，或直接以语音消息发给对方。用户要求「说给我听/发条语音」时用。",
+      "语音输出：把一段文字说出来，或直接以语音消息发给对方。用户要求「发语音/语音条/用语音和我说/用语音回复」时用 message（落地可见气泡）；只有明确要求「念给我听/朗读/播报」这种后台说一遍才用 speak（无气泡）。",
     defaultAction: "speak",
     actions: {
       speak: {
@@ -285,7 +285,7 @@ const COMPOSITE_SPECS: CompositeSpec[] = [
       message: {
         tool: "voice.send_message",
         desc: "生成语音消息并发送",
-        keywords: ["语音消息", "发语音", "语音回复", "用语音发", "语音条"],
+        keywords: ["语音消息", "发语音", "语音回复", "用语音发", "语音条", "语音给我", "发送语音", "语音说", "用语音"],
       },
     },
     properties: {
@@ -859,6 +859,24 @@ export const COMPOSITE_ACTION_SPECS: ReadonlyArray<{
 export const COMPOSITE_ABSORBED_TOOL_NAMES: ReadonlySet<string> = new Set(
   COMPOSITE_SPECS.flatMap((spec) => Object.values(spec.actions).map((a) => a.tool)),
 );
+
+/**
+ * 例外：语音细分工具必须同时暴露给模型（2026-11-21 修复「用语音说晚安没气泡」）。
+ *
+ * 根因：`voice` 复合工具的 defaultAction 是 `speak`（无 UI、后台播放），而
+ * `voice.send_message` 才落地微信式语音气泡。两者共用 `text` 参数，`resolveCompositeAction`
+ * 只按参数签名判定，模型漏填 action 时会稳定落到 speak。更糟的是复合收编把
+ * VOICE_CHAT_TOOLS 里语义明确的 `voice.send_message`（description 明写「发语音→气泡」）
+ * 一并过滤掉，模型根本看不到它——于是「用语音和我说晚安」被实现成一次无 UI 播报，
+ * 用户只看到模型在正文里复述「语音发过去了，五十四秒」。
+ *
+ * 这里让两个语音细分入口绕过复合收编：复合 `voice` 仍保留（关键词召回），
+ * 细分工具同时可见且描述精确，模型可据用户措辞直接选对发消息 vs 播报。
+ */
+export const DIRECTLY_EXPOSED_COMPOSITE_TOOLS: ReadonlySet<string> = new Set([
+  "voice.speak",
+  "voice.send_message",
+]);
 
 /**
  * 解析 action：显式合法值 > 参数签名 > 只读兜底分支。

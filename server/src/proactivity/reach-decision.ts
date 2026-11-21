@@ -94,8 +94,6 @@ export type ReachValue = {
 export type ReachContext = {
   /** arbiter-v2.interruptCost 的原始 0-10 成本，本模块 /10 归一化 */
   contextCost: number;
-  /** 静默时段（quiet-hours.ts 单一事实源） */
-  quietHours: boolean;
   /** 用户当前是否在线（离线不发，交管道挂起） */
   online?: boolean;
   /** 近 30min 已主动投递次数（突发熔断） */
@@ -118,7 +116,7 @@ export type ReachDecisionInput = {
    * true 时跳过"价值挣得通道"的 admission 扫描，直接评估请求通道：
    *   - 净效用 U > 0 → 放行该通道
    *   - U <= 0 → drop（负反馈仍能压住）
-   * 所有守卫（离线/静默/高上下文成本/突发熔断）**依旧生效**——
+   * 所有守卫（离线/高上下文成本/突发熔断）**依旧生效**——
    * 这正是"用同一套算法防止语音条用得太频繁"的落点。
    */
   respectRequestedChannel?: boolean;
@@ -278,12 +276,13 @@ export function computeCost(channel: ReachChannel, context: ReachContext): numbe
  * 规则顺序（先命中先出）：
  *   1. explicit / must / critical → 直通（用请求通道，缺省 voice.message），不拦。
  *   2. 离线 → defer（交管道挂起重投，不消耗预算）。
- *   3. 静默时段且非必达 → defer（等静默结束）。
- *   4. 高打断成本 → defer（等 pause）。
- *   5. 突发熔断 → batch。
+ *   3. 高打断成本 → defer（等 pause）。
+ *   4. 突发熔断 → batch。
+ *   5. 调用方已选定通道（respectRequestedChannel）且该通道 U > 0 → 直发该通道。
  *   6. 从重到轻遍历通道，第一个 U >= admission 的 → send_now + 该通道。
  *   7. 全部不过门槛但 maxU >= batch 下限 → batch。
  *   8. 其余 → drop（留痕供"上周为什么没提醒我"）。
+ * （禁音时段规则已移除，2026-11-20：语音条/播报不再受深夜限制。）
  */
 export function evaluateReach(input: ReachDecisionInput): ReachDecision {
   const p = clamp01(input.acceptance ?? 0.5);
@@ -332,19 +331,7 @@ export function evaluateReach(input: ReachDecisionInput): ReachDecision {
     };
   }
 
-  // 规则 3：静默时段 → 延后（对齐 quiet-hours：高重要度才放行，但 must 已在规则1直通）
-  if (input.context.quietHours) {
-    return {
-      ...base,
-      action: "defer",
-      channel: null,
-      utility: maxUtility,
-      cost: ctxNorm,
-      reason: "quiet_hours_defer",
-    };
-  }
-
-  // 规则 4：上下文成本过高 → 等 pause
+  // 规则 3：上下文成本过高 → 等 pause
   if (ctxNorm >= DEFER_CONTEXT_COST) {
     return {
       ...base,
@@ -356,7 +343,7 @@ export function evaluateReach(input: ReachDecisionInput): ReachDecision {
     };
   }
 
-  // 规则 5：突发熔断 → batch
+  // 规则 4：突发熔断 → batch
   if ((input.context.recentBurst ?? 0) >= BURST_BREAKER) {
     return {
       ...base,
@@ -368,7 +355,7 @@ export function evaluateReach(input: ReachDecisionInput): ReachDecision {
     };
   }
 
-  // 规则 6：调用方明确选定了通道（voice.* 工具自主表达的"用语音说"）。
+  // 规则 5：调用方明确选定了通道（voice.* 工具自主表达的"用语音说"）。
   // 此时不再用 admission 门槛把语音降到 chat——那会让冷启动（p=0.5）永远发不出语音。
   // 频率控制完全交给已生效的守卫（规则 2-5：离线/静默/高成本/突发）+ 反馈 p：
   //   U > 0 放行；U <= 0 沉默。负反馈越多 p 越低，U 转负自然停。
@@ -394,7 +381,7 @@ export function evaluateReach(input: ReachDecisionInput): ReachDecision {
     };
   }
 
-  // 规则 7：从重到轻，第一个负担得起的通道（价值挣得通道；social 上限在 allowed 里）
+  // 规则 6：从重到轻，第一个负担得起的通道（价值挣得通道；social 上限在 allowed 里）
   for (let i = REACH_CHANNELS.length - 1; i >= 0; i--) {
     const c = perChannel[i];
     if (!allowed.includes(c.channel)) continue;

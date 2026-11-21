@@ -1,7 +1,7 @@
 // ReachDecisionService —— 期望效用决策层的运行时包装。
 //
 // 把纯决策引擎 evaluateReach 与两个既有事实源接起来：
-//   - arbiter-v2.interruptCost / quiet-hours → 上下文成本与静默判定（不重复实现传感器）
+//   - arbiter-v2.interruptCost → 上下文成本（不重复实现传感器）
 //   - OutcomeStore                          → outcome 反馈的 pos/neg 计数 → Beta 后验 p
 //
 // 服务本身无定时器、无 IO 写、无 LLM；decide() 是"算一次"的同步调用。
@@ -40,7 +40,6 @@ import type {
   ReachDecisionInput,
   ReachValue,
 } from "./reach-decision.js";
-import { isQuietHourNow } from "./quiet-hours.js";
 import type { ProactiveImportance } from "./pipeline-types.js";
 
 /** 反馈信号映射：OutcomeStore 的 outcome 字符串 → 正/负样本。 */
@@ -131,7 +130,6 @@ export class ReachDecisionService {
     );
     const context: ReachContext = {
       contextCost: this.deps.contextCost?.(ask.actorId) ?? 0,
-      quietHours: isQuietHourNow(now),
       online: this.deps.online?.(ask.actorId) ?? true,
       recentBurst: burst,
     };

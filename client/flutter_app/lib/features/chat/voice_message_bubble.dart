@@ -3,15 +3,16 @@ import "package:flutter/material.dart";
 import "../../core/config/media_url.dart";
 import "../../core/services/tts_player.dart";
 
-/// 微信式可重播语音消息气泡。
+/// 微信式可重播语音消息气泡（2026-11-20 交互对齐 mockup）。
 ///
 /// 设计要点：
 ///   - 左侧（他人）/ 右侧（自己）布局，圆角气泡
-///   - 喇叭 icon + 声波条（用 waveform 数组画 Container 高度）+ 时长文字「23″」
+///   - 喇叭 icon + 声波条（waveform 数组画高度）+ 时长文字「23″」
 ///   - 点击播放 / 暂停；播放中声波条流动动画
-///   - 已读：灰色喇叭；未读：高亮喇叭
-///   - 无 waveform 时用静默 placeholder（5 段等高条）
-///   - 不可播放时降级显示 transcript 文本
+///   - **默认不显示转写文字**：长按（手机）/ 右键（电脑）弹出微信式深色菜单
+///     「转文字 / 收藏 / 删除」，点「转文字」才在气泡下方展开 transcript
+///   - 无 waveform 时用静默 placeholder（16 段自然波形）
+///   - 不可播放时降级显示 transcript 文本（无障碍兜底）
 class VoiceMessageBubble extends StatefulWidget {
   const VoiceMessageBubble({
     super.key,
@@ -21,6 +22,8 @@ class VoiceMessageBubble extends StatefulWidget {
     this.waveform,
     this.transcript,
     this.isRead = true,
+    this.onDelete,
+    this.onFavorite,
   });
 
   /// 服务端返回的可访问路径，如 `/agent/voice/messages/.../xxx.mp3`。
@@ -35,11 +38,18 @@ class VoiceMessageBubble extends StatefulWidget {
   /// 波形数据（0.0-1.0），可空。
   final List<double>? waveform;
 
-  /// 文本备份，无障碍 / 不可播放时降级展示。
+  /// 转写文本备份：默认不展示，仅「转文字」展开 / 无障碍兜底时用。
   final String? transcript;
 
   /// 是否已读（影响喇叭 icon 颜色）。
   final bool isRead;
+
+  /// 删除回调（长按菜单「删除」）：由宿主接入真实删除链路
+  /// （移动端 = controller.removeMessage 落盘；未注入时气泡本地隐藏兜底）。
+  final VoidCallback? onDelete;
+
+  /// 收藏回调（长按菜单「收藏」）：未注入时仅本地 SnackBar 反馈。
+  final VoidCallback? onFavorite;
 
   @override
   State<VoiceMessageBubble> createState() => _VoiceMessageBubbleState();
@@ -50,6 +60,9 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble>
   late AnimationController _waveController;
   bool _isPlaying = false;
   bool _loadFailed = false;
+  bool _transcriptExpanded = false;
+  bool _removedLocally = false;
+  OverlayEntry? _menuEntry;
 
   @override
   void initState() {
@@ -63,6 +76,7 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble>
 
   @override
   void dispose() {
+    _closeMenu();
     TtsPlayer.instance.removeOnCompleted(_onPlayCompleted);
     _waveController.dispose();
     super.dispose();
@@ -109,8 +123,67 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble>
     return MediaUrl.resolve(mediaUrl);
   }
 
+  // ── 长按 / 右键菜单（微信式深色横排） ──────────────────────────────
+
+  void _showMenu(Offset globalPosition) {
+    if (_menuEntry != null) {
+      _closeMenu();
+      return;
+    }
+    final OverlayState? overlay = Overlay.maybeOf(context, rootOverlay: true);
+    if (overlay == null) return;
+
+    _menuEntry = OverlayEntry(
+      builder: (BuildContext ctx) => _VoiceMenuOverlay(
+        anchor: globalPosition,
+        hasTranscript: widget.transcript?.isNotEmpty == true,
+        onDismiss: _closeMenu,
+        onTranscribe: () {
+          _closeMenu();
+          if (widget.transcript?.isNotEmpty != true) {
+            _toast("转写还没好，稍后再试");
+            return;
+          }
+          setState(() => _transcriptExpanded = !_transcriptExpanded);
+        },
+        onFavorite: () {
+          _closeMenu();
+          widget.onFavorite?.call();
+          _toast("已收藏");
+        },
+        onDelete: () {
+          _closeMenu();
+          if (widget.onDelete != null) {
+            widget.onDelete!();
+          } else {
+            // 宿主未接删除链路：本地隐藏兜底（桌面端当前无消息删除 API）
+            if (!mounted) return;
+            setState(() => _removedLocally = true);
+          }
+        },
+      ),
+    );
+    overlay.insert(_menuEntry!);
+  }
+
+  void _closeMenu() {
+    _menuEntry?.remove();
+    _menuEntry = null;
+  }
+
+  void _toast(String message) {
+    final ScaffoldMessengerState? messenger = ScaffoldMessenger.maybeOf(context);
+    if (messenger == null) return;
+    messenger
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message), duration: const Duration(seconds: 1)));
+  }
+
   @override
   Widget build(BuildContext context) {
+    if (_removedLocally) {
+      return const SizedBox.shrink();
+    }
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
 
@@ -118,10 +191,16 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble>
     final bg = isMe ? cs.primary : cs.surfaceContainerHighest;
     final fg = isMe ? cs.onPrimary : cs.onSurface;
 
-    final seconds = (widget.durationMs / 1000).ceil().clamp(1, 99);
+    // 与服务端 agent-voice-tools.ts 的 Math.round(durationMs / 1000) 同口径：
+    // 旧实现用 ceil（1.2s 会显示 2″）且 clamp 到 99（长语音被截成 99″），
+    // 与工具回执的秒数对不上，正是「语音条后面显示时间不准」的直接原因。
+    final seconds = (widget.durationMs / 1000).round().clamp(1, 599);
 
     final wave = widget.waveform ?? _defaultWaveform();
     final waveCount = wave.length.clamp(3, 32);
+
+    final bool showTranscript =
+        widget.transcript != null && widget.transcript!.isNotEmpty && _transcriptExpanded;
 
     return Align(
       alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
@@ -140,57 +219,59 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble>
             bottomRight: Radius.circular(isMe ? 4 : 16),
           ),
         ),
-        child: Column(
-          crossAxisAlignment: isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                // 喇叭 icon（左侧/右侧根据 isMe 翻转）
-                if (!isMe) _buildSpeakerIcon(fg),
-                if (!isMe) const SizedBox(width: 8),
-                // 声波条
-                _buildWaveform(wave.take(waveCount).toList(), fg),
-                if (isMe) const SizedBox(width: 8),
-                if (isMe) _buildSpeakerIcon(fg),
-                const SizedBox(width: 8),
-                // 时长
+        // 手机端长按 / 电脑端右键 → 微信式菜单（转文字入口）
+        child: GestureDetector(
+          onLongPressStart: (LongPressStartDetails d) => _showMenu(d.globalPosition),
+          onSecondaryTapUp: (TapUpDetails d) => _showMenu(d.globalPosition),
+          child: Column(
+            crossAxisAlignment: isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // 喇叭 icon（左侧/右侧根据 isMe 翻转）
+                  if (!isMe) _buildSpeakerIcon(fg),
+                  if (!isMe) const SizedBox(width: 8),
+                  // 声波条
+                  _buildWaveform(wave.take(waveCount).toList(), fg),
+                  if (isMe) const SizedBox(width: 8),
+                  if (isMe) _buildSpeakerIcon(fg),
+                  const SizedBox(width: 8),
+                  // 时长
+                  Text(
+                    "$seconds″",
+                    style: theme.textTheme.bodySmall?.copyWith(color: fg),
+                  ),
+                ],
+              ),
+              if (_loadFailed && widget.transcript != null) ...[
+                const SizedBox(height: 6),
                 Text(
-                  "$seconds″",
-                  style: theme.textTheme.bodySmall?.copyWith(color: fg),
+                  widget.transcript!,
+                  style: theme.textTheme.bodySmall?.copyWith(color: fg.withValues(alpha: 0.7)),
                 ),
               ],
-            ),
-            if (_loadFailed && widget.transcript != null) ...[
-              const SizedBox(height: 6),
-              Text(
-                widget.transcript!,
-                style: theme.textTheme.bodySmall?.copyWith(color: fg.withValues(alpha: 0.7)),
-              ),
-            ],
-            // ASR 完成后由服务端回推 transcript：有转写文本时就在波形下面展示，
-            // 方便用户核对 ASR 准确率（微信式「语音→文字」体验）。
-            if (!_loadFailed &&
-                widget.transcript != null &&
-                widget.transcript!.isNotEmpty) ...[
-              const SizedBox(height: 6),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: fg.withValues(alpha: 0.08),
-                  borderRadius: BorderRadius.circular(6),
-                ),
-                child: Text(
-                  widget.transcript!,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                    color: fg.withValues(alpha: 0.85),
-                    height: 1.4,
+              // 转写文字：默认不显示，仅长按/右键菜单「转文字」展开（对齐微信）
+              if (showTranscript) ...[
+                const SizedBox(height: 6),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: fg.withValues(alpha: 0.08),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    widget.transcript!,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: fg.withValues(alpha: 0.85),
+                      height: 1.4,
+                    ),
                   ),
                 ),
-              ),
+              ],
             ],
-          ],
+          ),
         ),
       ),
     );
@@ -239,5 +320,115 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble>
       final t = (i - 8).abs() / 8.0;
       return (0.4 + (1 - t) * 0.5).clamp(0.3, 0.9);
     });
+  }
+}
+
+/// 微信式深色横排菜单（转文字 / 收藏 / 删除）。
+///
+/// 全屏透明屏障负责点外部关闭；菜单条锚定在长按点上方，
+/// 靠近顶部时翻转到下方，左右越界自动收进屏内。
+class _VoiceMenuOverlay extends StatelessWidget {
+  const _VoiceMenuOverlay({
+    required this.anchor,
+    required this.hasTranscript,
+    required this.onDismiss,
+    required this.onTranscribe,
+    required this.onFavorite,
+    required this.onDelete,
+  });
+
+  final Offset anchor;
+  final bool hasTranscript;
+  final VoidCallback onDismiss;
+  final VoidCallback onTranscribe;
+  final VoidCallback onFavorite;
+  final VoidCallback onDelete;
+
+  static const Color _menuBg = Color(0xE6484848);
+  static const Color _menuFg = Color(0xFFE8E8EC);
+
+  @override
+  Widget build(BuildContext context) {
+    final Size screen = MediaQuery.sizeOf(context);
+    const double menuHeight = 58;
+    // 三项横排：每项约 64 宽 + 分隔线
+    const double menuWidth = 200;
+
+    double left = anchor.dx - menuWidth / 2;
+    left = left.clamp(8.0, screen.width - menuWidth - 8.0);
+
+    // 优先出现在手指/光标上方（微信语义），越顶翻到下方
+    double top = anchor.dy - menuHeight - 14;
+    final bool flipBelow = top < MediaQuery.paddingOf(context).top + 8;
+    if (flipBelow) top = anchor.dy + 14;
+    top = top.clamp(8.0, screen.height - menuHeight - 8.0);
+
+    Widget item({
+      required IconData icon,
+      required String label,
+      required VoidCallback onTap,
+      bool muted = false,
+    }) {
+      final Color color = muted ? _menuFg.withValues(alpha: 0.45) : _menuFg;
+      return GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: SizedBox(
+          width: menuWidth / 3,
+          height: menuHeight,
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon, size: 18, color: color),
+              const SizedBox(height: 3),
+              Text(
+                label,
+                style: TextStyle(fontSize: 11, color: color, decoration: TextDecoration.none),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    Widget divider() => Container(width: 1, height: 34, color: Colors.white.withValues(alpha: 0.15));
+
+    return Stack(
+      children: [
+        // 全屏屏障：点外部关闭
+        Positioned.fill(
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: onDismiss,
+            onLongPress: onDismiss,
+            onSecondaryTap: onDismiss,
+          ),
+        ),
+        Positioned(
+          left: left,
+          top: top,
+          child: Container(
+            width: menuWidth,
+            height: menuHeight,
+            decoration: BoxDecoration(
+              color: _menuBg,
+              borderRadius: BorderRadius.circular(10),
+              boxShadow: const [
+                BoxShadow(color: Color(0x66000000), blurRadius: 18, offset: Offset(0, 4)),
+              ],
+            ),
+            child: Row(
+              children: [
+                item(icon: Icons.notes, label: "转文字", onTap: onTranscribe, muted: !hasTranscript),
+                divider(),
+                item(icon: Icons.star_border, label: "收藏", onTap: onFavorite),
+                divider(),
+                item(icon: Icons.delete_outline, label: "删除", onTap: onDelete),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
   }
 }

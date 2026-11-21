@@ -49,7 +49,7 @@ function makeDeps(overrides?: {
     onConversationTurn: overrides?.onConversationTurn,
     frequencyGovernor: new FrequencyGovernor({
       ignoreEnv: true,
-      disableQuietHours: true,
+      
     }),
   };
   return { deps, signals, toolCalls };
@@ -132,7 +132,7 @@ test("频控：每日预算耗尽后全部拦截", async () => {
     executeTool: async () => ({ ok: true, result: {} }),
     frequencyGovernor: new FrequencyGovernor({
       ignoreEnv: true,
-      disableQuietHours: true,
+      
       dailyBudget: 1,
     }),
   });

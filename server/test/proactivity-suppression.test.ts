@@ -18,7 +18,7 @@ const ACTOR = "actor-suppression-test";
 // ── 1. 频控器新 kind 注册 ─────────────────────────────
 
 test("频控器：新场景 kind 注册与冷却配置", () => {
-  const governor = new FrequencyGovernor({ ignoreEnv: true, disableQuietHours: true });
+  const governor = new FrequencyGovernor({ ignoreEnv: true, });
 
   // weather_alert：预警类 30min 冷却（到期前拦截，30min 后放行）
   const t0 = new Date("2026-08-29T10:00:00");
@@ -174,7 +174,7 @@ function makeHubDeps(store: ProactivitySuppressionStore) {
       signals.push(s);
     },
     executeTool: async () => ({ ok: true, result: {} }),
-    frequencyGovernor: new FrequencyGovernor({ ignoreEnv: true, disableQuietHours: true }),
+    frequencyGovernor: new FrequencyGovernor({ ignoreEnv: true, }),
     suppressionStore: store,
   };
   return { deps, signals };

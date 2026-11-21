@@ -57,18 +57,11 @@ test("recentBurst 注入 → 突发熔断 batch", () => {
   assert.match(d.reason, /burst_breaker/);
 });
 
-test("静默时段: nowFn 落在 23 点 → defer（非必达）", () => {
+test("静默时段已移除：23 点不再 defer，正常走效用评估", () => {
   const s = svc({ nowFn: () => localAt(23) });
   const d = s.decide({ actorId: "a", kind: "k", importance: "medium" });
-  assert.equal(d.action, "defer");
-  assert.match(d.reason, /quiet_hours_defer/);
-});
-
-test("静默时段下 critical 仍直通（必达旁路优先于静默）", () => {
-  const s = svc({ nowFn: () => localAt(23) });
-  const d = s.decide({ actorId: "a", kind: "k", importance: "critical" });
-  assert.equal(d.action, "send_now");
-  assert.match(d.reason, /must_bypass/);
+  assert.notEqual(d.action, "defer");
+  assert.ok(!String(d.reason).includes("quiet_hours"));
 });
 
 test("urgency / beneficiary 覆盖进入价值分", () => {

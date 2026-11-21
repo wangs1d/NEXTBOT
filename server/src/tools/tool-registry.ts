@@ -41,6 +41,13 @@ export type KnownLocation = ClientLocationWire & { ageMs: number };
 
 export type ToolContext = {
   sessionId: string;
+  /**
+   * 连接权威身份（session.init 绑定的 actorId，WS 注册的键）。
+   * 与 userId / sessionId 二选一的「请求身份」不同：推 WS 事件必须用它，
+   * 否则工具上下文里的 userId 与连接注册键不一致时 trySend 静默失败
+   * （语音条「调用成功但没气泡」的根因之一）。由装配层显式注入，缺省回退旧行为。
+   */
+  actorId?: string;
   /** 稳定用户标识（优先）；与 `sessionId` 二选一由 {@link resolveActorId} 合并 */
   userId?: string;
   /** 触发本轮工具执行的 `chat.user_message.messageId`（发送方主会话），用于审计与中继关联 */

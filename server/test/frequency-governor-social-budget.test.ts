@@ -12,7 +12,7 @@ const NOON = new Date(2026, 10, 19, 12, 0, 0);
 function mkGov(opts: { daily?: number; social?: number } = {}): FrequencyGovernor {
   return new FrequencyGovernor({
     ignoreEnv: true,
-    disableQuietHours: true,
+    
     dailyBudget: opts.daily ?? 15,
     socialDailyBudget: opts.social ?? 4,
   });

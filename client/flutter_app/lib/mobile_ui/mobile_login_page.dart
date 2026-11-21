@@ -49,26 +49,13 @@ class MobileLoginPage extends StatefulWidget {
   State<MobileLoginPage> createState() => _MobileLoginPageState();
 }
 
-class _MobileLoginPageState extends State<MobileLoginPage>
-    with SingleTickerProviderStateMixin {
+class _MobileLoginPageState extends State<MobileLoginPage> {
   final EmailLoginApi _api = EmailLoginApi();
 
   // ── 品牌登录面固定黑白（对齐方案 C2 设计稿，与 App 主题解耦）──
   static const Color _textPrimary = Color(0xFFF2F2F2);
   static const Color _textSecondary = Color(0xFF9B9B9B);
   static const Color _textMuted = Color(0xFF5C5C5C);
-
-  /// 品牌位白色短线的呼吸动画（0.35 ↔ 0.9 透明度循环）。
-  late final AnimationController _breath = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 2600),
-  )..repeat(reverse: true);
-
-  @override
-  void dispose() {
-    _breath.dispose();
-    super.dispose();
-  }
 
   /// 打开认证卡片（登录 / 注册）。
   void _openAuthCard(_AuthMode mode) {
@@ -131,16 +118,14 @@ class _MobileLoginPageState extends State<MobileLoginPage>
                     ),
                   ),
                   const SizedBox(height: 8),
-                  FadeTransition(
-                    opacity:
-                        Tween<double>(begin: 0.35, end: 0.9).animate(_breath),
-                    child: Container(
-                      width: 22,
-                      height: 2,
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(999),
-                      ),
+                  // 品牌位白色短线：静态（用户 2026-11-21 定稿去掉呼吸动画，
+                  // 点开应用到登录页之间不做任何动画停留，直接到登录界面）。
+                  Container(
+                    width: 22,
+                    height: 2,
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.9),
+                      borderRadius: BorderRadius.circular(999),
                     ),
                   ),
                   // 中段大字口号（视觉锚点）

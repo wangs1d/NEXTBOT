@@ -1,9 +1,8 @@
 // 仲裁层（唯一决策口）：效用评估（声明了 utility 的提案）→ 保质期 → 负反馈抑制
-// → 静默择时 → 分层预算 → 在场择时。
+// → 分层预算 → 在场择时。
 // 纯规则零 LLM（LLM 只出现在 speak 话术生成与可选竞争仲裁），确定可测。
 import { deriveNotifyValue, evaluateActionUtility, isUtilityEvalEnabled, type ActionUtilityResult } from "./action-utility.js";
 import type { ArbitrationDecision, ProactiveProposal, PresenceState } from "./pipeline-types.js";
-import { isQuietHourNow, nextQuietEnd } from "./quiet-hours.js";
 
 export type GovernorVerdict = { allowed: boolean; reason: string };
 
@@ -24,8 +23,6 @@ export const CONVERSATION_DEFER_MS = 90_000;
 /** 投递竞态重试间隔（仲裁时在线、发送时已全部掉线 → 待发区保留稍后重试，重连即达） */
 export const DELIVERY_RETRY_MS = 30_000;
 
-// 静默时段统一收敛至 quiet-hours.ts（env 可配）；此处 re-export 保持既有导入兼容
-export { isQuietHourNow, nextQuietEnd, quietHourWindow as quietHoursWindow } from "./quiet-hours.js";
 
 export function arbitrate(p: ProactiveProposal, ctx: ArbiterContext): ArbitrationDecision {
   // 效用评估（方案 A/B，仲裁链最前面）：声明了 utility 的提案先过三分支判定。
@@ -64,25 +61,6 @@ export function arbitrate(p: ProactiveProposal, ctx: ArbiterContext): Arbitratio
       reasonChain: [...chain, `negative_feedback:${suppression.reason}`],
       utility: utilityResult,
     };
-  }
-  // 静默时段：critical/high 豁免（时效性事务——验证码 10 分钟作废、传票/逾期类，
-  // defer 到明早等于没提醒；与 governor「静默仅 high 放行」口径对齐，2026-10-01
-  // 修复：邮件提醒 high 被吞到早上 7 点、验证码全无效）。用户活跃（在设备前）
-  // 时的低/中打扰聊天气泡不算惊扰，照发；其余 medium/low defer 到静默结束
-  // （"没发"与"择机发"是两种体验）。
-  if (isQuietHourNow(new Date(ctx.now)) && p.importance !== "critical" && p.importance !== "high") {
-    const userAwake = ctx.presence === "active";
-    const lowKey = p.importance === "low" || p.importance === "medium";
-    if (!(userAwake && lowKey)) {
-      return {
-        proposal: p,
-        verdict: "deferred",
-        reasonChain: [...chain, "quiet_hours_defer_to_morning"],
-        deliverAfter: Math.max(nextQuietEnd(new Date(ctx.now)), p.deliverAfter ?? 0),
-        utility: utilityResult,
-      };
-    }
-    chain.push("quiet_hours_awake_low_key_bypass");
   }
   // 分层频控：must 层（用户点名要的事）绕过社交预算，不占社交配额
   if (p.tier === "social") {

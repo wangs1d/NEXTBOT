@@ -10,8 +10,11 @@ import type { TtsService } from "./tts-service.js";
  * 设计目标：
  *   1. **作为 Agent 底层能力**：与 socialFeedService 解耦，独立目录 `data/voice-messages/`。
  *   2. **可重播**：每个文件名 = `{actorId}/{msgId}.mp3`，客户端可通过 `GET /agent/voice/messages/:actorId/:msgId.mp3` 反复拉流。
- *   3. **时长估算**：mp3 CBR 下 size ÷ bitrate ≈ duration；bitrate 默认 24kbps（tts-1 模型约 32kbps，MiniMax 约 24kbps）。
- *      粗估够用，UI 只需展示秒数，不需要 ffprobe 级精度。
+ *   3. **时长**：优先使用 TtsService 逐帧解析出的真实时长（`synth.quality.metrics.durationS`）。
+ *      TtsService 在合成时已调用 `inspectMp3` 解出精确时长用于音质门禁，这里不能丢弃。
+ *      只有在质量报告缺失（旧的/降级 provider）时才按「实际码率」粗估。
+ *      ！不要用固定 4000 B/s 粗估：Breeze 输出 mp3_44100_128（128kbps≈16000 B/s），
+ *        固定 4000 B/s 会把 13 秒音频算成 54 秒——这正是「一句晚安 54 秒」的根因。
  *   4. **波形降级**：服务端不生成波形数据（避免解码 mp3），客户端可用静默 placeholder 渲染；
  *      用户端上传时由客户端采集 waveform 后随消息体一起发送。
  *
@@ -26,8 +29,12 @@ import type { TtsService } from "./tts-service.js";
  */
 export class VoiceMessageService {
   private readonly rootDir: string;
-  /** 默认 TTS mp3 比特率（字节/秒），用于时长粗估；tts-1 约 4KB/s = 32kbps。 */
-  private readonly estimatedBytesPerSecond = 4000;
+  /**
+   * 时长兜底粗估用的字节/秒。仅在 TtsService 没有质量报告时才会用到。
+   * 已按当前主力 Breeze 输出格式 mp3_44100_128 修正为 16000 B/s（128kbps），
+   * 不再是导致 4 倍虚高的 4000 B/s。若质量报告带 bitrateKbps，则优先按它计算。
+   */
+  private readonly fallbackBytesPerSecond = 16000;
 
   constructor(rootDir?: string) {
     // 默认 <server>/data/voice-messages/
@@ -72,7 +79,9 @@ export class VoiceMessageService {
     // 写盘
     writeFileSync(fullPath, synth.buffer);
 
-    const durationMs = estimateDurationMs(synth.buffer.length, this.estimatedBytesPerSecond);
+    // 时长口径统一：优先用逐帧解码出的真实时长，退化路径按"实际码率"估算，
+    // 绝不再用固定 4000 B/s（会把 13s 音频虚报成 54s）。
+    const durationMs = resolveDurationMs(synth.buffer.length, synth.quality, this.fallbackBytesPerSecond);
     const mediaUrl = `/agent/voice/messages/${safeActor}/${fileName}`;
 
     return {
@@ -110,7 +119,8 @@ export class VoiceMessageService {
 
     writeFileSync(fullPath, buffer);
 
-    const finalDurationMs = durationMs ?? estimateDurationMs(buffer.length, this.estimatedBytesPerSecond);
+    const finalDurationMs =
+      durationMs ?? estimateDurationMs(buffer.length, this.fallbackBytesPerSecond);
     const mediaUrl = `/agent/voice/messages/${safeActor}/${fileName}`;
 
     return { ok: true, mediaUrl, msgId, durationMs: finalDurationMs };
@@ -149,7 +159,35 @@ function sanitizeActorId(actorId: string): string {
   return cleaned || "anonymous";
 }
 
-/** 根据文件大小与估算比特率粗估时长（毫秒）。 */
+/** TtsService 合成结果里与时长相关的子集（解耦，便于单测注入）。 */
+type QualityLike = { metrics?: Record<string, number> } | undefined;
+
+/**
+ * 统一时长解析（毫秒）：
+ *   1. 质量报告里的 durationS 是 inspectMp3 逐帧累加 samplesPerFrame/sampleRate 的
+ *      真实时长——精度到毫秒，直接换算，杜绝码率假设带来的成倍误差；
+ *   2. 无真实时长时，按质量报告给出的 bitrateKbps 推算每秒字节数；
+ *   3. 都没有才用兜底常量（已按当前主力 128kbps 输出修正）。
+ */
+function resolveDurationMs(
+  bufferLength: number,
+  quality: QualityLike,
+  fallbackBytesPerSecond: number,
+): number {
+  const metrics = quality?.metrics;
+  const realSeconds = metrics?.durationS;
+  if (typeof realSeconds === "number" && Number.isFinite(realSeconds) && realSeconds > 0) {
+    return Math.max(1, Math.round(realSeconds * 1000));
+  }
+  const bitrateKbps = metrics?.bitrateKbps;
+  const bytesPerSecond =
+    typeof bitrateKbps === "number" && Number.isFinite(bitrateKbps) && bitrateKbps > 0
+      ? (bitrateKbps * 1000) / 8
+      : fallbackBytesPerSecond;
+  return estimateDurationMs(bufferLength, bytesPerSecond);
+}
+
+/** 根据文件大小与估算比特率粗估时长（毫秒，仅在无逐帧时长时用）。 */
 function estimateDurationMs(fileSizeBytes: number, bytesPerSecond: number): number {
   if (fileSizeBytes <= 0 || bytesPerSecond <= 0) return 0;
   const seconds = fileSizeBytes / bytesPerSecond;

@@ -63,7 +63,7 @@ function makeHarness(opts: { online?: boolean; pushEnabled?: boolean } = {}) {
   const pushes: PushCall[] = [];
   pipeline = new ProactivePipeline({
     dataPath: dir,
-    governor: new FrequencyGovernor({ ignoreEnv: true, disableQuietHours: true, dailyBudget: 100 }),
+    governor: new FrequencyGovernor({ ignoreEnv: true, dailyBudget: 100 }),
     suppression: { isSuppressed: () => ({ suppressed: false, reason: "" }) },
     presence,
     delivery: new ProactiveDeliveryService({

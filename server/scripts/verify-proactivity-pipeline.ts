@@ -21,7 +21,7 @@ const results: Array<{ scenario: string; verdict: string; chain: string; ok: boo
 
 const dir = mkdtempSync(join(tmpdir(), "verify-proactive-"));
 const presence = new PresenceService();
-const governor = new FrequencyGovernor({ ignoreEnv: true, disableQuietHours: true });
+const governor = new FrequencyGovernor({ ignoreEnv: true, });
 const delivered: string[] = [];
 const spoken: string[] = [];
 const pushes: Array<{ actorId: string; title: string; body: string }> = [];

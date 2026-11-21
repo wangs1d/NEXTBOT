@@ -124,6 +124,16 @@ export async function textsearchViaDidi(
     );
     if (!res.ok) return null;
     const parsed = parseJsonLoose(res.result) as Record<string, unknown> | null;
+    // 滴滴 MCP 是 HTTP 200 但业务体带错误码（如 city="兴义市" → CITY_NOT_FOUND）。
+    // 不能只看 res.ok，否则业务失败会被当成「搜不到目的地」的失败假象。
+    if (parsed && !Array.isArray(parsed) && typeof parsed.code === "string" &&
+        !/^0$|success/i.test(parsed.code)) {
+      return null;
+    }
+    if (parsed && !Array.isArray(parsed) && typeof parsed.status === "string" &&
+        !/^0$|success/i.test(parsed.status)) {
+      return null;
+    }
     const pois: Array<Record<string, unknown>> = Array.isArray(parsed)
       ? (parsed as Array<Record<string, unknown>>)
       : Array.isArray((parsed as { pois?: unknown })?.pois)

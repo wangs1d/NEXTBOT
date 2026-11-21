@@ -225,6 +225,7 @@ import { CodeSandboxService } from "../services/code-sandbox-service.js";
 import { ShoppingOrderService } from "../services/shopping-order-service.js";
 import { ShoppingOrderStore } from "../services/shopping-order-store.js";
 import { ShoppingCompareService } from "../services/shopping-compare-service.js";
+import { buildToolCard } from "../services/tool-card-registry.js";
 import { recordShoppingDecisionPage } from "../services/shopping-decision-store.js";
 import { AgentBrowserService } from "../services/agent-browser-service.js";
 import {
@@ -1128,6 +1129,30 @@ export async function createAppServices(
     dataDir: join(getDataDir(), "shopping"),
     // 云端浏览器取回的真实主图落本机（手机端只跟自己的服务端取图）
     imageStore: imageGenerationService,
+    // 登录自动闭环（2026-11-21）：后台检测到扫码登录成功 → 自动续跑比价 →
+    // 把比价卡主动推给用户，不必回来点「我扫好了 / 继续比价」。
+    // synapseBus 在启动后段（3385/4306）赋值，poll 是异步 tick，届时已就绪。
+    onLoginAutoReady: (actorId, sessionId, result) => {
+      const card = buildToolCard("shopping.compare.prices", result);
+      if (!card) return;
+      const bus = synapseBus;
+      const payload = {
+        type: "agent.shopping_auto_ready",
+        payload: {
+          title: "比价好了",
+          text: "登录搞定，我把这几个平台的价格一起比好了——",
+          card,
+          messageId: `shopping-auto-${sessionId}-${Date.now()}`,
+        },
+      };
+      if (bus) {
+        void bus.sendToUser(actorId, payload);
+      } else {
+        // 总线尚未装配（启动早期）：直推 WS 兜底，不丢结果
+        wsConnectionRegistry.trySend(actorId, JSON.stringify(payload));
+      }
+      console.log(`[ShoppingCompare] 登录自动闭环：已向 ${actorId} 推送比价结果卡`);
+    },
   });
   // 初始化 Agent 通用网页操作服务（有状态会话池，通用网页多步操作：open/click/type/scroll/screenshot/extract_text/wait_for/close）。
   // 执行层复用通用浏览器层：内置浏览器优先；撞登录墙/验证码时走通用 human handoff。
@@ -1547,7 +1572,7 @@ export async function createAppServices(
     );
     registerAgentPhoneTools(toolRegistry, virtualPhoneService, reachDecisionService);
   }
-  registerAgentVoiceTools(toolRegistry, voiceCapabilityService, reachDecisionService);
+  registerAgentVoiceTools(toolRegistry, voiceCapabilityService);
   // task.dispatch（2026-09-05 前后台架构）：前台派后台任务原语。launch 晚绑定——
   // 工具注册发生在 registry 装配期（agentCore 尚未创建），agentCore 就绪后接上。
   const taskDispatchLauncherRef: {
@@ -5023,7 +5048,7 @@ export async function createAppServices(
 
   // ─── ProactivityHub 主动性多元化模块装配 ───
   // 多元触发（对话关怀/任务恭喜/待办闭环/过劳干预/问候）+ 全局频控
-  // （FrequencyGovernor：每日预算 + 分 kind 冷却 + 静默时段）+ 两种行为模式：
+  // （FrequencyGovernor：每日预算 + 分 kind 冷却）+ 两种行为模式：
   //   speak → LifeSignalHub 发布 → BrainCenter.decide → ProactionCortex 既有闭环
   //   act   → 白名单工具静默后台执行（media/calendar/smart_home，无删除类）
   // （advise 模式已随 AdviceStore 死代码一并移除：advise 请求统一改道 speak）
@@ -5763,7 +5788,7 @@ export async function createAppServices(
 
   // 主动性模块的消息聚合开口（2026-10-25 取代 digest_beat 固定节拍「心跳回顾」）：
   // 聚合同一批程序数据（日程/课表/未读/就绪目标/关注话题/活动目标，**不含天气**——
-  // 天气归晚间 digest 的明日预告），材料有新增且过了打扰闸（静默时段/最小间隔/
+  // 天气归晚间 digest 的明日预告），材料有新增且过了打扰闸（最小间隔/
   // 每日上限/负反馈抑制）才调一次 LLM 审阅；agent 判断值得说才产出一条无标题的
   // 普通主动消息（NOP = 沉默）。确定性闸门在前省 token，投递继承统一管道全部语义
   // （去重/静默择时/离线挂起重连补投/频控记账）。
@@ -6900,7 +6925,7 @@ export async function createAppServices(
 
   // L3 排期与开口（2026-10-19）：内省引擎此前只在 HTTP 查询时被动读，闲置衰减/
   // 过期/复核的副作用在生产从不发生。这里补上"谁在夜里调它、结果怎么开口"：
-  // 每晚 3 点跑一遍，finding → proactivityHub.submitIntent（频控/静默时段/负反馈
+  // 每晚 3 点跑一遍，finding → proactivityHub.submitIntent（频控/负反馈
   // 抑制由那条管道统一处理，不新增闸门）。GOAL_NIGHTLY=0 关。
   const goalNightly = new GoalNightlyJob({
     introspector: goalIntrospector,

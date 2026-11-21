@@ -56,7 +56,7 @@ function makeHarness(opts: {
 } = {}): Harness {
   const dir = mkdtempSync(join(tmpdir(), "proactive-gate-"));
   const presence = new PresenceService();
-  const governor = new FrequencyGovernor({ ignoreEnv: true, disableQuietHours: true, dailyBudget: 20 });
+  const governor = new FrequencyGovernor({ ignoreEnv: true, dailyBudget: 20 });
   const delivered: Harness["delivered"] = [];
   const inbox: Harness["inbox"] = [];
   const outcomes = new OutcomeStore(join(dir, "outcomes.json"));

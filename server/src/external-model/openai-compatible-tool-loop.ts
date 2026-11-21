@@ -46,6 +46,7 @@ import { BROWSER_SESSION_LIST_CHAT_TOOL } from "../tools/browser-session-chat-to
 import {
   COMPOSITE_ABSORBED_TOOL_NAMES,
   COMPOSITE_CHAT_TOOLS,
+  DIRECTLY_EXPOSED_COMPOSITE_TOOLS,
   resolveEffectiveToolName,
 } from "./composite-chat-tools.js";
 import { INTEREST_WATCH_CHAT_TOOLS } from "../tools/interest-watch-tools.js";
@@ -1180,7 +1181,14 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
     ].filter((tool) => {
       const name = tool.type === "function" ? tool.function?.name ?? "" : "";
       // 已被复合工具收编的细分入口不再暴露；agent_quick 属注册占位，一并隐藏。
-      return !COMPOSITE_ABSORBED_TOOL_NAMES.has(name) && name !== "world.open_registry.agent_quick";
+      // 语音细分工具例外：必须让模型直接看到 voice.send_message（发气泡）与
+      // voice.speak（无 UI 播报）的精确语义，否则「用语音说晚安」会漏填复合 action
+      // 而落到默认 speak，表现为「工具调了但没有语音条」。
+      return (
+        (!COMPOSITE_ABSORBED_TOOL_NAMES.has(name) ||
+          DIRECTLY_EXPOSED_COMPOSITE_TOOLS.has(name)) &&
+        name !== "world.open_registry.agent_quick"
+      );
     }),
     ...COMPOSITE_CHAT_TOOLS,
   ];

@@ -8,7 +8,7 @@
 // 本模块管「要不要现在打扰」这个更前置的问题；两个都过才真正发出去。
 // ReachRouter（通道升级）与 AttentionStore（台账/ack 归一）保持不变。
 import { ALERT_COST_BASE } from "./cost-calibrator.js";
-import { isQuietHourNow, nextQuietEnd, isQuietHour } from "./quiet-hours.js";
+import { isQuietHour } from "./quiet-hours.js";
 import type { PresenceService } from "./presence-service.js";
 import type { ScreenFocusKind } from "./sensors/types.js";
 
@@ -83,7 +83,6 @@ export const COST_WEIGHTS = {
   terminal: 3,
   idle: 0,
   absent: 0,
-  lateNight: 3,
   /** (1 - receptivity) 的放大系数 */
   receptivityAmp: 2,
   /** 每次 recentBurst 的边际成本 */
@@ -121,7 +120,8 @@ export function interruptCost(s: ContextSnapshot): number {
   if (s.nextEventMin !== null && s.nextEventMin >= 0 && s.nextEventMin <= 10) {
     cost += COST_WEIGHTS.meetingSoonMin;
   }
-  if (s.quietHours) cost += COST_WEIGHTS.lateNight;
+  // 禁音时段已移除（2026-11-20）：深夜不再加权。s.quietHours 字段保留，
+  // 仅用于 pause 跃迁检测（静默结束 → 早晨回归是开口时机，不是限制）。
   cost += (1 - clamp01(s.receptivity)) * COST_WEIGHTS.receptivityAmp;
   cost += s.recentBurst * COST_WEIGHTS.burst;
   return Math.max(0, Math.min(10, Math.round(cost * 10) / 10));
@@ -420,13 +420,8 @@ export class ArbiterV2 {
   ): void {
     const ttl =
       input.urgency === "alert" ? PARK_TTL.alert : input.urgency === "normal" ? PARK_TTL.normal : 3600_000;
-    let expireAt = now + ttl;
-    // 静默时段挂起的事件留到静默结束（对齐管道 quiet_hours defer 语义）：
-    // 晚上理好的事早上说，而不是 2h 后悄悄作废。加 30min 宽限：正好卡在
-    // 静默结束点过期的挂起项会在晨间 pause 放行前一瞬被清掉（实测踩过）
-    if (isQuietHourNow(new Date(now))) {
-      expireAt = Math.max(expireAt, nextQuietEnd(new Date(now)) + 30 * 60_000);
-    }
+    // 禁音时段 TTL 延长已移除（2026-11-20）：挂起项一律按标准保质期。
+    const expireAt = now + ttl;
     this.parked.push({
       id: input.id,
       actorId: input.actorId,

@@ -10,9 +10,13 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : FlutterActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // Android 12+ 系统启动画面：图标位已是透明占位、图标动画时长归零。
-        // 这里再去掉系统默认的退出淡出——app 首帧（N 光扫）一画出来就立刻
-        // 接管屏幕，前一层连图标带停留/过渡时间整体不出现。
+        // Android 12+ 系统启动画面 = 主流 hold splash 的载体，不是要「秒关」：
+        // Dart 侧已把会话读盘挪到 runApp 之前 await，这段等待期间系统 splash
+        // 一直 hold（纯 #161616，与登录页/N 光扫同色）。本回调的触发时机恰好
+        // 是 Flutter 首帧绘制完成——那时 main() 已决议完 StartupOutcome，首帧
+        // 就是最终目标页（登录页或主壳+N 光扫）。此刻 remove() 即「hold 到路由
+        // 决议完成再释放」，splash → 目标页无缝衔接，无空白、无闪帧。
+        // 图标位透明占位、动画时长归零：前一层不带图标/停留/淡出。
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             splashScreen.setOnExitAnimationListener { splashScreenView ->
                 splashScreenView.remove()

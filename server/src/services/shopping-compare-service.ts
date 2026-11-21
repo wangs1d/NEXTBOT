@@ -138,6 +138,20 @@ export interface PendingCompareSession {
 
 /** 待登录会话的存活时长：二维码本身约 2–5 分钟失效，给 20 分钟余量够用户从容处理。 */
 const PENDING_COMPARE_TTL_MS = 20 * 60 * 1000;
+/**
+ * 登录自动检测的轮询间隔（2026-11-21，默认 5s）。
+ * 每次 tick 对未交付的待登录会话读一次实时 Cookie，判到就自动续跑比价。
+ * 5s 是体感（用户扫码确认后几秒内就开始出价）与开销的折中；可用
+ * SHOPPING_LOGIN_AUTO_POLL_MS 覆盖，设为 0 关闭自动检测（退回手动点按钮）。
+ */
+const LOGIN_AUTO_POLL_MS = readEnvInt("SHOPPING_LOGIN_AUTO_POLL_MS", 5_000);
+/**
+ * 「刚自动交付过」的宽限窗（2026-11-21）：比价卡已经主动推给用户后，
+ * pending 会话被删，用户若又点了旧登录卡上的「我扫好了 / 继续比价」，
+ * 不该报「会话过期」误导他以为比价失败——在这个窗口内改说结果已在对话流。
+ * 比二维码 TTL（20min）再留 10min，覆盖用户扫完隔一会儿回来看旧卡的场景。
+ */
+const AUTO_DELIVER_GRACE_MS = 30 * 60 * 1000;
 
 /** 一条降价监控 */
 export interface PriceWatch {
@@ -201,6 +215,17 @@ export interface ShoppingCompareServiceDeps {
     actorId: string,
     payload: CompareResult & { fetchedAt: number },
   ) => string | null | void;
+  /**
+   * 登录自动检测命中后的结果交付回调（2026-11-21）。
+   * 后台轮询检测到待登录比价会话已就绪 → 自动续跑比价 → 把结果卡主动推给用户，
+   * 用户不必回来点「我扫好了 / 继续比价」。装配层负责 buildToolCard + 主动推送
+   * （SynapseBus.sendToUser，离线降级）。回调异常/未注入不影响比价主流程。
+   */
+  onLoginAutoReady?: (
+    actorId: string,
+    sessionId: string,
+    result: Record<string, unknown>,
+  ) => void | Promise<void>;
   /** 测试注入时钟 */
   now?: () => number;
   /**
@@ -454,9 +479,19 @@ export class ShoppingCompareService {
   private readonly clock: () => number;
   private onPriceAlert: ShoppingCompareServiceDeps["onPriceAlert"];
   private onCompareResult: ShoppingCompareServiceDeps["onCompareResult"];
+  private onLoginAutoReady: ShoppingCompareServiceDeps["onLoginAutoReady"];
   private loaded = false;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private loginWatchTimer: ReturnType<typeof setInterval> | null = null;
   private started = false;
+  /** 已自动续跑过的待登录会话 id（去重：一轮只自动交付一次） */
+  private readonly autoResumed = new Set<string>();
+  /**
+   * 最近已交付比价的 actor → 交付时刻/查询（2026-11-21）。
+   * 只用于按钮兜底话术：pending 删掉后旧卡仍在聊天里，用户再点不能说「过期」。
+   * 新一轮 rememberPendingCompare 会清掉旧标记，避免把新一轮误判成已交付。
+   */
+  private readonly autoDelivered = new Map<string, { at: number; query: string }>();
   /** 比价单平台超时由 searchProduct 控制；并行平台数上限防滥用 */
   private readonly maxPlatforms = readEnvInt("SHOPPING_COMPARE_MAX_PLATFORMS", 4);
   /** 缺省轮首次比价的登录探测平台数：一次做齐多平台登录建档（2026-11-12）。 */
@@ -486,6 +521,7 @@ export class ShoppingCompareService {
     this.clock = deps.now ?? Date.now;
     this.onPriceAlert = deps.onPriceAlert;
     this.onCompareResult = deps.onCompareResult;
+    this.onLoginAutoReady = deps.onLoginAutoReady;
   }
 
   /** 到价回调（装配层晚接线；构造时也可注入。晚于构造是因为 ProactivityHub 后创建） */
@@ -1485,7 +1521,22 @@ export class ShoppingCompareService {
       expiresAt: now + PENDING_COMPARE_TTL_MS,
     };
     this.pendingCompares.set(this.pendingKey(actorId), session);
+    // 新一轮开始：上一轮的「已交付」标记作废，免得按钮话术把新一轮误判成已交付
+    this.autoDelivered.delete(actorId);
     return session;
+  }
+
+  /**
+   * 最近是否刚交付过比价结果（2026-11-21，给卡内旧按钮兜底话术用）。
+   *
+   * 自动检测交付后 pending 会话被删，用户若回头点旧登录卡上的
+   * 「我扫好了 / 继续比价」，resume 会走「会话过期」——那是误导：
+   * 结果其实已经主动推到对话流了。这里给调用方一个确定性的判据，
+   * 让它改说「已经比好了，往下翻看结果」。
+   */
+  wasRecentlyAutoDelivered(ctx: ToolContext): boolean {
+    const rec = this.autoDelivered.get(resolveActorId(ctx));
+    return !!rec && this.clock() - rec.at <= AUTO_DELIVER_GRACE_MS;
   }
 
   /**
@@ -1577,17 +1628,39 @@ export class ShoppingCompareService {
     opts: { skipPending?: boolean } = {},
   ): Promise<
     | { ok: true; result: Record<string, unknown> }
-    | { ok: false; error: string; stillWaiting?: boolean }
+    | { ok: false; error: string; stillWaiting?: boolean; alreadyDelivered?: boolean }
   > {
     const session = this.getPendingCompare(ctx);
     if (!session) {
+      // 2026-11-21：自动检测已经把结果推给过用户了——旧卡上的按钮再点
+      // 不能说「过期」（用户会以为比价失败）。如实告诉他结果已交付。
+      if (this.wasRecentlyAutoDelivered(ctx)) {
+        return {
+          ok: false,
+          error: "这轮比价已经给你了——往下翻看刚推给你的结果卡；没看到的话回一句「继续比价」，我重新比一轮。",
+          alreadyDelivered: true,
+        };
+      }
       return { ok: false, error: "这次比价的登录会话已经过期了，重新说一次要比的东西就行" };
     }
-    // 哪些平台现在真的登录好了（以已授权 Cookie 为准）
-    const loginReady = await this.deps.shoppingOrderService
-      .listPlatformsWithCookies(session.actorId, session.loginPlatforms)
-      .catch(() => [] as string[]);
-    const readySet = new Set(loginReady);
+    // 哪些平台现在真的登录好了。
+    // 2026-11-21 根修「扫码成功又说没登录」：这里原来只查库
+    // （listPlatformsWithCookies），但用户扫码后 Cookie 只落在常驻浏览器 context
+    // 里、consent=allow 才会落库；于是「我扫好了」判 ready、这里又判没登录，
+    // 两处口径打架。改成复用 checkMultiPlatformLogin——它已包含
+    // 库 Cookie + context 实时 Cookie + 留驻页 URL 逃逸三路判定，且判到会
+    // 在授权前提下顺手落库，是登录态的唯一真相源（card-action 也走它）。
+    let readyPlatforms: string[] = [];
+    try {
+      const checked = await this.deps.shoppingOrderService.checkMultiPlatformLogin(
+        ctx,
+        session.loginPlatforms,
+      );
+      readyPlatforms = checked?.ready ?? [];
+    } catch {
+      readyPlatforms = [];
+    }
+    const readySet = new Set(readyPlatforms);
     // 仍需登录的（用户没扫 / 没扫成功）——它们不打断整轮，但要如实进清单
     let stillNeedLogin = session.loginPlatforms.filter(
       (p) => !readySet.has(p) && !session.skipped.includes(p),
@@ -1627,9 +1700,92 @@ export class ShoppingCompareService {
         error: String((result as { error?: unknown }).error ?? "比价没跑通"),
       };
     }
-    // 本轮已交付：从待登录会话里摘掉（避免下一轮误续跑）
+    // 本轮已交付：从待登录会话里摘掉（避免下一轮误续跑），并留下「刚交付」
+    // 标记——旧登录卡上的按钮再点时据此给正确话术，而不是「会话已过期」。
     this.pendingCompares.delete(this.pendingKey(session.actorId));
+    this.autoDelivered.set(session.actorId, { at: this.clock(), query: session.query });
     return { ok: true, result: result as unknown as Record<string, unknown> };
+  }
+
+  // ---- 登录自动检测（2026-11-21）：推完码后台守着，登录成功自动续跑交付 ----
+
+  /**
+   * 一轮后台登录检测 tick（由短周期定时器调用，测试可直接调用）。
+   *
+   * 设计纪律（对齐 Muse / 主流 agent 的「用户处理完就自动接着跑」）：
+   *  - 零 LLM、零用户点击：只用确定性 Cookie 判定 + 已有续跑函数。
+   *  - 每轮 pending 会话只自动交付一次（autoResumed 去重），失败会在下一
+   *    tick 重试（比如 Cookie 还没同步过来），直到会话过期。
+   *  - 「全部就绪」才自动交付；只扫了一部分时继续等，不交半成品
+   *    （用户要的是一次性完整比价，不是京东先给一版淘宝再补）。
+   *  - 会话内所有待登录平台都被用户手动跳过了 → 也自动交付（不阻塞）。
+   *
+   * 返回本次自动交付的会话数（测试/观测用）。
+   */
+  async pollPendingLogins(nowMs: number = this.clock()): Promise<number> {
+    if (LOGIN_AUTO_POLL_MS <= 0) return 0;
+    // 顺手清掉过期的「刚交付」标记，避免长跑进程里 Map 无限增长
+    for (const [actor, rec] of Array.from(this.autoDelivered.entries())) {
+      if (nowMs - rec.at > AUTO_DELIVER_GRACE_MS) this.autoDelivered.delete(actor);
+    }
+    if (this.pendingCompares.size === 0) return 0;
+    let delivered = 0;
+    for (const [key, session] of Array.from(this.pendingCompares.entries())) {
+      if (nowMs > session.expiresAt) {
+        this.pendingCompares.delete(key);
+        this.autoResumed.delete(session.id);
+        continue;
+      }
+      if (this.autoResumed.has(session.id)) continue;
+      const ctx: ToolContext = { sessionId: session.sessionId, userId: session.actorId };
+      try {
+        // 需要登录的 = 待登录清单里还没被跳过的
+        const needed = session.loginPlatforms.filter((p) => !session.skipped.includes(p));
+        if (needed.length === 0) {
+          // 用户把所有待登录平台都跳过了 → 直接续跑（只比其余平台）
+          const resumed = await this.resumeCompareAfterLogin(ctx, { skipPending: true });
+          if (resumed.ok) {
+            this.autoResumed.add(session.id);
+            await this.deliverAutoResult(session, resumed.result);
+            delivered += 1;
+          } else if (resumed.stillWaiting) {
+            continue;
+          } else {
+            // 真失败（不是「还在等」）：标记去重，避免每 5s 刷一条错误
+            this.autoResumed.add(session.id);
+          }
+          continue;
+        }
+        const checked = await this.deps.shoppingOrderService.checkMultiPlatformLogin(ctx, needed);
+        const readySet = new Set(checked.ready ?? []);
+        const allReady = needed.every((p) => readySet.has(p));
+        if (!allReady) continue; // 还有没扫的，继续等
+        const resumed = await this.resumeCompareAfterLogin(ctx);
+        if (!resumed.ok) {
+          if (resumed.stillWaiting) continue;
+          this.autoResumed.add(session.id);
+          continue;
+        }
+        this.autoResumed.add(session.id);
+        await this.deliverAutoResult(session, resumed.result);
+        delivered += 1;
+      } catch (err) {
+        console.log(`[ShoppingCompare] 登录自动检测失败（下轮重试）: ${err}`);
+      }
+    }
+    return delivered;
+  }
+
+  private async deliverAutoResult(
+    session: PendingCompareSession,
+    result: Record<string, unknown>,
+  ): Promise<void> {
+    if (!this.onLoginAutoReady) return;
+    try {
+      await this.onLoginAutoReady(session.actorId, session.sessionId, result);
+    } catch (err) {
+      console.log(`[ShoppingCompare] 自动续跑结果交付失败: ${err}`);
+    }
   }
 
   // ---- 服务/保险类调研比价（shopping.compare.research 工具） ----
@@ -1687,13 +1843,26 @@ export class ShoppingCompareService {
       });
     }, this.watchTickMs);
     this.timer.unref?.();
-    console.log(`[ShoppingCompare] 降价监控已启动（tick=${Math.round(this.watchTickMs / 60000)}min，监控数=${this.watches.size}）`);
+    // 登录自动检测（2026-11-21）：短周期 tick，独立定时器（降价监控是 60min）。
+    if (LOGIN_AUTO_POLL_MS > 0) {
+      this.loginWatchTimer = setInterval(() => {
+        void this.pollPendingLogins().catch((err) => {
+          console.log(`[ShoppingCompare] 登录自动检测 tick 失败（忽略）: ${err}`);
+        });
+      }, LOGIN_AUTO_POLL_MS);
+      this.loginWatchTimer.unref?.();
+    }
+    console.log(`[ShoppingCompare] 降价监控已启动（tick=${Math.round(this.watchTickMs / 60000)}min，监控数=${this.watches.size}）；登录自动检测=${LOGIN_AUTO_POLL_MS > 0 ? `${LOGIN_AUTO_POLL_MS}ms` : "off"}`);
   }
 
   stop(): void {
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
+    }
+    if (this.loginWatchTimer) {
+      clearInterval(this.loginWatchTimer);
+      this.loginWatchTimer = null;
     }
     this.started = false;
   }

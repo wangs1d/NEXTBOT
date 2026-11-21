@@ -15,8 +15,6 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSy
 import { dirname, join } from "node:path";
 
 import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
-import { isQuietHourNow } from "./arbiter.js";
-
 /** 通话后 LLM 口语回复函数（bootstrap 注入 externalChat 薄包装） */
 export type CallTurnLlm = (history: Array<{ role: "system" | "user" | "assistant"; content: string }>) => Promise<string>;
 
@@ -77,10 +75,7 @@ export class ProactiveCaller {
   /** 该 kind 现在是否允许打电话（确定性策略，零 LLM） */
   canCallNow(kind: string, importance: string, now = new Date(this.nowFn())): { allowed: boolean; reason: string } {
     if (process.env.PROACTIVE_CALL_ENABLED === "0") return { allowed: false, reason: "kill_switch" };
-    // 静默时段只有 critical 唤醒（半夜来电只留给真正紧急的事）
-    if (isQuietHourNow(now) && importance !== "critical") {
-      return { allowed: false, reason: "quiet_hours" };
-    }
+    // 禁音时段限制已移除（2026-11-20）：深夜来电不再按时段拦截，仍受 kill_switch + kind 冷却约束
     const last = this.kindLastAt.get(kind);
     const cooldown = CALL_COOLDOWN_MS[kind] ?? CALL_COOLDOWN_MS.default;
     if (last !== undefined && this.nowFn() - last < cooldown) {

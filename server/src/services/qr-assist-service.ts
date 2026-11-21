@@ -246,8 +246,10 @@ export class QrAssistService {
                 ...(s.qrLinkFallback ? { qrLinkFallback: s.qrLinkFallback } : {}),
                 ...(s.dims ? { width: s.dims.width, height: s.dims.height } : {}),
               })),
-              note: meta.caption ?? "用对应平台的 App 扫下面任意一个码，扫完我会自动继续比价",
-              primaryLabel: "我扫好了",
+              note: meta.caption ?? "用对应平台的 App 扫一扫下面的码确认登录（拼多多请从相册选码）——扫完不用点，我会自动检测并接着比价",
+              // 主按钮降级为兜底：服务端后台会自动检测登录并续跑，用户不必点。
+              // 保留按钮让想即时触发的用户仍可点，文案如实说明「不点也行」。
+              primaryLabel: "我扫好了（不点也行）",
               secondaryLabel: "先不比了",
               primaryAction: "shopping.login.check",
               secondaryAction: "local.dismiss",
@@ -377,16 +379,16 @@ export function toAppLaunchLink(
         )}`,
       };
     case "pdd":
-      // 拼多多扫码登录的码内容是
+      // 拼多多**不返回深链**（2026-11-21 用户实测定稿）。码内容是
       // https://mobile.yangkeduo.com/down_scan.html?secret_key=…&pdd_biz_scene=AUTH_LOGIN
-      // （云端实测解码所得）。App 的 scheme 支持「宿主 + 原样 https 路径」：
-      //   pinduoduo://com.xunmeng.pinduoduo/https://mobile.yangkeduo.com/…
-      // 直接开 https 只会落到「打开拼多多APP」下载页（真机事故），所以两个
-      // 候选都是 App scheme，浏览器不作为兜底。
-      return {
-        link: `pinduoduo://com.xunmeng.pinduoduo/${text}`,
-        fallback: `pddopen://?h5Url=${encodeURIComponent(text)}`,
-      };
+      // ——这是「扫完码后的落地页」，不是登录确认页。无论用
+      // pinduoduo:// 宿主还是 pddopen:// 包它，真机都只落到下载页或首页，
+      // 到不了确认界面（用户原话「这条路是死的」）。拼多多的登录确认只能由
+      // App 内「扫一扫」识别二维码触发，这是平台安全设计，绕不过。
+      // 返回 null → 客户端不跳 App，直接把码存相册，提示用户
+      // 「打开拼多多 → 扫一扫 → 从相册选这张码 → 确认」，服务端同时后台
+      // 自动检测登录态，检测到就自动续跑比价（不再依赖点按钮）。
+      return null;
     default:
       return null;
   }

@@ -40,7 +40,7 @@ function makeHarness() {
   const presence = new PresenceService();
   const escalations: Array<{ proposal: ProactiveProposal; deliveryId: string }> = [];
   const delivered: string[] = [];
-  const governor = new FrequencyGovernor({ ignoreEnv: true, disableQuietHours: true });
+  const governor = new FrequencyGovernor({ ignoreEnv: true, });
   const pipeline = new ProactivePipeline({
     dataPath: dir,
     governor,

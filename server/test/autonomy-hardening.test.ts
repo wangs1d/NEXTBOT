@@ -297,7 +297,7 @@ function makeHub(overrides?: { autonomyLevel?: (actorId: string) => number; conf
       return { ok: true, result: {} };
     },
     pendingConfirmations: confirmations,
-    frequencyGovernor: new FrequencyGovernor({ disableQuietHours: true, ignoreEnv: true }),
+    frequencyGovernor: new FrequencyGovernor({ ignoreEnv: true }),
     ...(overrides?.autonomyLevel ? { autonomyLevel: overrides.autonomyLevel } : {}),
   } as ConstructorParameters<typeof ProactivityHub>[0]);
   return { hub, executed, spoken, confirmations };
@@ -420,7 +420,7 @@ test("AutonomySettingsStore：等级与勿扰读写、持久化", () => {
 });
 
 test("governor 勿扰前置闸：medium/low 沉默，high 放行", () => {
-  const g = new FrequencyGovernor({ disableQuietHours: true, ignoreEnv: true });
+  const g = new FrequencyGovernor({ ignoreEnv: true });
   g.setDndCheck(() => true);
   assert.equal(g.canTrigger("u1", "life_reminder", "low").allowed, false);
   assert.equal(g.canTrigger("u1", "life_reminder", "medium").reason, "dnd_active");

@@ -7,6 +7,7 @@ import type { ShoppingCompareService } from "../../services/shopping-compare-ser
 import type { PaymentService } from "../../services/payment-service.js";
 import type { BookingService } from "../../services/booking/booking-service.js";
 import { BROWSER_SESSION_SITES } from "../../services/browser-session-sites.js";
+import { getLoginCookieMarkerNames } from "../../services/browser-runtime/index.js";
 import { buildToolCard } from "../../services/tool-card-registry.js";
 import { regeocodeViaDidi } from "../../services/ride-pickup-candidates.js";
 import { getUnifiedPaymentService } from "../../payments/unified-payment-service.js";
@@ -98,6 +99,141 @@ function num(v: unknown): number | undefined {
 /** 平台 id → 中文来源名（多平台登录卡点名用）。 */
 function platformLabelOf(id: string): string {
   return (BROWSER_SESSION_SITES as Record<string, { label?: string } | undefined>)[id]?.label ?? id;
+}
+
+/**
+ * 手动导入 Cookie 的服务端暂存（2026-11-21）。
+ *
+ * 流程分两步卡内动作：`shopping.login.import`（粘贴文本 → 解析校验 →
+ * 统一闸分诊）→ `shopping.login.import.consent`（统一授权卡 → 应用）。
+ * 旧的 `shopping.login.import.confirm`（逐次「是否保存」小卡）保留兼容
+ * 历史消息里的老卡，新卡一律走统一闸。
+ * Cookie 不随卡片回传客户端再回来（避免登录态在聊天载荷里走两遭），暂存
+ * 在这里，actor+平台各一份，10 分钟过期。确认/过期/重导都会清掉。
+ */
+const PENDING_IMPORT_TTL_MS = 10 * 60 * 1000;
+const pendingCookieImports = new Map<
+  string,
+  { platform: string; cookies: import("../../services/browser-session-types.js").ImportedBrowserCookie[]; markerNames: string[]; at: number }
+>();
+
+function pendingImportKey(actorId: string, platform: string): string {
+  return `${actorId}:${platform}`;
+}
+
+function stagePendingImport(
+  actorId: string,
+  platform: string,
+  entry: { cookies: import("../../services/browser-session-types.js").ImportedBrowserCookie[]; markerNames: string[] },
+): void {
+  // 同一 actor 只保留最近一份/平台，避免粘贴多轮把内存堆起来
+  for (const key of [...pendingCookieImports.keys()]) {
+    if (key.startsWith(`${actorId}:`)) pendingCookieImports.delete(key);
+  }
+  pendingCookieImports.set(pendingImportKey(actorId, platform), { platform, ...entry, at: Date.now() });
+}
+
+function takePendingImport(
+  actorId: string,
+  platform: string,
+): { cookies: import("../../services/browser-session-types.js").ImportedBrowserCookie[]; markerNames: string[] } | null {
+  const entry = pendingCookieImports.get(pendingImportKey(actorId, platform));
+  if (!entry) return null;
+  pendingCookieImports.delete(pendingImportKey(actorId, platform));
+  if (Date.now() - entry.at > PENDING_IMPORT_TTL_MS) return null;
+  return entry;
+}
+
+// ── 统一保存闸（2026-11-21 用户定稿）────────────────────────────────────
+//
+// 「是否保存」不再每次导入弹一张小卡，而是一张**专门的统一授权卡**：
+// 问一次「允许保存登录 Cookie 吗」，同意即写全局授权键（ALL_SITES），
+// 之后所有平台、所有登录方式（导入 / 扫码 / 内置浏览器）的登录态都默认
+// 保存，不再逐次询问。「仅本次」= 这份用完即弃、不落任何授权，下次仍会问。
+// 闸本身复用扫码登录那条线的 captureConsents（getCookieSaveConsent /
+// recordCookieSaveConsent），两条路不各问各的。
+
+/** 导入内容过期卡（confirm / consent 两个动作共用同一张）。 */
+function buildImportExpiredCard(platform: string, platformLabel: string): Record<string, unknown> {
+  return {
+    title: `导入${platformLabel}登录态`,
+    items: [],
+    cardType: "shopping_login",
+    extra: {
+      shopping: {
+        stage: "login",
+        title: "导入内容已过期",
+        platform,
+        platformLabel,
+        note: "刚才粘贴的 Cookie 已超时（10 分钟）。重新粘贴一次即可，很快的。",
+        primaryLabel: "重新粘贴",
+        secondaryLabel: "先不导了",
+        primaryAction: "local.importDialog",
+        secondaryAction: "local.dismiss",
+        actions: { platform },
+      },
+    },
+  };
+}
+
+/** 导入完成卡（已应用、无挂起比价可续时兜底告知）。 */
+function buildImportReadyCard(
+  platform: string,
+  platformLabel: string,
+  saved: boolean,
+  note: string,
+): Record<string, unknown> {
+  return {
+    title: `${platformLabel}登录态已就绪`,
+    items: [],
+    cardType: "shopping_login",
+    extra: {
+      shopping: {
+        stage: "login",
+        title: saved
+          ? `${platformLabel}登录态已保存`
+          : `${platformLabel}登录态已启用（仅本次）`,
+        platform,
+        platformLabel,
+        note,
+        primaryLabel: "知道了",
+        secondaryLabel: "",
+        primaryAction: "local.dismiss",
+        secondaryAction: "",
+        actions: { platform },
+      },
+    },
+  };
+}
+
+/**
+ * 导入应用后的统一收口：本轮若还有被登录闸门挂起的比价，就地续跑并交付
+ * 结果卡；没有挂起（或续跑没出结果）就回导入完成卡。confirm / consent /
+ * 已授权静默导入三处共用。
+ */
+async function deliverImportOutcome(args: {
+  send: (body: Record<string, unknown>) => void;
+  compareService: ShoppingCompareService | null | undefined;
+  toolContext: ToolContext;
+  fallbackCard: Record<string, unknown>;
+}): Promise<void> {
+  const compareService = args.compareService;
+  if (compareService) {
+    const pendingSession = compareService.getPendingCompare(args.toolContext);
+    if (pendingSession) {
+      const resumed = await compareService
+        .resumeCompareAfterLogin(args.toolContext)
+        .catch(() => null);
+      if (resumed?.ok) {
+        const card = buildToolCard("shopping.compare.prices", resumed.result);
+        if (card) {
+          args.send({ ok: true, card });
+          return;
+        }
+      }
+    }
+  }
+  args.send({ ok: true, card: args.fallbackCard });
 }
 
 /**
@@ -369,7 +505,12 @@ export async function handleCardActionEvent(
             if (!pickup || pickup === "自定义上车点") {
               if (place.name) pickupLabel = place.name;
             }
-            if (!resolvedCity) resolvedCity = place.city || place.county || "";
+            // city 以「上车点坐标逆地理出的地级市」为权威（P0-2）：
+            // 滴滴 maps_textsearch 只认地级市/自治州（「黔西南布依族苗族自治州」），
+            // 卡片透传的往往是县级市（「兴义市」）→ HTTP 200 但 body=CITY_NOT_FOUND
+            // → 被当成「无法定位目的地」。有 regeo 结果就覆盖，不再沿用透传值。
+            if (place.city) resolvedCity = place.city;
+            else if (place.county) resolvedCity = place.county;
           }
         }
         const result = await booking.search(toolContext, "ride", {
@@ -592,8 +733,8 @@ export async function handleCardActionEvent(
                 platforms: multiPlatforms,
                 qrItems: freshQrs,
                 title: `请扫码登录（${multiPlatforms.map((p) => platformLabelOf(p)).join("、")}）`,
-                note: "还没检测到登录成功——码可能已过期，点「重新出码」换一张新的再扫",
-                primaryLabel: "我扫好了",
+                note: "还没检测到登录——码可能过期了，点「重新出码」换新再扫；扫完不用点按钮，我会自动检测并接着比价",
+                primaryLabel: "我扫好了（不点也行）",
                 secondaryLabel: "先不比了",
                 primaryAction: "shopping.login.check",
                 stage: "login",
@@ -607,6 +748,13 @@ export async function handleCardActionEvent(
           // 有待登录比价在等 → 主按钮直接**续跑比价**（用户要的「登录完再统一
           // 取价、一次性交付」），不要让用户再说一句「我扫好了」。
           const canResume = !!compareService && !!pendingSession;
+          // 2026-11-21：自动检测可能已经把这轮比价结果主动推给用户了（此时
+          // pending 已删）。旧登录卡还留在聊天里，用户再点「我扫好了」不能
+          // 说「比价已过期」——那是误导，结果其实就在他刚收到的消息里。
+          const alreadyDelivered =
+            !!compareService?.wasRecentlyAutoDelivered(toolContext);
+          const fullyDone =
+            pendingLabels.length === 0 && alreadyDelivered && !canResume;
           send({
             ok: true,
             card: buildMultiLoginCard({
@@ -621,11 +769,20 @@ export async function handleCardActionEvent(
                   ? `还差：${pendingLabels.join("、")}（可重新出码，或跳过这家只比其余平台）`
                   : canResume
                     ? "全部登录完成，点「继续比价」我把这轮的价格一次性给你"
-                    : "登录都好了，但刚才那轮比价已经过期——回一句「继续比价」我重新来一轮",
-              primaryLabel:
-                pendingLabels.length > 0 ? "继续比价（补齐剩余平台）" : "继续比价",
-              secondaryLabel: "先比已登录的",
-              primaryAction: canResume ? "shopping.compare.resume" : "shopping.login.check",
+                    : alreadyDelivered
+                      ? "这轮比价已经给你了——往下翻看刚推给你的结果卡；要重新比就回一句「继续比价」"
+                      : "登录都好了，但刚才那轮比价已经过期——回一句「继续比价」我重新来一轮",
+              primaryLabel: fullyDone
+                ? "知道了"
+                : pendingLabels.length > 0
+                  ? "继续比价（补齐剩余平台）"
+                  : "继续比价",
+              secondaryLabel: fullyDone ? "先不比了" : "先比已登录的",
+              primaryAction: fullyDone
+                ? "local.dismiss"
+                : canResume
+                  ? "shopping.compare.resume"
+                  : "shopping.login.check",
               // 「先比已登录的」= 剩下的不等了，只比已登录的（服务端据此把剩下
               // 的记成「已跳过」，不是「没价」）
               secondaryAction: canResume ? "shopping.compare.resume" : "local.dismiss",
@@ -727,7 +884,15 @@ export async function handleCardActionEvent(
         const target = str(data.platform);
         const skipped = compareService.skipLoginPlatform(toolContext, target);
         if (!skipped) {
-          send({ ok: false, error: "这次登录会话已经过期了，重新说一次要比的东西就行" });
+          // 自动检测已交付过 → 旧卡的「跳过这家」也不该说会话过期
+          const alreadyDelivered =
+            compareService.wasRecentlyAutoDelivered(toolContext);
+          send({
+            ok: false,
+            error: alreadyDelivered
+              ? "这轮比价已经给你了——往下翻看结果卡；要重新比就回一句「继续比价」"
+              : "这次登录会话已经过期了，重新说一次要比的东西就行",
+          });
           return true;
         }
         const remaining = skipped.remaining;
@@ -772,8 +937,8 @@ export async function handleCardActionEvent(
             platforms: remaining,
             qrItems,
             title: `请扫码登录（${remaining.map((p) => platformLabelOf(p)).join("、")}）`,
-            note: `已跳过${target ? platformLabelOf(target) : "这家"}，其余扫码后我一起比给你`,
-            primaryLabel: "我扫好了",
+            note: `已跳过${target ? platformLabelOf(target) : "这家"}，其余扫码后我会自动检测并一起比给你（不用点按钮）`,
+            primaryLabel: "我扫好了（不点也行）",
             secondaryLabel: "先不比了",
             primaryAction: "shopping.login.check",
             stage: "login",
@@ -834,12 +999,218 @@ export async function handleCardActionEvent(
             platforms: [...scope],
             qrItems,
             title: `请扫码登录（${[...scope].map((p) => platformLabelOf(p)).join("、")}）`,
-            note: "已换新的二维码，扫完点「我扫好了」",
-            primaryLabel: "我扫好了",
+            note: "已换新的二维码，扫完不用点按钮，我会自动检测并接着比价",
+            primaryLabel: "我扫好了（不点也行）",
             secondaryLabel: "先不比了",
             primaryAction: "shopping.login.check",
             stage: "login",
           }),
+        });
+        return true;
+      }
+
+      // 手动导入 Cookie（2026-11-21）：扫码授权被平台风控拦死（拼多多不向
+      // 无头浏览器兑现登录态），登录入口改为「用户在自己浏览器导出 Cookie →
+      // 粘贴导入」。第一步：解析 + 登录标记软校验 → 换成「是否保存」卡。
+      case "shopping.login.import": {
+        const cookieText = str(data.cookieText);
+        if (!platform || !cookieText) {
+          send({ ok: false, error: "缺少平台或 Cookie 内容" });
+          return true;
+        }
+        const actorId = ctx.boundActorId;
+        const prep = shoppingService.prepareCookieImport(platform, cookieText);
+        if (!prep.ok) {
+          send({
+            ok: true,
+            card: {
+              title: `导入${platformLabel}登录态`,
+              items: [],
+              cardType: "shopping_login",
+              extra: {
+                shopping: {
+                  stage: "login",
+                  title: "这串 Cookie 没解析出来",
+                  platform,
+                  platformLabel,
+                  note: prep.error,
+                  primaryLabel: "重新粘贴",
+                  secondaryLabel: "先不导了",
+                  primaryAction: "local.importDialog",
+                  secondaryAction: "local.dismiss",
+                  actions: { platform },
+                },
+              },
+            },
+          });
+          return true;
+        }
+        // 软校验失败（没有登录标记）：大概率导出时还没登录，如实告知。
+        if (!prep.markerFound) {
+          const markers = getLoginCookieMarkerNames(platform);
+          send({
+            ok: true,
+            card: {
+              title: `导入${platformLabel}登录态`,
+              items: [],
+              cardType: "shopping_login",
+              extra: {
+                shopping: {
+                  stage: "login",
+                  title: `没检测到${platformLabel}的登录信息`,
+                  platform,
+                  platformLabel,
+                  note:
+                    `解析到 ${prep.cookies.length} 条 Cookie，但里面没有登录标记（${markers.join(" / ")}）。` +
+                    "大概率导出时还没登录——请在浏览器里登录后再导出一次。",
+                  primaryLabel: "重新粘贴",
+                  secondaryLabel: "先不导了",
+                  primaryAction: "local.importDialog",
+                  secondaryAction: "local.dismiss",
+                  actions: { platform },
+                },
+              },
+            },
+          });
+          return true;
+        }
+        stagePendingImport(actorId, platform, { cookies: prep.cookies, markerNames: prep.markerNames });
+        // 统一闸分诊（2026-11-21）：已同意 → 不再问，直接默认保存并就地
+        // 续跑；已拒绝 → 不保存也不再问（仅本次）；未表态 → 弹下面的
+        // 统一授权卡，问这一次、答完对所有平台生效。
+        const consent = await shoppingService
+          .getCookieSaveConsent(actorId, platform)
+          .catch(() => "ask" as const);
+        if (consent !== "ask") {
+          const applied = await shoppingService.applyCookieImport(
+            actorId,
+            platform,
+            prep.cookies,
+            consent === "allow",
+          );
+          if (!applied.ok) {
+            send({ ok: false, error: applied.error });
+            return true;
+          }
+          await deliverImportOutcome({
+            send,
+            compareService: deps.shoppingCompareService,
+            toolContext,
+            fallbackCard: buildImportReadyCard(
+              platform,
+              platformLabel,
+              applied.saved,
+              applied.saved
+                ? "统一保存闸已开：以后所有平台的登录态都默认保存，不再逐次询问。Cookie 过期了重新导入一次就行。"
+                : "这轮比价先用它；你之前选择不保存登录 Cookie，所以没有存，下次导入时会再确认一次。",
+            ),
+          });
+          return true;
+        }
+        // 统一授权卡：不是「这份 Cookie 存不存」的小卡，而是所有登录态
+        // 保存行为的总开关。同意 → shopping.login.import.consent 落全局
+        // 授权键；仅本次 → 只应用不落任何授权（下次导入仍会问）。
+        send({
+          ok: true,
+          card: {
+            title: "保存登录 Cookie",
+            items: [],
+            cardType: "shopping_login",
+            extra: {
+              shopping: {
+                stage: "login-consent",
+                title: "允许保存登录 Cookie 吗？",
+                platform,
+                platformLabel,
+                note:
+                  `已解析到${platformLabel}的登录信息（${prep.markerNames.join("、")}）。` +
+                  "这是一个统一的开关：同意一次，之后所有平台的登录态都会默认保存，不再逐次询问；" +
+                  "Cookie 过期了重新导入一次就行。选「仅本次」则这份用完即弃，下次还会问。",
+                primaryLabel: "同意，以后都自动保存",
+                secondaryLabel: "仅本次使用",
+                primaryAction: "shopping.login.import.consent",
+                secondaryAction: "shopping.login.import.consent",
+                actions: { platform, allow: true },
+                secondaryPayload: { allow: false },
+              },
+            },
+          },
+        });
+        return true;
+      }
+
+      // 手动导入 Cookie · 兼容路径（历史消息里的旧卡）：应用 + 自动续跑。
+      // 保存 → 落库授权（永久）；仅本次 → 灌 context（本轮）。新卡一律走
+      // 下面的统一闸（shopping.login.import.consent），这里只为老卡保留。
+      case "shopping.login.import.confirm": {
+        const actorId = ctx.boundActorId;
+        const staged = takePendingImport(actorId, platform);
+        if (!staged) {
+          send({ ok: true, card: buildImportExpiredCard(platform, platformLabel) });
+          return true;
+        }
+        const save = data.save === true;
+        const applied = await shoppingService.applyCookieImport(actorId, platform, staged.cookies, save);
+        if (!applied.ok) {
+          send({ ok: false, error: applied.error });
+          return true;
+        }
+        await deliverImportOutcome({
+          send,
+          compareService: deps.shoppingCompareService,
+          toolContext,
+          fallbackCard: buildImportReadyCard(
+            platform,
+            platformLabel,
+            applied.saved,
+            applied.saved
+              ? `以后比价${platformLabel}不用再扫码，直接用这份登录态。Cookie 过期了重新导入一次就行。`
+              : "这轮比价先用它；没保存，下次要再导入一次。",
+          ),
+        });
+        return true;
+      }
+
+      // 手动导入 Cookie · 统一闸答复（2026-11-21 用户定稿）：「是否保存」
+      // 收敛成一张专门的统一授权卡——allow=true → 写全局授权键
+      // （CAPTURE_CONSENT_ALL_SITES，答一次对所有平台生效）+ 本次默认保存，
+      // 之后所有登录态（导入 / 扫码 / 内置浏览器）都默认保存、不再问；
+      // allow=false → 只应用这一份、不落任何授权（下次导入仍会问）。
+      // 应用完立刻尝试续跑挂起的比价（有挂起就地出结果卡）。
+      case "shopping.login.import.consent": {
+        const actorId = ctx.boundActorId;
+        const staged = takePendingImport(actorId, platform);
+        if (!staged) {
+          send({ ok: true, card: buildImportExpiredCard(platform, platformLabel) });
+          return true;
+        }
+        const allow = data.allow === true;
+        if (allow) {
+          try {
+            await shoppingService.recordCookieSaveConsent(actorId, true);
+          } catch (e) {
+            console.warn(
+              `[shop-login] 统一保存授权落盘失败（不影响本次导入）：${e instanceof Error ? e.message : String(e)}`,
+            );
+          }
+        }
+        const applied = await shoppingService.applyCookieImport(actorId, platform, staged.cookies, allow);
+        if (!applied.ok) {
+          send({ ok: false, error: applied.error });
+          return true;
+        }
+        await deliverImportOutcome({
+          send,
+          compareService: deps.shoppingCompareService,
+          toolContext,
+          fallbackCard: buildImportReadyCard(
+            platform,
+            platformLabel,
+            applied.saved,
+            applied.saved
+              ? "已保存，而且这是统一开关——之后所有平台的登录态都会默认保存，不用再逐次确认。Cookie 过期了重新导入一次就行。"
+              : "这轮比价先用它；没保存，下次导入时会再问一次。",
+          ),
         });
         return true;
       }

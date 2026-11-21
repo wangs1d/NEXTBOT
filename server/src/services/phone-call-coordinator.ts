@@ -138,8 +138,6 @@ export type PhoneCallConfig = {
   perNumber24hLimit: number;
   /** 单 actor 每自然日最多拨出次数 */
   dailyLimit: number;
-  /** 静默时段 "HH:mm-HH:mm"（可跨午夜），时段内禁止拨出 */
-  quietHours: string;
   /** 等待确认 TTL（毫秒），超时自动作废 */
   confirmTtlMs: number;
   /** 手机桥 dial 调用超时（含手机端全屏确认等待） */
@@ -152,7 +150,6 @@ const DEFAULT_CONFIG: PhoneCallConfig = {
   enabled: false,
   perNumber24hLimit: 2,
   dailyLimit: 20,
-  quietHours: "22:00-08:00",
   confirmTtlMs: 10 * 60_000,
   dialTimeoutMs: 45_000,
   defaultMaxDurationSec: 300,
@@ -173,7 +170,6 @@ function configFromEnv(env: NodeJS.ProcessEnv = process.env): PhoneCallConfig {
     enabled: envBoolean(env.PHONE_CALL_ENABLED),
     perNumber24hLimit: envInt(env.PHONE_CALL_PER_NUMBER_24H_LIMIT, DEFAULT_CONFIG.perNumber24hLimit),
     dailyLimit: envInt(env.PHONE_CALL_DAILY_LIMIT, DEFAULT_CONFIG.dailyLimit),
-    quietHours: (env.PHONE_CALL_QUIET_HOURS ?? DEFAULT_CONFIG.quietHours).trim(),
     confirmTtlMs: envInt(env.PHONE_CALL_CONFIRM_TTL_MS, DEFAULT_CONFIG.confirmTtlMs),
     dialTimeoutMs: envInt(env.PHONE_CALL_DIAL_TIMEOUT_MS, DEFAULT_CONFIG.dialTimeoutMs),
     defaultMaxDurationSec: envInt(env.PHONE_CALL_MAX_DURATION_SEC, DEFAULT_CONFIG.defaultMaxDurationSec),
@@ -190,19 +186,6 @@ export function maskPhoneNumber(raw: string): string {
     return `${digits.slice(0, 2)}**${digits.slice(-2)}`;
   }
   return "****";
-}
-
-/** 静默时段判定；解析失败视为无静默时段（fail-open 仅影响可用性，不影响安全门）。 */
-export function isInQuietHours(range: string, at: Date): boolean {
-  const m = range.match(/^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})$/);
-  if (!m) return false;
-  const minutes = at.getHours() * 60 + at.getMinutes();
-  const start = Number.parseInt(m[1], 10) * 60 + Number.parseInt(m[2], 10);
-  const end = Number.parseInt(m[3], 10) * 60 + Number.parseInt(m[4], 10);
-  if (start === end) return false;
-  if (start < end) return minutes >= start && minutes < end;
-  // 跨午夜（如 22:00-08:00）
-  return minutes >= start || minutes < end;
 }
 
 /** 用户文本确认（仅在会话处于 awaiting_confirm 时被消费，兜底确认卡渲染失败的场景）。 */
@@ -439,12 +422,8 @@ export class PhoneCallCoordinator {
     }
     const number = check.number!;
 
-    const quiet = isInQuietHours(this.config.quietHours, this.now());
-    if (quiet) {
-      return rejectResult(
-        `当前处于静默时段（${this.config.quietHours}），禁止外呼打扰他人。请稍后再试。`,
-      );
-    }
+    // 禁音时段限制已移除（2026-11-20）：外呼不再受静默时段拦截，
+    // 仍受确认门 + 单号 24h 限额 + 日限额约束。
 
     // 单飞：同号码已有未决会话 → 返回现有 callId，不重复建卡
     const pending = [...this.sessions.values()].find(
@@ -622,14 +601,7 @@ export class PhoneCallCoordinator {
       );
     }
 
-    const quiet = isInQuietHours(this.config.quietHours, this.now());
-    if (quiet) {
-      session.state = "cancelled";
-      session.rejectReason = "quiet_hours";
-      await this.persist(session);
-      await this.audit("reject", session, { reason: "quiet_hours" });
-      return rejectResult(`当前处于静默时段（${this.config.quietHours}），禁止外呼。`, { callId });
-    }
+    // 禁音时段限制已移除（2026-11-20）：确认后拨出不再受静默时段拦截。
 
     const freq = this.frequencyReject(actorId, session.number);
     if (freq) {

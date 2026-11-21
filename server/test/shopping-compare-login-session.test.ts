@@ -52,6 +52,8 @@ function makeStubOrderService(state: {
   fetched: string[];
   refreshed: string[];
   pushed: string[][];
+  /** true=模拟「库里查不到 Cookie，但浏览器 context 里登录态还在」 */
+  dbEmpty?: boolean;
 }) {
   const prices: Record<string, number> = {
     suning: 1899,
@@ -70,7 +72,7 @@ function makeStubOrderService(state: {
   const service = {
     listSupportedPlatforms: () => ["jd", "taobao", "pdd", "suning", "smzdm"],
     listPlatformsWithCookies: async (_actorId: string, platforms: string[]) =>
-      platforms.filter((p) => state.cookies.has(p)),
+      state.dbEmpty ? [] : platforms.filter((p) => state.cookies.has(p)),
     canUseVisibleBrowser: () => false,
     checkMultiPlatformLogin: async (_ctx: unknown, platforms: string[]) => {
       const ready = platforms.filter((p) => state.cookies.has(p));
@@ -125,6 +127,7 @@ async function withService<T>(
   fn: (
     service: ShoppingCompareService,
     state: { cookies: Set<string>; fetched: string[]; refreshed: string[]; pushed: string[][] },
+    order?: ShoppingOrderService,
   ) => Promise<T>,
 ): Promise<T> {
   const dataDir = await mkdtemp(join(tmpdir(), "npc-p1-"));
@@ -134,12 +137,13 @@ async function withService<T>(
     refreshed: [] as string[],
     pushed: [] as string[][],
   };
+  const order = makeStubOrderService(state);
   const service = new ShoppingCompareService({
-    shoppingOrderService: makeStubOrderService(state),
+    shoppingOrderService: order,
     dataDir,
   });
   try {
-    return await fn(service, state);
+    return await fn(service, state, order);
   } finally {
     await service.flush();
     await rm(dataDir, { recursive: true, force: true });
@@ -299,6 +303,186 @@ test("P1 续跑：登录后统一取价 → 一次性交付；未登录平台显
     assert.ok(factSheet.includes("【未取到报价的平台】"));
     assert.ok(factSheet.includes("淘宝：需要登录（未完成）"), factSheet);
     assert.ok(!factSheet.includes("淘宝 ¥"), "未取到的平台不得出现价格");
+  });
+});
+
+/**
+ * 2026-11-21 根修：「扫码成功又说没登录」——Cookie 只在浏览器 context 里、
+ * 库里还没有（consent 未落库）时，续跑必须认 checkMultiPlatformLogin 的实时
+ * 判定，不能只查库。用独立状态模拟「库空 / 实时已登录」两路不一致。
+ */
+test("续跑：库里没 Cookie 但 checkMultiPlatformLogin 判已登录 → 不能报「没登录」", async () => {
+  await withService(async (service, state, order) => {
+    await service.comparePrices(makeCtx(), "Sony WH-1000XM5", {
+      platforms: ["jd", "suning"],
+    });
+
+    // 库里为空（模拟 consent 未落库），但实时 context 判京东已登录
+    state.cookies.add("jd");
+    state.dbEmpty = true;
+    // checkMultiPlatformLogin 走 context 实时判定，仍认 cookies 里的 jd
+    (order as unknown as { checkMultiPlatformLogin: unknown }).checkMultiPlatformLogin =
+      async (_ctx: unknown, platforms: string[]) => ({
+        ready: platforms.filter((p) => state.cookies.has(p)),
+        pending: platforms.filter((p) => !state.cookies.has(p)),
+      });
+
+    const resumed = await service.resumeCompareAfterLogin(makeCtx());
+    assert.equal(resumed.ok, true, `实时已登录应能续跑：${JSON.stringify(resumed)}`);
+    if (!resumed.ok) return;
+    const searched = (resumed.result as Record<string, unknown>).searchedPlatforms as string[];
+    assert.ok(searched.includes("jd"), "实时登录的京东应参与取价");
+  });
+});
+
+/**
+ * 2026-11-21 自动闭环：推完码后台检测，全部登录成功 → 自动续跑 + 主动交付，
+ * 用户不用回来点任何按钮。且同一会话只自动交付一次（去重）。
+ */
+test("自动检测：全部登录成功 → 自动续跑比价并交付（无需点按钮，只交一次）", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "npc-auto-"));
+  const state = {
+    cookies: new Set<string>(),
+    fetched: [] as string[],
+    refreshed: [] as string[],
+    pushed: [] as string[][],
+  };
+  const delivered: Array<{ actorId: string; sessionId: string; result: Record<string, unknown> }> = [];
+  const service = new ShoppingCompareService({
+    shoppingOrderService: makeStubOrderService(state),
+    dataDir,
+    onLoginAutoReady: (actorId, sessionId, result) => {
+      delivered.push({ actorId, sessionId, result });
+    },
+  });
+  try {
+    await service.comparePrices(makeCtx(), "Sony WH-1000XM5", {
+      platforms: ["jd", "suning"],
+    });
+    assert.ok(service.getPendingCompare(makeCtx()), "应有待登录会话");
+
+    // 还没登录：poll 不交付
+    assert.equal(await service.pollPendingLogins(), 0);
+    assert.equal(delivered.length, 0);
+
+    // 用户扫码，两家全登录
+    state.cookies.add("jd");
+    const n = await service.pollPendingLogins();
+    assert.equal(n, 1, "全登录后应自动交付一轮");
+    assert.equal(delivered.length, 1, "应主动交付一次结果");
+    assert.equal(delivered[0]!.actorId, "u-p1");
+    const searched = delivered[0]!.result.searchedPlatforms as string[];
+    assert.ok(searched.includes("jd") && searched.includes("suning"));
+
+    // 会话已交付：再 poll 不重复
+    assert.equal(await service.pollPendingLogins(), 0);
+    assert.equal(delivered.length, 1, "同一会话不得重复交付");
+    assert.equal(service.getPendingCompare(makeCtx()), null, "交付后待登录会话应清空");
+  } finally {
+    await service.flush();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 2026-11-21 用户反馈②：自动交付后旧登录卡还在聊天里，用户又点
+ * 「继续比价 / 我扫好了」时，不能再报「会话过期」——结果其实已推给他了。
+ */
+test("自动交付后再点旧按钮 → 提示已交付，不再误报会话过期", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "npc-delivered-"));
+  const state = {
+    cookies: new Set<string>(),
+    fetched: [] as string[],
+    refreshed: [] as string[],
+    pushed: [] as string[][],
+  };
+  const service = new ShoppingCompareService({
+    shoppingOrderService: makeStubOrderService(state),
+    dataDir,
+    onLoginAutoReady: () => {},
+  });
+  try {
+    await service.comparePrices(makeCtx(), "Sony WH-1000XM5", {
+      platforms: ["jd", "suning"],
+    });
+    state.cookies.add("jd");
+    assert.equal(await service.pollPendingLogins(), 1, "先自动交付一轮");
+
+    assert.equal(
+      service.wasRecentlyAutoDelivered(makeCtx()),
+      true,
+      "交付后应标记「刚交付过」",
+    );
+    const resumed = await service.resumeCompareAfterLogin(makeCtx());
+    assert.equal(resumed.ok, false);
+    if (!resumed.ok) {
+      assert.equal(resumed.alreadyDelivered, true);
+      assert.match(resumed.error, /已经给你了/);
+      assert.doesNotMatch(resumed.error, /过期/);
+    }
+
+    // 经 card.action 的「继续比价」按钮也不能误报过期
+    const { socket, sent } = makeFakeSocket();
+    await handleCardActionEvent(
+      { socket, boundActorId: "u-p1", sendUnifiedError: () => {} },
+      {
+        messageId: "msg-old",
+        cardId: "card-old",
+        actionId: "shopping.compare.resume",
+        payload: {},
+      },
+      {
+        shoppingOrderService: makeStubOrderService(state),
+        shoppingCompareService: service,
+      },
+    );
+    assert.equal(sent.length, 1);
+    const body = sent[0]!.payload as Record<string, unknown>;
+    assert.equal(body.ok, false);
+    assert.match(String(body.error), /已经给你了/);
+    assert.doesNotMatch(String(body.error), /过期/);
+  } finally {
+    await service.flush();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+/** 新一轮比价开始 → 上一轮的「已交付」标记必须作废。 */
+test("新一轮比价清掉上一轮已交付标记（按钮话术不串台）", async () => {
+  await withService(async (service, state) => {
+    await service.comparePrices(makeCtx(), "Sony WH-1000XM5", {
+      platforms: ["jd", "suning"],
+    });
+    state.cookies.add("jd");
+    (service as unknown as { onLoginAutoReady: unknown }).onLoginAutoReady = () => {};
+    assert.equal(await service.pollPendingLogins(), 1);
+    assert.equal(service.wasRecentlyAutoDelivered(makeCtx()), true);
+
+    // 用户发起新一轮（仍撞登录墙）→ 标记清零
+    await service.comparePrices(makeCtx(), "Bose QC45", {
+      platforms: ["taobao", "suning"],
+    });
+    assert.ok(service.getPendingCompare(makeCtx()), "新一轮应挂起等待登录");
+    assert.equal(service.wasRecentlyAutoDelivered(makeCtx()), false);
+  });
+});
+
+/**
+ * 自动检测：只扫了一家（还有一家没登录）→ 不交半成品，继续等。
+ */
+test("自动检测：部分登录 → 不交付，等全部就绪", async () => {
+  await withService(async (service, state) => {
+    let delivered = 0;
+    (service as unknown as { onLoginAutoReady: unknown }).onLoginAutoReady = () => {
+      delivered += 1;
+    };
+    await service.comparePrices(makeCtx(), "Sony WH-1000XM5", {
+      platforms: ["jd", "taobao", "suning"],
+    });
+    state.cookies.add("jd"); // 只扫了京东，淘宝还没扫
+    assert.equal(await service.pollPendingLogins(), 0, "部分登录不应交付");
+    assert.equal(delivered, 0);
+    assert.ok(service.getPendingCompare(makeCtx()), "会话应继续等待");
   });
 });
 

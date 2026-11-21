@@ -782,6 +782,7 @@ class _MobileChatPageState extends State<MobileChatPage> {
                       ? audio.transcript
                       : null) ??
                   (m.text.isNotEmpty ? m.text : null),
+              onDelete: () => _controller.removeMessage(m.messageId),
             ),
           ),
         );

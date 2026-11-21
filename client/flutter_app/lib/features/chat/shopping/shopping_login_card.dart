@@ -113,6 +113,13 @@ class _ShoppingLoginCardState extends State<ShoppingLoginCard> {
   }
 
   void _act(String actionId, {Map<String, dynamic>? payloadOverride}) {
+    // 本地动作（2026-11-21）：重新粘贴 Cookie——纯 UI，不占网络往返。
+    // 主按钮路径会先把 _checking 置 true，这里要复位，别让按钮灰 8 秒。
+    if (actionId == "local.importDialog") {
+      if (_checking) setState(() => _checking = false);
+      _openImportChooser();
+      return;
+    }
     final AgentResultData? data = widget.cardData;
     final void Function(AgentResultAction, {required AgentResultData cardData})? cb =
         widget.onUserAction;
@@ -176,6 +183,81 @@ class _ShoppingLoginCardState extends State<ShoppingLoginCard> {
     );
   }
 
+  // ── 手动导入 Cookie（2026-11-21）──────────────────────────────────────
+  //
+  // 扫码授权被平台风控拦死（拼多多不向无头浏览器兑现登录态，手机怎么确认
+  // 云端都拿不到 Cookie），登录入口补一条手动路：用户在自己浏览器里登录、
+  // 导出 Cookie 粘贴进来，服务端校验后问「是否保存」，保存即永久免扫码。
+
+  /// 卡上可导入的平台：优先卡上画了码的几家，其次单家卡，最后退待登录清单。
+  List<Map<String, String>> get _importTargets {
+    final List<Map<String, String>> out = <Map<String, String>>[];
+    void push(String platform, String label) {
+      final String pid = platform.trim();
+      if (pid.isEmpty || out.any((Map<String, String> e) => e["platform"] == pid)) return;
+      out.add(<String, String>{
+        "platform": pid,
+        "platformLabel": label.trim().isEmpty ? pid : label.trim(),
+      });
+    }
+
+    for (final Map<String, dynamic> it in shopMaps(p["qrItems"])) {
+      push(shopStr(it["platform"]), shopStr(it["platformLabel"]));
+    }
+    push(shopStr(p["platform"]), shopStr(p["platformLabel"]));
+    for (final Map<String, dynamic> it in _pendingRows()) {
+      push(shopStr(it["platform"]), shopStr(it["platformLabel"]));
+    }
+    return out;
+  }
+
+  /// 打开导入入口：只有一家直接弹粘贴框；多家先选一家。
+  Future<void> _openImportChooser() async {
+    final List<Map<String, String>> targets = _importTargets;
+    if (targets.isEmpty) return;
+    if (targets.length == 1) {
+      await _showImportDialog(targets.first["platform"]!, targets.first["platformLabel"]!);
+      return;
+    }
+    final Map<String, String>? picked = await showDialog<Map<String, String>>(
+      context: context,
+      builder: (BuildContext ctx) => SimpleDialog(
+        title: const Text("给哪家导入 Cookie？"),
+        children: <Widget>[
+          for (final Map<String, String> t in targets)
+            SimpleDialogOption(
+              onPressed: () => Navigator.of(ctx).pop(t),
+              child: Text(t["platformLabel"] ?? t["platform"] ?? ""),
+            ),
+        ],
+      ),
+    );
+    if (picked == null || !mounted) return;
+    await _showImportDialog(picked["platform"]!, picked["platformLabel"]!);
+  }
+
+  /// 粘贴对话框：带「怎么导出」的教学文案（手机端没法直接拿 Cookie，
+  /// 主路径是电脑浏览器 F12 复制请求标头里的 Cookie 整串）。
+  /// controller 归对话框组件所有（见 [_CookiePasteDialog]）——pop 出场动画
+  /// 期间 TextField 还在用它，不能在这里同步 dispose。
+  Future<void> _showImportDialog(String platform, String platformLabel) async {
+    final String? text = await showDialog<String>(
+      context: context,
+      builder: (BuildContext ctx) => _CookiePasteDialog(platformLabel: platformLabel),
+    );
+    if (text == null || text.isEmpty || !mounted) return;
+    _quickAct("shopping.login.import", <String, dynamic>{
+      "platform": platform,
+      "cookieText": text,
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text("正在校验 Cookie…"),
+        duration: Duration(seconds: 3),
+      ),
+    );
+  }
+
   /// 点码登录（2026-11-14）：服务端把二维码解码出内嵌 URL 并包装成 App 深链，
   /// 点一下直接拉起对应 App 走平台自己的登录确认页——省掉
   /// 「存图 → 开 App → 相册扫码」三步。深链打不开（没装 App / scheme 失效）
@@ -203,18 +285,22 @@ class _ShoppingLoginCardState extends State<ShoppingLoginCard> {
     final String fb = (fallback ?? "").trim();
     if (await tryLaunch(fb)) return;
 
-    // 没有 App / 深链打不开（2026-11-19 用户要求）：直接帮用户把码存进相册，
-    // 省掉「截图/长按保存」这一步——他只需要打开对应 App 从相册扫。
+    // 没有可用深链（2026-11-21：拼多多的 down_scan 落地页跳 App 到不了确认
+    // 界面，服务端已不再给它深链）：把码存进相册，明确告诉用户走
+    // 「打开 App → 扫一扫 → 从相册选这张码 → 确认」。这是拼多多登录确认的
+    // 唯一通路（平台安全设计，任何 agent 绕不过），不是「没找到 App」。
+    // 服务端同时后台自动检测登录态，扫完不用回来点任何按钮。
     final bool saved = await _saveQrToGallery(imageUrl);
     if (!mounted) return;
+    final String who = platformLabel.isEmpty ? "对应" : platformLabel;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
           saved
-              ? "没找到${platformLabel.isEmpty ? "对应" : platformLabel}App，二维码已存到相册，打开 App 从相册扫一下就行"
-              : "没能打开${platformLabel.isEmpty ? "对应" : platformLabel}App，请用 App 扫码登录",
+              ? "二维码已存相册：打开$who → 扫一扫 → 从相册选这张码确认登录。扫完不用回来点，我会自动接着比价"
+              : "请用$who的扫一扫扫这张码确认登录；扫完我会自动接着比价",
         ),
-        duration: const Duration(seconds: 4),
+        duration: const Duration(seconds: 5),
       ),
     );
   }
@@ -641,6 +727,30 @@ class _ShoppingLoginCardState extends State<ShoppingLoginCard> {
                 ],
               ),
             ),
+          // 手动导入 Cookie 入口（2026-11-21）：扫码被平台风控拦死时的
+          // 替代登录路。只在「还在等登录」的卡上常驻（主动作是登录校验/
+          // 继续比价/重新粘贴），「是否保存」「已保存」这些后置卡不出现，
+          // 避免误导再导一次。不能拿 qrItems/pendingPlatforms 判——下单
+          // 单家卡的字段铺在顶层，同样在等登录。
+          if (_importTargets.isNotEmpty &&
+              <String>[
+                "shopping.login.check",
+                "shopping.compare.resume",
+                "local.importDialog",
+              ].contains(shopStr(p["primaryAction"])))
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 8, 14, 0),
+              child: Row(
+                children: <Widget>[
+                  const Spacer(),
+                  ShopMiniButton(
+                    cs: cs,
+                    label: "手动导入 Cookie",
+                    onTap: () => _openImportChooser(),
+                  ),
+                ],
+              ),
+            ),
           if (note.isNotEmpty)
             Padding(
               padding: const EdgeInsets.fromLTRB(14, 8, 14, 0),
@@ -1009,6 +1119,81 @@ class _PendingPlatformList extends StatelessWidget {
               ],
             ),
           ),
+      ],
+    );
+  }
+}
+
+/// 手动导入 Cookie 的粘贴对话框（2026-11-21）。
+///
+/// controller 由本组件持有并在 dispose 里释放——弹窗 pop 有出场动画，
+/// 期间 TextField 仍在读写 controller，外层同步 dispose 会炸
+/// 「A TextEditingController was used after being disposed」。
+class _CookiePasteDialog extends StatefulWidget {
+  const _CookiePasteDialog({required this.platformLabel});
+
+  final String platformLabel;
+
+  @override
+  State<_CookiePasteDialog> createState() => _CookiePasteDialogState();
+}
+
+class _CookiePasteDialogState extends State<_CookiePasteDialog> {
+  final TextEditingController _controller = TextEditingController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    return AlertDialog(
+      title: Text("导入${widget.platformLabel} Cookie"),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text(
+              "在电脑浏览器登录${widget.platformLabel}网页版 → 按 F12 → 「网络/Network」→ 点任意一个请求 → "
+              "在请求标头（Request Headers）里复制 Cookie: 后面的整串，粘贴到下面。"
+              "也支持 Cookie 导出插件（EditThisCookie 等）的 JSON 数组。",
+              style: TextStyle(
+                fontSize: 12,
+                height: 1.5,
+                color: cs.onSurfaceVariant,
+              ),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _controller,
+              minLines: 3,
+              maxLines: 6,
+              style: const TextStyle(fontSize: 12),
+              decoration: const InputDecoration(
+                hintText: "粘贴 Cookie…",
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: <Widget>[
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text("取消"),
+        ),
+        FilledButton(
+          onPressed: () {
+            final String t = _controller.text.trim();
+            Navigator.of(context).pop(t.isEmpty ? null : t);
+          },
+          child: const Text("提交"),
+        ),
       ],
     );
   }

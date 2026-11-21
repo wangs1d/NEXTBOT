@@ -94,6 +94,22 @@ export function hasLoginCookieMarker(
   return cookies.some((c) => markers.includes(c.name));
 }
 
+/**
+ * 该平台是否定义了正向登录 Cookie marker（2026-11-21）。
+ *
+ * 用于区分「有强信号但因没读到而判 pending」与「本来就没有强信号、只能靠
+ * URL 逃逸兜底」两种平台——前者绝不能靠页面跳走误判成功。
+ */
+export function hasLoginCookieMarkerNames(siteId: string): boolean {
+  const markers = LOGIN_COOKIE_MARKERS[siteId];
+  return !!markers && markers.length > 0;
+}
+
+/** 诊断用：取平台定义的 marker 名字（只读，不记 Cookie 值）。 */
+export function getLoginCookieMarkerNames(siteId: string): string[] {
+  return LOGIN_COOKIE_MARKERS[siteId] ?? [];
+}
+
 /** 扫码登录最长等待（毫秒）。可用 SHOPPING_LOGIN_WAIT_MS 覆盖。 */
 export function getLoginWaitMs(): number {
   const v = Number.parseInt(process.env.SHOPPING_LOGIN_WAIT_MS ?? "120000", 10);

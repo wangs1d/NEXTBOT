@@ -1,14 +1,13 @@
 // ProactivityHub —— 全局频控器（FrequencyGovernor）
 //
-// 职责：主动性多元化后防止"频繁打扰"。三层规则：
+// 职责：主动性多元化后防止"频繁打扰"。两层规则：
 //  1. 每 actor 每日总预算（默认 3 次，env 可调；必达类提案在管道层绕过本预算）
 //  2. 分 kind 冷却（greeting/分享每天最多 1 次，关怀 8h 一次……）
-//  3. 静默时段（23-7 点）：仅 importance=high 放行
+// （静默时段规则已移除，2026-11-20：夜间不再按时段拦截）
 //
 // 与 ProactionCortex 的 disturb/repeat_suppress 是双层防线：本模块前置粗筛
 // （触发源层），ProactionCortex 保留细筛（决策层），二者不冲突。
 import type { FrequencyVerdict } from "./proactivity-types.js";
-import * as quietHours from "./quiet-hours.js";
 
 /** 分 kind 冷却毫秒表（env PROACTIVITY_COOLDOWN_<KIND> 可覆盖单值） */
 const DEFAULT_KIND_COOLDOWN_MS: Record<string, number> = {
@@ -53,7 +52,7 @@ const DEFAULT_UNKNOWN_KIND_COOLDOWN_MS = 2 * 60 * 60 * 1000;
  */
 const DAILY_ONCE_KINDS = new Set(["greeting", "interest_share", "monthly_report", "digest"]);
 
-// 静默时段统一收敛至 quiet-hours.ts（env PROACTIVITY_QUIET_START/END 可配；默认 23:00-7:00）
+// 静默时段限制已移除（2026-11-20）：夜间接推不再按时段拦截
 
 function readEnvInt(name: string, fallback: number): number {
   const raw = process.env[name];
@@ -70,10 +69,7 @@ function localDateKey(now: Date): string {
   return `${y}-${m}-${d}`;
 }
 
-function isQuietHour(hour: number): boolean {
-  return quietHours.isQuietHour(hour);
-}
-
+/** Actor 频控状态（逐日计数 + 分 kind 冷却） */
 type ActorFrequencyState = {
   dateKey: string;
   dailyCount: number;
@@ -113,7 +109,6 @@ export class FrequencyGovernor {
   private readonly socialDailyBudget: number;
   private readonly nowFn: () => Date;
   private readonly kindCooldownMs: Record<string, number>;
-  private readonly disableQuietHours: boolean;
   /** env 显式覆盖过的 kind（restore 时不落盘值覆盖 env 意图） */
   private readonly envOverriddenKinds = new Set<string>();
   /** 勿扰检查（AutonomySettingsStore.isDnd 的薄依赖；bootstrap 注入，缺省不启用） */
@@ -131,12 +126,11 @@ export class FrequencyGovernor {
     kindCooldownMs?: Record<string, number>;
     /** 测试用：不读 env */
     ignoreEnv?: boolean;
-    /** 测试用：禁用静默时段（避免深夜跑测试随机失败） */
-    disableQuietHours?: boolean;
-    /** 测试注入：时钟源（默认真实系统时间；集成冒烟用 mock 时钟） */
+    /** 注入测试时钟（默认真实系统时间；集成冒烟用 mock 时钟） */
     nowFn?: () => Date;
   }) {
-    this.disableQuietHours = opts?.disableQuietHours === true;
+    // 禁音时段检查已移除（2026-11-20）：主动推送不再受深夜时段限制，
+    // 频控只剩日预算 + 分 kind 冷却 + 勿扰开关 + 自适应反馈。
     this.nowFn = opts?.nowFn ?? (() => new Date());
     // 每日预算定位为「异常熔断」而非主动性的日常约束：正常节制的责任在
     // ArbiterV2 打断成本 + 分 kind 冷却 + 反馈自适应，这里只防 LLM 抽风连发。
@@ -233,8 +227,8 @@ export class FrequencyGovernor {
   /**
    * 判定一次主动意图是否允许触发。
    * @param kind 已知 kind 用专属冷却；LLM 自定义标签用默认冷却（预算兜底）
-   * @param importance 静默时段仅 high 放行（awake 且低打扰档除外）
-   * @param opts.awake 用户当前活跃在设备前（管道传入）：静默时段的低/中打扰
+   * @param importance 重要性（用于勿扰豁免判定）
+   * @param opts.awake 用户当前活跃在设备前（管道传入）
    *   消息不算惊扰——「23 点还醒着」时的轻声一句话与「把人叫醒」是两回事；
    *   high/critical（弹窗/响铃级）不豁免，仍按静默规则把关
    */
@@ -248,15 +242,9 @@ export class FrequencyGovernor {
     const state = this.stateOf(actorId, now);
 
     // 规则 0：用户勿扰（AutonomySettingsStore DND）——medium/low 一律沉默，
-    // high 及以上放行（与静默时段的 high 豁免口径一致；紧急事不被勿扰吞掉）
+    // high 及以上放行（紧急事不被勿扰吞掉）
     if (this.dndCheck?.(actorId) === true && importance !== "high") {
       return { allowed: false, reason: "dnd_active" };
-    }
-
-    // 规则 3：静默时段仅 high 放行（awake 时的低打扰档豁免）
-    const lowKeyQuietOk = opts?.awake === true && importance !== "high";
-    if (!this.disableQuietHours && isQuietHour(now.getHours()) && importance !== "high" && !lowKeyQuietOk) {
-      return { allowed: false, reason: `quiet_hours(${now.getHours()}h,importance=${importance})` };
     }
 
     // 规则 1：每日总预算

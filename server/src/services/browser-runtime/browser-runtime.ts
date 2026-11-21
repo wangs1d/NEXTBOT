@@ -384,6 +384,28 @@ export class BrowserRuntime {
     }));
   }
 
+  /**
+   * 手动导入 Cookie 的「仅本次」路径（2026-11-21）：把用户粘贴的 Cookie 直接
+   * 灌进 actor+站点级常驻 context，不落库。本轮取价（acquirePage 复用同一
+   * context）与登录检测（readContextCookies）立刻都能看到；进程重启或用户
+   * 吊销后自然失效。每轮 acquirePage 的 addCookies 只在带 Cookie 时覆盖同名
+   * 项，不会清掉这里灌进去的登录态。
+   */
+  async primeContextCookies(
+    actorId: string,
+    siteId: string,
+    url: string,
+    cookies: ImportedBrowserCookie[],
+  ): Promise<boolean> {
+    if (cookies.length === 0) return false;
+    const pw = await loadPlaywright();
+    if (!pw) return false;
+    const browser = await this.getPersistentBrowser(pw);
+    const key = `u:${actorId}:${siteId}`;
+    await this.getContext(browser, key, { cookies, url });
+    return true;
+  }
+
   /** 关停（进程退出 / 测试收尾）。 */
   async dispose(): Promise<void> {
     await this.closePersistentBrowser();

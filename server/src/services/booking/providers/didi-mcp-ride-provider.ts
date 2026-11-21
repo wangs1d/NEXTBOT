@@ -156,6 +156,16 @@ export class DidiMcpRideProvider implements BookingProvider {
     );
     if (!res.ok) return null;
     const parsed = parseResultJson(res.result);
+    // HTTP 200 但业务体带错误码：city 不合规（如县级「兴义市」）时滴滴返回
+    // {"code":"CITY_NOT_FOUND"}，此时 parsed 里根本没有 location，若不显式
+    // 拦截就会静默走到「无法定位目的地」——根因是 city 口径，不是目的地本身。
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const code = (parsed as Record<string, unknown>).code;
+      const status = (parsed as Record<string, unknown>).status;
+      const badCode = typeof code === "string" && !/^0$|success/i.test(code);
+      const badStatus = typeof status === "string" && !/^0$|success/i.test(status);
+      if (badCode || badStatus) return null;
+    }
     const loc = deepFind(parsed, /^(location|lng_lat|coord)$/i);
     let lng: unknown;
     let lat: unknown;

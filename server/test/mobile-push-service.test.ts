@@ -200,7 +200,7 @@ function makeHarness(opts: { pushOk?: boolean } = {}): Harness {
   const flags = { pushEnabled: true, pushOk: opts.pushOk ?? true };
   const pipeline = new ProactivePipeline({
     dataPath: dir,
-    governor: new FrequencyGovernor({ ignoreEnv: true, disableQuietHours: true }),
+    governor: new FrequencyGovernor({ ignoreEnv: true, }),
     suppression: { isSuppressed: () => ({ suppressed: false, reason: "" }) },
     presence,
     delivery: new ProactiveDeliveryService({
@@ -282,7 +282,7 @@ test("pipeline: 未注入推送通道时离线一律挂起（原行为不变）"
   try {
     const pipeline = new ProactivePipeline({
       dataPath: dir,
-      governor: new FrequencyGovernor({ ignoreEnv: true, disableQuietHours: true }),
+      governor: new FrequencyGovernor({ ignoreEnv: true, }),
       suppression: { isSuppressed: () => ({ suppressed: false, reason: "" }) },
       presence: new PresenceService(),
       delivery: new ProactiveDeliveryService({ trySend: () => false }),
@@ -306,7 +306,7 @@ test("pipeline: WS 竞态失败也触发离线推送升级", async () => {
     const pushes: unknown[] = [];
     const pipeline = new ProactivePipeline({
       dataPath: dir,
-      governor: new FrequencyGovernor({ ignoreEnv: true, disableQuietHours: true }),
+      governor: new FrequencyGovernor({ ignoreEnv: true, }),
       suppression: { isSuppressed: () => ({ suppressed: false, reason: "" }) },
       presence,
       delivery: new ProactiveDeliveryService({ trySend: () => false }), // 恒失败=竞态

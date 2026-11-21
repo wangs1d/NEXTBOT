@@ -21,7 +21,7 @@ import { ToolRegistry } from "../src/tools/tool-registry.js";
  * 电话代办（phone_call.*）P0 全链路回归：
  *   prepare（校验+确认卡）→ 确认门（卡片点击/文本兜底）→ start（桥接拨出）
  *   → finish（结果回填 + 收件箱必达）。
- * 同时锁死安全硬约束：未经确认拒绝、紧急号码/虚拟号拒绝、静默时段、频控、
+ * 同时锁死安全硬约束：未经确认拒绝、紧急号码/虚拟号拒绝、频控、
  * 同轮去重、禁用即不可见、与虚拟电话/phone.dial 的命名与路由边界。
  */
 
@@ -33,7 +33,6 @@ function createHarness(opts: {
   enabled?: boolean;
   now?: Date;
   perNumber24hLimit?: number;
-  quietHours?: string;
   dialResult?: { ok: boolean; state?: string; error?: string };
 } = {}) {
   const currentTime = opts.now ? new Date(opts.now) : new Date("2026-09-18T10:00:00");
@@ -64,7 +63,6 @@ function createHarness(opts: {
     config: {
       enabled: opts.enabled ?? true,
       perNumber24hLimit: opts.perNumber24hLimit ?? 2,
-      quietHours: opts.quietHours ?? "22:00-08:00",
     },
     now: () => new Date(currentTime),
   });
@@ -229,7 +227,7 @@ test("取消路径：卡片「取消」点击后 start 拒绝，会话收口为 
   assert.equal(status.state, "cancelled");
 });
 
-test("拒绝矩阵：紧急号码 / 6 位虚拟号 / 空号码 / 静默时段 / 跨他人会话", async () => {
+test("拒绝矩阵：紧急号码 / 6 位虚拟号 / 空号码 / 跨他人会话", async () => {
   const { coordinator, tick } = createHarness();
   const actorId = "user-d";
 
@@ -244,14 +242,7 @@ test("拒绝矩阵：紧急号码 / 6 位虚拟号 / 空号码 / 静默时段 / 
   const empty = await coordinator.prepare(actorId, { number: "  ", goal: "x" });
   assert.equal(empty.ok, false);
 
-  // 静默时段（22:00-08:00）：推进到 23:30
-  tick(new Date("2026-09-18T23:30:00").getTime() - new Date("2026-09-18T10:00:00").getTime());
-  const quiet = await coordinator.prepare(actorId, { number: "13655556666", goal: "x" });
-  assert.equal(quiet.ok, false);
-  assert.match(String(quiet.reason), /静默时段/);
-
-  // 跨身份访问：A 的会话对 B 不可见
-  tick(-new Date("2026-09-18T23:30:00").getTime() + new Date("2026-09-18T10:00:00").getTime());
+  // 跨身份访问：A 的会话对 B 不可见（静默时段限制已移除，深夜外呼不再拦截）
   const prepared = await coordinator.prepare(actorId, { number: "13655556666", goal: "x" });
   assert.equal(prepared.ok, true);
   const foreign = await coordinator.status("user-e", String(prepared.callId));

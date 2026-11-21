@@ -168,14 +168,37 @@ void main() async {
     // 会话……），否则新目录为空、老用户表现为「重新登录 + 聊天历史消失」。
     // 幂等 + 非 Windows no-op + 静默失败，见 AppSupportMigration。
     await AppSupportMigration.migrateIfNeeded();
-    // 运行通道（runtime 收回开关）：上次启动读到的 channel 必须先于任何网络
-    // 请求生效——platform 形态下本机 runtime 不拉起，地址要整体切到控制面。
-    await InstallIdentity.instance.applyBootChannel();
-    // 远程配置下发·地基（2026-11-10）：上次启动从控制面拉到的地址覆盖
-    // 先于一切网络请求生效（与 applyBootChannel 同语义：上次取到的，本次
-    // 生效）；随后后台静默刷新，只落盘不立即应用——当前会话的连接已按
-    // 启动地址建立，新值下次启动接管。拉取失败 fail-open，行为不变。
-    await RemoteConfig.instance.applyCached();
+
+    final bool bootMobile = !kIsWeb && (Platform.isAndroid || Platform.isIOS);
+
+    // 手机端冷启动（对齐主流 StartupOutcome 模式，2026-11-21 定稿）：
+    // 会话读盘回到 runApp 之前 await——这段等待期间系统原生 splash（纯
+    // #161616，与登录页/N 光扫同色）一直 hold 着，用户看到的不是「空白」，
+    // 而是 splash 无缝衔接到目标页。读盘完成后 main() 一次性决议 outcome，
+    // 首帧直接渲染目标页：已登录→主壳+N 光扫，未登录→登录页（不播动画）。
+    // 没有「先渲染登录页→后台再 setState 切主壳」的闪帧，也没有首帧二选一赌注。
+    //   · InstallIdentity.applyBootChannel → 稳定设备 id
+    //   · RemoteConfig.applyCached        → _remote* 地址覆盖
+    //   · AccessCredentialStore.load      → token / userId
+    //   · AccountSessionStore.load        → 登录邮箱
+    // 这些都是毫秒级本地读，被 splash 完全遮蔽，代价不可见。
+    // 桌面端 org 迁移后的串行顺序有历史包袱，保持原样。
+    if (bootMobile) {
+      // 保存并 await：_loadAccountSession 之后遇到它时 Future 已完成，立即
+      // 返回，不会并发撞 load() 的 _loaded 幂等位。
+      _mobileBootWarmup = _warmMobileBootServices();
+      await _mobileBootWarmup;
+    } else {
+      // 运行通道（runtime 收回开关）：上次启动读到的 channel 必须先于任何网络
+      // 请求生效——platform 形态下本机 runtime 不拉起，地址要整体切到控制面。
+      await InstallIdentity.instance.applyBootChannel();
+      // 远程配置下发·地基（2026-11-10）：上次启动从控制面拉到的地址覆盖
+      // 先于一切网络请求生效；随后后台静默刷新，只落盘不立即应用。
+      await RemoteConfig.instance.applyCached();
+      _writeCrashLog("[BOOT]", "stage 1: before AccessCredentialStore.load", StackTrace.current);
+      await AccessCredentialStore.instance.load();
+    }
+    // 拉取失败 fail-open，行为不变。
     unawaited(RemoteConfig.instance.refreshAndPersist());
     // 设备时区预热（零权限、零网络）：session.init 必须同步发出，而 IANA 时区
     // 读取是异步平台调用——先预热，连接建立时 snapshotSync 才能给出完整快照。
@@ -206,9 +229,6 @@ void main() async {
       await runRegisterPreviewWindow();
       return;
     }
-    // 预加载本机访问凭据（token），确保首次 session.init 就能带上
-    _writeCrashLog("[BOOT]", "stage 1: before AccessCredentialStore.load", StackTrace.current);
-    await AccessCredentialStore.instance.load();
     // 预加载云端连接版「用户自有模型」配置——后台加载，不挡首帧：
     // 未配置时 load() 会走跨卸载恢复链（Android 上是 MediaStore 全 Downloads
     // 查询，首装冷库可达秒级），原实现串在 runApp 之前，未登录启动表现为
@@ -217,40 +237,19 @@ void main() async {
     // 「首次 session.init 带上 BYOK 三元组」的语义不变。
     // （仅云端连接版消费；byok 本地版不读此文件。）
     unawaited(CloudModelBindingStore.instance.load());
-    // 手机端：账号会话读盘提前到首帧之前。系统启动画面（已去掉应用图标层）
-    // 与 Flutter 首帧之间不再插「等读盘」的静止画面——首帧即按登录态武装
-    // N 光扫动画，点开应用直接进入动画，不留任何延迟层。
-    // 桌面端不预读，保持原 initState 异步读盘时序，零影响。
     // 未登录时的匿名身份源：两端都用本机安装标识当 actor，不再挤在
     // 编译期 sessionId（session-mvp-001）上串记忆/世界/配额。桌面端若还按
     // 旧约定回落 session-mvp-001，就会出现「init 报 A、消息报 B」的身份
     // 不一致（2026-11-11 事故形态），所以这里两端必须同一套。
-    // 安装标识在 applyBootChannel() 里已同步装载（runApp 之前），此处可直读。
+    // 安装标识 provider 只是个闭包，读的是 applyBootChannel() 后台装载的
+    // cachedInstallId：首帧可能还是 null（回落 guest），后台读完即自动生效，
+    // 未登录首屏没有任何业务请求，不存在「首个 init 带错身份」的问题。
     ApiConfig.installIdentityProvider =
         () => InstallIdentity.instance.cachedInstallId;
-    final bool bootMobile = !kIsWeb && (Platform.isAndroid || Platform.isIOS);
-    String? bootAccountEmail;
-    if (bootMobile) {
-      await AccountSessionStore.instance.load();
-      bootAccountEmail = AccountSessionStore.instance.email;
-      // 身份来源（主流顺序：凭据优先）
-      //  ① 本机 access token 的归属——登录时由服务端签发，不受读盘时序影响，
-      //     也不可能出现「文件丢了就报默认身份」；
-      //  ② 账号会话文件里的邮箱（老版本落盘 / 服务端未签发 token 的场景）；
-      // 两者都没有 = 真正未登录，回落到设备匿名身份（ApiConfig.effectiveActorId）。
-      final String credentialUserId = AccessCredentialStore.instance.hasCredentials
-          ? (AccessCredentialStore.instance.userId ?? "")
-          : "";
-      final String bootIdentity = (bootAccountEmail?.isNotEmpty ?? false)
-          ? bootAccountEmail!
-          : credentialUserId;
-      bootAccountEmail = bootIdentity.isEmpty ? null : bootIdentity;
-      // 首个 session.init/HTTP 在首帧就可能发出，身份必须先落位。
-      ApiConfig.runtimeUserId = bootAccountEmail;
-      // 身份一变就要重新绑定服务端 actor：连接可能已经带着旧身份建好了
-      // （见 WsChatService._announcedActorId）。
-      WsChatService.shared.ensureIdentityAnnounced();
-    }
+    // 手机端首帧一律按「未登录」渲染登录页，身份决议推迟到后台读盘完成后，
+    // 由 _loadAccountSession 统一收口。这样后台读盘是这些 store 的唯一入口，
+    // 不会和首帧路径争抢 load() 的幂等位（_loaded 在 await 前置位，两处并发
+    // load 会让后到的一路拿到尚未读出的空值）。
     _writeCrashLog("[BOOT]", "stage 2: after cred load, before webview bootstrap", StackTrace.current);
     // WebView2 环境进程内只初始化一次：共用浏览器 CDP 调试端口（默认开启，
     // Agent 比价/下单页面直接开在内置浏览器，登录态即本人）必须在这里传入，
@@ -325,9 +324,20 @@ void main() async {
       return;
     }
     _writeCrashLog("[BOOT]", "stage 7: calling runApp", StackTrace.current);
+    // 主流模式：首帧前一次性决议 typed outcome，runApp 首帧直接渲染目标页。
+    // 已登录 → authenticated → 主壳 + N 光扫；未登录 → unauthenticated → 登录页。
+    // 两种门禁首帧一次成型，没有后台 setState 重挂造成的闪帧。
+    // 决议出的身份同步写进 runtimeUserId，保证首帧业务请求带对身份。
+    final String? bootIdentity = bootMobile ? _resolveBootIdentity() : null;
+    if (bootIdentity != null) ApiConfig.runtimeUserId = bootIdentity;
     runApp(PrivateAiApp(
-      initialAccountEmail: bootAccountEmail,
+      initialAccountEmail: bootIdentity,
       initialSessionLoaded: bootMobile,
+      startupOutcome: bootMobile
+          ? (bootIdentity != null
+              ? StartupOutcome.authenticated
+              : StartupOutcome.unauthenticated)
+          : null,
     ));
     // 上次会话桌宠开着 → 起稳后自动恢复；从没召唤过则保持不出现。
     unawaited(Future<void>.delayed(
@@ -339,6 +349,33 @@ void main() async {
     _writeCrashLog("[UNCAUGHT-ZONE]", error, stack);
     debugPrint('[UNCAUGHT] $error\n$stack');
   });
+}
+
+/// 手机端冷启动读盘（runApp 之前 await，2026-11-21 定稿）。
+///
+/// 这段本地读发生在 system splash hold 期间，被同色 splash 完全遮蔽，
+/// 不产生任何可见空白；读完 main() 立即决议 StartupOutcome 并首帧成型。
+/// - 本函数是这些 store 的**唯一 load 入口**，_loadAccountSession 再遇到它
+///   时 Future 已完成，立即返回，不会并发撞 load() 的 _loaded 幂等位。
+/// - applyBootChannel/applyCached 的「上次取到的值本次生效」语义不变，
+///   生效时机在首帧前——和桌面端一致。
+Future<void>? _mobileBootWarmup;
+
+Future<void> _warmMobileBootServices() async {
+  // 逐个 await 且各自吞异常：Future.wait 遇任一 future 抛错会让 _loadAccountSession
+  // 提前放行、读到未落位的身份。各 store 内部已 catch，这里再兜一层双保险。
+  for (final Future<void> task in <Future<void>>[
+    InstallIdentity.instance.applyBootChannel(),
+    RemoteConfig.instance.applyCached(),
+    AccessCredentialStore.instance.load(),
+    AccountSessionStore.instance.load(),
+  ]) {
+    try {
+      await task;
+    } catch (e) {
+      debugPrint("[BootWarm] ignored: $e");
+    }
+  }
 }
 
 /// 全局错误兜底：把 Dart/Flutter 侧所有致命错误写入本地日志文件。
@@ -407,20 +444,47 @@ String? _bubbleTraceOf(String messageId) {
   return m?.group(1);
 }
 
+/// 冷启动路由决议结果（typed outcome，对齐主流 StartupOutcome 模式）。
+/// main() 在首帧前一次性决议，runApp 首帧直接按 outcome 渲染目标页，
+/// 杜绝「先渲染登录页 → 后台读完 setState 切主壳」的闪帧。
+enum StartupOutcome {
+  /// 本机有留存会话 → 首帧直接进主壳并播 N 光扫。
+  authenticated,
+  /// 无留存会话 → 首帧直接落登录页，不播动画。
+  unauthenticated,
+}
+
+/// 首帧前决议本机会话身份：账号会话邮箱优先，其次 access token 归属。
+/// 与 _PrivateAiAppState._resolveLocalIdentity 同语义；store 已在 main()
+/// 中 await 读完，这里同步读取即可。
+String? _resolveBootIdentity() {
+  final String mail = ApiConfig.normalizeIdentity(AccountSessionStore.instance.email);
+  if (mail.isNotEmpty) return mail;
+  if (AccessCredentialStore.instance.hasCredentials) {
+    final String fromToken =
+        ApiConfig.normalizeIdentity(AccessCredentialStore.instance.userId);
+    if (fromToken.isNotEmpty) return fromToken;
+  }
+  return null;
+}
+
 class PrivateAiApp extends StatefulWidget {
   const PrivateAiApp({
     super.key,
     this.initialAccountEmail,
     this.initialSessionLoaded = false,
+    this.startupOutcome,
   });
 
-  /// 手机端在 runApp 前预读的本机会话邮箱（null = 未登录）。只用于决定首帧
-  /// 是否直接武装 N 光扫；桌面端与测试入口保持默认（null / false）。
+  /// 首帧前预读的本机会话邮箱（null = 未登录）。
   final String? initialAccountEmail;
 
-  /// 会话是否已在首帧前读完。true 时根 State 直接用预读结果构建门禁并开播
-  /// N 动画，不再异步读盘、不再 setState 重挂动画，避免中间出现静止等待帧。
+  /// 会话是否已在首帧前读完（桌面端沿用旧路径）。
   final bool initialSessionLoaded;
+
+  /// 冷启动 typed outcome（手机端）：非 null 时首帧一次成型，不再异步读盘/重挂。
+  /// null = 桌面端或测试入口，走 initialSessionLoaded 旧路径。
+  final StartupOutcome? startupOutcome;
 
   @override
   State<PrivateAiApp> createState() => _PrivateAiAppState();
@@ -655,10 +719,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// 启动登录态就绪后拉一次，设置/更换成功后本地即时更新。
   String? _userAvatarPath;
 
-  /// N 开场动画武装位：只在大门放行后播放——已登录冷启动（读盘有会话）
-  /// 或注册/登录完成首次切入主界面时置位。未登录停在注册页期间绝不播放。
-  /// 手机端已把读盘前置到 main()：首帧就置位，点开应用即开播，中间没有
-  /// 等待读盘的静止帧（用户 2026-11-08：前一层连图标带停留时间都不要）。
+  /// N 光扫武装位：只在大门放行后播放。手机端冷启动由 [StartupOutcome]
+  /// 在首帧前确定（authenticated → 播，unauthenticated → 不播），后台读盘
+  /// 回调不再改写；注册/登录成功由 [_completeWebAuth] 置位。
   bool _playBootAnimation = false;
   bool _bootAnimDone = false;   // 开场动画是否已播完（每次武装前重置）
 
@@ -762,7 +825,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   bool _phoneSpeakerOn = true;
   DateTime? _lastDesktopBriefingAt;
   StreamSubscription<String>? _mobileBriefingTapSub;
-  bool _notificationPermissionChecked = false;
+  /// 手机端权限询问只发起一次的守卫：_completeWebAuth（登录/注册）与
+  /// _loadAccountSession（冷启动恢复会话）会在相邻帧内都触发 bootstrap，
+  /// 若两次都真去 request，Android 在系统框尚未销毁时会静默吞掉后一个请求
+  /// （表现：首启只弹通知框，定位框要重启应用才弹）。置位于入口处同时拦并发。
+  bool _mobilePermissionBootstrapDone = false;
 
   @override
   void initState() {
@@ -772,13 +839,23 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     // 手机端已在 main() 首帧前预读：这里直接把状态摆好，让 N 动画从第一帧
     // 就开播，不再有「系统启动画面 → 等读盘的静止帧 → N 动画」这段延迟
     // （用户 2026-11-08 定稿：前一层连图标带停留时间整体不要）。
-    if (widget.initialSessionLoaded) {
+    if (widget.startupOutcome != null) {
+      // 手机端主流模式：outcome 首帧前决议完成，这里一次成型摆好门禁与动画。
+      // 已登录 → 主壳 + N 光扫；未登录 → 登录页、不播。无后台二次重挂。
+      _sessionLoaded = true;
+      _accountEmail = widget.startupOutcome == StartupOutcome.authenticated
+          ? widget.initialAccountEmail
+          : null;
+      _playBootAnimation = widget.startupOutcome == StartupOutcome.authenticated;
+      ApiConfig.runtimeUserId = _accountEmail;
+      WsChatService.shared.ensureIdentityAnnounced();
+    } else if (widget.initialSessionLoaded) {
+      // 桌面端旧路径：会话已在 main() 首帧前读完，有账号即武装 N 光扫。
       _accountEmail = widget.initialAccountEmail;
       _sessionLoaded = true;
       _playBootAnimation = _accountEmail != null;
       ApiConfig.runtimeUserId = _accountEmail;
-      // 读盘/回连晚于建连时，连接上钉的还是默认身份——补发一次 session.init
-      // 把它改绑到真实账号，否则后续消息会被服务端判 FORBIDDEN 丢弃。
+      // 读盘/回连晚于建连时，补发一次 session.init 改绑真实账号。
       WsChatService.shared.ensureIdentityAnnounced();
     }
     unawaited(_loadAccountSession());
@@ -2349,6 +2426,43 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                 );
               }
             });
+          }
+        }
+        // ====== 比价登录自动闭环结果卡（agent.shopping_auto_ready）======
+        // 服务端后台检测到扫码登录成功、自动续跑比价后主动推来。桌面端与
+        // 手机端同构落一条完整 assistant 消息：正文 + 比价卡。卡按
+        // [AGENT_RESULT_CARD_START] 标记块 + envelopeBlocks 双写，与
+        // card.update / done 帧同一约定——渲染、历史回放、复制三处一致。
+        if (type == "agent.shopping_auto_ready") {
+          final Object? card = payload["card"];
+          if (card is Map) {
+            final Map<String, dynamic> cardMap = Map<String, dynamic>.from(card);
+            final String text = payload["text"]?.toString() ??
+                "登录搞定，价格帮你比好了——";
+            final String messageId = payload["messageId"]?.toString() ??
+                "shopping-auto-${DateTime.now().microsecondsSinceEpoch}";
+            // 去重：重连 / 补投不得重复落卡
+            if (!_messages.any((ChatMessage m) => m.messageId == messageId)) {
+              final String block =
+                  "[AGENT_RESULT_CARD_START]\n${jsonEncode(cardMap)}\n[AGENT_RESULT_CARD_END]";
+              final ChatMessage msg = ChatMessage(
+                messageId: messageId,
+                sessionId: ApiConfig.effectiveActorId,
+                role: "assistant",
+                text: "$text\n$block",
+                timestamp: DateTime.now(),
+                envelopeBlocks: <Map<String, dynamic>>[
+                  <String, dynamic>{"type": "card", "card": cardMap},
+                ],
+              );
+              setState(() {
+                _messages.add(msg);
+                _assistantMessageIndexById[messageId] = _messages.length - 1;
+              });
+              unawaited(_store.saveMessage(msg).catchError((Object e) {
+                debugPrint("[chat] shopping auto-ready saveMessage failed: $e");
+              }));
+            }
           }
         }
         if (type == "agent.proactive_voice") {
@@ -5527,12 +5641,22 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     });
   }
 
-  /// 手机端权限申请主流程：只申请真正缺的，先通知后定位。自然收敛：
-  /// - 通知：系统永久拒绝（permanentlyDenied）后 status 不再是 isDenied，
-  ///   不会再弹；用户没拒绝过才询问。
+  /// 手机端权限申请主流程：只申请真正缺的，并且**一次 requestPermissions
+  /// 同时带上通知 + 定位**（2026-11-21 根修）。
+  ///
+  /// 旧实现是「通知框 → 等 600ms → geolocator 再弹定位框」两次独立请求：
+  /// Android 一次只受理一个权限框，前一个还在销毁时后一个会被系统静默判
+  /// denied 且不显示 UI——表现就是首启只看到通知框，定位要等下次冷启动
+  /// （通知已授权、不再抢框）才弹。批量请求交给系统串行排队弹框，彻底避开。
+  ///
+  /// 自然收敛：
+  /// - 通知：permanentlyDenied 后 status 不再是 isDenied，系统不再受理，不询问。
   /// - 定位：consent 只记系统给过的真实答复（允许/拒绝），拒绝后绝不打扰；
   ///   没问成的那次不落记录，下次冷启动继续问。
   Future<void> _runMobilePermissionBootstrap() async {
+    if (_mobilePermissionBootstrapDone) return;
+    _mobilePermissionBootstrapDone = true;
+
     bool notifNeeded = false;
     try {
       final PermissionStatus status = await Permission.notification.status;
@@ -5544,23 +5668,30 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         await ClientLocationService.getLocationConsent() == null;
     if (!notifNeeded && !locationNeeded) return;
 
-    // 通知先弹（系统框），用户点完再弹定位。
-    if (notifNeeded) {
-      await _ensureMobileNotificationPermission();
-      // Android 在「上一个权限对话框仍在销毁」时发起的新请求会被直接判 denied
-      // 且不显示 UI（一次只受理一个框）——不留这个间隔，首启只能看到通知框，
-      // 定位框要等下次冷启动才弹。
-      if (locationNeeded) {
-        await Future<void>.delayed(const Duration(milliseconds: 600));
-      }
+    // 一次请求带上所有缺失权限：系统在同一流程里依次弹出各权限组的框，
+    // 全部答完一次性回调，不会出现「第二个框还没轮到就被吞」。
+    final List<Permission> needed = <Permission>[
+      if (notifNeeded) Permission.notification,
+      if (locationNeeded) Permission.location,
+    ];
+    final Map<Permission, PermissionStatus> results;
+    try {
+      results = await needed.request();
+    } catch (_) {
+      return; // 没问成就不落 consent，下次冷启动继续问
     }
+
     if (locationNeeded) {
-      final bool? granted =
-          await ClientLocationService.requestSystemLocationPermission();
-      if (granted == null) return;
-      await ClientLocationService.setLocationConsent(granted);
-      if (!granted) return;
-      unawaited(ClientLocationService.warmUpGpsIfConsented());
+      final PermissionStatus? status = results[Permission.location];
+      if (status == null) return; // 请求没受理，不落记录，下次冷启动继续问
+      if (status.isGranted) {
+        await ClientLocationService.setLocationConsent(true);
+        unawaited(ClientLocationService.warmUpGpsIfConsented());
+      } else if (status.isDenied || status.isPermanentlyDenied) {
+        // 用户明确拒绝（含「不再询问」）→ 落 false，此后绝不打扰。
+        await ClientLocationService.setLocationConsent(false);
+      }
+      // restricted / 未受理：不落记录，下次冷启动继续问。
     }
   }
 
@@ -5991,11 +6122,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// 顶在最前——重量级初始化照常在后台跑，注册成功落盘即切入主界面。
   Widget _buildApp() {
     if (!_sessionLoaded) {
-      // 兜底分支：手机端会话已在 main() 首帧前读完，正常启动不会走到这里。
-      // 万一预读未完成，也只给与 N 光扫同色的纯底，不复用桌面初始化页
-      // （转圈 + 自绘标题栏），避免中间插进一层浅色加载页。
+      // 仅异常入口落此分支（正常冷启动 outcome 已在首帧前决议）。
       if (_isMobile) {
-        return const ColoredBox(color: Color(0xFF161616));
+        return _buildMobileLoginGate();
       }
       return _buildLoadingApp();
     }
@@ -6239,22 +6368,34 @@ class _PrivateAiAppState extends State<PrivateAiApp>
 
   Future<void> _loadAccountSession() async {
     if (widget.initialSessionLoaded) {
-      // 手机端已在 main() 首帧前读完：留一个事件循环边界，灵动岛/头像等
-      // 平台侧动作不挤在 initState 内同步执行；此时 N 动画已在首帧开播，
-      // 绝不 setState 重挂（重挂会重置动画进度，等于又插一段空白）。
+      // 桌面端：会话已在 main() 首帧前读完。留一个事件循环边界，灵动岛/
+      // 头像等平台侧动作不挤在 initState 内同步执行；此时 N 动画已在首帧
+      // 开播，绝不 setState 重挂（重挂会重置动画进度，等于又插一段空白）。
       await Future<void>.delayed(Duration.zero);
+    } else if (_isMobile) {
+      // 兜底路径（异常入口未传 startupOutcome）：等 main() 读盘 Future 完成
+      // 再决议，撞不上 load() 的 _loaded 幂等位。
+      await _mobileBootWarmup;
+      await AccountSessionStore.instance.load(); // 幂等
     } else {
       await AccountSessionStore.instance.load();
     }
-    ApiConfig.runtimeUserId = _resolveLocalIdentity(
+    // 身份来源（主流顺序：凭据优先，与 main() 原首帧决议同语义）：
+    //  ① 本机 access token 的归属——登录时服务端签发，权威且不受读盘时序影响；
+    //  ② 账号会话文件里的邮箱（老版本落盘 / 服务端未签发 token 的场景）。
+    // 两者都没有 = 真正未登录，回落设备匿名身份（ApiConfig.effectiveActorId）。
+    final String? localIdentity = _resolveLocalIdentity(
       AccountSessionStore.instance.email,
     );
+    ApiConfig.runtimeUserId = localIdentity;
     // 账号读写都在鉴权链路里：身份一确定就重绑连接（登录/切换/回连共用此路）。
     WsChatService.shared.ensureIdentityAnnounced();
     if (!mounted) return;
     if (!widget.initialSessionLoaded) {
+      // 仅兜底路径会走到：首帧未决议，后台读完才切主壳并武装。
+      // 正常手机端冷启动 outcome 已在首帧成型，绝不走这里（无二次重挂）。
       setState(() {
-        _accountEmail = AccountSessionStore.instance.email;
+        _accountEmail = localIdentity;
         _sessionLoaded = true;
         _playBootAnimation = _accountEmail != null;
       });
@@ -6329,8 +6470,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     setState(() {
       _accountEmail = mail;
       _needsOnboarding = freshCreated;
-      // 新建账号走向导自己的进度条开机动画；已注册登录照常 N 光扫
-      _playBootAnimation = !freshCreated;
+      // N 光扫武装：手机端登录/注册成功进主壳时播（冷启动已由 outcome
+      // 在首帧前武装）；桌面端新建账号走向导进度条动画，其余登录照常播。
+      _playBootAnimation = _isMobile || !freshCreated;
       _bootAnimDone = false;
     });
     _syncIslandGate();
@@ -6668,26 +6810,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       await _handleMorningBriefingEvent(data, forceDialog: true);
     } catch (_) {
       // ignore invalid mobile briefing payload
-    }
-  }
-
-  /// 系统通知权限（Android 13+ / iOS）：带「本次会话只问一次」的守卫。
-  /// 手机端从冷启动挪到进主壳后调用，避免在登录门禁页弹系统框。
-  Future<void> _ensureMobileNotificationPermission() async {
-    if (kIsWeb ||
-        (defaultTargetPlatform != TargetPlatform.android &&
-            defaultTargetPlatform != TargetPlatform.iOS)) {
-      return;
-    }
-    if (_notificationPermissionChecked) return;
-    _notificationPermissionChecked = true;
-    try {
-      final PermissionStatus status = await Permission.notification.status;
-      if (status.isDenied) {
-        await Permission.notification.request();
-      }
-    } catch (_) {
-      // ignore notification permission failures
     }
   }
 

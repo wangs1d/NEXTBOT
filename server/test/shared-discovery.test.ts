@@ -148,7 +148,7 @@ test("旁路生产者（直接 submitProposal）也走共享层：读走预留�
     const delivered: Array<{ actorId: string; json: string }> = [];
     const pipeline = new ProactivePipeline({
       dataPath: dir,
-      governor: new FrequencyGovernor({ ignoreEnv: true, disableQuietHours: true }),
+      governor: new FrequencyGovernor({ ignoreEnv: true, }),
       suppression: { isSuppressed: () => ({ suppressed: false, reason: "" }) },
       presence,
       delivery: new ProactiveDeliveryService({
@@ -235,7 +235,7 @@ test("管道结算：deferred 提案维持预留（不消费发现），等真�
     const presence = new PresenceService(); // 未 markConnected → offline → 仲裁挂起
     const pipeline = new ProactivePipeline({
       dataPath: dir,
-      governor: new FrequencyGovernor({ ignoreEnv: true, disableQuietHours: true }),
+      governor: new FrequencyGovernor({ ignoreEnv: true, }),
       suppression: { isSuppressed: () => ({ suppressed: false, reason: "" }) },
       presence,
       delivery: new ProactiveDeliveryService({ trySend: () => true }),

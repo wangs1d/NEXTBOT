@@ -30,7 +30,7 @@ function makeHub(opts?: { confirmations?: PendingConfirmationStore }) {
       toolCalls.push({ tool, args });
       return { ok: true, result: {} };
     },
-    frequencyGovernor: new FrequencyGovernor({ ignoreEnv: true, disableQuietHours: true }),
+    frequencyGovernor: new FrequencyGovernor({ ignoreEnv: true, }),
     silenceLog,
     pendingConfirmations: opts?.confirmations,
   });
@@ -303,7 +303,7 @@ test("管道级确认委托: origin=pipeline 的条目经 resolver 回流，不�
       toolCalls.push({ tool, args });
       return { ok: true, result: {} };
     },
-    frequencyGovernor: new FrequencyGovernor({ ignoreEnv: true, disableQuietHours: true }),
+    frequencyGovernor: new FrequencyGovernor({ ignoreEnv: true, }),
     silenceLog: new SilenceLog(),
     pendingConfirmations: store,
   });
