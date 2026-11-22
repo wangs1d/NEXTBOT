@@ -2,6 +2,84 @@ import { resolveActorId } from "../agent/actor-id.js";
 import type { VoiceCapabilityService } from "../services/voice-capability-service.js";
 import type { ToolRegistry } from "./tool-registry.js";
 
+/** 单条语音气泡的目标时长（按中文语速约 12~20 秒）与硬上限。 */
+const VOICE_SEGMENT_TARGET_CHARS = 60;
+const VOICE_SEGMENT_MAX_CHARS = 110;
+/** 长文最多拆成多少条语音气泡，避免一次刷出十几条。 */
+const VOICE_SEGMENT_MAX_COUNT = 12;
+
+/**
+ * 语音条分泡口径（2026-11-23 用户裁决）：
+ * 一条语音不允许吞下整段回复，长内容要按「正常分泡」拆成多条可重播语音。
+ *
+ * 切法：先按换行/句末标点（。！？；…）切句，再把相邻短句合并到 ~60 字；
+ * 单句超过 110 字时优先在逗号/顿号等自然停顿处硬切；超过 12 段时按顺序
+ * 分组并回，保证气泡数量可控且顺序不变。
+ */
+export function splitVoiceMessageText(text: string): string[] {
+  const normalized = text.replace(/\r\n?/g, "\n").trim();
+  if (!normalized) return [];
+
+  const sentences: string[] = [];
+  for (const paragraph of normalized.split(/\n+/)) {
+    const line = paragraph.trim();
+    if (!line) continue;
+    const parts = line.match(
+      /[^。！？!?；;…]+[。！？!?；;…]+[”"’'」』）)]*|[^。！？!?；;…]+$/gu,
+    );
+    if (parts) sentences.push(...parts.map((part) => part.trim()).filter(Boolean));
+  }
+
+  const segments: string[] = [];
+  let current = "";
+  const flush = () => {
+    if (current) {
+      segments.push(current);
+      current = "";
+    }
+  };
+  for (const sentence of sentences) {
+    for (const piece of hardSplitSentence(sentence, VOICE_SEGMENT_MAX_CHARS)) {
+      if (!current) {
+        current = piece;
+      } else if (current.length + piece.length <= VOICE_SEGMENT_TARGET_CHARS) {
+        current += piece;
+      } else {
+        flush();
+        current = piece;
+      }
+    }
+  }
+  flush();
+
+  if (segments.length <= VOICE_SEGMENT_MAX_COUNT) return segments;
+  const groupSize = Math.ceil(segments.length / VOICE_SEGMENT_MAX_COUNT);
+  const capped: string[] = [];
+  for (let i = 0; i < segments.length; i += groupSize) {
+    capped.push(segments.slice(i, i + groupSize).join(""));
+  }
+  return capped;
+}
+
+function hardSplitSentence(sentence: string, maxChars: number): string[] {
+  if (sentence.length <= maxChars) return [sentence];
+  const out: string[] = [];
+  let rest = sentence;
+  while (rest.length > maxChars) {
+    const window = rest.slice(0, maxChars);
+    let cut = -1;
+    for (const mark of ["，", "、", "：", ",", "；", " "]) {
+      const index = window.lastIndexOf(mark);
+      if (index > cut) cut = index;
+    }
+    if (cut < Math.floor(maxChars * 0.5)) cut = maxChars - 1;
+    out.push(rest.slice(0, cut + 1).trim());
+    rest = rest.slice(cut + 1).trim();
+  }
+  if (rest) out.push(rest);
+  return out.filter(Boolean);
+}
+
 /**
  * Agent 底层语音能力工具族（表达）：
  *   - voice.speak         → 轻量播报（无 UI，客户端后台一次性播放）
@@ -100,35 +178,66 @@ export function registerAgentVoiceTools(
       return { ok: false, error: "缺少 text（语音消息要朗读的内容）" };
     }
 
-    const result = await voiceCapability.sendMessage({
-      toUserId: actorId,
-      text,
-      traceId: context.chatUserMessageId ?? context.sessionId,
-    });
+    // 语音条也走「分泡」：长内容拆成多条短语音，每条独立合成、可单独重播。
+    // 串行合成保证气泡落屏顺序与原文一致（并行会按完成先后乱序推送）。
+    const segments = splitVoiceMessageText(text);
+    const sent: Array<{
+      messageId: string;
+      mediaUrl: string;
+      durationMs: number;
+      pushed: boolean;
+      provider?: string;
+    }> = [];
+    let firstError: string | undefined;
+    for (const segment of segments) {
+      const result = await voiceCapability.sendMessage({
+        toUserId: actorId,
+        text: segment,
+        traceId: context.chatUserMessageId ?? context.sessionId,
+      });
+      if (result.ok) {
+        sent.push({
+          messageId: result.messageId,
+          mediaUrl: result.mediaUrl,
+          durationMs: result.durationMs,
+          pushed: result.pushed,
+          provider: result.provider,
+        });
+      } else {
+        firstError ??= result.error;
+      }
+    }
 
-    if (!result.ok) {
+    if (sent.length === 0) {
       return {
         ok: false,
-        error: result.error ?? "语音消息发送失败",
+        error: firstError ?? "语音消息发送失败",
         retryable: true,
       };
     }
 
-    const seconds = Math.max(1, Math.round(result.durationMs / 1000));
-    const providerHint = result.provider ? `（TTS：${result.provider}）` : "";
+    const durationMs = sent.reduce((sum, item) => sum + item.durationMs, 0);
+    const seconds = Math.max(1, Math.round(durationMs / 1000));
+    const provider = sent.find((item) => item.provider)?.provider;
+    const providerHint = provider ? `（TTS：${provider}）` : "";
+    const pushed = sent.every((item) => item.pushed);
+    const splitHint =
+      sent.length > 1 ? `长内容已按正常分泡拆成 ${sent.length} 条短语音` : "";
 
     // 回执只给模型看，不给用户看。明确禁止在正文复述语音内容或秒数：
     // 此前 summary 带「已发送语音消息（N"）...」，模型把它复述成
     // 「语音发过去了大哥，五十四秒」——而 N 来自错的码率估算，用户看到编的数字。
     return {
       ok: true,
-      messageId: result.messageId,
-      mediaUrl: result.mediaUrl,
-      durationMs: result.durationMs,
+      messageId: sent[0].messageId,
+      messageIds: sent.map((item) => item.messageId),
+      segmentCount: sent.length,
+      mediaUrl: sent[0].mediaUrl,
+      durationMs,
       durationSeconds: seconds,
-      pushed: result.pushed,
-      summary: result.pushed
-        ? `语音消息已作为可重播语音气泡落入对话流${providerHint}。禁止在正文复述这条语音的内容或时长，也不要用「发过去了/已送达」之类措辞——用户能直接看到气泡，任何复述都是编造。调用完只需自然接下一句。`
+      pushed,
+      summary: pushed
+        ? `语音消息已作为可重播语音气泡落入对话流${providerHint}${splitHint ? `，${splitHint}` : ""}。禁止在正文复述这条语音的内容或时长，也不要用「发过去了/已送达」之类措辞——用户能直接看到气泡，任何复述都是编造。调用完只需自然接下一句。`
         : `语音消息已生成，但当前连接不可达${providerHint}。不要声称送达；如确需说明，只说「稍后重连可收听」，不要编造时长。`,
     };
   });
