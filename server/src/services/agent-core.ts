@@ -22,6 +22,8 @@ import type { LocationCoordinator } from "./location-coordinator.js";
 import type { ActorContextService } from "./actor-context-service.js";
 import type { LocationHistoryService } from "./location-history-service.js";
 import type { PlaceSemanticsService } from "./place-semantics-service.js";
+import type { TurnLocationHook } from "./turn-location-hook.js";
+import { selectPromptLocation } from "./turn-location-hook.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import { seedIdentityMarkdown } from "../agent/identity-markdown-seeder.js";
 import { isActorDisabled } from "./user-disable-gate.js";
@@ -369,8 +371,11 @@ export class AgentCore {
   /** 地点语义（家/公司）：prompt 里的「在家/在公司」与常去地点语义标签都读它 */
   private placeSemantics: PlaceSemanticsService | null = null;
   private actorContext: ActorContextService | null = null;
-  /** prompt 按要 GPS 的上次尝试时间（失败冷却用，per-actor）。 */
-  private promptLocationLastAttemptAt = new Map<string, number>();
+  /**
+   * 每轮位置感知钩子（2026-11-22）：prompt 装配前把「当前位置」拉齐到本轮
+   * （与【当前时间】同级的动态注入）。未注入时退回「只读快照」旧行为。
+   */
+  private turnLocationHook: TurnLocationHook | null = null;
   private moodInferenceService: MoodInferenceService | null = null;
   private wsRegistry: ClientPushPort | null = null;
   private lifeSignalHubService: LifeSignalHubService | null = null;
@@ -490,6 +495,16 @@ export class AgentCore {
     this.promptContextBuilder.setTimezoneProvider(
       service ? (actorId: string) => service.resolveClock(actorId).timezone : null,
     );
+  }
+
+  /**
+   * 注入每轮位置感知钩子（2026-11-22，bootstrap 在快照/协调器之后装配）。
+   *
+   * 与 setActorContext 分开：钩子还依赖 LocationCoordinator 与地点语义，
+   * 三者装配顺序由 bootstrap 决定；这里只消费成品，不在 setter 里拼装。
+   */
+  setTurnLocationHook(hook: TurnLocationHook | null): void {
+    this.turnLocationHook = hook;
   }
 
   /** 在 bootstrap 注册情绪感知后注入，用于按轮分析用户消息情绪。 */
@@ -1023,6 +1038,22 @@ export class AgentCore {
       /* 记忆组件未装配 → 不做指代锚定，回退模型判断 */
     }
 
+    // 每轮位置钩子（2026-11-22）：位置不再只是「上次上报的快照」，而是和
+    // 【当前时间】同级的本轮感知——并行发起（不串行拖慢记忆/画像装配），
+    // 位置块解析等它结束后再读快照，保证拿到的是本轮刷新后的状态。
+    const locationRefresh = this.turnLocationHook
+      ? ctxTiming(
+          "locationHook",
+          this.turnLocationHook.run(actorId, {
+            reason: route.plane === "task" ? "task" : "chat",
+          }),
+        )
+      : null;
+    const resolveLocationForPrompt = (): Promise<string | undefined> =>
+      (locationRefresh ?? Promise.resolve(null)).then(() =>
+        this.resolveUserLocationForPrompt(actorId, opts),
+      );
+
     const [narrativeRecall, workingMemorySummary, recentConversationHistory, userLocation, personalization] =
       route.plane === "chat"
       ? await Promise.all([
@@ -1034,7 +1065,7 @@ export class AgentCore {
           // 跨会话待办衔接块（v3 起恒 undefined，见上注释）
           Promise.resolve(undefined) as Promise<string | undefined>,
           // 2026-09-05：对话面也注入位置背景（纯缓存/按需 RPC，零 LLM）
-          ctxTiming("userLocation", this.resolveUserLocationForPrompt(actorId, opts)),
+          ctxTiming("userLocation", resolveLocationForPrompt()),
           // 2026-09-29 画像接通对话面：chat 面注入文件画像（轻量切片零副作用；
           // 模板画像不注入）。语气不走 toneGuidance（mood/风格闸单点管）。
           ctxTiming(
@@ -1049,7 +1080,7 @@ export class AgentCore {
           Promise.resolve(cognitiveWorkingMemorySummary || undefined),
           Promise.resolve(undefined) as Promise<string | undefined>,
           // 2026-09-05：每轮无条件注入（缓存/按需 RPC，零 LLM；措辞层已禁止反问）
-          this.resolveUserLocationForPrompt(actorId, opts),
+          resolveLocationForPrompt(),
           this.userPersonalizationService?.getPromptSlice(actorId, text) ?? Promise.resolve({}),
         ]);
 
@@ -1520,72 +1551,33 @@ if (route.plane === "task") {
    * P0/P4：每条带「[相对时间·记忆类型]」前缀（程序化计算，杜绝 LLM 生成时间标签失真），
    * 让 LLM 清楚知道每条记忆是什么时候发生的、属于哪类记忆，回答时不会张冠李戴。
    */
-  /** prompt 位置新鲜窗口：窗口内直接用缓存，超窗才向客户端要一次 GPS（≤1 次/窗口/actor）。 */
-  private static readonly PROMPT_LOCATION_FRESH_MS = 5 * 60 * 1000;
-  /** 按要 GPS 的失败冷却：客户端离线/拒绝定位时，避免每条消息都白等 6s 超时。 */
-  private static readonly PROMPT_LOCATION_RETRY_MS = 10 * 60 * 1000;
 
   /**
-   * Prompt 阶段的位置注入（全链路零 LLM、**零阻塞**）。
+   * Prompt 阶段的位置注入（全链路零 LLM）。
    *
-   * 2026-11-05 架构修正：本方法只读「情境快照」，不再向客户端发起按需定位。
-   * 位置是 Actor 的持续属性，不是一次 RPC——旧实现每轮先查缓存、缺失就
-   * `requestLocation`（12s RPC）并靠「只发起不等待」打补丁避免阻塞，本质是
-   * 在错误架构上叠补丁。现在：
+   * 2026-11-22 架构修正：位置刷新从本方法剥离到 `TurnLocationHook`——每轮在
+   * 上下文装配阶段并行跑一次（快路径缓存命中零等待，过期才在预算内向设备要
+   * 一次 fix）。本方法只负责**读**与**裁决**，职责单一：
    *   1. 本轮显式带入（少数程序化调用方）优先；
-   *   2. 其次读快照（WS 每次上报都会刷新，含被历史频控丢弃的那部分）；
+   *   2. 其次读快照（钩子本轮可能刚更新；WS 每次上报也会刷新）；
    *   3. 快照空（进程刚重启）才落魄盘历史的最近一条；
-   *   4. 都没有 → 不注入（位置可缺席，时间不受影响）。
+   *   4. 快照/历史超过最大可用龄期 → 一律不注入（旧坐标不得冒充当前位置）；
+   *   5. 都没有 → 不注入（位置可缺席，时间不受影响）。
    * 龄期一律如实标注，绝不把旧位置说成实时。
    */
   private async resolveUserLocationForPrompt(
     actorId: string,
     opts?: { clientIp?: string; clientLocation?: ClientLocationWire },
   ): Promise<string | undefined> {
-    let location: ClientLocationWire | undefined = opts?.clientLocation;
-    let observedAt = location ? Date.now() : undefined;
-
-    const snapshot = this.actorContext?.get(actorId)?.location;
-    if (snapshot && (observedAt == null || snapshot.observedAt >= observedAt)) {
-      location = {
-        latitude: snapshot.latitude,
-        longitude: snapshot.longitude,
-        ...(snapshot.accuracyMeters != null ? { accuracyMeters: snapshot.accuracyMeters } : {}),
-        ...(snapshot.city ? { city: snapshot.city } : {}),
-        ...(snapshot.district ? { district: snapshot.district } : {}),
-        ...(snapshot.region ? { region: snapshot.region } : {}),
-        ...(snapshot.country ? { country: snapshot.country } : {}),
-        ...(snapshot.label ? { label: snapshot.label } : {}),
-        // 精确位置（2026-11-14）：快照里已有门牌/地标就一并注入，prompt 不再只到城市级。
-        ...(snapshot.address ? { address: snapshot.address } : {}),
-        ...(snapshot.township ? { township: snapshot.township } : {}),
-        ...(snapshot.poi ? { poi: snapshot.poi } : {}),
-        ...(snapshot.poiDistanceMeters != null
-          ? { poiDistanceMeters: snapshot.poiDistanceMeters }
-          : {}),
-        // 时区不从位置带：它在【当前时间】块里由快照的 clock 字段独立表达
-      };
-      observedAt = snapshot.observedAt;
-    }
-
-    if (!location && this.locationHistory) {
-      const sample = this.locationHistory.latest(actorId);
-      const at = sample ? Date.parse(sample.recordedAt) : NaN;
-      if (sample && Number.isFinite(at)) {
-        location = {
-          latitude: sample.latitude,
-          longitude: sample.longitude,
-          ...(sample.city ? { city: sample.city } : {}),
-          ...(sample.district ? { district: sample.district } : {}),
-          ...(sample.region ? { region: sample.region } : {}),
-          ...(sample.country ? { country: sample.country } : {}),
-          ...(sample.label ? { label: sample.label } : {}),
-        };
-        observedAt = at;
-      }
-    }
-
-    if (!location) return undefined;
+    // 选择与龄期裁决收敛到 selectPromptLocation（唯一口）：消息自带 → 快照 →
+    // 落盘历史，三者同口径比较；超龄一律不选，旧坐标不得冒充当前位置。
+    const selected = selectPromptLocation({
+      ...(opts?.clientLocation ? { clientLocation: opts.clientLocation } : {}),
+      snapshot: this.actorContext?.get(actorId)?.location ?? null,
+      historySample: this.locationHistory?.latest(actorId) ?? null,
+    });
+    if (!selected) return undefined;
+    const { location, observedAt, snapshot } = selected;
 
     // 语义刷新：getPlaces 命中 TTL 缓存时零成本；未命中只读本地历史 + 已缓存 POI，
     // 不发网络请求（POI 缺失时后台预热，下一轮可用）。

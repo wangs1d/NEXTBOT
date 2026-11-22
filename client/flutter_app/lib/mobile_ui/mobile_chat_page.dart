@@ -21,7 +21,6 @@ import "../features/chat/image_preview_panel.dart";
 import "../features/chat/local_media_store.dart";
 import "../features/chat/media_disk_cache.dart";
 import "../features/chat/message_body_renderer.dart";
-import "../features/chat/structured_assistant_message_body.dart";
 import "../features/chat/travel_plan_archive.dart";
 import "../features/chat/travel_plan_launcher.dart";
 import "../features/chat/followup_bubbles.dart";
@@ -37,12 +36,6 @@ const double kAgentStatusOrbInset = 16;
 
 /// 顶栏文字字体：与侧边栏统一使用 HarmonyOS Sans SC。
 const String _kTopBarFontFamily = "HarmonyOS Sans SC";
-
-/// 消息流左右边距：结构化内容（卡片/表格/摘要）的左右边缘距屏幕 16px。
-const double _kMessageSidePadding = 16;
-
-/// 闲聊气泡最大宽（设计稿 236 / 320 ≈ 73.8%，按屏宽等比）。
-const double _kChatBubbleWidthFactor = 0.738;
 
 /// 手机端对话主界面(白黑极简,跟随主题)。
 ///
@@ -683,8 +676,9 @@ class _MobileChatPageState extends State<MobileChatPage> {
       child: ListView.builder(
         controller: _scroll,
         reverse: !openingOnly,
-        padding: EdgeInsets.fromLTRB(_kMessageSidePadding, openingOnly ? 24 : 6,
-            _kMessageSidePadding, 8),
+        padding: EdgeInsets.fromLTRB(
+            MobileTheme.messageSidePadding, openingOnly ? 24 : 6,
+            MobileTheme.messageSidePadding, 8),
         itemCount: messageCount + flowOffset + (typing ? 1 : 0),
         // 按消息 id 复用 Element（2026-11-11 闪卡根治）：reverse 列表下每追加
         // 一条消息（用户气泡 / turn_started 空占位），所有已有消息的 index 都
@@ -785,7 +779,8 @@ class _MobileChatPageState extends State<MobileChatPage> {
           alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
           child: ConstrainedBox(
             constraints: BoxConstraints(
-              maxWidth: MediaQuery.sizeOf(context).width * 0.738,
+              maxWidth: MobileTheme.chatBubbleMaxWidth(
+                  MediaQuery.sizeOf(context).width),
             ),
             child: VoiceMessageBubble(
               mediaUrl: audio.url,
@@ -816,8 +811,8 @@ class _MobileChatPageState extends State<MobileChatPage> {
           padding: const EdgeInsets.symmetric(vertical: 4),
           child: ConstrainedBox(
             constraints: BoxConstraints(
-              maxWidth:
-                  MediaQuery.sizeOf(context).width - _kMessageSidePadding * 2,
+              maxWidth: MobileTheme.messageMaxWidth(
+                  MediaQuery.sizeOf(context).width),
             ),
             child: EveningDigestCard(digest: m.eveningDigest!),
           ),
@@ -903,7 +898,8 @@ class _MobileChatPageState extends State<MobileChatPage> {
       child: Container(
         width: double.infinity,
         constraints: BoxConstraints(
-          maxWidth: MediaQuery.sizeOf(context).width - _kMessageSidePadding * 2,
+          maxWidth: MobileTheme.messageMaxWidth(
+              MediaQuery.sizeOf(context).width),
         ),
         margin: const EdgeInsets.symmetric(vertical: 5),
         padding: const EdgeInsets.fromLTRB(15, 9, 15, 4),
@@ -1059,8 +1055,8 @@ class _MobileChatPageState extends State<MobileChatPage> {
           width: double.infinity,
           margin: const EdgeInsets.symmetric(vertical: 4),
           constraints: BoxConstraints(
-            maxWidth:
-                MediaQuery.sizeOf(context).width - _kMessageSidePadding * 2,
+            maxWidth: MobileTheme.messageMaxWidth(
+                MediaQuery.sizeOf(context).width),
           ),
           decoration: BoxDecoration(
             color: p.surface,
@@ -1222,16 +1218,6 @@ class _MobileChatPageState extends State<MobileChatPage> {
               color: p.textPrimary,
               fontSize: 17,
               fontWeight: FontWeight.w600,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            "随时随地,随聊随答\n同一账号与桌面端数据同步",
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              color: p.textSecondary,
-              fontSize: 13,
-              height: 1.6,
             ),
           ),
         ],
@@ -1439,7 +1425,8 @@ class _MobileChatPageState extends State<MobileChatPage> {
           alignment: Alignment.centerRight,
           child: Container(
             constraints: BoxConstraints(
-              maxWidth: MediaQuery.sizeOf(context).width * 0.738,
+              maxWidth: MobileTheme.chatBubbleMaxWidth(
+                  MediaQuery.sizeOf(context).width),
             ),
             margin: const EdgeInsets.symmetric(vertical: 5),
             padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 11),
@@ -1529,7 +1516,10 @@ class _MobileChatPageState extends State<MobileChatPage> {
     final Color text = isUser ? p.userBubbleText : p.assistantBubbleText;
     // 宽度口径：普通闲聊维持设计稿泡宽；含卡片/表格/摘要的结构化回复
     // 放宽到「屏宽 − 左右各 16px」，与气泡外的独立卡同宽。
-    final bool wideAssistant = !isUser && _assistantNeedsWideBubble(m);
+    // 判定唯一源在渲染层（assistantBodyNeedsWideWidth）：它按「真正会被画出来
+    // 的那份正文」判结构，页面侧自读 m.text 会在「信封 text 块带全文、
+    // finalText 只剩一句/为空」的轮次上判反（2026-11-21 根修）。
+    final bool wideAssistant = !isUser && assistantBodyNeedsWideWidth(m);
     final double screenWidth = MediaQuery.sizeOf(context).width;
     return Align(
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
@@ -1537,8 +1527,8 @@ class _MobileChatPageState extends State<MobileChatPage> {
         width: wideAssistant ? double.infinity : null,
         constraints: BoxConstraints(
           maxWidth: wideAssistant
-              ? screenWidth - _kMessageSidePadding * 2
-              : screenWidth * _kChatBubbleWidthFactor,
+              ? MobileTheme.messageMaxWidth(screenWidth)
+              : MobileTheme.chatBubbleMaxWidth(screenWidth),
         ),
         margin: const EdgeInsets.symmetric(vertical: 5),
         padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 11),
@@ -1908,40 +1898,6 @@ List<AgentResultData> _standaloneCardsOf(ChatMessage m) {
     if (block.isCard) add(block.data);
   }
   return out;
-}
-
-/// 助手消息是否含「非纯闲聊」内容：摘要卡 / 媒体卡 / 信封块里的卡与媒体 /
-/// 结构化正文（小标题、列表、表格）。这类回复放宽到全宽渲染，
-/// 纯聊天文字仍按设计稿泡宽收窄。
-///
-/// 照片回复例外：只带照片（连同散文正文）的轮次保持设计稿泡宽，照片卡大小
-/// 与放宽前一致；同轮还带结果卡或结构化正文时才放宽。
-bool _assistantNeedsWideBubble(ChatMessage m) {
-  if (m.role == "user") return false;
-  if (m.summaryCard != null) return true;
-  bool hasMedia = (m.mediaCards?.isNotEmpty ?? false) ||
-      (m.pendingMediaCards?.isNotEmpty ?? false);
-  bool hasCard = m.text.contains(AgentResultParser.startMarker);
-  bool hasNonText = hasMedia;
-  for (final List<Map<String, dynamic>>? blocks
-      in <List<Map<String, dynamic>>?>[
-    m.renderBlocks,
-    m.envelopeBlocks,
-    m.replyBlocks,
-  ]) {
-    if (blocks == null) continue;
-    for (final Map<String, dynamic> b in blocks) {
-      final String type = b["type"]?.toString() ?? "text";
-      if (type == "media") hasMedia = true;
-      if (type == "card") hasCard = true;
-      if (type != "text") hasNonText = true;
-    }
-  }
-  final bool structuredText =
-      StructuredAssistantMessageBody.isStructuredText(m.text);
-  if (hasMedia && !hasCard && !structuredText) return false;
-  if (hasNonText) return true;
-  return structuredText;
 }
 
 /// 气泡里还有没有可见正文：卡外置后，若消息只剩卡（正文全被剥掉的历史形态），

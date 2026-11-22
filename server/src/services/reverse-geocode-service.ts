@@ -241,6 +241,38 @@ async function reverseFromAmap(latitude: number, longitude: number): Promise<Rev
 
   // 最近地标：AOI（小区/园区/学校，位置稳定）优先，其次最近 POI（店铺/门牌点）。
   // 高德的 pois/aois 已按距离升序，取第一条即可；distance 是米。
+/** 最近地标的可接受距离（米）：超出不再作为「最近地标」输出，避免指错地方。
+ *  检索半径本身是 200m，这里只兜「接口给了 distance 异常大」的情况，
+ *  不误杀 150~200m 的正常地标（prompt 里本就带「约 N 米」，不会冒充脚下）。 */
+const LANDMARK_MAX_DISTANCE_M = 250;
+
+type LandmarkCandidate = {
+  name: string;
+  distanceMeters?: number;
+  type?: string;
+};
+
+/** AOI / POI 里取真实最近者（同距离偏好 AOI）；超距离阈值返回 undefined。 */
+function pickNearestLandmark(
+  aoi: LandmarkCandidate | null,
+  poi: LandmarkCandidate | null,
+): LandmarkCandidate | undefined {
+  const candidates = [aoi, poi].filter((c): c is LandmarkCandidate => Boolean(c?.name));
+  if (candidates.length === 0) return undefined;
+  candidates.sort((a, b) => {
+    const da = a.distanceMeters ?? Number.POSITIVE_INFINITY;
+    const db = b.distanceMeters ?? Number.POSITIVE_INFINITY;
+    if (da !== db) return da - db;
+    // 同距离：AOI（小区/园区）比 POI（店铺）更适合作「你在哪」的锚点。
+    return (a === aoi ? 0 : 1) - (b === aoi ? 0 : 1);
+  });
+  const best = candidates[0];
+  if (best.distanceMeters != null && best.distanceMeters > LANDMARK_MAX_DISTANCE_M) {
+    return undefined;
+  }
+  return best;
+}
+
   const nearest = (list?: Array<{ name?: string; distance?: string | number; type?: string }>) => {
     const first = list?.[0];
     const name = pick(first?.name);
@@ -255,7 +287,11 @@ async function reverseFromAmap(latitude: number, longitude: number): Promise<Rev
   };
   const nearestAoi = nearest(data.regeocode.aois);
   const nearestPoi = nearest(data.regeocode.pois);
-  const landmark = nearestAoi ?? nearestPoi;
+  // 最近地标（2026-11-22 准确性修正）：原先「AOI 无条件优先」会在
+  // 「180m 外的小区」与「12m 外的门店」并存时选前者，用户问「我在哪」
+  // 就被带到隔壁院。改为按真实距离取最近；同距离仍偏好 AOI（名称更稳定）。
+  // 超过 LANDMARK_MAX_DISTANCE_M 宁可不给地标，也不给一个错的地标。
+  const landmark = pickNearestLandmark(nearestAoi, nearestPoi);
 
   const timezone = await fetchTimezone(latitude, longitude);
   return {

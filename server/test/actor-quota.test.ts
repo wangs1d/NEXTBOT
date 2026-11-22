@@ -207,7 +207,6 @@ test("G 非重型工具不加 actor 闸：具身单飞域按原样直接执行",
 test("H 生产工具上下文自带 actorId：漏透传=按 actor 收口静默失效", async () => {
   const { ToolContextFactory } = await import("../src/agent/execution/tool-context-factory.js");
   const registry = {
-    getCachedResult: () => null,
     execute: async () => ({ ok: true, result: {} }),
   };
   const factory = new ToolContextFactory({

@@ -227,6 +227,92 @@ export function buildScheduleCreateInput(
 }
 
 /**
+ * 从用户本轮原话确定性解析「list_tasks 要查哪段时间」（2026-11-21 根治 P1）。
+ *
+ * 背景：旧实现把 from/to 完全交给模型填，缺省 from=now——用户问「昨天有什么安排」
+ * 「上周的会议」「今天早上那个提醒过了吗」时，模型漏传/传错 from 就查不到过去日程，
+ * 于是明明建过的提醒答「没有」。用户原话（context.userText）才是权威意图源。
+ *
+ * 纯函数、只吃注入的 now（不读 Date.now），按用户时区算自然日/自然周的边界。
+ * 只识别确定的相对时间词；识别不出返回 null，调用方退回模型参数/缺省未来范围。
+ */
+export type ScheduleRangeIntent = { from: string; to: string; label: string };
+
+function startOfDayUtcMs(dayOffset: number, now: Date, timezone: string): number {
+  // 先取「现在」在该时区的本地年月日，再按本地 00:00 反推 UTC 毫秒。
+  // 用 Intl 取时区偏移，避免服务器本地时区冒充用户时区。
+  const local = localPartsOf(now.toISOString(), timezone);
+  const asUtc = Date.UTC(local.y, local.m - 1, local.d, local.hour, local.minute);
+  const offsetMs = asUtc - Math.floor(now.getTime() / 60_000) * 60_000;
+  return Date.UTC(local.y, local.m - 1, local.d + dayOffset, 0, 0, 0) - offsetMs;
+}
+
+export function parseScheduleRangeIntent(
+  userText: string | undefined | null,
+  now: Date,
+  timezone: string,
+): ScheduleRangeIntent | null {
+  const t = (userText ?? "").replace(/\s+/g, "");
+  if (!t) return null;
+  const tz = timezone.trim() || "Asia/Shanghai";
+  const day = (offset: number) => new Date(startOfDayUtcMs(offset, now, tz)).toISOString();
+  const range = (fromOffset: number, toOffset: number, label: string): ScheduleRangeIntent => ({
+    from: day(fromOffset),
+    to: day(toOffset),
+    label,
+  });
+
+  // 自然周：以周一为起点。用「用户时区的今天」取星期（0=周日）——
+  // 不能用 startOfDayUtcMs 的 UTC 时刻取 getUTCDay：本地 00:00 在前一夜 UTC，
+  // 东八区会差一天，导致上周/本周边界整体偏移一天。
+  const localToday = localPartsOf(now.toISOString(), tz);
+  const todayDow = new Date(Date.UTC(localToday.y, localToday.m - 1, localToday.d)).getUTCDay();
+  const daysSinceMonday = (todayDow + 6) % 7;
+  // 周偏移：0=本周一，-1=上周一，1=下周一。
+  const weekMonday = (weekOffset: number) => -daysSinceMonday + weekOffset * 7;
+
+  // 顺序敏感：先匹配长词/带修饰的词，再匹配泛词。
+  if (/大前天/.test(t)) return range(-3, -2, "大前天");
+  if (/前天/.test(t)) return range(-2, -1, "前天");
+  if (/昨天|昨日|昨晚|昨夜|昨儿/.test(t)) return range(-1, 0, "昨天");
+  if (/上上周|上上个星期|上上礼拜/.test(t)) return range(weekMonday(-2), weekMonday(-1), "上上周");
+  if (/上周|上个星期|上星期|上礼拜/.test(t)) return range(weekMonday(-1), weekMonday(0), "上周");
+  if (/这周|本周|这个星期|这星期|这礼拜|本周内/.test(t)) return range(weekMonday(0), weekMonday(1), "本周");
+  if (/下周|下个星期|下星期|下礼拜/.test(t)) return range(weekMonday(1), weekMonday(2), "下周");
+  if (/大后天/.test(t)) return range(3, 4, "大后天");
+  if (/后天/.test(t)) return range(2, 3, "后天");
+  if (/明天|明日|明早|明晚|明儿/.test(t)) return range(1, 2, "明天");
+  if (/今天|今日|今早|今晚|今夜|今儿/.test(t)) return range(0, 1, "今天");
+  // 最近/未来 N 天：含今天，共 N 个自然日。数字支持阿拉伯与中文（一…十）。
+  const cnDigit: Record<string, number> = {
+    一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10,
+  };
+  const num = "(\\d{1,2}|[一二两三四五六七八九十])";
+  const toN = (raw?: string): number => {
+    if (!raw) return NaN;
+    if (/^\d+$/.test(raw)) return Number(raw);
+    return cnDigit[raw] ?? NaN;
+  };
+  // 匹配「最近3天 / 近三天 / 未来一周 / 接下来2周」，周按 ×7 折算成天。
+  const recent = t.match(new RegExp(`最近${num}天|近${num}天|过去${num}天`));
+  if (recent) {
+    const n = toN(recent[1] ?? recent[2] ?? recent[3]);
+    if (n >= 1 && n <= 90) return range(-(n - 1), 1, `最近${n}天`);
+  }
+  const futureDay = t.match(new RegExp(`未来${num}天|接下来${num}天|今后${num}天`));
+  if (futureDay) {
+    const n = toN(futureDay[1] ?? futureDay[2] ?? futureDay[3]);
+    if (n >= 1 && n <= 90) return range(0, n, `未来${n}天`);
+  }
+  const futureWeek = t.match(new RegExp(`未来${num}周|接下来${num}周|今后${num}周|未来${num}个?星期`));
+  if (futureWeek) {
+    const w = toN(futureWeek[1] ?? futureWeek[2] ?? futureWeek[3] ?? futureWeek[4]);
+    if (w >= 1 && w <= 12) return range(0, w * 7, `未来${w}周`);
+  }
+  return null;
+}
+
+/**
  * 睡觉叫醒（「明早7点叫我起床」）在日程任务之外补建真闹钟（kind=alarm）。
  *
  * 2026-11-09 用户定调：废除正则文本匹配，是否建真闹钟的唯一判定 = 模型传入的
@@ -535,20 +621,37 @@ export function registerCalendarTools(
 
   const handleListTasks = async (input: Record<string, unknown>, context: ToolContext) => {
     const sessionId = resolveActorId(context);
-    const now = Date.now();
-    const from =
-      input.from != null && String(input.from).trim()
-        ? String(input.from).trim()
-        : new Date(now).toISOString();
-    const to =
-      input.to != null && String(input.to).trim()
-        ? String(input.to).trim()
-        : new Date(now + 120 * 86400000).toISOString();
+    const now = scheduleTaskService.currentTime();
+    const tz =
+      String(input.timezone ?? context.clientLocation?.timezone ?? "Asia/Shanghai").trim() ||
+      "Asia/Shanghai";
+    // 权威意图源 = 用户原话（2026-11-21 根治 P1）：服务端自己解析「昨天/上周/
+    // 今天早上」等相对时间，覆盖模型漏传/传错的 from/to；模型参数仅作兜底。
+    const intent = parseScheduleRangeIntent(context.userText, now, tz);
+    let from: string;
+    let to: string;
+    if (intent) {
+      from = intent.from;
+      to = intent.to;
+    } else {
+      from =
+        input.from != null && String(input.from).trim()
+          ? String(input.from).trim()
+          : now.toISOString();
+      to =
+        input.to != null && String(input.to).trim()
+          ? String(input.to).trim()
+          : new Date(now.getTime() + 120 * 86400000).toISOString();
+    }
     const tasks = scheduleTaskService.listTasksBySession(sessionId, { from, to });
     return {
       ok: true,
       from,
       to,
+      // 回执标注查询范围来源与人类可读标签：模型据此如实说「上周的安排」，
+      // 不会把「查到的旧提醒」误说成「未来安排」；无相对词时为空。
+      rangeLabel: intent?.label ?? "",
+      rangeFromUserText: !!intent,
       count: tasks.length,
       tasks: tasks.map((t) => ({
         taskId: t.taskId,

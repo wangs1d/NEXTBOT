@@ -108,3 +108,95 @@ export function getLocationLastKnownMaxAgeMs(): number {
   const min = Number.isFinite(v) && v > 0 ? v : 120;
   return Math.min(min, 7 * 24 * 60) * 60_000;
 }
+
+/**
+ * 每轮位置钩子开关（缺省开）：每轮 prompt 装配前判断快照龄期，过期就向在线
+ * 设备要一次新鲜 fix。`LOCATION_TURN_HOOK=0` 关闭，退回「只读既有快照」。
+ */
+export function isTurnLocationHookEnabled(): boolean {
+  const raw = process.env.LOCATION_TURN_HOOK?.trim().toLowerCase();
+  return raw !== "0" && raw !== "false" && raw !== "off" && raw !== "no";
+}
+
+/**
+ * 每轮位置钩子的「新鲜窗口」（秒，缺省 60）：快照/协调器缓存龄期在窗口内
+ * 直接复用，不重复请求设备。夹紧到 10s..30min（0 视为缺省）。
+ */
+export function getTurnLocationFreshSec(): number {
+  const v = Number.parseInt(process.env.LOCATION_TURN_FRESH_SEC ?? "", 10);
+  if (!Number.isFinite(v) || v <= 0) return 60;
+  return Math.min(Math.max(v, 10), 1800);
+}
+
+/**
+ * 每轮位置钩子等待设备回包的预算（毫秒，缺省 2600，夹紧 0..8000）。
+ *
+ * 2026-11-22 三改（准 + 快）：精度门槛收到 15m 后，要给 GPS 一点时间从
+ * 「首个 30~60m 的融合 fix」收敛到 ≤10m（室外常见 1.5~2.5s）。预算 2600
+ * 覆盖这条曲线；端侧并行赛跑且 ≤15m 即回，多数轮次 0.8~1.8s 就收口，
+ * 预算只是室内弱信号的上限（超时后进 90s 冷却，不每轮硬等）。
+ * 0 = 完全不等待（只读服务端已有状态）：请求仍在后台继续，回包照常写快照。
+ */
+export function getTurnLocationBudgetMs(): number {
+  const v = Number.parseInt(process.env.LOCATION_TURN_BUDGET_MS ?? "", 10);
+  if (!Number.isFinite(v)) return 2600;
+  return Math.min(Math.max(v, 0), 8000);
+}
+
+/**
+ * 「先答后刷」复用窗口（秒，缺省 90，夹紧 0..1800）。
+ *
+ * 快照既新鲜又精准最好；但连续对话里每条消息都等一次 GPS 首字会明显变慢。
+ * 于是：**精度达标（≤15m）**的快照即使超出新鲜窗口，只要还在本窗口内，
+ * 本轮直接用（位置块如实写「X 分钟前」），刷新丢后台——这一轮零等待，
+ * 下一轮吃到新值。0 = 关闭（严格每轮现拉）。
+ *
+ * 为什么从 120 收到 90：走路 1.4m/s 时 2 分钟已偏 170m，门牌就错了；
+ * 90s 是「坐着/在店里连续聊」与「已经在走动」的折中点。嫌慢可上调，
+ * 要更准可下调到 0（此时仍保留 60s 新鲜窗口的零等待复用）。
+ */
+export function getTurnLocationReuseMaxAgeSec(): number {
+  const v = Number.parseInt(process.env.LOCATION_TURN_REUSE_MAX_AGE_SEC ?? "", 10);
+  if (!Number.isFinite(v)) return 90;
+  return Math.min(Math.max(v, 0), 1800);
+}
+
+/**
+ * 每轮位置钩子的精度门槛（米，缺省 15）：快照/缓存精度差于该值时不复用，
+ * 改为向设备要一次高精度 fix。
+ *
+ * 2026-11-22 三改：30 → 15。30m 在密集街区已经是「半条街」，门牌/小区常错；
+ * 15m 是「同一栋楼/同一个院门口」的量级，开阔户外 GPS 常态可达，不会把
+ * 常见的好 fix 判成不可用而每轮白拉。精度未知（旧客户端未上报）视为合格
+ * ——不能因为拿不到数字就每轮空等。夹紧 5..500；0/非法=缺省。
+ */
+export function getTurnLocationMaxAccuracyMeters(): number {
+  const v = Number.parseInt(process.env.LOCATION_TURN_MAX_ACCURACY_M ?? "", 10);
+  if (!Number.isFinite(v) || v <= 0) return 15;
+  return Math.min(Math.max(v, 5), 500);
+}
+
+/**
+ * 精度尝试失败冷却（秒，缺省 90，夹紧 0..3600）。
+ *
+ * 室内/隧道里高精度 fix 反复拿不到：如果每轮都硬等满预算，聊天首字会被拖 4s。
+ * 第一次失败后进入冷却，冷却期内只复用现有位置（如实带精度/龄期），
+ * 到点再试——既不假装精准，也不无限期空等。0=不冷却。
+ */
+export function getTurnLocationPrecisionRetrySec(): number {
+  const v = Number.parseInt(process.env.LOCATION_TURN_PRECISION_RETRY_SEC ?? "", 10);
+  if (!Number.isFinite(v)) return 90;
+  return Math.min(Math.max(v, 0), 3600);
+}
+
+/**
+ * 位置类 prompt 块的最大龄期（分钟，缺省沿用最近已知龄期 120）。
+ *
+ * 超过该龄期的位置**不再作为「用户当前所在地」注入**——旧坐标留在快照里
+ * 可以给工具做「最后已知」参考，但模型不该把它当此刻事实。0/非法=回退缺省。
+ */
+export function getLocationPromptMaxAgeMs(): number {
+  const v = Number.parseInt(process.env.LOCATION_PROMPT_MAX_AGE_MIN ?? "", 10);
+  if (!Number.isFinite(v) || v <= 0) return getLocationLastKnownMaxAgeMs();
+  return Math.min(v, 7 * 24 * 60) * 60_000;
+}

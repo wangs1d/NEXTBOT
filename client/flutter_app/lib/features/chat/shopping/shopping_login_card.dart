@@ -9,6 +9,7 @@ import "package:url_launcher/url_launcher.dart";
 import "../../../core/config/media_url.dart";
 import "../../../core/utils/agent_result_parser.dart";
 import "../media_disk_cache.dart";
+import "platform_login_webview_page.dart";
 import "shopping_shared.dart";
 
 /// 购物登录卡（2026-11-06 用户定稿）：**二维码就在这张卡里，而且要大**。
@@ -118,6 +119,19 @@ class _ShoppingLoginCardState extends State<ShoppingLoginCard> {
     if (actionId == "local.importDialog") {
       if (_checking) setState(() => _checking = false);
       _openImportChooser();
+      return;
+    }
+    // 本地动作（2026-11-22）：登录失败卡上的「重新登录」——直接再拉起
+    // App 内登录页，不用回对话重来一遍。
+    if (actionId == "local.webLogin") {
+      if (_checking) setState(() => _checking = false);
+      final String pid = shopStr(p["platform"]);
+      final String plabel = shopStr(p["platformLabel"]);
+      if (pid.isNotEmpty) {
+        _openWebLogin(pid, plabel.isEmpty ? pid : plabel);
+      } else {
+        _openWebLoginChooser();
+      }
       return;
     }
     final AgentResultData? data = widget.cardData;
@@ -237,8 +251,7 @@ class _ShoppingLoginCardState extends State<ShoppingLoginCard> {
   }
 
   /// 粘贴对话框：带「怎么导出」的教学文案（手机端没法直接拿 Cookie，
-  /// 主路径是电脑浏览器 F12 复制请求标头里的 Cookie 整串）。
-  /// controller 归对话框组件所有（见 [_CookiePasteDialog]）——pop 出场动画
+  /// 主路径是电脑浏览器 F12 复制请求标头里的 Cookie 整串）。  /// controller 归对话框组件所有（见 [_CookiePasteDialog]）——pop 出场动画
   /// 期间 TextField 还在用它，不能在这里同步 dispose。
   Future<void> _showImportDialog(String platform, String platformLabel) async {
     final String? text = await showDialog<String>(
@@ -254,6 +267,72 @@ class _ShoppingLoginCardState extends State<ShoppingLoginCard> {
       const SnackBar(
         content: Text("正在校验 Cookie…"),
         duration: Duration(seconds: 3),
+      ),
+    );
+  }
+
+  // ── App 内 WebView 登录（2026-11-22）────────────────────────────────
+  //
+  // 手机端没有桌面那种「用户自己的 WebView2」：比价跑在云端无头 Chromium 里，
+  // 拼多多这类平台不向无头浏览器兑现登录态——扫码确认再多次，云端 context
+  // 里也没有 PDDUserID。所以补一条「在 App 里真登录一次，把 Cookie 交回云端
+  // 落库」的路：这一页是手机端唯一能拿到完整登录态（含 HttpOnly）的地方。
+
+  bool get _canWebLogin =>
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.iOS);
+
+  /// 有内置登录页的平台（映射表里没有的不给入口，免得打开一个登不进去的页）。
+  List<Map<String, String>> get _webLoginTargets => _importTargets
+      .where((Map<String, String> t) =>
+          kPlatformWebLoginUrls.containsKey(t["platform"] ?? ""))
+      .toList();
+
+  Future<void> _openWebLoginChooser() async {
+    final List<Map<String, String>> targets = _webLoginTargets;
+    if (targets.isEmpty) return;
+    if (targets.length == 1) {
+      await _openWebLogin(targets.first["platform"]!, targets.first["platformLabel"]!);
+      return;
+    }
+    final Map<String, String>? picked = await showDialog<Map<String, String>>(
+      context: context,
+      builder: (BuildContext ctx) => SimpleDialog(
+        title: const Text("登录哪一家？"),
+        children: <Widget>[
+          for (final Map<String, String> t in targets)
+            SimpleDialogOption(
+              onPressed: () => Navigator.of(ctx).pop(t),
+              child: Text(t["platformLabel"] ?? t["platform"] ?? ""),
+            ),
+        ],
+      ),
+    );
+    if (picked == null || !mounted) return;
+    await _openWebLogin(picked["platform"]!, picked["platformLabel"]!);
+  }
+
+  /// 打开登录页 → 拿到 Cookie → 回传服务端（落库 + 灌 context + 续跑比价）。
+  Future<void> _openWebLogin(String platform, String platformLabel) async {
+    final List<Map<String, String>>? cookies =
+        await Navigator.of(context).push<List<Map<String, String>>>(
+      MaterialPageRoute<List<Map<String, String>>>(
+        builder: (BuildContext _) => PlatformLoginWebViewPage(
+          platform: platform,
+          platformLabel: platformLabel,
+        ),
+      ),
+    );
+    if (cookies == null || cookies.isEmpty || !mounted) return;
+    _quickAct("shopping.login.cookies", <String, dynamic>{
+      "platform": platform,
+      "cookies": cookies,
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text("拿到 ${cookies.length} 条 Cookie，正在保存…"),
+        duration: const Duration(seconds: 3),
       ),
     );
   }
@@ -740,9 +819,20 @@ class _ShoppingLoginCardState extends State<ShoppingLoginCard> {
               ].contains(shopStr(p["primaryAction"])))
             Padding(
               padding: const EdgeInsets.fromLTRB(14, 8, 14, 0),
-              child: Row(
+              // 窄屏上两个按钮并排会顶出边界，用 Wrap 让它们自己换行
+              child: Wrap(
+                alignment: WrapAlignment.end,
+                spacing: 8,
+                runSpacing: 6,
                 children: <Widget>[
-                  const Spacer(),
+                  // App 内登录（2026-11-22）：手机端唯一能拿到完整登录态的路。
+                  // 放在「手动导入」前面——它更短、更可能成功，用户第一眼先看到。
+                  if (_canWebLogin && _webLoginTargets.isNotEmpty)
+                    ShopMiniButton(
+                      cs: cs,
+                      label: "在 App 内登录",
+                      onTap: () => _openWebLoginChooser(),
+                    ),
                   ShopMiniButton(
                     cs: cs,
                     label: "手动导入 Cookie",

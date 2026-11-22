@@ -246,7 +246,9 @@ export class QrAssistService {
                 ...(s.qrLinkFallback ? { qrLinkFallback: s.qrLinkFallback } : {}),
                 ...(s.dims ? { width: s.dims.width, height: s.dims.height } : {}),
               })),
-              note: meta.caption ?? "用对应平台的 App 扫一扫下面的码确认登录（拼多多请从相册选码）——扫完不用点，我会自动检测并接着比价",
+              // 只留事实，不写"扫完不用点"这类承诺（2026-11-22）：扫码只是把码
+              // 读进 App，能不能成还取决于平台与页面是否还在轮询，承诺了就会骗人。
+              note: meta.caption ?? "用对应平台的 App 扫一扫下面的码（拼多多请从相册选码）",
               // 主按钮降级为兜底：服务端后台会自动检测登录并续跑，用户不必点。
               // 保留按钮让想即时触发的用户仍可点，文案如实说明「不点也行」。
               primaryLabel: "我扫好了（不点也行）",

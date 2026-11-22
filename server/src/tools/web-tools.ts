@@ -13,6 +13,28 @@ function toBoundedLimit(input: unknown, fallback: number): number {
   return Math.max(1, Math.min(25, Math.floor(limit)));
 }
 
+/**
+ * 从用户原话解析图片张数（2026-11-22，与天气/日历/行情同构的 query 驱动）：
+ * 权威意图源 = context.userText——用户明确说了「来 6 张 / 三张照片」时服务端
+ * 直接按原话定张数，模型漏转填 limit 也不再丢；没说张数（泛问「找些照片」）
+ * 返回 null，调用方退回模型 limit 兜底、缺省 4 张。
+ * 只匹配「N 张」量词形态，避免「对比4家酒店」「他今年8岁」误伤；上限 8
+ * 与产品口径一致（默认 4、最多 8）。纯函数、不读时钟。
+ */
+const CN_DIGIT: Record<string, number> = { 一: 1, 两: 2, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
+
+export function parseImageCountIntent(userText: string | undefined | null): number | null {
+  const t = (userText ?? "").replace(/\s+/g, "");
+  if (!t) return null;
+  const m = t.match(/(\d{1,2}|[一二两三四五六七八九十])张/);
+  if (!m) return null;
+  const raw = m[1];
+  const n = /^\d+$/.test(raw) ? Number(raw) : (CN_DIGIT[raw] ?? NaN);
+  if (!Number.isFinite(n)) return null;
+  if (n < 1 || n > 8) return null; // 超产品上限不认，防「100张」撑爆回执
+  return Math.floor(n);
+}
+
 /** 截断正文，控制返回 token 量。 */
 function trimContent(text: string, maxChars: number): string {
   const t = text.trim();
@@ -51,9 +73,13 @@ export function registerWebTools(
     // 搜索 API 后查询词应保持完整，不在工具层裁剪。
     const query = String(input.query ?? "").trim();
     // 默认 4、上限 8：贴合「少而精+图文混排」的产品诉求。
+    // 张数由「用户原话」决定（2026-11-22，query 驱动同构）：原话明确说了
+    // 「来6张/三张照片」时服务端直接定张数，模型漏转填 limit 不再丢；
+    // 原话没说张数时退回模型 limit 兜底、缺省 4。
     // 一轮最多调用一次本工具（见下方同轮单次搜索闸）；需要多角度/多主题
     // 出图时用 search_images_batch（一次调用内部自行拆维度）。
-    const limit = toBoundedLimit(input.limit, 4);
+    const fromText = parseImageCountIntent(context.userText);
+    const limit = fromText ?? toBoundedLimit(input.limit, 4);
     if (!query) return { provider: "none", mediaType: "image", items: [], notes: ["query 不能为空"] };
 
     // 同轮单次搜索闸（2026-11-12 用户口径「一轮就搜索一次」）：同轮内第二次
@@ -77,6 +103,8 @@ export function registerWebTools(
       context.sessionId,
       mediaTurnFromContext(context),
     );
+    // 张数来源观测（query 驱动排查口径，与天气 rangeFromUserText 同构）：
+    const countSource = fromText != null ? "user-text" : "model-or-default";
     if (memoKey) {
       if (imageSearchTurnMemo.size > 256) imageSearchTurnMemo.clear();
       imageSearchTurnMemo.set(memoKey, exec);
@@ -91,7 +119,12 @@ export function registerWebTools(
           if (imageSearchTurnMemo.get(memoKey) === exec) imageSearchTurnMemo.delete(memoKey);
         });
     }
-    return exec;
+    console.log(`[search_images] 张数=${limit} 来源=${countSource} query=${query.slice(0, 40)}`);
+    return exec.then((result) =>
+      fromText != null
+        ? { ...result, requestedCount: fromText, countFromUserText: true }
+        : result,
+    );
   });
 
   /**

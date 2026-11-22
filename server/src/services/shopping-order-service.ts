@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
 
-import type { Page } from "playwright";
+import type { Frame, Page } from "playwright";
 
 import { resolveActorId } from "../agent/actor-id.js";
 import { redactCredentials } from "../security/redact.js";
@@ -239,7 +239,13 @@ export class ShoppingOrderService {
    */
   private readonly qrWaitPages = new Map<
     string,
-    { lease: BrowserPageLease; timer: NodeJS.Timeout; preview?: BrowserPreviewHandle }
+    {
+      lease: BrowserPageLease;
+      timer: NodeJS.Timeout;
+      preview?: BrowserPreviewHandle;
+      /** 留驻期间盯 URL 变化的监听器（释放时要摘掉，别留在页面对象上）。 */
+      watchNav?: (frame: Frame) => void;
+    }
   >();
 
   constructor(
@@ -809,8 +815,21 @@ export class ShoppingOrderService {
   /**
    * 留驻一个「已出码」的登录页，等用户扫码（TTL 到点自动关）。
    *
-   * 页面里的 JS 轮询是扫码生效的唯一通道：关了页面，用户的「确认登录」不会
-   * 落到浏览器，下一步校验必然说「还没识别到登录」。
+   * 页面里的 JS 轮询是扫码生效的**唯一**通道（2026-11-22 抓包定论）：
+   *
+   *   拼多多登录页点「扫码登录」后，页面每 3s 打
+   *   `GET /proxy/api/api/cupid/login/check_qr_code?pdduid=0`，
+   *   **请求头里必须带页面 JS 现算的 `anti-content` 签名**。
+   *   我试过在服务端自己复刻这个轮询（同 context、共享 Cookie）：一律
+   *   `{"error_code":40003,"错误请求参数"}` —— 没有那个签名就过不了。
+   *   也就是说：**除了这张还停在 login.html、JS 还活着的页面，没有任何
+   *   别的进程能替它把「手机上的确认」换成 Cookie。**
+   *
+   * 推论（排障时先查这一条）：等待期间页面一旦被导航走（例如拼多多把
+   * 桌面 UA 导向 down_scan.html 的 App 引导页），页内轮询就断了，手机端
+   * 再怎么显示「登录成功」，这个浏览器也永远拿不到 PDDUserID——这正是
+   * 「手机显示登录、云端没变化」的成因。所以留驻期间要**盯住 URL 变化**，
+   * 跳走了就当场留痕，别等用户点「我扫好了」才在后知后觉地判未登录。
    *
    * 画面同步续上（2026-11-20）：留驻期间继续向手机端推预览帧，节奏放稀
    * （画面是静止的登录页）。否则用户扫码那几十秒里悬浮窗「无帧超时」熄灭，
@@ -826,6 +845,7 @@ export class ShoppingOrderService {
     const prev = this.qrWaitPages.get(key);
     if (prev) {
       clearTimeout(prev.timer);
+      if (prev.watchNav) prev.lease.page.off("framenavigated", prev.watchNav);
       prev.preview?.stop();
       void prev.lease.release().catch(() => {});
     }
@@ -846,12 +866,30 @@ export class ShoppingOrderService {
         : undefined;
     const timer = setTimeout(() => {
       this.qrWaitPages.delete(key);
+      this.qrLeftLogged.delete(key);
       preview?.stop();
+      if (watchNav) lease.page.off("framenavigated", watchNav);
       void lease.release().catch(() => {});
       console.log(`[shop-qr] ${platform} 留驻页面已释放（${Math.round(ttlMs / 1000)}s 到期）`);
     }, ttlMs);
     timer.unref?.();
-    this.qrWaitPages.set(key, { lease, timer, preview });
+    // 等待期间盯住导航（2026-11-22）：拼多多桌面 UA 出码后，平台有可能把页面
+    // 导向 down_scan.html 这类 App 引导页——页内 JS 轮询一断，手机上的确认就
+    // 永远换不到 Cookie。这里当场留痕，把「什么时候、跳去哪」变成可查的事实。
+    const holdUrl = lease.page.url();
+    const watchNav = (frame: Frame): void => {
+      if (frame !== lease.page.mainFrame()) return;
+      const held = this.qrWaitPages.get(key);
+      if (!held || held.lease !== lease) return;
+      const now = lease.page.url();
+      if (now === holdUrl) return;
+      console.log(
+        `[shop-login] ${platform} 留驻页在等扫码期间被导航走 → ${now.slice(0, 180)}` +
+          "（该页 JS 轮询已断，之后的手机确认换不到 Cookie）",
+      );
+    };
+    lease.page.on("framenavigated", watchNav);
+    this.qrWaitPages.set(key, { lease, timer, preview, watchNav });
     console.log(`[shop-qr] ${platform} 页面留驻 ${Math.round(ttlMs / 1000)}s 等扫码`);
   }
 
@@ -862,6 +900,8 @@ export class ShoppingOrderService {
     if (!held) return;
     clearTimeout(held.timer);
     this.qrWaitPages.delete(key);
+    this.qrLeftLogged.delete(key);
+    if (held.watchNav) held.lease.page.off("framenavigated", held.watchNav);
     held.preview?.stop();
     void held.lease.release().catch(() => {});
   }
@@ -881,11 +921,27 @@ export class ShoppingOrderService {
     if (!held || held.lease.page.isClosed()) return false;
     try {
       const det = await detectLoginPage(platform, held.lease.page);
+      if (!det.isLogin) {
+        // 落地页 URL 是判断「扫码到底换来了什么」的唯一硬证据（2026-11-22）：
+        //   · 落到 down_scan / 下载引导页 → 平台只把你导去开 App，没给 web 会话；
+        //   · 落到 my_order / 个人中心 → 会话真的生效了，那问题在 Cookie 读取侧。
+        // 只打一次，别每 5s 轮询刷屏。
+        const key = `${actorId}:${platform}`;
+        if (!this.qrLeftLogged.has(key)) {
+          this.qrLeftLogged.add(key);
+          console.log(
+            `[shop-login] ${platform} 留驻页已离开登录页，落地 URL=${held.lease.page.url()}`,
+          );
+        }
+      }
       return !det.isLogin;
     } catch {
       return false;
     }
   }
+
+  /** 「留驻页离开登录页」这个事实只记一次日志（清理键随页面释放）。 */
+  private readonly qrLeftLogged = new Set<string>();
 
   /** 取预检缓存的码（90s 内有效，取走即删）。 */
   private takeCachedLoginPng(actorId: string, platform: string): Buffer | null {
@@ -2445,6 +2501,54 @@ export class ShoppingOrderService {
   }
 
   /**
+   * 客户端 WebView 登录回传的 Cookie（2026-11-22）。
+   *
+   * 与 {@link prepareCookieImport}（粘贴文本）同一条落库/授权/续跑链，只是
+   * 来源换成手机端内置 WebView 的 CookieManager：用户在 App 里登一次，客户端
+   * 把整串 Cookie 交回来，服务端校验登录标记后走同一把统一保存闸。
+   *
+   * 为什么要有这条路：手机端没有桌面那种「用户自己的 WebView2」，比价只能跑
+   * 在云端无头 Chromium 里，而拼多多这类平台不向无头兑现登录态——扫码确认
+   * 一万次，云端 context 里也不会出现 PDDUserID。唯一可行的凭证来源就是
+   * 「真实浏览器登录 → 把 Cookie 交过来」。
+   */
+  prepareCookieJar(
+    platform: string,
+    raw: ImportedBrowserCookie[],
+  ):
+    | { ok: true; cookies: ImportedBrowserCookie[]; markerFound: boolean; markerNames: string[] }
+    | { ok: false; error: string } {
+    if (!isBrowserSessionSiteId(platform)) {
+      return { ok: false, error: `不支持的平台：${platform}` };
+    }
+    const cookies: ImportedBrowserCookie[] = [];
+    for (const item of Array.isArray(raw) ? raw : []) {
+      const name = String(item?.name ?? "").trim();
+      if (!name) continue;
+      cookies.push({
+        name,
+        value: String(item?.value ?? ""),
+        ...(item?.domain ? { domain: String(item.domain) } : {}),
+        path: item?.path ?? "/",
+        ...(typeof item?.expires === "number" ? { expires: item.expires } : {}),
+        ...(typeof item?.httpOnly === "boolean" ? { httpOnly: item.httpOnly } : {}),
+        ...(typeof item?.secure === "boolean" ? { secure: item.secure } : {}),
+      } as ImportedBrowserCookie);
+    }
+    if (cookies.length === 0) {
+      return { ok: false, error: "没拿到任何 Cookie——登录页可能还没走完，再登一次试试" };
+    }
+    const markerNames = getLoginCookieMarkerNames(platform);
+    const found = cookies.filter((c) => markerNames.includes(c.name));
+    return {
+      ok: true,
+      cookies,
+      markerFound: markerNames.length === 0 || found.length > 0,
+      markerNames: found.map((c) => c.name),
+    };
+  }
+
+  /**
    * 手动导入 Cookie · 第二步：应用（用户对「是否保存」表态后调用）。
    *
    * save=true → `importCookies(agentAllowed:true)` 落库：AES 加密持久化、
@@ -2462,18 +2566,25 @@ export class ShoppingOrderService {
       return { ok: false, error: `不支持的平台：${platform}` };
     }
     const siteId: BrowserSessionSiteId = platform;
+    const homeUrl = BROWSER_SESSION_SITES[siteId].homeUrl;
     if (save) {
       try {
         await this.deps.browserSessionService.importCookies(actorId, siteId, cookies, {
           agentAllowed: true,
         });
-        return { ok: true, saved: true };
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         return { ok: false, error: `保存 Cookie 失败：${message}` };
       }
+      // 落库之后必须**同时**灌进当前常驻 context（2026-11-22 修）：只写文件
+      // 的话，紧接着的登录检测 / 挂起比价续跑读的还是那个没凭据的旧 context，
+      // 用户会看到「已保存」但下一句仍是「还没登录」。灌失败不影响保存结果
+      // （下一轮 acquirePage 会从库里重新 addCookies）。
+      await this.browserExecutor
+        .primeContextCookies(actorId, siteId, homeUrl, cookies)
+        .catch(() => false);
+      return { ok: true, saved: true };
     }
-    const homeUrl = BROWSER_SESSION_SITES[siteId].homeUrl;
     const primed = await this.browserExecutor
       .primeContextCookies(actorId, siteId, homeUrl, cookies)
       .catch(() => false);

@@ -380,6 +380,15 @@ export class ScheduleTaskService {
     return this.clock();
   }
 
+  /**
+   * 对外暴露的同一时间源（2026-11-21）：工具层解析「昨天/上周」等相对时间时
+   * 复用本服务的注入时钟，保证与 listTasksBySession 的 now 完全同源、测试可控，
+   * 不在工具里另开 Date.now()/new Date() 造成时间漂移或不可测。
+   */
+  currentTime(): Date {
+    return this.clock();
+  }
+
   setRouteEstimator(
     estimator:
       | ((input: { sessionId: string; location: string }) => Promise<RouteEstimate | null>)

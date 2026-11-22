@@ -54,6 +54,10 @@ class MainActivity : FlutterActivity() {
         // 支付宝 App 支付（额度充值）：已安装支付宝时唤起原生收银台。
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, AlipayPayPlugin.CHANNEL)
             .setMethodCallHandler(AlipayPayPlugin(this))
+        // 平台登录 Cookie 读取（2026-11-22）：App 内 WebView 登录后把完整
+        // Cookie（含 HttpOnly 的 PDDUserID）交回 Dart，再由客户端上传云端落库。
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, WebLoginCookiePlugin.CHANNEL)
+            .setMethodCallHandler(WebLoginCookiePlugin())
     }
 
     override fun onNewIntent(intent: Intent) {

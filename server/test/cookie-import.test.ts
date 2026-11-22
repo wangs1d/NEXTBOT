@@ -170,6 +170,122 @@ test("apply：不支持的平台 → 明确报错", async () => {
   assert.ok(!applied.ok);
 });
 
+// ---------- 3.5 客户端 WebView 回传（2026-11-22） ----------
+//
+// 手机端没有桌面那种「用户自己的 WebView2」，拼多多又不向无头 context 兑现
+// 登录态，唯一可行凭证来源是「App 内 WebView 真登录 → Cookie 交回云端」。
+
+test("jar：含 PDDUserID → 三条 Cookie 全收、登录标记点名", () => {
+  const svc = makeService({ sessionService: new BrowserSessionService() });
+  const res = svc.prepareCookieJar("pdd", [
+    { name: "pdd_vds", value: "v", domain: "mobile.yangkeduo.com" },
+    { name: "PDDUserID", value: "U1", domain: "mobile.yangkeduo.com" },
+    { name: "api_uid", value: "a", domain: "mobile.yangkeduo.com" },
+  ]);
+  assert.ok(res.ok);
+  if (!res.ok) return;
+  assert.equal(res.cookies.length, 3);
+  assert.equal(res.markerFound, true);
+  assert.deepEqual(res.markerNames, ["PDDUserID"]);
+});
+
+test("jar：空数组 / 不支持的平台 → 可读报错", () => {
+  const svc = makeService({ sessionService: new BrowserSessionService() });
+  const empty = svc.prepareCookieJar("pdd", []);
+  assert.ok(!empty.ok);
+  const bad = svc.prepareCookieJar("not-a-site", [{ name: "a", value: "1" }]);
+  assert.ok(!bad.ok);
+});
+
+test("apply save=true：除了落库，还必须灌进当前 context（否则下一步仍判未登录）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cookie-jar-"));
+  process.env.BROWSER_SESSION_DATA_DIR = dir;
+  const primeCalls: Array<{ actorId: string; siteId: string; url: string; cookies: number }> = [];
+  try {
+    const sessionService = new BrowserSessionService();
+    const svc = makeService({ sessionService, primeCalls });
+    const prep = svc.prepareCookieJar("pdd", [
+      { name: "PDDUserID", value: "U1", domain: "mobile.yangkeduo.com" },
+    ]);
+    assert.ok(prep.ok);
+    if (!prep.ok) return;
+    const applied = await svc.applyCookieImport(ACTOR, "pdd", prep.cookies, true);
+    assert.ok(applied.ok);
+    assert.equal(primeCalls.length, 1, "保存后要立刻灌 context");
+    const got = await sessionService.getCookiesForAgent(ACTOR, "pdd");
+    assert.equal(got.length, 1);
+  } finally {
+    delete process.env.BROWSER_SESSION_DATA_DIR;
+  }
+});
+
+test("line：App 内登录回传 → 直接落库 + 灌 context + 回就绪卡（回传即授权）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cookie-jar-wire-"));
+  process.env.BROWSER_SESSION_DATA_DIR = dir;
+  const primeCalls: Array<{ actorId: string; siteId: string; url: string; cookies: number }> = [];
+  try {
+    const sessionService = new BrowserSessionService();
+    const svc = makeService({ sessionService, primeCalls });
+    const actorId = "u-web-login";
+    await svc.recordCookieSaveConsent(actorId, true);
+
+    const { socket, sent } = makeFakeSocket();
+    const handled = await handleCardActionEvent(
+      { socket, boundActorId: actorId, sendUnifiedError: () => {} },
+      {
+        messageId: "msg-w1",
+        cardId: "card-w1",
+        actionId: "shopping.login.cookies",
+        payload: {
+          platform: "pdd",
+          cookies: [{ name: "PDDUserID", value: "U9", domain: "mobile.yangkeduo.com" }],
+        },
+      },
+      { shoppingOrderService: svc },
+    );
+    assert.equal(handled, true);
+    assert.equal(sent[0]?.payload.ok, true, "回传后应直接就绪，不再弹询问卡");
+    assert.equal(primeCalls.length, 1, "落库的同时必须灌进当前 context");
+    const got = await sessionService.getCookiesForAgent(actorId, "pdd");
+    assert.equal(got.length, 1);
+    assert.equal(got[0].name, "PDDUserID");
+  } finally {
+    delete process.env.BROWSER_SESSION_DATA_DIR;
+  }
+});
+
+test("line：回传的 Cookie 里没有登录标记 → 明确说没登进去（不落库）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cookie-jar-bad-"));
+  process.env.BROWSER_SESSION_DATA_DIR = dir;
+  try {
+    const sessionService = new BrowserSessionService();
+    const svc = makeService({ sessionService });
+    const actorId = "u-web-login-bad";
+    const { socket, sent } = makeFakeSocket();
+    await handleCardActionEvent(
+      { socket, boundActorId: actorId, sendUnifiedError: () => {} },
+      {
+        messageId: "msg-w2",
+        cardId: "card-w2",
+        actionId: "shopping.login.cookies",
+        payload: {
+          platform: "pdd",
+          cookies: [{ name: "api_uid", value: "x", domain: "mobile.yangkeduo.com" }],
+        },
+      },
+      { shoppingOrderService: svc },
+    );
+    const shopping = (sent[0]?.payload.card as Record<string, { shopping?: Record<string, unknown> }>)
+      ?.extra?.shopping;
+    assert.match(String(shopping?.title ?? ""), /没检测到/);
+    assert.equal(shopping?.primaryAction, "local.webLogin");
+    const statuses = await sessionService.listStatuses(actorId);
+    assert.equal(statuses.find((s) => s.siteId === "pdd")?.hasCookies, false);
+  } finally {
+    delete process.env.BROWSER_SESSION_DATA_DIR;
+  }
+});
+
 // ---------- 4. 统一保存闸（2026-11-21 用户定稿）----------
 //
 // 「是否保存」收敛成一张专门的统一授权卡：问一次「允许保存登录 Cookie 吗」，

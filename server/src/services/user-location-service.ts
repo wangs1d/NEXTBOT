@@ -183,13 +183,12 @@ export async function resolveUserLocationPrompt(ctx?: ClientGeoContext): Promise
   if (!info) return undefined;
   const label = formatUserLocationLabel(info);
   if (!label || label === "未知") return undefined;
-  const coordNote =
-    info.latitude != null && info.longitude != null
-      ? `（GPS ${info.latitude.toFixed(6)}, ${info.longitude.toFixed(6)}）`
-      : "";
-  // 精确位置块（2026-11-14）：只给省市区等于「大概在哪」，街区/小区/地标必须一起给出，
-  // 模型才有材料回答「我现在在哪」而不是「你在某某市」。地标距离也如实标注。
-  const lines = [`用户当前所在地${coordNote}：${label}`];
+  // 精确位置（2026-11-14）：只给省市区等于「大概在哪」，街区/小区/地标必须一起给出，
+  // 模型才有材料回答「我现在在哪」而不是「你在某某市」。
+  // 坐标不进 prompt（2026-11-22 用户定调）：模型只需要「在哪」，经纬度对它没有
+  // 决策价值，反而容易被正文复述成念坐标；精确坐标留给工具按需取
+  //（ToolContext.clientLocation / requestLocation），不进语言模型上下文。
+  const lines = [`用户当前所在地：${label}`];
   if (info.poi && !label.includes(info.poi)) {
     const distance =
       info.poiDistanceMeters != null && Number.isFinite(info.poiDistanceMeters)

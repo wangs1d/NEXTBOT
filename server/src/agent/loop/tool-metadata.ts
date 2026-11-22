@@ -42,11 +42,6 @@ export interface ToolMetadata {
   riskLevel?: "low" | "medium" | "high";
   /** Preferred execution timeout for this tool. */
   timeoutMs?: number;
-  /** Cache behavior for read-only tools. */
-  cachePolicy?: {
-    enabled: boolean;
-    ttlMs?: number;
-  };
   /** 同类替代工具（按优先级排序，失败时依次尝试） */
   alternatives: string[];
   /** 是否需要"禁止假成功"强约束（用户易感知成败的工具） */
@@ -167,7 +162,6 @@ export function getToolMetadata(toolName: string): ToolMetadata {
     toolset: category,
     sideEffect: inferSideEffect(toolName),
     riskLevel: inferRiskLevel(toolName),
-    cachePolicy: inferCachePolicy(toolName),
     alternatives: getToolAlternatives(toolName),
     requireHonestFailure: HONEST_FAILURE_TOOLS.has(toolName),
   };
@@ -199,17 +193,6 @@ function inferRiskLevel(toolName: string): ToolMetadata["riskLevel"] {
     return "medium";
   }
   return "low";
-}
-
-function inferCachePolicy(toolName: string): ToolMetadata["cachePolicy"] | undefined {
-  // search_images 故意不给缓存（2026-11-09 用户真机反馈：「再来几张」会返回前面
-  // 已经返回过的照片）。图片结果天生是「要给下一批」的语义，而缓存键只有
-  // name+input、TTL 60s，同 query 追轮会直接命中上一轮结果，把同一批图再发一遍。
-  // 图片搜索必须每次重跑 + 会话级去重（services/media-shown-ledger.ts）。
-  if (/^(weather\.get_local|search_web|search_videos|fetch_web|info\.inspect_webpage|info\.navigate_site|info\.search)$/.test(toolName)) {
-    return { enabled: true, ttlMs: 60_000 };
-  }
-  return undefined;
 }
 
 /**

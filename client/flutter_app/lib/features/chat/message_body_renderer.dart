@@ -83,6 +83,73 @@ Widget buildMessageBody(
   );
 }
 
+/// 气泡宽度判定的唯一事实源：这条助手消息的正文会不会撑成「结构化」。
+///
+/// 为什么必须和渲染器同源（2026-11-21 根修）：
+/// 正文到底由哪个字段画出来，是 [buildMessageBody] 的选源顺序决定的
+/// （信封 text 块 > reply blocks text 块 > renderBlocks 文本段 > message.text）。
+/// 页面侧此前自己拿 `message.text` 判结构，一旦某一轮「信封 text 块带全文、
+/// finalText 只剩开场一句 / 为空」（摘要卡轮、按泡切分的轮次都会这样），
+/// 判定就与真正画出来的内容打架——同一条回复里上一泡撑满、下一泡又缩回
+/// 73.8%，表现就是「宽度更新没生效」。
+///
+/// 判定口径（与旧页面实现逐条对齐，只把「读哪份文本」换成渲染面同源）：
+/// - 摘要卡 → 宽
+/// - 有非 text 块（卡 / 媒体 / media_segments）→ 宽
+/// - 纯媒体、无卡、正文不结构化 → 窄（图廊自成一块，泡不撑满）
+/// - 其余看正文段是否结构化（标题 / 列表 / 表格 / 代码块 / 引用）
+bool assistantBodyNeedsWideWidth(ChatMessage message) {
+  if (message.role == "user") return false;
+  if (message.summaryCard != null) return true;
+
+  bool hasCard = message.text.contains(AgentResultParser.startMarker);
+  bool hasMedia = (message.mediaCards?.isNotEmpty ?? false) ||
+      (message.pendingMediaCards?.isNotEmpty ?? false);
+  bool hasNonText = hasMedia;
+  // 渲染面实际会被画出来的正文段（同一份源，顺序同 buildMessageBody）。
+  final List<String> renderedTexts = <String>[];
+
+  void scanBlocks(List<Map<String, dynamic>>? blocks) {
+    if (blocks == null) return;
+    for (final Map<String, dynamic> b in blocks) {
+      final String type = b["type"]?.toString() ?? "text";
+      if (type == "text") {
+        final String t = b["text"]?.toString() ?? "";
+        if (t.trim().isNotEmpty) renderedTexts.add(t);
+        continue;
+      }
+      if (type == "media") hasMedia = true;
+      if (type == "card") hasCard = true;
+      hasNonText = true;
+    }
+  }
+
+  scanBlocks(message.envelopeBlocks);
+  scanBlocks(message.replyBlocks);
+  final List<Map<String, dynamic>>? renderBlocks = message.renderBlocks;
+  if (renderBlocks != null && renderBlocks.isNotEmpty) {
+    for (final Map<String, dynamic> b in renderBlocks) {
+      final String type = b["type"]?.toString() ?? "text";
+      if (type == "media") {
+        hasMedia = true;
+        hasNonText = true;
+        continue;
+      }
+      final String t = b["text"]?.toString() ?? "";
+      if (t.trim().isNotEmpty) renderedTexts.add(t);
+    }
+  }
+
+  // 有 text 块且块里确有正文 → 只按块判；块全空（渲染器会回退旧链）才读 text。
+  final bool structured = renderedTexts.isNotEmpty
+      ? renderedTexts
+          .any((String t) => StructuredAssistantMessageBody.isStructuredText(t))
+      : StructuredAssistantMessageBody.isStructuredText(message.text);
+  if (hasMedia && !hasCard && !structured) return false;
+  if (hasNonText) return true;
+  return structured;
+}
+
 /// 「需要你拍板」动作行（2026-11-13「通知即界面」）。
 ///
 /// 第一个动作是**主按钮**（实心），其余是描边——一眼能看出「推荐哪个」，

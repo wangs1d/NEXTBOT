@@ -120,6 +120,12 @@ export type BrowserRuntimeDeps = {
   coordinator: SharedBrowserCoordinator;
   gateway: SharedBrowserCdpGateway;
   browserSessionService: BrowserSessionService;
+  /**
+   * CDP over WS 隧道（2026-11-22）：云端部署下客户端上报的 127.0.0.1 端点
+   * 服务端不可达，经它转成服务端本机的一个代理端点。缺省不装配 = 只支持
+   * 同机部署（byok 本地 runtime）。
+   */
+  cdpTunnel?: import("../shared-browser/cdp-tunnel.js").CdpTunnelHub;
 };
 
 /** 无头页面打开参数（agent_browser 等直接要页面的调用方用）。 */
@@ -154,6 +160,15 @@ export class BrowserRuntime {
   /** 正在创建的 context（并发预检时同 key 只建一次，避免泄漏）。 */
   private readonly contextCreating = new Map<string, Promise<{ ctx: BrowserContext; created: boolean }>>();
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * 内置浏览器 CDP 连不上时的冷却截止（2026-11-22）。
+   *
+   * 为什么需要：客户端上报的是它自己的 `http://127.0.0.1:<port>`（WebView2
+   * 调试端口只绑回环），**云端部署的服务端永远连不上**——每次取价都白等一次
+   * 5s 连接超时才回退无头，比价整体被拖慢，日志里还什么都没有。失败后冷却
+   * 60s 内直接回退无头，并把原因明确打出来（同机部署 / CDP 隧道才可能连通）。
+   */
+  private sharedCdpDownUntil = 0;
   /** 空闲多久整体回收（毫秒）。常驻不等于永久占用，静默期照样让位给系统。 */
   private static readonly IDLE_CLOSE_MS = 45 * 60_000;
   /** context 上限（每用户每站点一个）：防内存随用户数线性增长。 */
@@ -411,9 +426,10 @@ export class BrowserRuntime {
     await this.closePersistentBrowser();
   }
 
-  /** 内置浏览器路径是否可用（客户端在线 + CDP 总开关 + 端点已上报）。 */
+  /** 内置浏览器路径是否可用（客户端在线 + CDP 总开关 + 端点已上报 + 未在故障冷却期）。 */
   canUseSharedBrowser(actorId: string): boolean {
     return (
+      Date.now() >= this.sharedCdpDownUntil &&
       this.deps.gateway.available &&
       this.deps.coordinator.hasExecutor(actorId) &&
       this.deps.coordinator.cdpEndpoint(actorId) !== ""
@@ -431,9 +447,29 @@ export class BrowserRuntime {
     opts: { waitSlotMs?: number } = {},
   ): Promise<BrowserPageLease | null> {
     if (!this.canUseSharedBrowser(actorId)) return null;
-    const endpoint = this.deps.coordinator.cdpEndpoint(actorId);
+    // 刚失败过就别再等：CDP 端点只绑客户端回环，云端服务端连不上是常态，
+    // 每次白等 5s 会把比价整体拖慢（2026-11-22）。
+    if (Date.now() < this.sharedCdpDownUntil) return null;
+    const rawEndpoint = this.deps.coordinator.cdpEndpoint(actorId);
+    // 新客户端支持 WS 隧道：把「客户端回环端点」换成「服务端本机代理端点」。
+    // 老客户端（没上报 cdpTunnel）保持直连（同机 byok 部署仍可用）。
+    let endpoint = rawEndpoint;
+    if (this.deps.cdpTunnel && this.deps.coordinator.cdpTunnelSupported(actorId)) {
+      const proxied = await this.deps.cdpTunnel.endpointFor(actorId).catch(() => null);
+      if (proxied) endpoint = proxied;
+    }
     const connected = await this.deps.gateway.connect(endpoint).catch(() => false);
-    if (!connected) return null;
+    if (!connected) {
+      this.sharedCdpDownUntil = Date.now() + 60_000;
+      console.log(
+        `[browser] 内置浏览器 CDP 连不上（${endpoint}）：` +
+          (endpoint === rawEndpoint
+            ? "端点只绑客户端 127.0.0.1，云端服务端不可达；"
+            : "隧道代理已建立但客户端侧调试端口没通；") +
+          "已回落无头通道，60s 内不再尝试。",
+      );
+      return null;
+    }
     // 先点亮「Agent 正在操作浏览器」→ 客户端据此打开内置浏览器面板并创建
     // WebView2；openPage 会等面板页出现再导航（面板没开时开不了页）。
     this.deps.coordinator.notifyBrowserBusy?.(actorId, true, "页面任务");

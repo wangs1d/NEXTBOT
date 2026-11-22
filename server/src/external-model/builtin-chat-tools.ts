@@ -53,13 +53,14 @@ export const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
         "搜索公开图片结果，下载并转存为服务端本地 PNG，返回可在对话中直接预览的 mediaUrl/thumbnailUrl（形如 /agent/images/...png），以及可打开来源页的 pageUrl。\n" +
         "适用场景：用户**主动表达**想看/找图/照片/实拍图/长什么样/配图/壁纸/风景照/表情包/给我看看等视觉诉求时，调用本工具直接出图，不要建议用户去其他平台。一轮最多调用一次本工具（服务端会拦截同轮重复调用并复用首次结果）；可与 search_web 并行。\n" +
         "不要误触发：仅当**当前轮**用户明确要图时才调用。若只是普通提及某事物（如聊天里带\"图\"字、或前面轮次搜过图），且本轮用户并未索图，不要调用本工具——宁缺勿滥，避免无关照片刷屏。\n" +
-        "回答时优先展示 3-6 条最相关图片 PNG，附来源页链接；不要把图片搜索误用成 image.generate（生成图）。\n" +
+        "用户没有明确要几张时默认只返回 4 张；用户原话明确说了张数（如「来 6 张」「三张照片」）时**服务端会自动按原话定张数**，limit 一般不用传；只有用户没说张数、你又希望多于 4 张时才传 limit，最大 8。\n" +
+        "回答时附来源页链接；不要把图片搜索误用成 image.generate（生成图）。\n" +
         "降级策略（重要）：当用户要「某人+某场景/风格」的照片而组合搜索被拒/为空时，立刻只用该人名重新调用一次，交付人物的通用照片，并在回复里说明具体场景图暂时搜不到——宁可给通用真照片，也不要空手而归或编造说辞。",
       parameters: {
         type: "object",
         properties: {
           query: { type: "string", description: "图片搜索词，只允许两种形态：① 单一实体词——人名/地名/作品名/事物名（2-12 字，如「刘浩存」「灯塔」「科莫多岛」），人物照片必须只传人名本身；② 普通事物的「事物+场景」两词组合（如「灯塔 风景」「雪山 日落」）。禁止人名+修饰词组合（如「刘浩存 红毯」「卢昱晓 写真」）和中英混排——这类组合在图片搜索引擎只会返回随机无关填充。一轮只搜一次，不要为同一人或不同侧面拆成多次调用" },
-          limit: { type: "integer", description: "返回数量，1-8，默认 4" },
+          limit: { type: "integer", description: "返回张数。服务端已按用户原话自动判定（默认 4 张），一般不用传；仅原话没说张数且需要多于 4 张时才传，最大 8" },
         },
         required: ["query"],
         additionalProperties: false,
@@ -227,11 +228,11 @@ export const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
         "⚠️ 不要猜测用户所在城市——如果用户未明确说城市名，不要传 city/latitude/longitude，工具会自动获取用户真实位置。\n" +
         "用户明确说了城市名时才传 city（如「上海天气」→ city:'上海'）。\n" +
         "timezone 一般不要传：缺省 auto 由用户坐标推导当地时区（服务器时区与出口 IP 都不参与）。\n" +
-        "可选 days：预报天数 1-16。默认 2（今天+明天）；用户问后天/周末/未来一周等多日天气时传对应天数" +
-        "（如「后天下雨吗」→ days:3，「周末天气」→ days:7），回执会带 dailyForecast 逐日数组（含 dayLabel 今天/明天/后天/周X）。\n" +
-        "可选 focus：用户明确只问某一天时传，回执只含那天的数据（问明天就不掺今天的实况和气温）。" +
-        "「明天天气怎么样」→ focus:'tomorrow'；「今天热不热」→ focus:'today'；" +
-        "两天都提或泛泛问天气（「这两天冷吗」「天气如何」）不传，缺省回执含今天+明天。\n" +
+        "服务端会自动读取用户本轮原话判断查哪一天，无需你纠结 days/focus——问明天就只回明天、问后天就只回后天，" +
+        "绝不会出现卡片与正文各说一天的情况。下面两个参数只是可选兜底，通常不用传。\n" +
+        "可选 days：预报天数 1-16，仅多日需求（未来一周/某几天）才需要，缺省单日。" +
+        "传了会带 dailyForecast 逐日数组（含 dayLabel 今天/明天/后天/周X）。\n" +
+        "可选 focus：today=只回今天、tomorrow=只回明天；一般不传，服务端已从原话判定。\n" +
         "⚠️ 回执含 todayRainPeriod / tomorrowRainPeriod（降水集中的钟点段，如「上午 9–12 点最明显」）时，" +
         "正文必须把这段说出来，不能只讲「今天降水 99%」——用户要知道的是几点出门。\n" +
         "⚠️ todayRainPeriod 写成「…已下过」时当天的雨已经过去，不要再催带伞。\n" +
@@ -247,11 +248,11 @@ export const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
           city: { type: "string", description: "城市名（与坐标二选一）" },
           timezone: { type: "string" },
           locationLabel: { type: "string", description: "展示用地点名" },
-          days: { type: "integer", description: "预报天数 1-16，默认 2（今天+明天）；问多日时传" },
+          days: { type: "integer", description: "预报天数 1-16，仅多日需求才传；缺省单日。服务端已按用户原话自动判定，通常不用传" },
           focus: {
             type: "string",
             enum: ["today", "tomorrow"],
-            description: "用户明确只问某一天时传：today=只回今天（无明日段），tomorrow=只回明天（无当前实况/今日数据）；不传=今天+明天",
+            description: "today=只回今天、tomorrow=只回明天；一般不用传，服务端已从用户原话判定，回执只含那一天",
           },
         },
         additionalProperties: false,
@@ -266,7 +267,7 @@ export const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
         "查询股票/指数/ETF 的实时与最近成交报价（腾讯行情，A股/港股/美股）。\n" +
         "适用场景：用户问「现在/今天 XX 多少点、多少钱、涨跌多少」类行情事实时必须优先调用本工具；" +
         "新闻搜索（search_web）返回的报价是文章快照，无日期、新旧混杂，禁止当作最新行情引用——搜索只负责回答「为什么涨跌」。\n" +
-        "参数 symbols 每项一个标的：支持常用别名（上证指数/大盘/创业板指/沪深300/恒生指数/道指/纳斯达克/标普500/罗素2000/特斯拉/英伟达/苹果/微软/亚马逊/谷歌/Meta）" +
+        "**服务端自动从用户原话提取全部标的（多个也一次查全），symbols 一般不用传**；仅原话没有明确标的时才用它兜底。支持常用别名（上证指数/大盘/创业板指/沪深300/恒生指数/道指/纳斯达克/标普500/罗素2000/特斯拉/英伟达/苹果/微软/亚马逊/谷歌/Meta）" +
         "或交易所代码（sh000001、sz399006、sh000300、hkHSI、hk00700、usDJI、usIXIC、usINX、usAAPL）；一次最多 8 个。\n" +
         "回执契约：quotes[] 含 name/market/price/prevClose/change/changePct/quoteTime（报价时间，北京时间）。" +
         "⚠️ 报价是交易所最近成交快照：回复中必须说明数据是 quoteTime 那一刻的；quoteTime 不是今天 = 最近收盘数据，照实说是哪天的收盘，禁止说成「现在/今天」。" +
@@ -277,7 +278,7 @@ export const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
           symbols: {
             type: "array",
             items: { type: "string" },
-            description: "标的列表，别名或交易所代码，最多 8 个",
+            description: "标的列表，别名或交易所代码，最多 8 个。一般可省略——服务端已从用户原话自动提取全部标的；仅原话无明确标的时才用本字段兜底",
           },
         },
         required: ["symbols"],
@@ -456,7 +457,7 @@ export const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
         "【内置 Calendar】日程/提醒/定时任务的统一入口（用 action 分流）。\n" +
         "action=create：创建提醒/日程/定时任务。优先把用户原句放进 text（含时间与事项，如「明天 9:00 提醒我开会」），服务端确定性解析时间与事项；只有时间/类型已结构化时才用下方字段。常见触发：「明天早上九点提醒我开会」「十分钟后提醒我」「到点叫我吃药」「定个明早七点的闹钟」（睡觉叫醒须传 alarmIntent=true）「提醒我交周报」。带明确时间点时直接调用，不要追问；**用户只说了要做什么、没给任何时间（如「设置一个闹钟」「提醒我交周报」）时，先问清几点并停止本轮，不要调用本工具，也不要把自己猜的时间写进 text/runAt**；仅当返回 needsRecurrenceConfirm=true 时按 suggestedQuestion 追问一次后重调。kind=reminder 时返回 whenSpoken（口语时间，如「明天上午十一点」；**仅在时间不是用户说的、或与他说的不同时才用它交代一句，用户刚说过就别重复**，也别把钟点念成 11:00、别念 11/6 这种日期）；advanceReminderKinds 只说明提前提醒的性质（departure=出发前、evening_before=前一晚），是事实不是台词：要不要提起、怎么提起你自己判断，别提字段名、别说几级、别报时点；hasAdvanceReminder 为 true 时说明另有提前提醒，别让用户以为只响一次，但不要解释提醒是怎么排的，也不要罗列提醒时间点。提醒方式默认弹窗；仅用户明确要求电话/语音才升级。\n" +
         "action=batch_create：批量创建日程（一次最多 60 条）。用于用户一次性导入多件日程的场景（课表/排班表/会议日程/行程单），先从图/文提取每条的 description 与 runAt（ISO 时间），再一次创建；逐条转述结果，冲突/失败条目如实说明。单条日程不要用本 action。\n" +
-        "action=list_tasks：查询当前用户已创建的定时日程/提醒（含下次执行时间）。默认只查未来 120 天；**要核对已响过/已过期/历史日程（如「今天早上那个提醒过了吗」「我昨天有什么安排」），把 from 设为过去时间（如今天 00:00 或昨天 00:00），返回项里 status=completed 与 lastRunAt 表示已经执行过，属于过去事件**。仅当用户**明确**要查看/确认日程或定时任务时调用；禁止用于「你确定？」「真的吗？」等短句追问。\n" +
+        "action=list_tasks：查询当前用户已创建的定时日程/提醒（含下次执行时间）。**服务端会从用户原话自动判定查询范围（今天/昨天/前天/本周/上周/下周/最近N天/未来N天），from/to 一般不用传**；没说时间范围时默认只查未来 120 天。返回项里 status=completed 与 lastRunAt 表示已经执行过，属于过去事件；回执 rangeLabel 说明服务端按哪个时间范围查询，据此如实转述。仅当用户**明确**要查看/确认日程或定时任务时调用；禁止用于「你确定？」「真的吗？」等短句追问。\n" +
         "action=delete_task：删除用户已创建的定时日程/提醒。仅当用户明确要求删除/取消某个日程或提醒时调用；可先用 action=list_tasks 找到 taskId。\n" +
         "action=update_task：改期/编辑单个日程：改时间、改时长、改提前量、暂停或恢复。taskId 来自 list_tasks。\n" +
         "action=find_free_slots：查询未来空闲时段（自动扣除已有安排占用）。用于「什么时候有空」「帮我约时间」，或改期遇 conflict=true 后给用户改期建议。返回 slots[]（startLocal/endLocal 展示），由用户选定。",
@@ -536,8 +537,8 @@ export const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
             },
           },
           // ── action=list_tasks ──
-          from: { type: "string", description: "action=list_tasks/find_free_slots：范围起点 ISO，可选。list_tasks 要查历史/已过期日程时传过去时间（如今天 00:00）" },
-          to: { type: "string", description: "action=list_tasks/find_free_slots：范围终点 ISO，可选" },
+          from: { type: "string", description: "action=list_tasks/find_free_slots：范围起点 ISO，可选兜底。list_tasks 一般不用传——服务端已从用户原话判定（昨天/上周/今天等）；仅原话无时间词时用它" },
+          to: { type: "string", description: "action=list_tasks/find_free_slots：范围终点 ISO，可选兜底，服务端已从用户原话判定" },
           // ── action=delete_task / update_task ──
           taskId: { type: "string", description: "action=delete_task/update_task：日程 taskId（list_tasks 返回）" },
           // ── action=update_task 补充 ──

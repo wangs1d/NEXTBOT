@@ -22,12 +22,17 @@ class PlanStepsCard extends StatelessWidget {
     super.key,
     required this.steps,
     required this.onConfirm,
+    this.onCancel,
   });
 
   final List<TurnPlanStep> steps;
 
   /// 用户点「我已完成，继续下一步」
   final VoidCallback onConfirm;
+
+  /// 用户点「终止」：不要这个计划了（2026-11-22）。
+  /// null 时不渲染终止入口（未接线的调用方保持原样）。
+  final VoidCallback? onCancel;
 
   @override
   Widget build(BuildContext context) {
@@ -86,6 +91,31 @@ class PlanStepsCard extends StatelessWidget {
                         "$done/${visible.length}",
                         style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
                       ),
+                      if (onCancel != null) ...<Widget>[
+                        const Spacer(),
+                        // 终止：整个计划作废（不是只跳过当前步）。只在卡片
+                        // 未完成时出现——卡片全部完成后本来就不渲染。
+                        Tooltip(
+                          message: "终止这个任务",
+                          child: TextButton.icon(
+                            onPressed: onCancel,
+                            icon: const Icon(Icons.stop_circle_outlined, size: 14),
+                            label: const Text("终止"),
+                            style: TextButton.styleFrom(
+                              foregroundColor: cs.onSurfaceVariant,
+                              minimumSize: const Size(0, 26),
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 8),
+                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              visualDensity: VisualDensity.compact,
+                              textStyle: const TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
                     ],
                   ),
                   const SizedBox(height: 6),

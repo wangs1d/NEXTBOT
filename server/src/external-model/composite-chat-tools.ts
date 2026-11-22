@@ -9,6 +9,18 @@
  * - action 的 description 必须写清「什么时候用这个分支」，它是模型分化的唯一依据；
  *   keywords 同时承担两件事：写进 description 供模型判断，以及模型漏填 action 时
  *   按参数/词面做确定性兜底（resolveCompositeAction）。
+ *
+ * ⚠️ 新增/修改复合工具的硬性约束（违反会在 CI 直接红，见文末测试）：
+ * 1. 被收编的细分工具默认对模型隐藏，子能力靠 schema 的 `原工具 xxx` 文本被检索召回。
+ *    **绝不删 buildSchema 里的原名拼接** —— 少一个原名就等于少一个入口。
+ * 2. 语义与 prompt 强绑定 / 下游有确定性回执消费（如天气卡、语音气泡）的细分工具，
+ *    必须加入 DIRECTLY_EXPOSED_COMPOSITE_TOOLS 白名单；同时能力 prompt 只能写
+ *    「复合入口名(action=分支)」，禁止点名被收编的独立工具名（否则模型找不到 → 凭知识答）。
+ * 3. defaultAction 必须是本复合声明过的 action；多个 action 共用执行器时用 forwardAction 区分。
+ * 4. 每次改动后跑：`tsx --test test/composite-tool-invariants.test.ts
+ *    test/capability-prompt-tool-name.test.ts`（结构契约 + prompt 断链双巡检）。
+ * 事故存档：天气卡只回文字、语音说晚安没气泡，均因上述约束被绕过；两次都靠事后补白名单，
+ * 现已改为测试强制。勿再引入「prompt 点名隐藏工具名」或「删原名省 token」。
  */
 
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
@@ -98,7 +110,7 @@ function hasValue(value: unknown): boolean {
   return true;
 }
 
-const COMPOSITE_SPECS: CompositeSpec[] = [
+export const COMPOSITE_SPECS: CompositeSpec[] = [
   {
     name: "web_search",
     description:
@@ -151,9 +163,10 @@ const COMPOSITE_SPECS: CompositeSpec[] = [
       },
       weather: {
         tool: "weather.get_local",
-        desc: "查天气，city 缺省按用户所在地；问多日（未来一周/后天/周末）时传 days",
+        desc: "查天气，city 缺省按用户所在地；服务端自动读用户原话判定查哪一天（明天只回明天、后天只回后天），" +
+          "不会带回多套温度。days/focus 是可选兜底，通常不用传；仅主动任务无原话时才靠它们指定",
         keywords: ["天气", "气温", "下雨", "温度", "降温", "多少度", "空气质量"],
-        params: ["city", "days"],
+        params: ["city", "days", "focus"],
       },
       quote: {
         tool: "market.quote",
@@ -177,12 +190,17 @@ const COMPOSITE_SPECS: CompositeSpec[] = [
       },
       days: {
         type: "integer",
-        description: "weather 分支的预报天数 1-16（未来一周 → 7，后天 → 3），缺省今天+明天",
+        description: "weather 分支的预报天数 1-16，仅多日需求才传；服务端已按用户原话自动判定，通常不用传",
       },
-      symbols: { type: "string", description: "quote 的标的代码或名称，支持逗号分隔多个（如 BTC,ETH）" },
+      focus: {
+        type: "string",
+        enum: ["today", "tomorrow"],
+        description: "weather 分支：一般不用传，服务端已从用户原话判定查哪天、回执只含那天数据；这是可选兜底",
+      },
+      symbols: { type: "string", description: "quote 分支：一般不用传，服务端已从用户原话自动提取全部标的（多个也一次查全）；仅原话无明确标的时才用它兜底，逗号分隔多个" },
       limit: {
         type: "integer",
-        description: "web 返回条数（默认 5）；images 分支为返回张数（默认 4，上限 8）",
+        description: "web 返回条数（默认 5）；images 分支为返回张数——服务端已按用户原话自动判定（默认 4 张），一般不用传；仅原话没说张数且需要多于 4 张时才传，最大 8",
       },
     },
   },
@@ -861,21 +879,25 @@ export const COMPOSITE_ABSORBED_TOOL_NAMES: ReadonlySet<string> = new Set(
 );
 
 /**
- * 例外：语音细分工具必须同时暴露给模型（2026-11-21 修复「用语音说晚安没气泡」）。
+ * 例外：语义与 prompt 强绑定、下游有确定性回执消费的细分入口必须同时暴露给模型。
  *
- * 根因：`voice` 复合工具的 defaultAction 是 `speak`（无 UI、后台播放），而
- * `voice.send_message` 才落地微信式语音气泡。两者共用 `text` 参数，`resolveCompositeAction`
- * 只按参数签名判定，模型漏填 action 时会稳定落到 speak。更糟的是复合收编把
- * VOICE_CHAT_TOOLS 里语义明确的 `voice.send_message`（description 明写「发语音→气泡」）
- * 一并过滤掉，模型根本看不到它——于是「用语音和我说晚安」被实现成一次无 UI 播报，
- * 用户只看到模型在正文里复述「语音发过去了，五十四秒」。
+ * 根因（语音，2026-11-21）：`voice` 复合工具的 defaultAction 是 `speak`（无 UI、后台播放），
+ * 而 `voice.send_message` 才落地微信式语音气泡。两者共用 `text` 参数，模型漏填 action
+ * 时稳定落到 speak；复合收编又把语义明确的细分工具一并隐藏，于是「用语音说晚安」
+ * 变成一次无 UI 播报。
  *
- * 这里让两个语音细分入口绕过复合收编：复合 `voice` 仍保留（关键词召回），
- * 细分工具同时可见且描述精确，模型可据用户措辞直接选对发消息 vs 播报。
+ * 根因（天气，2026-11-21）：prompt 4️⃣ 明写「天气：weather.get_local」，卡链路也只认
+ * `effectiveTool === "weather.get_local"` 的回执（weather.scene.ts）。但复合收编后模型
+ * 只看得到 `web_search`，且 `resolveCompositeAction` 不再按关键词打分——模型选 `web`
+ * 分支或直接凭知识作答时天气回执为空，天气卡恒不出，用户只拿到一段文字。
+ * 这里让 `weather.get_local` 绕过收编，与 prompt 4️⃣ 对齐：模型能直接选到语义明确的
+ * 入口，回执/disableBubble/天气卡全链路按既有口径工作；`web_search(action=weather)`
+ * 仍保留为另一条等价路径（同一执行器），两条路都归一到 weather.get_local。
  */
 export const DIRECTLY_EXPOSED_COMPOSITE_TOOLS: ReadonlySet<string> = new Set([
   "voice.speak",
   "voice.send_message",
+  "weather.get_local",
 ]);
 
 /**

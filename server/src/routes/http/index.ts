@@ -14,6 +14,7 @@ import { registerChatRoutes } from "./chat.js";
 import { registerClientManifestRoutes } from "./client-manifest.js";
 import { registerClientConfigRoutes } from "./client-config.js";
 import { registerClientTelemetryRoutes } from "./client-telemetry.js";
+import { registerUsageAnalyticsRoutes } from "./usage-analytics.js";
 import { registerInternalManifestEventRoutes } from "./internal-manifest-events.js";
 import { registerModelProviderRoutes } from "./model-providers.js";
 import { registerServiceConfigRoutes } from "./service-config.js";
@@ -126,6 +127,8 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerClientConfigRoutes(app);
   // 安装包运行埋点（自包含，无 deps）：客户端启动上报 + 管理端 runtime 收回决策台账
   registerClientTelemetryRoutes(app);
+  // 跨端使用习惯埋点（自包含，无 deps）：统一事件接收 + 管理端聚合（概览 usage 字段）
+  registerUsageAnalyticsRoutes(app);
   // 清单变化 SSE 事件流（自包含；MANIFEST_EVENT_TOKEN 未配置时 403 禁用）：
   // 更新控制面机器（ECS）上启用，下游（云端网关/本地 runtime）订阅后秒级广播
   registerInternalManifestEventRoutes(app);

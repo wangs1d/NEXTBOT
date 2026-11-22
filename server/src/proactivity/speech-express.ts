@@ -56,6 +56,11 @@ export type SpeechHubDeps = {
   personaPrompt?: (sessionId: string) => string | null;
   /** 用户画像浅层（称呼/沟通偏好/所在地） */
   styleBrief?: (sessionId: string) => Promise<string | null> | string | null;
+  /**
+   * 用户此刻位置（2026-11-22）：由后端位置快照/每轮感知钩子自动提供，
+   * 不从触发源 facts 里带、也不向设备发同步请求。返回 null 不注入。
+   */
+  locationBrief?: (sessionId: string) => Promise<string | null> | string | null;
   nowFn?: () => number;
   timeoutMs?: number;
 };
@@ -115,6 +120,7 @@ export class SpeechHub {
   private readonly cap: number;
   private readonly personaPrompt?: SpeechHubDeps["personaPrompt"];
   private readonly styleBrief?: SpeechHubDeps["styleBrief"];
+  private readonly locationBrief?: SpeechHubDeps["locationBrief"];
   private callsDate = "";
   private callsToday = 0;
   private lastFallback?: string;
@@ -122,6 +128,7 @@ export class SpeechHub {
   constructor(private readonly deps: SpeechHubDeps) {
     this.personaPrompt = deps.personaPrompt;
     this.styleBrief = deps.styleBrief;
+    this.locationBrief = deps.locationBrief;
     this.nowFn = deps.nowFn ?? Date.now;
     this.timeoutMs = deps.timeoutMs ?? 8_000;
     const raw = process.env.PROACTIVITY_MAX_PHRASE_PER_DAY;
@@ -174,6 +181,14 @@ export class SpeechHub {
       }
     } catch {
       /* 画像读取失败不阻塞 */
+    }
+    // 此刻位置（2026-11-22）：主动消息同样要有时空锚点——否则「外面下雨了」
+    // 只能靠画像里的常住地猜。位置块带龄期，旧位置由提供方自行降级/省略。
+    try {
+      const location = await this.locationBrief?.(opts.sessionId);
+      if (location) blocks.push(location);
+    } catch {
+      /* 位置读取失败不阻塞 */
     }
     return blocks.filter(Boolean).join("\n\n");
   }

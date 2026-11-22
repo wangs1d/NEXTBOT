@@ -76,6 +76,60 @@ function resolveSymbol(raw: string): string | null {
   return null;
 }
 
+/**
+ * 从用户本轮原话确定性提取行情标的（2026-11-21 根治 P2）。
+ *
+ * 背景：旧实现只读模型填的 symbols，模型漏填/少填（「特斯拉和英伟达」只填一个）
+ * 就少查一个标的——用户原话才是权威意图源。服务端自己扫描原话，覆盖模型参数。
+ *
+ * 只认两类，避免把普通英文词误当代码：
+ *   1) 已知别名（上证/纳指/特斯拉/美元汇率…），长词优先匹配；
+ *   2) 严格交易所前缀代码（sh/sz/hk/us/wh + 2~6 位字母数字）。
+ * 按原话首次出现顺序去重、最多 8 个（与 handler 既有上限一致）。
+ * 纯函数、不读时钟、无 IO。
+ */
+export function extractSymbolsFromUserText(userText: string | undefined | null): string[] {
+  const t = (userText ?? "").trim();
+  if (!t) return [];
+  const hits: Array<{ index: number; code: string }> = [];
+  const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+  // 1) 别名：长词优先，避免「上证指数」被「上证」抢先截断产生歧义（同码去重后无碍，但顺序更稳）
+  const aliases = Object.entries(SYMBOL_ALIASES).sort((a, b) => b[0].length - a[0].length);
+  for (const [alias, code] of aliases) {
+    const re = new RegExp(escape(alias), "gi");
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(t)) !== null) {
+      hits.push({ index: m.index, code });
+    }
+  }
+
+  // 2) 严格市场前缀代码（仅 sh/sz/hk/us/wh），排除普通英文单词误判
+  // 真实代码第 3 位必为大写字母或数字（sh000001/usAAPL/whUSDCNY），借此排除
+  // what/where/use 这类以 wh/us 开头的普通英文单词；全小写裸词一律不当代码。
+  const codeRe = /[a-zA-Z]{2}[A-Z0-9][A-Za-z0-9]{1,5}/g;
+  let m: RegExpExecArray | null;
+  while ((m = codeRe.exec(t)) !== null) {
+    const raw = m[0];
+    if (/^(sh|sz|hk|us|wh)/i.test(raw) && RAW_CODE_RE.test(raw)) {
+      hits.push({ index: m.index, code: raw });
+    }
+  }
+
+  // 3) 按出现顺序去重（大小写不敏感），最多 8 个
+  hits.sort((a, b) => a.index - b.index);
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const h of hits) {
+    const key = h.code.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(h.code);
+    if (out.length >= 8) break;
+  }
+  return out;
+}
+
 /** 解析行情时间戳：A 股 `20261106150003` / 美股港股 `2026-11-05 17:15:59` 或 `2026/11/6 15:00:03`（均为北京时间）。 */
 function parseQuoteTime(raw: string | undefined): string | undefined {
   const s = raw?.trim() ?? "";
@@ -140,12 +194,18 @@ function round2(v: number): number {
 }
 
 export function registerMarketQuoteTools(registry: ToolRegistry): void {
-  registry.register("market.quote", async (input) => {
-    const rawList = Array.isArray(input.symbols)
-      ? input.symbols.map((s) => String(s))
-      : String(input.symbols ?? "")
-          .split(/[,，\s]+/)
-          .filter(Boolean);
+  registry.register("market.quote", async (input, context) => {
+    // 权威意图源 = 用户原话（2026-11-21 根治 P2）：服务端自己扫描原话里的标的，
+    // 覆盖模型漏填/少填的 symbols；原话里没有任何标的时才退回模型参数。
+    const fromText = extractSymbolsFromUserText(context?.userText);
+    const rawList =
+      fromText.length > 0
+        ? fromText
+        : Array.isArray(input.symbols)
+          ? input.symbols.map((s) => String(s))
+          : String(input.symbols ?? "")
+              .split(/[,，\s]+/)
+              .filter(Boolean);
     const seen = new Set<string>();
     const codes: Array<{ code: string; source: string }> = [];
     const unresolved: string[] = [];
@@ -223,6 +283,10 @@ export function registerMarketQuoteTools(registry: ToolRegistry): void {
       ok: true,
       quotes,
       ...(missing.length > 0 ? { missing } : {}),
+      // 查询范围来源标注（2026-11-21）：标的优先取用户原话，模型参数仅兜底；
+      // 回执如实透出，便于排查「少查标的」并防止模型把兜底结果说成用户点名的。
+      symbolsFromUserText: fromText.length > 0,
+      quoteCount: quotes.length,
       note: "price 是交易所最近成交快照。quoteTime 是该报价的时间：不是今天就是最近收盘，回复中必须说明数据是哪天的；报价只回答「多少」，涨跌原因仍需 search_web。",
     };
   });

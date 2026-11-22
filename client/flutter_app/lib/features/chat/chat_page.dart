@@ -77,6 +77,9 @@ class ChatPage extends StatefulWidget {
     /// 跨轮常驻的任务步骤（plan.* 的可见面）：与 turnState 的差别是不随轮次
     /// 销毁——「等用户操作」通常发生在一轮结束之后。
     this.planSteps = const <TurnPlanStep>[],
+
+    /// 终止整个任务计划（步骤条右上角「终止」；null 时不渲染该入口）
+    this.onCancelPlan,
     this.onOpenPhoneDialer,
     this.inputFocusNode,
     this.isActive = true,
@@ -195,6 +198,9 @@ class ChatPage extends StatefulWidget {
 
   /// 跨轮常驻的任务步骤（plan.* 写入的会话级计划）
   final List<TurnPlanStep> planSteps;
+
+  /// 终止整个计划（清本地步骤条 + 通知服务端 clear）
+  final VoidCallback? onCancelPlan;
 
   /// 呼叫 Agent（App 内无需另输 6 位联络号）
   final VoidCallback? onOpenPhoneDialer;
@@ -1909,6 +1915,7 @@ class _ChatPageState extends State<ChatPage>
                                 ? widget.planSteps
                                 : widget.turnState!.plan,
                             onConfirm: () => _sendSuggestion("我已完成，继续下一步"),
+                            onCancel: widget.onCancelPlan,
                           ),
                         // Agent 状态条：处理状态统一收拢在这一条（工具名 / 口语化进度 /
                         // 百分比 + 进度条），固定在输入框上方，淡入淡出避免闪现/抖动

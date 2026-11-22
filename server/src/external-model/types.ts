@@ -484,11 +484,6 @@ export type ChatToolExecutionContext = {
      */
     extras?: { signal?: AbortSignal },
   ) => Promise<{ ok: boolean; result: Record<string, unknown> }>;
-  /** 查询工具缓存（命中则跳过 executeTool 的安全检查/BodyGateway 等中间层） */
-  getCachedToolResult?: (
-    name: string,
-    args: Record<string, unknown>,
-  ) => { ok: boolean; result: Record<string, unknown> } | null;
   /** 工具轮次中模型流式输出的口语化进度（不写入最终正文流） */
   onAgentStatusLine?: (line: string) => void;
   onToolExecuteStart?: (info: ToolExecuteStartInfo) => void;

@@ -37,8 +37,12 @@ class AgentLocationResponder {
 
   static Future<void> _reply(Map<String, dynamic> payload) async {
     final String jobId = payload["jobId"]?.toString() ?? "";
-    final ClientLocationPayload? loc =
-        await ClientLocationService.getCurrentLocationForAgentReply();
+    final String reason = payload["reason"]?.toString() ?? "";
+    // 每轮位置钩子（reason=turn:*）：快路径（最近 fix 复用 / 短预算取新），
+    // 服务端只等约 2s；工具按需定位仍走 8s 精确定位链。
+    final ClientLocationPayload? loc = reason.startsWith("turn")
+        ? await ClientLocationService.getCurrentLocationForTurn()
+        : await ClientLocationService.getCurrentLocationForAgentReply();
     // 拿不到坐标也回 jobId 空包：让服务端立即结算（resolve null），
     // 不白等满 12s 超时（与手机端 _handleLocationRequest 同语义）。
     final bool sent = WsChatService.shared.sendEvent(

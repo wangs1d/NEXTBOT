@@ -1,5 +1,6 @@
 import "dart:async";
 import "dart:convert";
+import "dart:io" show InternetAddress, Socket;
 
 import "package:flutter/foundation.dart";
 import "package:flutter/services.dart" show rootBundle;
@@ -73,6 +74,10 @@ class SharedBrowserHost {
     WsEventRouter.instance.subscribe(
       module: "shared-browser-host",
       scope: WsSubscribeScope.root,
+      // CDP 隧道（browser.cdp.data）是**不能丢**的字节流：丢一条就把
+      // DevTools 协议打乱（表现是页面卡住/命令超时）。默认 64 条的背压信箱
+      // 在页面加载的瞬间不够用，这里放大到 2048（handler 全同步，正常跟得上）。
+      maxPending: 2048,
       onEvent: (Map<String, dynamic> event) {
         final String type = event["type"] as String? ?? "";
         return instance.handleServerEvent(type, wsEventPayload(event));
@@ -183,7 +188,98 @@ class SharedBrowserHost {
     if (remoteDebugPort == null || !isReady || _sendEvent == null) return;
     _sendEvent!.call("browser.bridge.info", <String, dynamic>{
       "endpoint": "http://127.0.0.1:$remoteDebugPort",
+      // 声明支持 CDP over WS 隧道（2026-11-22）：服务端在云端时够不着本机
+      // 127.0.0.1 的调试端口，只能经 WS 把字节转过来。老服务端忽略该字段，
+      // 仍按同机直连处理。
+      "cdpTunnel": true,
     });
+  }
+
+  // ── CDP over WS 隧道（2026-11-22）──────────────────────────────────────
+  //
+  // 云端部署下，服务端的 Playwright 要驱动的是**用户电脑上的** WebView2。调试
+  // 端口只绑 127.0.0.1（安全设计，不能对外监听），所以服务端在自己本机开一个
+  // 代理端口，把每条 TCP 连接的字节经聊天 WS 转过来；这里连本机调试端口，
+  // 字节原样写回。Playwright 因此以为自己在连一个本地 CDP，实际落在用户桌面。
+
+  final Map<String, Socket> _cdpTunnels = <String, Socket>{};
+
+  Future<void> _openCdpTunnel(String tunnelId) async {
+    final int? port = remoteDebugPort;
+    if (tunnelId.isEmpty || port == null) return;
+    final Socket? socket = await _connectDebugPort(port);
+    if (socket == null) {
+      _sendEvent?.call("browser.cdp.closed", <String, dynamic>{"tunnelId": tunnelId});
+      return;
+    }
+    try {
+      _cdpTunnels[tunnelId] = socket;
+      // 连上才回 opened：服务端会先把早到的字节排队，收到这个再放行。
+      _sendEvent?.call("browser.cdp.opened", <String, dynamic>{"tunnelId": tunnelId});
+      socket.listen(
+        (List<int> data) {
+          _sendEvent?.call("browser.cdp.data", <String, dynamic>{
+            "tunnelId": tunnelId,
+            "data": base64Encode(data),
+          });
+        },
+        onDone: () => _closeCdpTunnel(tunnelId, notify: true),
+        onError: (Object _) => _closeCdpTunnel(tunnelId, notify: true),
+        cancelOnError: true,
+      );
+    } catch (_) {
+      _closeCdpTunnel(tunnelId, notify: true);
+    }
+  }
+
+  /// 连本机调试端口：第一次失败先确保 WebView2 宿主起来了再试一次。
+  ///
+  /// 为什么：调试端口只有在 WebView2 浏览器进程真正启动后才 listen。服务端
+  /// 可能比面板更早发起 CDP 连接（比如比价任务先跑），一次失败就放弃会让
+  /// 「隧道建好了但页面不动」变成常态。
+  Future<Socket?> _connectDebugPort(int port) async {
+    for (int attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        return await Socket.connect(
+          InternetAddress.loopbackIPv4,
+          port,
+          timeout: const Duration(seconds: 3),
+        );
+      } catch (_) {
+        if (attempt == 1) return null;
+        try {
+          await ensureStarted();
+        } catch (_) {
+          /* 启动失败就交给第二次尝试决定 */
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 400));
+      }
+    }
+    return null;
+  }
+
+  void _writeCdpTunnel(String tunnelId, String base64Data) {
+    final Socket? socket = _cdpTunnels[tunnelId];
+    if (socket == null || base64Data.isEmpty) return;
+    try {
+      socket.add(base64Decode(base64Data));
+    } catch (_) {
+      _closeCdpTunnel(tunnelId, notify: true);
+    }
+  }
+
+  void _closeCdpTunnel(String tunnelId, {required bool notify}) {
+    final Socket? socket = _cdpTunnels.remove(tunnelId);
+    if (socket != null) {
+      try {
+        socket.destroy();
+      } catch (_) {
+        /* ignore */
+      }
+    }
+    if (notify) {
+      _sendEvent?.call("browser.cdp.closed", <String, dynamic>{"tunnelId": tunnelId});
+    }
   }
 
   /// main.dart 的 ws 事件入口：命中 shared.browser.invoke 时执行并回执
@@ -206,6 +302,21 @@ class SharedBrowserHost {
         siteLabel: payload["siteLabel"]?.toString() ?? "该网站",
         allSites: payload["allSites"] == true,
       );
+      return;
+    }
+    if (type == "browser.cdp.open") {
+      unawaited(_openCdpTunnel(payload["tunnelId"]?.toString() ?? ""));
+      return;
+    }
+    if (type == "browser.cdp.data") {
+      _writeCdpTunnel(
+        payload["tunnelId"]?.toString() ?? "",
+        payload["data"]?.toString() ?? "",
+      );
+      return;
+    }
+    if (type == "browser.cdp.close") {
+      _closeCdpTunnel(payload["tunnelId"]?.toString() ?? "", notify: false);
       return;
     }
     if (type != "shared.browser.invoke") return;

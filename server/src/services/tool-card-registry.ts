@@ -486,6 +486,24 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
     const summary = str(r.summary);
     if (!weatherText && !summary) return null;
 
+    // 通用单日聚焦回执（2026-11-21，focusDay="single"）：后天及更远，只构建那天的行——
+    // 现象/气温区间/降雨；字段用中性 focus* 命名，不掺今日/明日/当前实况。
+    if (str(r.focusDay) === "single") {
+      const itemsS: ToolCardItem[] = [];
+      if (weatherText) itemsS.push({ type: "num", text: weatherText });
+      const rangeS = str(r.focusRangeC);
+      if (rangeS) itemsS.push({ type: "num", text: `气温 ${rangeS}` });
+      const rainS = num(r.focusRainPct);
+      const dayLabelS = str(r.focusDayLabel) || "那天";
+      const rainLineS = rainS != null ? rainText(dayLabelS, rainS, "") : null;
+      if (rainLineS) itemsS.push({ type: "num", text: rainLineS });
+      return {
+        title: summary || `${str(r.locationLabel) ? str(r.locationLabel) + " " : ""}${dayLabelS}天气`,
+        items: itemsS,
+        cardType: "weather",
+      };
+    }
+
     // 明日聚焦回执（2026-11-05，focusDay="tomorrow"）：只构建明天的行——
     // 现象/气温区间/明天降雨，不掺今天与当前实况；字段名是 tomorrow* 专属命名。
     if (str(r.focusDay) === "tomorrow") {

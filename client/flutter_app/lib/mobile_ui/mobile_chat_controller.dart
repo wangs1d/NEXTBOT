@@ -14,6 +14,7 @@ import "../core/db/isar_local_history_store.dart";
 import "../core/db/local_history_store.dart";
 import "../core/models/chat_models.dart";
 import "../core/services/access_auth_api.dart";
+import "../core/services/analytics.dart";
 import "../core/services/agent_name_store.dart";
 import "../core/services/attention_api.dart";
 import "../core/services/client_clock_service.dart";
@@ -1410,9 +1411,15 @@ class MobileChatController extends ChangeNotifier {
   /// 便「不知道用户的地址」。本端补齐后无论绑定落在哪条连接都能闭环。
   Future<void> _handleLocationRequest(Map<String, dynamic> payload) async {
     final String jobId = payload["jobId"]?.toString() ?? "";
+    final String reason = payload["reason"]?.toString() ?? "";
     ClientLocationPayload? loc;
     try {
-      loc = await _resolveLocation();
+      // 每轮位置钩子（reason=turn:*）：走快路径，优先复用最近 fix、短预算取新，
+      // 服务端只等约 2s，不能按工具路径的 8s GPS 预算回包。工具按需定位
+      // （无 reason / 其他 reason）仍走原有的精确定位链。
+      loc = reason.startsWith("turn")
+          ? await _resolveTurnLocation()
+          : await _resolveLocation();
     } catch (_) {
       loc = null;
     }
@@ -1560,6 +1567,13 @@ class MobileChatController extends ChangeNotifier {
     final resolver = debugLocationResolver;
     if (resolver != null) return resolver();
     return ClientLocationService.getCurrentLocationForAgentReply();
+  }
+
+  /// 每轮位置钩子专用（服务端 reason=turn:*）：快路径，永远在服务端预算内回包。
+  Future<ClientLocationPayload?> _resolveTurnLocation() {
+    final resolver = debugLocationResolver;
+    if (resolver != null) return resolver();
+    return ClientLocationService.getCurrentLocationForTurn();
   }
 
   void _onWsEvent(Map<String, dynamic> event) {
@@ -1874,6 +1888,11 @@ class MobileChatController extends ChangeNotifier {
     final String threadKey = _threadKeyOf(payload);
     final _ThreadTurnState t = _turnOf(threadKey);
     t.currentToolName = payload["toolName"]?.toString().trim() ?? "";
+    // 统一埋点：工具内部名记入功能偏好（fail-open，不影响渲染分支）。
+    final String? trackedTool = t.currentToolName;
+    if (trackedTool != null && trackedTool.isNotEmpty) {
+      unawaited(Analytics.instance.trackFeature(trackedTool));
+    }
     // 上一把工具的口语化进度不能挂到新工具头上：先清空，等服务端为
     // 新工具下发参数化文案（没有就退回工具族映射表）。
     t.agentStatusLine = null;

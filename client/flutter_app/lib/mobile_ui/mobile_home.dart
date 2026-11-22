@@ -727,8 +727,6 @@ class MobileHomePageState extends State<MobileHomePage>
                         child: _TabItem(
                           kind: MobileLineIconKind.values[i],
                           selected: _tabIndex == i,
-                          showLiveBadge:
-                              i == 0 && _chatController.isSideChatActive,
                           p: p,
                           onTap: () => _switchTab(i),
                         ),
@@ -786,12 +784,10 @@ class _TabItem extends StatelessWidget {
     required this.selected,
     required this.p,
     required this.onTap,
-    this.showLiveBadge = false,
   });
 
   final MobileLineIconKind kind;
   final bool selected;
-  final bool showLiveBadge;
   final MobilePalette p;
   final VoidCallback onTap;
 
@@ -821,34 +817,12 @@ class _TabItem extends StatelessWidget {
             child: SizedBox(
               width: 42,
               height: 42,
-              child: Stack(
-                alignment: Alignment.center,
-                children: <Widget>[
-                  MobileLineIcon(
-                    kind: kind,
-                    size: 22,
-                    color: color,
-                  ),
-                  if (showLiveBadge)
-                    Positioned(
-                      top: 1,
-                      right: 1,
-                      child: Container(
-                        width: 5,
-                        height: 5,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: p.online,
-                          boxShadow: <BoxShadow>[
-                            BoxShadow(
-                              color: p.online.withValues(alpha: 0.6),
-                              blurRadius: 5,
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                ],
+              child: Center(
+                child: MobileLineIcon(
+                  kind: kind,
+                  size: 22,
+                  color: color,
+                ),
               ),
             ),
           ),

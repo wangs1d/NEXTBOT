@@ -46,6 +46,7 @@ import "package:package_info_plus/package_info_plus.dart";
 import "core/services/local_runtime_config.dart";
 import "core/services/local_runtime_manager.dart";
 import "core/services/client_telemetry.dart";
+import "core/services/analytics.dart";
 import "core/services/install_identity.dart";
 import "core/services/remote_config.dart";
 import "core/presentation/api_key_setup_dialog.dart";
@@ -1008,6 +1009,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     super.didChangeAppLifecycleState(state);
     // 在场跟踪：手机后台时主动消息走系统通知（类微信），前台走应用内弹窗
     _lifecycleState = state;
+    // 统一埋点会话：回前台开新会话，切后台结算时长（fail-open，不影响在场判定）。
+    if (state == AppLifecycleState.resumed) {
+      Analytics.instance.resume();
+    } else if (state == AppLifecycleState.paused || state == AppLifecycleState.detached) {
+      Analytics.instance.pause();
+    }
     // 记录生命周期切换：若随后进程退出，可据此区分「用户关了窗口/系统杀进程」与「崩溃」。
     // 只写单行状态、不带堆栈——生命周期事件高频触发，带堆栈曾把日志刷到 189MB。
     _writeCrashLog("[LIFECYCLE]", "state=$state");
@@ -1043,6 +1050,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     }
     if (state == AppLifecycleState.detached) {
       _writeCrashLog("[EXIT]", "app detached (window closed)");
+      unawaited(Analytics.instance.stop());
     }
   }
 
@@ -1434,6 +1442,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       final RuntimeBootResult boot = await LocalRuntimeManager.ensureRunning();
       unawaited(ClientTelemetry.reportBoot(boot));
     }
+    // 统一使用习惯埋点：开启会话 + 定时心跳/批量上报（幂等，fail-open）。
+    unawaited(Analytics.instance.start());
     // 闹钟引擎引导：装载本地闹钟库并全量重排本地精确闹钟（杀进程/重启恢复主路）
     if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
       unawaited(() async {
@@ -1705,6 +1715,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         if (type == "tool.call") {
           if (_isAgentProcessing) {
             final String toolName = payload["toolName"]?.toString() ?? "";
+            // 统一埋点：工具内部名记入功能偏好（fail-open，不影响渲染分支）。
+            if (toolName.isNotEmpty) unawaited(Analytics.instance.trackFeature(toolName));
             // 浏览器承载的工具（比价/下单/共用浏览器操作等）：主界面不再渲染
             // 「我找找这件东西」这类进行时卡片，直接打开内置浏览器面板看真实
             // 操作（2026-10-28 用户要求）。工具徽标也不置位——输入框状态条
@@ -3537,6 +3549,53 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     _flushAssistantChunks();
     _takePendingAssistantChunkText();
     _clearAgentProcessingState(done: false);
+  }
+
+  /// 任务步骤条上的「终止」（2026-11-22）：用户不要这个计划了。
+  ///
+  /// 三件事一次做完：
+  ///  1. 本地立刻熄灭步骤条；若这轮还在跑，先软取消（清 activeTraceId）——
+  ///     服务端在途的 plan_step 因 traceId 不匹配被丢弃，步骤条不会复活；
+  ///  2. 服务端硬中断进行中的 turn（chat.turn.stop），别让工具链继续空转；
+  ///  3. 用 chat.user_action 带 planCancel 标记：服务端在点击原点 clear 会话
+  ///     计划，不转写 user_message、不跑模型——终止是控制动作，不该再问模型。
+  void _cancelPlan() {
+    if (_planSteps.isEmpty && !_isAgentProcessing) return;
+    final bool wasProcessing = _isAgentProcessing;
+    if (wasProcessing) _cancelCurrentTurn();
+    setState(_planSteps.clear);
+    if (_ws.isConnected) {
+      if (wasProcessing) {
+        _ws.sendEvent("chat.turn.stop", <String, dynamic>{
+          "sessionId": ApiConfig.effectiveActorId,
+        });
+      }
+      final bool sent = _ws.sendCardAction(
+        sessionId: ApiConfig.effectiveActorId,
+        messageId: "plan-cancel-${DateTime.now().microsecondsSinceEpoch}",
+        actionId: "plan.cancel",
+        label: "终止任务",
+        variant: "secondary",
+        actionPayload: <String, dynamic>{"planCancel": true},
+        userId: ApiConfig.effectiveActorId,
+      );
+      if (!sent) {
+        if (mounted) {
+          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+            const SnackBar(
+              content: Text("已在本机收掉，但服务器没收到（重连后计划可能再出现）"),
+            ),
+          );
+        }
+        return;
+      }
+    }
+    if (mounted) {
+      final ScaffoldMessengerState? messenger =
+          ScaffoldMessenger.maybeOf(context);
+      messenger?.hideCurrentSnackBar();
+      messenger?.showSnackBar(const SnackBar(content: Text("已终止这个任务")));
+    }
   }
 
   /// interim 已改为作为独立 assistant 消息入列表（见 chat.assistant_interim
@@ -7223,6 +7282,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       turnState: _turnState ?? _pendingLocalTurn,
       // 跨轮常驻任务步骤（plan.* 的可见面；等用户操作的一步会在这里给按钮）
       planSteps: _planSteps,
+      // 步骤条右上角「终止」：作废整个计划（本地清空 + 服务端 clear）
+      onCancelPlan: _cancelPlan,
       isActive: _tabIndex == 0,
       onOpenPhoneDialer: () {
         _callMyAgentViaPhone(null);

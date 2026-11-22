@@ -64,7 +64,6 @@ export class ToolContextFactory {
   create(base: ToolExecutionBase, callbacks: ToolContextCallbacks = {}): ChatToolExecutionContext {
     return {
       actorId: base.actorId,
-      getCachedToolResult: (name, args) => this.deps.toolRegistry.getCachedResult(name, args),
       executeTool: (name, args, extras) => this.execute(name, args, base, extras?.signal),
       onToolExecuteStart: callbacks.onToolExecuteStart,
       onAgentStatusLine: callbacks.onAgentStatusLine,

@@ -63,6 +63,13 @@ export const ClientEventType = {
    */
   BrowserBridgeInfo: "browser.bridge.info",
   /**
+   * CDP 隧道回执（2026-11-22）：客户端连上本机调试端口 / 回传字节 / 关闭隧道。
+   * payload：{ tunnelId }、{ tunnelId, data(base64) }、{ tunnelId }。
+   */
+  BrowserCdpOpened: "browser.cdp.opened",
+  BrowserCdpData: "browser.cdp.data",
+  BrowserCdpClosed: "browser.cdp.closed",
+  /**
    * 共用浏览器桥：客户端对「保存登录态」征询的答复（服务端 ask_save_login
    * 征询后回传）。payload { siteId, allowed }；服务端据此决定是否落库 Cookie。
    */
@@ -302,6 +309,14 @@ export const ServerEventType = {
   SharedBrowserInvoke: "shared.browser.invoke",
   /** 共用浏览器桥在线状态同步（随 session.init 绑定后下发） */
   SharedBrowserSync: "shared.browser.sync",
+  /**
+   * CDP over WS 隧道（2026-11-22）：服务端在本机开代理端口，把 Playwright 的
+   * CDP 流量经聊天 WS 转发到客户端本机的 WebView2 调试端口。
+   * 云端部署下这是「桌面端真的用自己内置浏览器」的唯一通路。
+   */
+  BrowserCdpOpen: "browser.cdp.open",
+  BrowserCdpData: "browser.cdp.data",
+  BrowserCdpClose: "browser.cdp.close",
   /**
    * Agent 浏览器工作预览帧（2026-11-12）：agent_browser 在服务端无头浏览器里
    * 每执行一步（open/click/type/scroll/wait_for/screenshot）后，把当前页面

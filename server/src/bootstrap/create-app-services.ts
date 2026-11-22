@@ -322,6 +322,7 @@ import type { ToolContext } from "../tools/tool-registry.js";
 import { resolveActorId, isEphemeralActorId } from "../agent/actor-id.js";
 import { SharedBrowserCoordinator } from "../services/shared-browser-coordinator.js";
 import { SharedBrowserCdpGateway } from "../services/shared-browser/cdp-gateway.js";
+import { CdpTunnelHub } from "../services/shared-browser/cdp-tunnel.js";
 import { LocationCoordinator } from "../services/location-coordinator.js";
 import { WechatClawBindingService } from "../services/wechat-claw-binding-service.js";
 import { WechatClawBridgeService } from "../services/wechat-claw-bridge-service.js";
@@ -580,6 +581,7 @@ import { ProfileRouter, setProfileRouter } from "../brain/profile-router.js";
 import { registerProfileQueryTool } from "../tools/profile-query-tool.js";
 import { registerWatchBoardTools } from "../tools/watch-board-tools.js";
 import { SpeechHub } from "../proactivity/speech-express.js";
+import { TurnLocationHook, formatActorLocationBrief } from "../services/turn-location-hook.js";
 import { OnboardingIntroService } from "../services/onboarding-intro-service.js";
 import { setOnboardingHintRuntime } from "../services/onboarding-state.js";
 import { MobilePushService } from "../proactivity/mobile-push-service.js";
@@ -1036,12 +1038,19 @@ export async function createAppServices(
   // 可信输入网关（CDP 桥）：总开关 SHARED_BROWSER_CDP_ENABLED（默认关）；
   // 客户端显式开启调试端口并上报端点后，trusted 工具用 Playwright 直连用户浏览器。
   const sharedBrowserCdpGateway = new SharedBrowserCdpGateway();
+  // CDP over WS 隧道（2026-11-22）：云端部署下客户端上报的 127.0.0.1 调试端口
+  // 服务端不可达，这里在服务端本机开代理、经聊天 WS 把字节转发到用户电脑，
+  // 让桌面端真正使用自己的内置浏览器（登录态即用户本人），与手机端共用同一账号。
+  const cdpTunnelHub = new CdpTunnelHub({
+    send: (actorId, payload) => sharedBrowserCoordinator.sendToExecutor(actorId, payload),
+  });
   // 通用浏览器层（内置浏览器优先 + 无头+Cookie 兜底）：购物、通用网页操作
   // （agent_browser）、预订报价共用同一套面板租约与登录门。
   const browserRuntime = new BrowserRuntime({
     coordinator: sharedBrowserCoordinator,
     gateway: sharedBrowserCdpGateway,
     browserSessionService,
+    cdpTunnel: cdpTunnelHub,
   });
   // 开机预热常驻 Chromium（2026-11-19）：服务启动就把浏览器进程与渲染管线建好，
   // 用户第一次真要开网页时不再吃冷启动（云端首次任务省 1~3 秒，也少一次风控
@@ -2436,6 +2445,16 @@ export async function createAppServices(
   const personaSoulProviderRef: {
     current: ((sessionId: string) => string | null) | null;
   } = { current: null };
+  /**
+   * 主动消息的「用户此刻位置」提供者（2026-11-22）。
+   *
+   * 位置能力（情境快照/协调器/钩子）在下方位置段落才装配，这里用晚绑定容器：
+   * 主动开口（light 润色 / full 做事）统一经 SpeechHub.buildSystemPrompt 注入，
+   * 场景代码不用各自携带位置。未装配 = 不注入（老行为）。
+   */
+  const turnLocationBriefRef: {
+    current: ((actorId: string) => Promise<string | null>) | null;
+  } = { current: null };
   const speechHub = new SpeechHub({
     chat: () => (externalChat?.isEnabled() ? externalChat : null),
     dataPath: join(getDataDir(), "proactivity"),
@@ -2444,6 +2463,8 @@ export async function createAppServices(
       readProfile: async (actorId) =>
         (await userProfileAggregatorRef.current?.readProfile(actorId)) ?? "",
     }),
+    // 主动消息从后台自动取位置：不依赖用户消息携带，也不要求场景自带 facts。
+    locationBrief: (actorId) => turnLocationBriefRef.current?.(actorId) ?? null,
   });
   // 日程分级预告段回填统一语气层（上方 reminderHandler 处晚绑定声明）：
   // SpeechHub light 档（人格 + 画像浅层，必达不否决），
@@ -3908,6 +3929,31 @@ export async function createAppServices(
     onPlacesUpdated: (actorId) => syncPlacesToProfile(actorId),
   });
   agentCore.setPlaceSemantics(placeSemanticsService);
+
+  // ─── 每轮位置感知钩子（2026-11-22，位置与时间同级动态注入）───
+  // 聊天/任务面：AgentCore 每轮装配前调用；主动消息：SpeechHub 经晚绑定
+  // locationBrief 调用（先刷新再读快照，全程服务端发起，不依赖用户消息携带）。
+  const turnLocationHook = new TurnLocationHook({
+    context: actorContext,
+    coordinator: locationCoordinator,
+    places: placeSemanticsService,
+  });
+  agentCore.setTurnLocationHook(turnLocationHook);
+  turnLocationBriefRef.current = async (actorId: string) => {
+    try {
+      // 主动消息「从后台自动获取就行」：不等设备回包（budget=0），只读服务端
+      // 当前状态；同时把一次刷新请求丢到后台，回包后写快照供下一轮/下一条用。
+      // 因此主动开口不会因为定位多等一两秒，也不会拿设备离线当理由编位置。
+      await turnLocationHook.run(actorId, { reason: "proactive", budgetMs: 0 });
+      const state = turnLocationHook.peek(actorId);
+      if (!state.available || state.ageMs == null) return null;
+      const loc = actorContext.get(actorId)?.location;
+      if (!loc) return null;
+      return formatActorLocationBrief(loc, state.ageMs);
+    } catch {
+      return null;
+    }
+  };
   /**
    * 常去地点 → 用户画像（2026-11-19）。
    *
@@ -7796,6 +7842,7 @@ export async function createAppServices(
     unifiedIdempotencyService,
     phoneBridgeCoordinator,
     sharedBrowserCoordinator,
+    cdpTunnelHub,
     messageHubService,
     friendMessageService,
     locationCoordinator,

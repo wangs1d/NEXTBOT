@@ -237,6 +237,86 @@ async function deliverImportOutcome(args: {
 }
 
 /**
+ * 已校验 Cookie 的统一应用链（2026-11-22 抽出）：暂存 → 统一保存闸分诊 →
+ * 应用 → 续跑挂起的比价。
+ *
+ * 为什么抽出来：手动粘贴（shopping.login.import）和手机端 WebView 登录回传
+ * （shopping.login.cookies）拿到的是同一份东西（已过登录标记软校验的
+ * Cookie 列表），后面每一步都必须一模一样——两条路各写一遍迟早走岔，
+ * 用户会遇到「粘贴会问一次、WebView 不问」这种不一致。
+ */
+async function applyPreparedCookies(args: {
+  send: (body: Record<string, unknown>) => void;
+  shoppingService: ShoppingOrderService;
+  compareService: ShoppingCompareService | null | undefined;
+  toolContext: ToolContext;
+  actorId: string;
+  platform: string;
+  platformLabel: string;
+  prep: { cookies: import("../../services/browser-session-types.js").ImportedBrowserCookie[]; markerNames: string[] };
+  /** 来源只影响「未表态」卡的说明文案，落库与续跑完全一致。 */
+  source: "paste" | "webview";
+}): Promise<void> {
+  const { send, shoppingService, platform, platformLabel, prep, actorId } = args;
+  stagePendingImport(actorId, platform, { cookies: prep.cookies, markerNames: prep.markerNames });
+  const consent = await shoppingService
+    .getCookieSaveConsent(actorId, platform)
+    .catch(() => "ask" as const);
+  if (consent !== "ask") {
+    const applied = await shoppingService.applyCookieImport(
+      actorId,
+      platform,
+      prep.cookies,
+      consent === "allow",
+    );
+    if (!applied.ok) {
+      send({ ok: false, error: applied.error });
+      return;
+    }
+    await deliverImportOutcome({
+      send,
+      compareService: args.compareService,
+      toolContext: args.toolContext,
+      fallbackCard: buildImportReadyCard(
+        platform,
+        platformLabel,
+        applied.saved,
+        applied.saved
+          ? "统一保存闸已开：以后所有平台的登录态都默认保存，不再逐次询问。Cookie 过期了重新登录一次就行。"
+          : "这轮比价先用它；你之前选择不保存登录 Cookie，所以没有存，下次登录时会再确认一次。",
+      ),
+    });
+    return;
+  }
+  send({
+    ok: true,
+    card: {
+      title: "保存登录 Cookie",
+      items: [],
+      cardType: "shopping_login",
+      extra: {
+        shopping: {
+          stage: "login-consent",
+          title: "允许保存登录 Cookie 吗？",
+          platform,
+          platformLabel,
+          note:
+            `${args.source === "webview" ? "已在 App 内拿到" : "已解析到"}${platformLabel}的登录信息（${prep.markerNames.join("、")}）。` +
+            "这是一个统一的开关：同意一次，之后所有平台的登录态都会默认保存，不再逐次询问；" +
+            "Cookie 过期了重新登录一次就行。选「仅本次」则这份用完即弃，下次还会问。",
+          primaryLabel: "同意，以后都自动保存",
+          secondaryLabel: "仅本次使用",
+          primaryAction: "shopping.login.import.consent",
+          secondaryAction: "shopping.login.import.consent",
+          actions: { platform, allow: true },
+          secondaryPayload: { allow: false },
+        },
+      },
+    },
+  });
+}
+
+/**
  * 多平台登录卡（2026-11-13 P1）——**卡形态的唯一真相源**。
  *
  * 三处都要用它：首次推码、跳过一家后的重发、二维码失效后的重推。
@@ -733,7 +813,7 @@ export async function handleCardActionEvent(
                 platforms: multiPlatforms,
                 qrItems: freshQrs,
                 title: `请扫码登录（${multiPlatforms.map((p) => platformLabelOf(p)).join("、")}）`,
-                note: "还没检测到登录——码可能过期了，点「重新出码」换新再扫；扫完不用点按钮，我会自动检测并接着比价",
+                note: "还没检测到登录——码可能过期了，点「重新出码」换新再扫",
                 primaryLabel: "我扫好了（不点也行）",
                 secondaryLabel: "先不比了",
                 primaryAction: "shopping.login.check",
@@ -999,7 +1079,7 @@ export async function handleCardActionEvent(
             platforms: [...scope],
             qrItems,
             title: `请扫码登录（${[...scope].map((p) => platformLabelOf(p)).join("、")}）`,
-            note: "已换新的二维码，扫完不用点按钮，我会自动检测并接着比价",
+            note: "已换新的二维码",
             primaryLabel: "我扫好了（不点也行）",
             secondaryLabel: "先不比了",
             primaryAction: "shopping.login.check",
@@ -1074,67 +1154,97 @@ export async function handleCardActionEvent(
           });
           return true;
         }
-        stagePendingImport(actorId, platform, { cookies: prep.cookies, markerNames: prep.markerNames });
-        // 统一闸分诊（2026-11-21）：已同意 → 不再问，直接默认保存并就地
-        // 续跑；已拒绝 → 不保存也不再问（仅本次）；未表态 → 弹下面的
-        // 统一授权卡，问这一次、答完对所有平台生效。
-        const consent = await shoppingService
-          .getCookieSaveConsent(actorId, platform)
-          .catch(() => "ask" as const);
-        if (consent !== "ask") {
-          const applied = await shoppingService.applyCookieImport(
-            actorId,
-            platform,
-            prep.cookies,
-            consent === "allow",
-          );
-          if (!applied.ok) {
-            send({ ok: false, error: applied.error });
-            return true;
-          }
-          await deliverImportOutcome({
-            send,
-            compareService: deps.shoppingCompareService,
-            toolContext,
-            fallbackCard: buildImportReadyCard(
-              platform,
-              platformLabel,
-              applied.saved,
-              applied.saved
-                ? "统一保存闸已开：以后所有平台的登录态都默认保存，不再逐次询问。Cookie 过期了重新导入一次就行。"
-                : "这轮比价先用它；你之前选择不保存登录 Cookie，所以没有存，下次导入时会再确认一次。",
-            ),
+        await applyPreparedCookies({
+          send,
+          shoppingService,
+          compareService: deps.shoppingCompareService,
+          toolContext,
+          actorId,
+          platform,
+          platformLabel,
+          prep: { cookies: prep.cookies, markerNames: prep.markerNames },
+          source: "paste",
+        });
+        return true;
+      }
+
+      // 手机端内置 WebView 登录回传（2026-11-22）。
+      //
+      // 用户在本 App 的登录页里真登录一次，客户端用系统 CookieManager 把
+      // 整串 Cookie 交回来。后面与手动粘贴完全同一条链（校验登录标记 →
+      // 统一保存闸 → 落库 + 灌 context → 续跑挂起比价），只是来源不同。
+      case "shopping.login.cookies": {
+        const actorId = ctx.boundActorId;
+        const raw = Array.isArray(data.cookies)
+          ? (data.cookies as Array<Record<string, unknown>>)
+          : [];
+        const prep = shoppingService.prepareCookieJar(
+          platform,
+          raw as import("../../services/browser-session-types.js").ImportedBrowserCookie[],
+        );
+        if (!prep.ok) {
+          send({
+            ok: true,
+            card: {
+              title: `登录${platformLabel}`,
+              items: [],
+              cardType: "shopping_login",
+              extra: {
+                shopping: {
+                  stage: "login",
+                  title: "这次没拿到登录态",
+                  platform,
+                  platformLabel,
+                  note: prep.error,
+                  primaryLabel: "重新登录",
+                  secondaryLabel: "先不登了",
+                  primaryAction: "local.webLogin",
+                  secondaryAction: "local.dismiss",
+                  actions: { platform },
+                },
+              },
+            },
           });
           return true;
         }
-        // 统一授权卡：不是「这份 Cookie 存不存」的小卡，而是所有登录态
-        // 保存行为的总开关。同意 → shopping.login.import.consent 落全局
-        // 授权键；仅本次 → 只应用不落任何授权（下次导入仍会问）。
-        send({
-          ok: true,
-          card: {
-            title: "保存登录 Cookie",
-            items: [],
-            cardType: "shopping_login",
-            extra: {
-              shopping: {
-                stage: "login-consent",
-                title: "允许保存登录 Cookie 吗？",
-                platform,
-                platformLabel,
-                note:
-                  `已解析到${platformLabel}的登录信息（${prep.markerNames.join("、")}）。` +
-                  "这是一个统一的开关：同意一次，之后所有平台的登录态都会默认保存，不再逐次询问；" +
-                  "Cookie 过期了重新导入一次就行。选「仅本次」则这份用完即弃，下次还会问。",
-                primaryLabel: "同意，以后都自动保存",
-                secondaryLabel: "仅本次使用",
-                primaryAction: "shopping.login.import.consent",
-                secondaryAction: "shopping.login.import.consent",
-                actions: { platform, allow: true },
-                secondaryPayload: { allow: false },
+        if (!prep.markerFound) {
+          const markers = getLoginCookieMarkerNames(platform);
+          send({
+            ok: true,
+            card: {
+              title: `登录${platformLabel}`,
+              items: [],
+              cardType: "shopping_login",
+              extra: {
+                shopping: {
+                  stage: "login",
+                  title: `没检测到${platformLabel}的登录信息`,
+                  platform,
+                  platformLabel,
+                  note:
+                    `拿到 ${prep.cookies.length} 条 Cookie，但里面没有登录标记（${markers.join(" / ")}）。` +
+                    "大概率还停在登录页没走完——把验证码 / 密码那步走完再点一次「登录好了」。",
+                  primaryLabel: "重新登录",
+                  secondaryLabel: "先不登了",
+                  primaryAction: "local.webLogin",
+                  secondaryAction: "local.dismiss",
+                  actions: { platform },
+                },
               },
             },
-          },
+          });
+          return true;
+        }
+        await applyPreparedCookies({
+          send,
+          shoppingService,
+          compareService: deps.shoppingCompareService,
+          toolContext,
+          actorId,
+          platform,
+          platformLabel,
+          prep: { cookies: prep.cookies, markerNames: prep.markerNames },
+          source: "webview",
         });
         return true;
       }

@@ -154,6 +154,28 @@ void main() {
     expect(sent.value["timezone"], "Asia/Shanghai");
   });
 
+  test("每轮位置钩子（reason=turn:*）→ 同样回 client.location_report", () async {
+    final MobileChatController controller = await newController();
+    addTearDown(controller.dispose);
+    MobileChatController.debugLocationResolver = () async => ClientLocationPayload(
+          latitude: 29.6531,
+          longitude: 106.5501,
+          capturedAt: "2026-11-22T03:00:00.000Z",
+        );
+
+    controller.debugHandleWsEvent(<String, dynamic>{
+      "type": "agent.location_request",
+      "payload": <String, dynamic>{"jobId": "job-turn-1", "reason": "turn:chat"},
+    });
+
+    final MapEntry<String, Map<String, dynamic>> sent =
+        await waitForSent(controller, "client.location_report",
+            where: (p) => p["jobId"] == "job-turn-1");
+    expect(sent.value["latitude"], 29.6531);
+    // capturedAt 必须原样回传（服务端据龄期裁决），不得被客户端改成「刚刚」。
+    expect(sent.value["capturedAt"], "2026-11-22T03:00:00.000Z");
+  });
+
   test("定位失败仍回 jobId 空包（服务端立即结算，不等 12s 超时）", () async {
     final MobileChatController controller = await newController();
     addTearDown(controller.dispose);

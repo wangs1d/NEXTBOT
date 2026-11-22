@@ -213,6 +213,11 @@ export type WsRouteDeps = {
   phoneBridgeCoordinator: PhoneBridgeCoordinator;
   /** 共用浏览器桥：用户与 Agent 共用客户端内嵌浏览器的动作转发通道 */
   sharedBrowserCoordinator: SharedBrowserCoordinator;
+  /**
+   * CDP over WS 隧道（2026-11-22）：云端部署时把 Playwright 的 CDP 流量转发到
+   * 客户端本机 WebView2 调试端口；null=未装配（只支持同机部署）。
+   */
+  cdpTunnelHub?: import("../services/shared-browser/cdp-tunnel.js").CdpTunnelHub | null;
   /** 消息聚合中心：手机桥接 phone.msg.report 批量落库用；null=未装配 */
   messageHubService?: MessageHubService | null;
   /** 站内好友消息投递内核：session.init 时补投未读好友消息（可选） */
@@ -311,6 +316,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     unifiedIdempotencyService,
     phoneBridgeCoordinator,
     sharedBrowserCoordinator,
+    cdpTunnelHub,
     messageHubService,
     friendMessageService,
     locationCoordinator,
@@ -479,7 +485,9 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
         locationCoordinator.unbindSocket(socket);
         if (boundActorId) {
           phoneBridgeCoordinator.unbindIfSocket(boundActorId, socket);
-          sharedBrowserCoordinator.unbindIfSocket(boundActorId, socket);
+          const wasBrowserExecutor = sharedBrowserCoordinator.unbindIfSocket(boundActorId, socket);
+          // 共用浏览器执行端下线：CDP 隧道代理与残留连接一并回收（重连后按需重建）
+          if (wasBrowserExecutor) cdpTunnelHub?.disposeActor(boundActorId);
         }
         phoneBridgeCoordinator.cancelPendingForSocket(socket);
         // 终端互连平台：清理该 socket 上绑定的设备
@@ -1253,6 +1261,33 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             return;
           }
           sharedBrowserCoordinator.setCdpEndpoint(boundActorId, endpoint);
+          // 新客户端声明支持 WS 隧道：服务端据此改走本机代理端点，桌面端
+          // 才能在云端部署下真正使用自己的内置浏览器（2026-11-22）。
+          sharedBrowserCoordinator.setCdpTunnelSupported(
+            boundActorId,
+            (event.payload as Record<string, unknown>)?.cdpTunnel === true,
+          );
+          return;
+        }
+
+        if (
+          event.type === ClientEventType.BrowserCdpOpened ||
+          event.type === ClientEventType.BrowserCdpData ||
+          event.type === ClientEventType.BrowserCdpClosed
+        ) {
+          // CDP 隧道回执（2026-11-22）：只允许已绑定的执行端连接回传，
+          // 隧道 id 由服务端签发，客户端指定不了目标主机（只能连本机调试口）。
+          if (!boundActorId || !cdpTunnelHub) return;
+          const p = (event.payload ?? {}) as Record<string, unknown>;
+          const tunnelId = String(p.tunnelId ?? "");
+          if (!tunnelId) return;
+          if (event.type === ClientEventType.BrowserCdpOpened) {
+            cdpTunnelHub.handleOpened(boundActorId, tunnelId);
+          } else if (event.type === ClientEventType.BrowserCdpData) {
+            cdpTunnelHub.handleData(boundActorId, tunnelId, String(p.data ?? ""));
+          } else {
+            cdpTunnelHub.handleClosed(boundActorId, tunnelId);
+          }
           return;
         }
 
@@ -1507,6 +1542,22 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             );
             if (handled) return;
             // 未识别的 ride 动作才落回模型轮（正常不会发生）
+          }
+
+          // 计划终止（2026-11-22）：任务步骤条上的「终止」= 用户不要这个计划了。
+          // 与 planStepId 同一条「在点击原点办完、不信模型」原则：直接 clear 会话
+          // 计划并中断进行中的轮次，**不**转写成 user_message（终止是控制动作，
+          // 再劳模型回一轮只会多出一条"好的"并把计划又写回来）。
+          if (actionPayload.planCancel === true) {
+            const store = getTaskPlanStore();
+            const planKey = taskPlanKey({
+              sessionId: typeof actPl.sessionId === "string" ? actPl.sessionId : boundActorId,
+              actorId: boundActorId,
+            });
+            const cleared = store?.clear(planKey) ?? false;
+            abortActiveTurn(boundActorId);
+            app.log.debug({ actorId: boundActorId, cleared, cardId }, "plan cancel");
+            return;
           }
 
           // 计划交接回执（2026-10-19 handoff）：用户在「我已完成，继续下一步」按钮上

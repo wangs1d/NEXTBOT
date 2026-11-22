@@ -32,6 +32,16 @@ import { haversineMeters } from "./geo-utils.js";
 export type ActorActivity = "still" | "walking" | "vehicle" | "unknown";
 export type ActorPlaceKind = "home" | "work" | "other" | "unknown";
 
+/**
+ * 「新但更粗」不得覆盖「旧但更准」的判定参数（见 updateLocation）：
+ *   - 只在旧快照还够新（≤90s）时才保护它——再旧就说明人可能已经走远；
+ *   - 新 fix 精度至少要差 1.5 倍且多出 15m，才算「明显更粗」，
+ *     避免 11m 与 12m 这种噪声互相打架。
+ */
+const KEEP_BETTER_FIX_MAX_AGE_MS = 90_000;
+const KEEP_BETTER_FIX_RATIO = 1.5;
+const KEEP_BETTER_FIX_MIN_GAP_M = 15;
+
 /** 时钟状态：IANA 时区是权威，偏移只作一致性校验与展示。 */
 export type ActorClockState = {
   timezone: string;
@@ -346,6 +356,29 @@ export class ActorContextService {
         const skewMs = Math.abs(at - capturedMs);
         observedAt = skewMs <= 10 * 60_000 ? capturedMs : at;
       }
+    }
+    // 精度优先合并（2026-11-22）：位置流里「新但明显更粗」的 fix 不得踩掉
+    // 「稍旧但更准」的快照。后台连续上报常态 30~60m，而每轮钩子刚拿到 8m；
+    // 旧规则「后到即覆盖」会让快照立刻退化，prompt 门牌错、下一轮又要重拉
+    // （既不准也更慢）。只有当旧快照已超过本窗口（视为位置可能已变）才允许
+    // 被粗 fix 覆盖；更准的 fix 永远直接覆盖。
+    const prev = ctx.location;
+    const nextAccuracy =
+      typeof loc.accuracyMeters === "number" && loc.accuracyMeters > 0
+        ? loc.accuracyMeters
+        : undefined;
+    if (
+      prev?.accuracyMeters != null &&
+      nextAccuracy != null &&
+      observedAt > prev.observedAt &&
+      observedAt - prev.observedAt <= KEEP_BETTER_FIX_MAX_AGE_MS &&
+      nextAccuracy > prev.accuracyMeters * KEEP_BETTER_FIX_RATIO &&
+      nextAccuracy - prev.accuracyMeters >= KEEP_BETTER_FIX_MIN_GAP_M
+    ) {
+      // 保留更准的旧坐标（龄期如实保留），只推进「这条 actor 有更新」的时间。
+      ctx.updatedAt = at;
+      this.afterUpdate();
+      return ctx;
     }
     ctx.location = {
       latitude: loc.latitude,

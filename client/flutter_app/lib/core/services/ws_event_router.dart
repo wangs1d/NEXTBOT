@@ -288,6 +288,7 @@ class WsEventRouter {
     required WsEventHandler onEvent,
     WsSubscribeScope scope = WsSubscribeScope.auto,
     Set<String> coalesceTypes = const <String>{},
+    int maxPending = WsBusSubscription.maxPending,
   }) {
     final WsBusSubscription sub = WsBusSubscription._(
       this,
@@ -296,6 +297,7 @@ class WsEventRouter {
       onEvent,
       scope,
       Set<String>.of(coalesceTypes),
+      maxPending,
     );
     _subscribers.add(sub);
     _replayStateTo(sub);
@@ -417,6 +419,7 @@ class WsBusSubscription {
     this.onEvent,
     this.scope,
     this.coalesceTypes,
+    this.queueLimit,
   );
 
   final WsEventRouter _router;
@@ -433,6 +436,12 @@ class WsBusSubscription {
   /// 待执行队列上限：超限丢最旧（背压兜底，防 handler 挂起时无界增长）。
   static const int maxPending = 64;
 
+  /// 本订阅者的队列上限（默认 [maxPending]）。
+  ///
+  /// 少数订阅者收到的是**不能丢**的流式字节（如 CDP 隧道 browser.cdp.data：
+  /// 丢一条就把 Chrome DevTools 协议流打乱），可由调用方放大缓冲。
+  final int queueLimit;
+
   final List<Map<String, dynamic>> _pending = <Map<String, dynamic>>[];
   bool _draining = false;
   bool _cancelled = false;
@@ -447,10 +456,10 @@ class WsBusSubscription {
     if (coalesceTypes.contains(type)) {
       _pending.removeWhere((Map<String, dynamic> e) => e["type"] == type);
     }
-    if (_pending.length >= maxPending) {
+    if (_pending.length >= queueLimit) {
       final Map<String, dynamic> dropped = _pending.removeAt(0);
       debugPrint(
-        "[ws-router] '$module' queue full ($maxPending), "
+        "[ws-router] '$module' queue full ($queueLimit), "
         "dropped oldest '${dropped["type"]}'",
       );
     }

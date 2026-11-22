@@ -84,6 +84,7 @@ const PUBLIC_EXACT_PATHS = new Set([
   //    此刻设备还没有任何凭证；两者都不返回用户数据。
   "/api/client/manifest",
   "/api/telemetry/client-boot",
+  "/api/telemetry/events", // 跨端行为埋点批量上报（与 client-boot 同类：不含用户数据内容、fail-open；登录前的行为也要能计入设备维度）
   "/accounts/me", // 注册探活（未配对时唯一能问「这个邮箱注册过吗」的入口）
   // ② 健康探针
   "/api/resource/health-check",

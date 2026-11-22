@@ -74,6 +74,9 @@ export class SharedBrowserCoordinator {
   /** 各执行端上报的 CDP 调试端点（trusted 工具用；默认空 = CDP 桥未开启）。 */
   private readonly cdpEndpoints = new Map<string, string>();
 
+  /** 支持 CDP over WS 隧道的执行端（新客户端；云端部署唯一可用的路径）。 */
+  private readonly cdpTunnelCapable = new Set<string>();
+
   /** 审计；缺省时跳过（单测场景）。 */
   constructor(private readonly audit?: AuditService) {}
 
@@ -86,6 +89,7 @@ export class SharedBrowserCoordinator {
     if (this.executors.get(actorId) !== socket) return false;
     this.executors.delete(actorId);
     this.cdpEndpoints.delete(actorId);
+    this.cdpTunnelCapable.delete(actorId);
     for (const [id, job] of this.pending.entries()) {
       if (job.socket === socket) {
         clearTimeout(job.timer);
@@ -118,6 +122,35 @@ export class SharedBrowserCoordinator {
     const trimmed = endpoint.trim();
     if (!trimmed) this.cdpEndpoints.delete(actorId);
     else this.cdpEndpoints.set(actorId, trimmed);
+  }
+
+  /**
+   * 客户端是否支持 CDP over WS 隧道（2026-11-22）。
+   *
+   * 云端部署下客户端上报的 `127.0.0.1:<port>` 服务端根本连不上（调试端口只绑
+   * 回环）。新客户端在 browser.bridge.info 里带 `cdpTunnel: true`，服务端据此
+   * 改走隧道端点，桌面端才能真正用上自己的内置浏览器。
+   */
+  setCdpTunnelSupported(actorId: string, supported: boolean) {
+    if (supported) this.cdpTunnelCapable.add(actorId);
+    else this.cdpTunnelCapable.delete(actorId);
+  }
+
+  cdpTunnelSupported(actorId: string): boolean {
+    return this.cdpTunnelCapable.has(actorId);
+  }
+
+  /** 向该 actor 的执行端 socket 直发一条事件（隧道信令用）；未绑定返回 false。 */
+  sendToExecutor(actorId: string, payload: Record<string, unknown>): boolean {
+    const socket = this.executors.get(actorId);
+    if (!socket) return false;
+    try {
+      if (socket.readyState !== undefined && socket.readyState > 1) return false;
+      socket.send(JSON.stringify(payload));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   cdpEndpoint(actorId: string): string {

@@ -124,6 +124,26 @@ abstract final class MobileTheme {
   /// 气泡圆角(用户 / 助手可对称)。
   static const double bubbleRadius = 20;
 
+  // ── 消息区宽度口径（唯一源）─────────────────────────────────────────
+  // 气泡 / 气泡外独立卡 / 摘要卡 / 语音条的水平尺寸只认这里。此前页面里散着
+  // `* 0.738` 与 `width - 16 * 2` 的多份字面量，改一处漏一处，宽度就「一会儿
+  // 宽一会儿窄」（2026-11-21 统一）。
+
+  /// 消息列表左右留白：列表 padding、独立卡与宽气泡的外沿都用它。
+  static const double messageSidePadding = 16;
+
+  /// 闲聊气泡宽度系数（设计稿泡宽，占屏宽比例）。
+  static const double chatBubbleWidthFactor = 0.738;
+
+  /// 消息元素可用的最大宽度：屏宽 − 左右留白。
+  /// 结构化正文气泡、气泡外独立卡、摘要卡、睡前备忘卡同宽。
+  static double messageMaxWidth(double screenWidth) =>
+      screenWidth - messageSidePadding * 2;
+
+  /// 闲聊气泡最大宽度（设计稿泡宽）：纯叙述文字/语音条按它收窄。
+  static double chatBubbleMaxWidth(double screenWidth) =>
+      screenWidth * chatBubbleWidthFactor;
+
   /// 浅色主题。
   static ThemeData get light => _build(MobilePalette.light, Brightness.light);
 

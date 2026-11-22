@@ -27,6 +27,39 @@ function locationAgeNote(ageMs: number | null): string {
   return min < 60 ? `（约 ${min} 分钟前的定位）` : `（约 ${(min / 60).toFixed(1)} 小时前的定位）`;
 }
 
+/**
+ * 从用户本轮原句确定性解析「问的是哪一天的天气」（2026-11-21 根治）。
+ *
+ * 背景：旧实现把「查哪天」交给模型填 focus/days，模型漏传或走复合路径丢参数时，
+ * 回执退化成今天+明天两套，卡片取今日、正文取明日，出现同一条回复两个温度区间打架。
+ * 用户原句（context.userText）才是权威意图源——服务端自己解析并覆盖模型参数，
+ * 模型漏传/复合丢参数都不再能让回执退回两套。
+ *
+ * 只识别确定的相对日与多日需求量；识别不出返回 null，调用方退回模型参数兜底。
+ * 纯函数、不读时钟（项目铁律：服务端禁 Date.now()/无参 new Date()）。
+ */
+export type WeatherDayIntent =
+  | { kind: "single"; dayIndex: number; label: string }
+  | { kind: "multi"; days: number };
+
+export function parseWeatherDayIntent(userText: string | undefined | null): WeatherDayIntent | null {
+  const t = (userText ?? "").replace(/\s+/g, "");
+  if (!t) return null;
+  // 单日相对词：顺序有关——先长词后短词，避免「大后天」被「后天」截走。
+  if (/大后天/.test(t)) return { kind: "single", dayIndex: 3, label: "大后天" };
+  if (/后天/.test(t)) return { kind: "single", dayIndex: 2, label: "后天" };
+  if (/明天|明日|明早|明晚|明夜|明儿/.test(t)) return { kind: "single", dayIndex: 1, label: "明天" };
+  if (/今天|今日|今晚|今早|今夜|今儿|此刻|现在|当前/.test(t)) return { kind: "single", dayIndex: 0, label: "今天" };
+  // 多日需求：这周/一周/N 天预报。
+  if (/这周|本周|一周|整周|整个星期|未来几天/.test(t)) return { kind: "multi", days: 7 };
+  const nDays = t.match(/未来?(\d{1,2})天|(\d{1,2})天(?:预报|天气)/);
+  if (nDays) {
+    const n = Number(nDays[1] ?? nDays[2]);
+    if (n >= 2 && n <= 16) return { kind: "multi", days: n };
+  }
+  return null;
+}
+
 export function registerWeatherTools(registry: ToolRegistry, weather: WeatherService): void {
   registry.register("weather.get_local", async (input, context) => {
     // 时区默认交给接口按坐标推导（auto）：服务端不用本机时区、不用出口 IP 的时区冒充
@@ -124,26 +157,53 @@ export function registerWeatherTools(registry: ToolRegistry, weather: WeatherSer
     console.log(
       `[weather.get_local] 位置来源=${locSource} 坐标=${lat.toFixed(4)},${lon.toFixed(4)} label=${label || "-"} city=${city || "-"}`,
     );
-    // days：用户问多日（"这周""后天""去玩三天"）时由模型传 1–16；缺省 2 = 今天+明天。
-    const daysInput = Number(input.days);
-    let days = Number.isFinite(daysInput) ? Math.max(1, Math.min(Math.trunc(daysInput), 16)) : 2;
-    // focus（2026-11-05）：用户明确只问某一天时收窄回执，别把「明天天气」答成今天+明天两套。
-    //   today    → days=1，回执只有当前实况+今天，无明日段；
-    //   tomorrow → days≥2，回执只有明天数据（无当前实况/今日气温湿度），卡片与正文都只围绕明天。
-    // 模型没传（泛泛问天气/两天都提）保持旧行为：今天+明天。
-    const focusInput = String(input.focus ?? "").trim();
-    const focus = focusInput === "today" || focusInput === "tomorrow" ? focusInput : "";
-    if (focus === "today") days = 1;
-    if (focus === "tomorrow") days = Math.max(2, days);
-    const brief = await weather.getBrief(lat, lon, timezone, label || undefined, days);
+    // 查询范围由「用户原话」决定（2026-11-21 根治，权威意图源 = context.userText）：
+    // 服务端确定性解析问的是哪天，覆盖模型填的 days/focus。模型漏传、复合路径丢参数
+    // 都不再能让回执退回「今天+明天」两套——那正是卡片/正文温度打架的根因。
+    // 模型参数仅作兜底：原话解析不出时（如主动任务无 userText、或只说「天气」）才采用。
+    const intent = parseWeatherDayIntent(context.userText);
 
-    if (focus === "tomorrow" && brief.tomorrow) {
+    let days: number;
+    let focusDay: "" | "tomorrow" = "";
+    let singleDayIndex = -1; // 后天及更远（≥2）的单日聚焦索引；0/1 走各自已有路径
+    if (intent?.kind === "single") {
+      // 原话明确某一天：单日聚焦，回执只放那天的数据。
+      //   今天 → days=1，summaryLine 天然只有今日段（无明日），走默认回执即可；
+      //   明天 → days≥2 走 buildTomorrowFocusResult，只留明日（已上线验证，字节不动）；
+      //   后天/大后天 → 走通用单日回执，只留那天（避免默认回执里今日/明日/后天三套打架）。
+      days = intent.dayIndex === 0 ? 1 : Math.max(2, intent.dayIndex + 1);
+      if (intent.dayIndex === 1) focusDay = "tomorrow";
+      if (intent.dayIndex >= 2) singleDayIndex = intent.dayIndex;
+    } else if (intent?.kind === "multi") {
+      days = intent.days;
+    } else {
+      // 兜底：原话解析不出（主动任务无 userText / 模型自报）时也默认单日——
+      // 不再默认「今天+明天」两套，彻底堵死卡片/正文各取一天打架的最后一个口子。
+      // 模型显式传值仍被尊重（days=N / focus=tomorrow），但「没给范围」一律当查一次。
+      const daysInput = Number(input.days);
+      days = Number.isFinite(daysInput) ? Math.max(1, Math.min(Math.trunc(daysInput), 16)) : 1;
+      const focusInput = String(input.focus ?? "").trim();
+      if (focusInput === "today") days = 1;
+      if (focusInput === "tomorrow") {
+        days = Math.max(2, days);
+        focusDay = "tomorrow";
+      }
+    }
+    const brief = await weather.getBrief(lat, lon, timezone, label || undefined, days);
+    const locLabel = [brief.locationLabel, locationAgeNote(locationAgeMs)]
+      .filter((s): s is string => !!s && String(s).trim().length > 0)
+      .join(" ");
+
+    // 明日聚焦：回执只放明天，卡片与正文都从回执来，不可能出现两套温度。
+    if (focusDay === "tomorrow" && brief.tomorrow) {
       return buildTomorrowFocusResult(brief.tomorrow, {
-        locationLabel: [brief.locationLabel, locationAgeNote(locationAgeMs)]
-          .filter((s): s is string => !!s && String(s).trim().length > 0)
-          .join(" "),
+        locationLabel: locLabel,
         windKmh: brief.windKmh,
       });
+    }
+    // 后天及更远单日聚焦：只放那天，同样杜绝多套温度并存。
+    if (singleDayIndex >= 2 && brief.daily?.[singleDayIndex]) {
+      return buildSingleDayFocusResult(brief.daily[singleDayIndex], singleDayIndex, locLabel);
     }
 
     return {
@@ -166,9 +226,7 @@ export function registerWeatherTools(registry: ToolRegistry, weather: WeatherSer
       ...(brief.tomorrow?.rainWindow
         ? { tomorrowRainPeriod: rainWindowSuffixText(brief.tomorrow.rainWindow) }
         : {}),
-      locationLabel: [brief.locationLabel, locationAgeNote(locationAgeMs)]
-        .filter((s): s is string => !!s && String(s).trim().length > 0)
-        .join(" "),
+      locationLabel: locLabel,
       // 多日逐日预报（index 0 = 今天；仅当请求 >2 天时携带，避免单日轮次撑大返回）
       ...(days > 2 && brief.daily && brief.daily.length > 0
         ? { dailyForecast: brief.daily.map(withDayLabel) }
@@ -206,6 +264,29 @@ function buildTomorrowFocusResult(
       ...(t.rainWindow ? { rainWindow: t.rainWindow } : {}),
     }),
     locationLabel: ctx.locationLabel,
+  };
+}
+
+/**
+ * 后天及更远单日聚焦回执（2026-11-21）：只放用户问的那一天，字段用中性 focus* 命名。
+ * 卡片构建器优先认 focusRangeC/focusDayLabel，正文也只读这些字段，不会掺今日/明日。
+ */
+function buildSingleDayFocusResult(
+  item: WeatherDailyForecastItem,
+  dayIndex: number,
+  locationLabel: string,
+) {
+  const dayLabel = withDayLabel(item, dayIndex).dayLabel;
+  const rainInfo = item.rainPct > 0 ? `，降水概率 ${item.rainPct}%` : "";
+  return {
+    ok: true,
+    focusDay: "single",
+    focusDayLabel: dayLabel,
+    summary: `${locationLabel ? `${locationLabel} ` : ""}${dayLabel}${item.weatherText}，${item.minC.toFixed(0)}–${item.maxC.toFixed(0)}°C${rainInfo}。`,
+    weatherText: item.weatherText,
+    focusRangeC: `${item.minC.toFixed(0)}°–${item.maxC.toFixed(0)}°`,
+    ...(item.rainPct > 0 ? { focusRainPct: item.rainPct } : {}),
+    locationLabel,
   };
 }
 

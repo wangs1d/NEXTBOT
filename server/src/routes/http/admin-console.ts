@@ -12,6 +12,7 @@ import { renderAdminConsolePage } from "./admin-console-page.js";
 import { adminAudit, readAdminAudit, requireAdmin } from "./admin-auth.js";
 import { feedbackStatusCounts } from "./feedback.js";
 import { clientTelemetrySummary } from "./client-telemetry.js";
+import { usageAnalyticsSummary } from "./usage-analytics.js";
 import { renderInboxTemplate } from "../../services/inbox-templates.js";
 import { resolvePrimaryExternalModelBinding } from "../../external-model/resolve-provider.js";
 import { readClientManifest } from "./client-manifest.js";
@@ -621,6 +622,17 @@ export function registerAdminConsoleRoutes(app: FastifyInstance, deps: HttpRoute
     // —— 站内信：总量、收/发、今日、近14日趋势 ——
     const messages = deps.messageHubService?.globalStats(14) ?? null;
 
+    // —— 使用习惯埋点聚合：账号显示名按 accountId / userId 双键检索，兼容端侧上报的 actorId 形态 ——
+    const accountNameById = new Map<string, string>();
+    for (const a of accounts) {
+      if (a.accountId) accountNameById.set(a.accountId, a.displayName);
+      if (a.userId) accountNameById.set(a.userId, a.displayName);
+    }
+    const usage = usageAnalyticsSummary({
+      registeredCount: accounts.length,
+      accountName: (id) => accountNameById.get(id) ?? null,
+    });
+
     return {
       ok: true,
       server: {
@@ -634,6 +646,7 @@ export function registerAdminConsoleRoutes(app: FastifyInstance, deps: HttpRoute
       messages,
       feedback,
       clients: clientTelemetrySummary(),
+      usage,
     };
   });
 

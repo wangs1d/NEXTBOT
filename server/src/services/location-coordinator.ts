@@ -43,6 +43,8 @@ type PendingRequest = {
   timer: NodeJS.Timeout;
   /** 本次请求下发给的全部连接（多设备 fan-out；任一端回包即完成） */
   sockets: Set<WsSendLike>;
+  /** 请求原因（turn:chat / turn:proactive / 工具名等），回包日志用它区分场景 */
+  reason?: string;
 };
 
 type CachedLocation = {
@@ -334,7 +336,12 @@ export class LocationCoordinator {
         resolve(null);
       }, this.requestTimeoutMs);
       const targetSockets = new Set(sockets);
-      this.pending.set(jobId, { sockets: targetSockets, timer, resolve });
+      this.pending.set(jobId, {
+        sockets: targetSockets,
+        timer,
+        resolve,
+        ...(reason ? { reason } : {}),
+      });
       const data = JSON.stringify({
         type: ServerEventType.LocationRequest,
         payload: { jobId, ...(reason ? { reason } : {}) },
@@ -369,7 +376,13 @@ export class LocationCoordinator {
       });
       // 真机定位链路可观测（2026-10-08）：这是「手机上报了什么坐标」的唯一一手证据，
       // 定位答错的排查从这里开始——坐标对而答错=LLM/逆地理问题；坐标错=手机 GPS 问题。
-      const pendingHit = String(payload.jobId ?? "").trim() ? "按需回包" : "主动上报";
+      const jobIdRaw = String(payload.jobId ?? "").trim();
+      const pendingForLog = jobIdRaw ? this.pending.get(jobIdRaw) : undefined;
+      // 回包原因一并落日志（turn:* = 每轮位置钩子；其它多为工具按需定位），
+      // 线上核「每轮是否真的在要新位置」直接看这一行。
+      const pendingHit = jobIdRaw
+        ? `按需回包 reason=${pendingForLog?.reason ?? "-"}`
+        : "主动上报";
       const device = this.socketClass.get(socket) ?? "-";
       console.log(
         `[location-coordinator] ${pendingHit} dev=${device} actor=${actorId} ` +

@@ -381,6 +381,89 @@ class ClientLocationService {
     return _fetchFresh(disk);
   }
 
+  // ─── 每轮位置钩子（服务端 reason=turn:*，2026-11-22）─────────────────
+  //
+  // 服务端每轮 prompt 装配前会要一次「此刻位置」。2026-11-22 定调**精度优先**：
+  // 缓存只有在「够新 + 够准」时才复用，否则现拉一次高精度 fix（高德
+  // Hight_Accuracy + GpsFirst，目标 ≤10m），拿不到才退回最近一次缓存——
+  // 旧坐标如实带 capturedAt / accuracyMeters，绝不伪装成精准定位。
+  //
+  // 为什么不无脑复用：后台连续流（continuous）的 fix 常态 30~60m，密集街区
+  // 会跨街/错门牌；「位置每轮更新」不等于「位置足够准」。
+  /// 缓存可复用的最大龄期：3min → 60s（准确优先）。1 分钟内的 fix 才敢当
+  /// 「此刻」用；走动 1.4m/s 时 3 分钟已偏 250m，门牌必错。
+  static const Duration _turnFastFixMaxAge = Duration(seconds: 60);
+  /// 复用缓存要求的水平精度（米）：与服务端 LOCATION_TURN_MAX_ACCURACY_M 对齐（15）。
+  static const double _turnPreciseMaxAccuracyMeters = 15;
+  /// 移动中不复用缓存（走路/骑行/开车）：坐标在变，缓存再准也是「上一处」。
+  static const double _turnMovingSpeedMps = 1.2;
+  /// 每轮现拉预算：服务端等 2.6s，这里给 2.4s——**端侧必须先于服务端收口**，
+  /// 否则回包永远晚到一轮。两个引擎并行且 ≤15m 即回，通常 0.8~1.8s 收口，
+  /// 2.4s 只兜「GPS 需要多几个 fix 收敛」的情况。
+  static const Duration _turnFetchBudget = Duration(milliseconds: 2400);
+  /// 后台预热预算（本轮没拿到达标精度时用，不影响本轮响应）。
+  static const Duration _warmBudget = Duration(milliseconds: 6000);
+  static DateTime? _lastWarmAt;
+
+  /// 每轮对话位置钩子专用（纯坐标，不做客户端逆地理）。
+  static Future<ClientLocationPayload?> getCurrentLocationForTurn() async {
+    final bool? consent = await getLocationConsent();
+    // 用户显式拒绝过定位：不回任何坐标（系统权限兜底在下面的定位调用里）。
+    if (consent == false) return null;
+
+    final ClientLocationPayload? cached = _cached;
+    final DateTime? cachedAt = _cachedAt;
+    final double? cachedSpeed = cached?.speedMps;
+    final bool moving = cachedSpeed != null && cachedSpeed > _turnMovingSpeedMps;
+    if (cached != null &&
+        cachedAt != null &&
+        !moving &&
+        DateTime.now().difference(cachedAt) <= _turnFastFixMaxAge &&
+        _accuracyUnknownOrWithin(cached.accuracyMeters, _turnPreciseMaxAccuracyMeters)) {
+      return cached;
+    }
+
+    try {
+      final ClientLocationPayload? precise = await _fetchPreciseCoords(
+        budget: _turnFetchBudget,
+      );
+      if (precise != null) return precise;
+    } catch (e) {
+      debugPrint("[ClientLocationService] 每轮高精度定位未取到（回最近一次）: $e");
+    }
+    final ClientLocationPayload? fallback = cached ?? await _loadFromDisk();
+    // 本轮只拿到粗 fix / 旧缓存：后台继续追一次高精度（节流 20s，只更新本地缓存），
+    // 下一轮服务端要位置时就是「秒回且达标」，不用再等 GPS。
+    if (!_accuracyUnknownOrWithin(fallback?.accuracyMeters, _turnPreciseMaxAccuracyMeters)) {
+      _warmTurnCache();
+    }
+    return fallback;
+  }
+
+  /// 精度未知（旧通道/旧设备未上报）视为「无法判断 → 允许复用」：
+  /// 不能因为拿不到数字就每轮白等一次 GPS。
+  static bool _accuracyUnknownOrWithin(double? accuracyMeters, double limitMeters) {
+    if (accuracyMeters == null || accuracyMeters <= 0) return true;
+    return accuracyMeters <= limitMeters;
+  }
+
+  /// 后台预热：本轮响应已经发出，这里只为下一轮把「精度达标的新鲜 fix」准备好。
+  /// 失败/超时都静默（预热是优化，不是功能），20s 内不重复触发。
+  static void _warmTurnCache() {
+    final DateTime now = DateTime.now();
+    final DateTime? last = _lastWarmAt;
+    if (last != null && now.difference(last) < const Duration(seconds: 20)) return;
+    _lastWarmAt = now;
+    unawaited(
+      _fetchPreciseCoords(budget: _warmBudget).then<void>((ClientLocationPayload? p) async {
+        if (p == null) return;
+        await _remember(p);
+      }).catchError((Object e) {
+        debugPrint("[ClientLocationService] 后台预热定位失败（忽略）: $e");
+      }),
+    );
+  }
+
   /// 服务端 `agent.location_request` 专用：纯坐标快回，不做客户端逆地理
   /// （服务端拿到坐标后自己反查城市）。
   ///
@@ -399,7 +482,23 @@ class ClientLocationService {
     }
   }
 
-  static Future<ClientLocationPayload?> _fetchAgentReplyCoords() async {
+  static Future<ClientLocationPayload?> _fetchAgentReplyCoords() {
+    // 工具按需路径（服务端等 12s）：给足 7.5s，高德 + geolocator 共享预算。
+    return _fetchPreciseCoords(budget: const Duration(milliseconds: 7500));
+  }
+
+  /// 高精度取点（高德 ⇄ geolocator **并行赛跑**，达标即回）。
+  ///
+  /// 2026-11-22 二改（提速）：原来「高德先跑满预算 → 不够准再给 geolocator
+  /// 剩余时间」，串行最坏要 4s+；现在两个引擎同时开跑，任何一个先给出
+  /// ≤ acceptAccuracyMeters（缺省 15m，与服务端精度门槛一致）的 fix 就立刻返回，
+  /// 都只有粗 fix 才等到预算耗尽取两者里最好的。这样常见场景 0.8~2s 出结果，
+  /// 精度门槛不降（仍是服务端 15m 判据）。
+  static Future<ClientLocationPayload?> _fetchPreciseCoords({
+    required Duration budget,
+    double targetAccuracyMeters = 10,
+    double acceptAccuracyMeters = 15,
+  }) async {
     if (_locationConsent != true) {
       final bool? consent = await getLocationConsent();
       // 2026-11-19 根修（「开了系统权限还说看不见」）：只有**显式拒绝**（false）
@@ -414,30 +513,58 @@ class ClientLocationService {
       debugPrint("[ClientLocationService] 定位权限未授予，按需回包回 null");
       return null;
     }
-    // 快速窗口契约：服务端只等 12s，本方法外层封顶 8s（高德 + geolocator 回退共享）。
-    // 高德融合定位通常 1~3s 出结果；geolocator 只用剩余预算，绝不超过总窗口。
-    //
-    // 2026-11-18 门槛 30m → 10m（用户要求「高德允许下的无限精确」）：30m 在城市
-    // 街区尺度已经会答错（≈半个街区）。10m 是开阔户外 GPS 的常见可达值，与高德
-    // regeo 6 位小数（≈0.11m）输入相比也只是硬件本身的极限。达不到时仍按
-    // 「预算耗尽给最佳 fix」返回，如实携带 accuracyMeters 交给服务端裁决。
-    final DateTime deadline = DateTime.now().add(const Duration(milliseconds: 7500));
-    final ClientLocationPayload? amap = await _amapFix(
-      timeout: const Duration(milliseconds: 5000),
-      maxAccuracyMeters: 10,
-    );
-    if (amap != null && _isAccurateEnough(amap.accuracyMeters, 10)) return amap;
 
-    final Duration remaining = deadline.difference(DateTime.now());
-    if (remaining >= const Duration(milliseconds: 500)) {
-      final Position? position = await _fetchPrecisePosition(
-        budget: remaining,
-        maxAccuracyMeters: 10,
-      );
-      if (position != null) return _payloadFrom(position);
+    final Completer<ClientLocationPayload?> completer =
+        Completer<ClientLocationPayload?>();
+    ClientLocationPayload? best;
+    double bestAccuracy = double.infinity;
+    int pending = 2;
+
+    void consider(ClientLocationPayload? payload) {
+      if (payload != null) {
+        final double raw = payload.accuracyMeters ?? 0;
+        // 精度未知按「达标」处理（旧设备/旧通道不给数字时不能空等）。
+        final double acc = raw > 0 ? raw : 0;
+        if (acc < bestAccuracy) {
+          bestAccuracy = acc;
+          best = payload;
+        }
+        if (acc <= acceptAccuracyMeters && !completer.isCompleted) {
+          completer.complete(best);
+          return;
+        }
+      }
+      pending -= 1;
+      if (pending <= 0 && !completer.isCompleted) completer.complete(best);
     }
-    // 高德给了低精度 fix 也比「什么都拿不到」强，如实带回 accuracyMeters。
-    return amap;
+
+    unawaited(
+      _amapFix(timeout: budget, maxAccuracyMeters: targetAccuracyMeters)
+          .then(consider)
+          .catchError((Object e) {
+        debugPrint("[ClientLocationService] 高德分支异常: $e");
+        consider(null);
+        return null;
+      }),
+    );
+    unawaited(
+      _fetchPrecisePosition(
+        budget: budget,
+        maxAccuracyMeters: targetAccuracyMeters,
+      ).then((Position? p) async {
+        consider(p == null ? null : await _payloadFrom(p));
+      }).catchError((Object e) {
+        debugPrint("[ClientLocationService] geolocator 分支异常: $e");
+        consider(null);
+        return null;
+      }),
+    );
+
+    // 两个引擎各自带预算，这里再兜一层（防某个通道卡住不回调）。
+    return completer.future.timeout(
+      budget + const Duration(milliseconds: 400),
+      onTimeout: () => best,
+    );
   }
 
   static bool _isAccurateEnough(double? accuracyMeters, double maxAccuracyMeters) {
@@ -527,7 +654,8 @@ class ClientLocationService {
   // 上报，服务端可据此裁决。
 
   /// last-known fix 的最大可信龄期：超过它宁可重新定位。
-  static const Duration _lastKnownMaxAge = Duration(seconds: 45);
+  /// 45s → 20s（准确优先）：40s 前的 fix 哪怕精度 8m，人可能已走 50m。
+  static const Duration _lastKnownMaxAge = Duration(seconds: 20);
 
   static Future<Position?> _fetchPrecisePosition({
     required Duration budget,

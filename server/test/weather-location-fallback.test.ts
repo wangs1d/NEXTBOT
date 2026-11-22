@@ -104,7 +104,11 @@ test("一次瞬时失败不写结果缓存：用户补上定位后立刻能查�
   assert.equal(second.result.locationLabel, "兴义市 · 贵州省 · 中国");
 });
 
-test("成功结果仍走缓存：同参数 TTL 内不重复取数", async () => {
+test("成功结果不进任何跨轮缓存：每次问天气都真正执行 handler（2026-11-22 根修）", async () => {
+  // 天气结果由 context.userText 决定，而工具结果缓存键只有 name+input（不含 userText），
+  // 缓存会让「问明天」命中上一次「问今天」的回执（真机复现今明两套温度打架）。
+  // 缓存层已整层拆除（2026-11-22）：跨轮无任何复用；同轮同参由 turnDedupeCache 去重；
+  // 服务内新鲜度由 GPS 的 LocationCoordinator 缓存、WeatherService.briefCache（键含 days）兜住。
   const registry = buildRegistry();
   let calls = 0;
   const context = {
@@ -116,5 +120,5 @@ test("成功结果仍走缓存：同参数 TTL 内不重复取数", async () => 
   };
   await registry.execute("weather.get_local", {}, context);
   await registry.execute("weather.get_local", {}, context);
-  assert.equal(calls, 1, "60s 内重复问天气不该重复拉 GPS 与预报");
+  assert.equal(calls, 2, "两轮都真正执行 handler，不得被跨轮结果缓存短路");
 });

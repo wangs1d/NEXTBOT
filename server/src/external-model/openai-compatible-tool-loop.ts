@@ -1919,7 +1919,8 @@ export async function streamCompletionWithTools(
         (r) => r.ok && receiptProducesCard(r.toolName, r.result),
       ));
   // 轮内去重缓存：同一工具 + 同一参数在本轮对话内只真实执行一次（用完即丢，
-  // 不跨轮持久——跨轮缓存由 ctx.getCachedToolResult 的 TTL 缓存负责）。
+  // 不跨轮持久——跨轮 TTL 结果缓存已整层拆除，2026-11-22：键不含 userText/actor，
+  // 曾致天气「问明天仍回今天+明天」、图片「再来几张」复用同批图两次真机事故）。
   // 值为共享 Promise：同一波内并发出现的相同调用 await 同一个执行（含确定性重试），
   // 消除并行重复执行；失败结果落定后立即摘除，后续 replan 波次仍可重新执行。
   const turnDedupeCache = new Map<string, Promise<ToolExecOutcome>>();
@@ -3228,15 +3229,11 @@ export async function streamCompletionWithTools(
         // 轮内去重缓存：同工具+同参数 → 共享同一次执行（含确定性重试）。
         // 替代旧 ReAct 循环的"重复搜索制动"——波次有界 + 去重，从源头消除重复执行。
         const dedupeKey = `${targetToolName}::${stableArgsKey(targetArgs)}`;
-        // 跨轮 TTL 缓存：查询类工具在 TTL 内相同参数直接返回缓存，跳过安全检查/BodyGateway 等中间层
-        const cachedResult = ctx.getCachedToolResult?.(targetToolName, targetArgs);
 
         const inflight = turnDedupeCache.get(dedupeKey);
         if (inflight) {
           // 命中（进行中或已成功落定）：直接复用同一次执行的结果
           exec = await inflight;
-        } else if (cachedResult) {
-          exec = cachedResult;
         } else {
           const shared = runExecWithRetry().then((settled) => {
             // 失败结果不驻留缓存：本轮后续 replan 波次仍可重新执行；

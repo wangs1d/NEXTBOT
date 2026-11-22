@@ -12,7 +12,6 @@ import {
   type AgentAccessMode,
 } from "../agent/agent-access-mode.js";
 import type { SkillManager } from "../skills/index.js";
-import { isBusinessFailurePayload } from "../render/types.js";
 
 import type { ClientLocationWire } from "../types/client-location.js";
 
@@ -144,55 +143,11 @@ export function resolveRegistryToolName(name: string): string {
   return REGISTRY_TOOL_NAME_ALIASES[name] ?? name;
 }
 
-/**
- * 工具结果缓存：相同工具名+参数在 TTL 内复用结果。
- * 适用场景：天气/时间/搜索等查询类工具，短时间内重复调用概率高。
- * 不适用：写操作、桌面操作、购物下单等副作用工具。
- */
-interface ToolCacheEntry {
-  result: { ok: boolean; result: Record<string, unknown> };
-  timestamp: number;
-}
-
-const TOOL_CACHE_TTL_MS = 60_000; // 60 秒缓存
-const TOOL_CACHE_MAX_SIZE = 100;
-
-/** 需要缓存的工具名（查询类、无副作用） */
-const CACHEABLE_TOOLS = new Set([
-  "weather.get_local",
-  "search_web",
-  "search_videos",
-  "fetch_web",
-  "info.inspect_webpage",
-  "info.navigate_site",
-  "hot_rankings",
-  // 注意：用户维度只读工具（wallet.get_*/calendar.list_tasks/brain.recall/
-  // perception.overview 等）故意不进——缓存键只有 name+input，跨 actor 复用
-  // 会串台；actor 无关的全网热搜才安全。
-  //
-  // search_images / search_images_batch 故意不进（2026-11-09 用户真机反馈）：
-  // 缓存键只有 name+input、TTL 60s，于是「再来几张」这种同 query 的追轮会直接
-  // 命中上一轮缓存，把**同一批 4 张图**原样再发一遍（用户侧就是「返回了前面已经
-  // 返回过的照片」）。图片结果天生是「要给下一批」的语义，同参追轮必须在
-  // UpstreamSearchService 里重跑 + 会话级去重（services/media-shown-ledger.ts），
-  // 不能复用上一轮的结果。同轮并行重复调用由工具循环的 turnDedupeCache 兜住。
-]);
-
-/** 生成工具缓存键 */
-function buildToolCacheKey(name: string, input: Record<string, unknown>): string {
-  const sortedInput = Object.keys(input).sort().reduce((acc, key) => {
-    acc[key] = input[key];
-    return acc;
-  }, {} as Record<string, unknown>);
-  return `${name}:${JSON.stringify(sortedInput)}`;
-}
-
 export class ToolRegistry {
   private readonly tools = new Map<string, ToolHandler>();
   private readonly metadata = new Map<string, ToolMetadata & { checkFn?: ToolAvailabilityCheck }>();
   private skillManager?: SkillManager;
   private worldService?: WorldService | null;
-  private readonly toolCache = new Map<string, ToolCacheEntry>();
   /** 工具执行成功通知器（装配层注入：消费类工具成功 → HookBus tool.executed） */
   private toolExecutedNotifier?: ToolExecutedNotifier;
 
@@ -349,36 +304,10 @@ export class ToolRegistry {
       };
     }
 
-    // 工具结果缓存：查询类工具在 TTL 内复用结果
-    if (this.isCacheableTool(registryName)) {
-      const ttlMs = this.resolveToolCacheTtlMs(registryName);
-      const cacheKey = buildToolCacheKey(registryName, input);
-      const cached = this.toolCache.get(cacheKey);
-      if (cached && Date.now() - cached.timestamp < ttlMs) {
-        return cached.result;
-      }
-      // 缓存未命中或过期，执行并缓存
-      try {
-        const result = await tool(input, context);
-        const safeResult = jsonSafeResult(result);
-        this.notifyToolExecuted(registryName, input, safeResult, context);
-        const entry = { result: { ok: true, result: safeResult }, timestamp: Date.now() };
-        // 自报失败（{ok:false}）不进缓存：一次瞬时失败否则会把整个 TTL 钉死成「拿不到数据」。
-        if (isBusinessFailurePayload(safeResult)) return entry.result;
-        // LRU 淘汰：超过最大容量时删除最旧的
-        if (this.toolCache.size >= TOOL_CACHE_MAX_SIZE) {
-          const oldestKey = this.toolCache.keys().next().value;
-          if (oldestKey !== undefined) {
-            this.toolCache.delete(oldestKey);
-          }
-        }
-        this.toolCache.set(cacheKey, entry);
-        return entry.result;
-      } catch (error) {        const message = error instanceof Error ? error.message : "工具执行失败";
-        return { ok: false, result: { error: message, errorCode: UnifiedErrorCode.ToolExecutionFailed } };
-      }
-    }
-
+    // 工具结果缓存整层已拆除（2026-11-22）：键只有 name+input，不含 context.userText /
+    // actor，两次真机事故（2026-11-09 图片「再来几张」复用同批图、2026-11-22 天气
+    // 「问明天仍回今天+明天」）都源于此。查询新鲜度优先；同轮内同参重复执行由工具循环
+    // 的 turnDedupeCache 兜住，服务内新鲜度（如 WeatherService.briefCache）由各自缓存负责。
     try {
       const result = await tool(input, context);
       const safeResult = jsonSafeResult(result);
@@ -413,37 +342,6 @@ export class ToolRegistry {
     return trimmed;
   }
 
-  /**
-   * 查询工具缓存（供 tool search 桥接层调用）。
-   * 命中时直接返回缓存结果，跳过 executeTool 调用。
-   * @returns 缓存结果，未命中返回 null
-   */
-  getCachedResult(
-    name: string,
-    input: Record<string, unknown>,
-  ): { ok: boolean; result: Record<string, unknown> } | null {
-    const registryName = resolveRegistryToolName(name);
-    if (!this.isCacheableTool(registryName)) return null;
-    const ttlMs = this.resolveToolCacheTtlMs(registryName);
-    const cacheKey = buildToolCacheKey(registryName, input);
-    const cached = this.toolCache.get(cacheKey);
-    if (cached && Date.now() - cached.timestamp < ttlMs) {
-      return cached.result;
-    }
-    return null;
-  }
-
-  /** 清理过期缓存（定期调用） */
-  cleanupCache(): void {
-    const now = Date.now();
-    for (const [key, entry] of this.toolCache.entries()) {
-      const toolName = key.slice(0, key.indexOf(":"));
-      if (now - entry.timestamp >= this.resolveToolCacheTtlMs(toolName)) {
-        this.toolCache.delete(key);
-      }
-    }
-  }
-
   private mergeMetadata(
     name: string,
     metadata?: ToolRegistrationMetadata,
@@ -468,15 +366,6 @@ export class ToolRegistry {
     const result = await checkFn(context);
     if (typeof result === "boolean") return { ok: result };
     return { ok: result.ok, reason: result.reason };
-  }
-
-  private isCacheableTool(name: string): boolean {
-    const policy = this.getMetadata(name).cachePolicy;
-    return policy?.enabled === true || CACHEABLE_TOOLS.has(name);
-  }
-
-  private resolveToolCacheTtlMs(name: string): number {
-    return this.getMetadata(name).cachePolicy?.ttlMs ?? TOOL_CACHE_TTL_MS;
   }
 }
 

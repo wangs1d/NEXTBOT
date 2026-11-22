@@ -154,6 +154,50 @@ test("快照：位置更新不得覆盖存储的设备直报时区（存储层�
   assert.equal(clock.source, "geo");
 });
 
+test("精度优先合并：新到的粗 fix 不得覆盖 90s 内更准的快照", () => {
+  let now = Date.UTC(2026, 10, 22, 3, 0, 0);
+  const svc = new ActorContextService({
+    persistPath: join(tmpdir(), `actor-ctx-quality-${process.pid}.json`),
+    persistThrottleMs: 0,
+    serverTimezone: "Asia/Shanghai",
+    now: () => now,
+  });
+
+  svc.updateLocation(
+    "u9",
+    { latitude: 29.65, longitude: 106.55, accuracyMeters: 8, capturedAt: new Date(now).toISOString() },
+    "turn-hook",
+  );
+
+  // 20s 后后台连续流来了一条 55m 的粗 fix：不得踩掉 8m 的快照
+  now += 20_000;
+  svc.updateLocation(
+    "u9",
+    { latitude: 29.652, longitude: 106.553, accuracyMeters: 55, capturedAt: new Date(now).toISOString() },
+    "continuous",
+  );
+  assert.equal(svc.get("u9")?.location?.accuracyMeters, 8, "粗 fix 不得覆盖更准的快照");
+  assert.equal(svc.get("u9")?.location?.latitude, 29.65);
+
+  // 更准的新 fix 正常覆盖
+  now += 20_000;
+  svc.updateLocation(
+    "u9",
+    { latitude: 29.651, longitude: 106.551, accuracyMeters: 5, capturedAt: new Date(now).toISOString() },
+    "turn-hook",
+  );
+  assert.equal(svc.get("u9")?.location?.accuracyMeters, 5);
+
+  // 旧快照超过 90s：粗 fix 允许覆盖（人可能已经走远，旧坐标不能再当准）
+  now += 120_000;
+  svc.updateLocation(
+    "u9",
+    { latitude: 29.7, longitude: 106.6, accuracyMeters: 60, capturedAt: new Date(now).toISOString() },
+    "continuous",
+  );
+  assert.equal(svc.get("u9")?.location?.accuracyMeters, 60);
+});
+
 test("快照：旧客户端只随位置带时区时仍可用", () => {
   const svc = new ActorContextService({
     persistPath: join(tmpdir(), `actor-ctx-legacy-${process.pid}.json`),

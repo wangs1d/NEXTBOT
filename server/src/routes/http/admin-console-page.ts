@@ -94,6 +94,57 @@ export function renderAdminConsolePage(): string {
   .bar-col { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px; }
   .bar-v { width: 100%; border-radius: 3px 3px 0 0; min-height: 2px; }
   .bar-label { font-size: 9px; color: var(--faint); white-space: nowrap; }
+  /* ---- 使用习惯概览 ---- */
+  .kpis { display: grid; grid-template-columns: repeat(6, minmax(0,1fr)); gap: 12px; margin-bottom: 14px; }
+  .kpi { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 13px 15px 11px; box-shadow: var(--shadow); position: relative; overflow: hidden; }
+  .kpi::before { content:""; position:absolute; left:0; top:0; bottom:0; width:3px; background:var(--kc, var(--accent)); }
+  .kpi .lab { color: var(--muted); font-size: 12px; }
+  .kpi .val { font-size: 24px; font-weight: 680; letter-spacing: -.02em; line-height: 1.25; margin: 5px 0 2px; font-variant-numeric: tabular-nums; }
+  .kpi .val small { font-size: 11.5px; font-weight: 500; color: var(--muted); margin-left: 2px; }
+  .kpi .foot { font-size: 10.5px; color: var(--faint); }
+  .kpi .foot b.up { color: var(--ok); font-weight: 600; }
+  .kpi .foot b.down { color: var(--bad); font-weight: 600; }
+  .ovgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 14px; }
+  .ovgrid.g32 { grid-template-columns: 1.25fr 1fr; }
+  .ovcard { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px 11px; box-shadow: var(--shadow); min-width: 0; }
+  .ovcard .ttl { font-size: 13.5px; font-weight: 620; display: flex; align-items: center; gap: 7px; flex-wrap: wrap; margin-bottom: 2px; }
+  .ovcard .ttl .tag { font-size: 10px; color: var(--muted); background: var(--line-soft); border-radius: 5px; padding: 1px 6px; font-weight: 500; }
+  .ovcard .desc { font-size: 11px; color: var(--faint); margin-bottom: 6px; }
+  .ovcard .meta { font-size: 11px; color: var(--muted); }
+  .ovcard .head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+  .chart { width: 100%; display: block; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11px; color: var(--muted); margin-top: 6px; }
+  .legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .legend i { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+  .hbars { margin-top: 4px; }
+  .hbar { display: grid; grid-template-columns: 84px 1fr 60px; align-items: center; gap: 9px; margin: 7px 0; font-size: 11.5px; }
+  .hbar .nm { color: #3d4658; text-align: right; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hbar .track { height: 9px; background: #f0f3f8; border-radius: 6px; overflow: hidden; }
+  .hbar .fill { height: 100%; border-radius: 6px; background: linear-gradient(90deg,#5a8bff,#2f6bff); min-width: 3px; }
+  .hbar .v { color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; }
+  .hbar .v b { color: var(--text); font-weight: 620; }
+  .cohort { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+  .cohort th, .cohort td { padding: 6px 6px; text-align: center; border-bottom: 1px solid var(--line-soft); white-space: nowrap; }
+  .cohort th { color: var(--muted); font-weight: 500; background: #fafbfd; }
+  .cohort td.l, .cohort th.l { text-align: left; }
+  .heatcell { border-radius: 5px; padding: 2px 0; font-variant-numeric: tabular-nums; font-weight: 600; display: block; }
+  .donutwrap { display: flex; align-items: center; gap: 18px; }
+  .donutlg { flex: 1; font-size: 12px; }
+  .donutlg .row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+  .donutlg .row i { width: 10px; height: 10px; border-radius: 3px; }
+  .donutlg .row .nm { flex: 1; color: var(--muted); }
+  .donutlg .row b { font-variant-numeric: tabular-nums; }
+  .hmwrap { overflow-x: auto; }
+  .hmgrid { display: grid; grid-template-columns: 28px repeat(24,1fr); gap: 3px; min-width: 500px; }
+  .hmgrid .hl { font-size: 9px; color: var(--faint); display: flex; align-items: center; justify-content: flex-end; padding-right: 2px; }
+  .hmgrid .hc { height: 12px; border-radius: 2.5px; }
+  .hmaxis { display: grid; grid-template-columns: 28px repeat(24,1fr); gap: 3px; min-width: 500px; margin-top: 3px; }
+  .hmaxis span { font-size: 9px; color: var(--faint); text-align: center; }
+  .avatar { width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; color: #fff; font-size: 10px; font-weight: 600; margin-right: 7px; vertical-align: middle; }
+  .rank { color: var(--faint); font-variant-numeric: tabular-nums; margin-right: 5px; }
+  .ptag { font-size: 10px; border-radius: 5px; padding: 1px 6px; background: var(--accent-weak); color: var(--accent-deep); }
+  .ptag.desktop { background: #f2edff; color: #7c5cff; }
+  .pending { text-align: center; color: var(--faint); font-size: 12px; padding: 22px 0; }
   .toolbar {
     display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
     background: var(--card); border: 1px solid var(--line); border-radius: 12px;
@@ -326,7 +377,12 @@ export function renderAdminConsolePage(): string {
 
   <section class="tab" id="tab-overview">
     <h1>概览</h1>
-    <div class="sub">用户增长 · 站内信 · 支付收入 · 反馈 · 服务器</div>
+    <div class="sub">用户增长 · 使用习惯 · 活跃与留存 · 站内信 · 支付收入 · 反馈 · 服务器</div>
+    <div class="toolbar" id="ovToolbar" style="display:none">
+      <span class="meta" id="ovMeta"></span>
+      <span style="flex:1"></span>
+      <button class="btn small" id="ovRefresh">刷新</button>
+    </div>
     <div id="overviewBody"><div class="empty">加载中…</div></div>
   </section>
 
@@ -600,6 +656,168 @@ function barChart(series, color) {
   return '<div class="bars">' + bars + "</div>";
 }
 
+// ===== 使用习惯图表组件（全部吃真实 usage 数据，不造假） =====
+function ovKpi(label, value, unit, foot, color) {
+  return '<div class="kpi" style="--kc:' + color + '"><div class="lab">' + label + "</div>" +
+    '<div class="val">' + value + (unit ? "<small>" + unit + "</small>" : "") + "</div>" +
+    '<div class="foot">' + (foot || "") + "</div></div>";
+}
+
+function pct(n) { return (n == null ? "-" : Number(n).toFixed(1) + "%"); }
+
+// 双线折线：本期 + 上周同期（上线率）
+function lineChart(a, b) {
+  if (!a || !a.length) return '<div class="pending">暂无数据</div>';
+  var W = 560, H = 190, x0 = 38, x1 = 548, y0 = 14, y1 = 150;
+  var vals = [];
+  a.forEach(function (p) { vals.push(p.rate); }); b.forEach(function (p) { vals.push(p.prev); });
+  var lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
+  lo = Math.max(0, Math.floor(lo - 2)); hi = Math.ceil(hi + 2); if (hi <= lo) hi = lo + 1;
+  function x(i, n) { return x0 + (x1 - x0) * (n <= 1 ? 0 : i / (n - 1)); }
+  function y(v) { return y1 - (v - lo) / (hi - lo) * (y1 - y0); }
+  function path(arr, key) {
+    return arr.map(function (p, i) { return (i ? "L" : "M") + x(i, arr.length).toFixed(1) + " " + y(p[key]).toFixed(1); }).join(" ");
+  }
+  var s = '<svg class="chart" viewBox="0 0 ' + W + " " + H + '" preserveAspectRatio="none" style="height:190px">';
+  [lo, (lo + hi) / 2, hi].forEach(function (v) {
+    var yy = y(v);
+    s += '<line x1="' + x0 + '" y1="' + yy + '" x2="' + x1 + '" y2="' + yy + '" stroke="#edf0f5"/>' +
+      '<text x="' + (x0 - 6) + '" y="' + (yy + 3.5) + '" font-size="10" fill="#9aa3b4" text-anchor="end">' + v + "%</text>";
+  });
+  s += '<path d="' + path(b, "prev") + '" fill="none" stroke="#c3ccdb" stroke-width="1.6" stroke-dasharray="5 4"/>' +
+    '<path d="' + path(a, "rate") + '" fill="none" stroke="#2f6bff" stroke-width="2.3" stroke-linejoin="round"/>';
+  a.forEach(function (p, i) {
+    if (i % 3 === 0 || i === a.length - 1) {
+      s += '<circle cx="' + x(i, a.length).toFixed(1) + '" cy="' + y(p.rate).toFixed(1) + '" r="2.8" fill="#fff" stroke="#2f6bff" stroke-width="2"/>' +
+        '<text x="' + x(i, a.length).toFixed(1) + '" y="' + (H - 10) + '" font-size="9" fill="#9aa3b4" text-anchor="middle">' + esc(p.day.slice(5)) + "</text>";
+    }
+  });
+  return s + "</svg>" +
+    '<div class="legend"><span><i style="background:#2f6bff"></i>本期</span><span><i style="background:#c3ccdb"></i>上周同期</span></div>';
+}
+
+// 人均时长柱图
+function durationChart(series) {
+  if (!series || !series.length) return '<div class="pending">暂无数据</div>';
+  var max = 1;
+  series.forEach(function (p) { if (p.avg > max) max = p.avg; });
+  var step = 560 / series.length, bw = Math.min(16, step * 0.55);
+  var s = '<svg class="chart" viewBox="0 0 560 190" preserveAspectRatio="none" style="height:190px">';
+  [0, Math.round(max / 2), Math.round(max)].forEach(function (v) {
+    var yy = 150 - v / max * 136;
+    s += '<line x1="38" y1="' + yy + '" x2="548" y2="' + yy + '" stroke="#edf0f5"/>' +
+      '<text x="32" y="' + (yy + 3.5) + '" font-size="10" fill="#9aa3b4" text-anchor="end">' + v + "</text>";
+  });
+  series.forEach(function (p, i) {
+    var h = p.avg / max * 136, xx = 38 + step * i + (step - bw) / 2, yy = 150 - h;
+    s += '<rect x="' + xx.toFixed(1) + '" y="' + yy.toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + Math.max(1, h).toFixed(1) + '" rx="3" fill="#7c5cff" title="' + esc(p.day) + '：人均 ' + p.avg + ' 分"/>';
+    if (i % 3 === 0 || i === series.length - 1) s += '<text x="' + (xx + bw / 2).toFixed(1) + '" y="168" font-size="9" fill="#9aa3b4" text-anchor="middle">' + esc(p.day.slice(5)) + "</text>";
+  });
+  return s + "</svg>";
+}
+
+function hbars(prefs) {
+  if (!prefs || !prefs.length) return '<div class="pending">暂无功能使用数据</div>';
+  var max = prefs[0].count || 1;
+  return prefs.slice(0, 8).map(function (p) {
+    return '<div class="hbar"><span class="nm">' + esc(p.name) + '</span><div class="track"><div class="fill" style="width:' +
+      (p.count / max * 100).toFixed(1) + '%"></div></div><span class="v"><b>' + p.count + "</b> 次</span></div>";
+  }).join("");
+}
+
+function cohortTable(rows) {
+  if (!rows || !rows.length) return '<div class="pending">留存需累积 cohort 后出现（首日数据次日可见）</div>';
+  function cell(v) {
+    if (v == null) return '<td><span class="heatcell" style="color:#9aa3b4">—</span></td>';
+    var a = Math.min(0.85, Math.max(0.08, (v - 20) / 55));
+    var color = a > 0.48 ? "#fff" : "#2456d9";
+    return '<td><span class="heatcell" style="background:rgba(47,107,255,' + a.toFixed(2) + ');color:' + color + '">' + v.toFixed(1) + "%</span></td>";
+  }
+  var h = '<table class="cohort"><thead><tr><th class="l">注册批次</th><th>用户</th><th>次日</th><th>3 日</th><th>7 日</th><th>30 日</th></tr></thead><tbody>';
+  rows.forEach(function (r) {
+    h += '<tr><td class="l">' + esc(r.cohort) + '</td><td>' + r.size + '</td>' + cell(r.d1) + cell(r.d3) + cell(r.d7) + cell(r.d30) + '</tr>';
+  });
+  return h + "</tbody></table>";
+}
+
+function donut(p) {
+  var total = (p.mobile || 0) + (p.desktop || 0);
+  var m = total ? Math.round(p.mobile / total * 100) : 0;
+  var d = total ? 100 - m : 0;
+  var r = 50, c = 2 * Math.PI * r;
+  var s = '<svg width="120" height="120" viewBox="0 0 120 120"><circle cx="60" cy="60" r="' + r + '" fill="none" stroke="#eef1f6" stroke-width="14"/>';
+  s += '<circle cx="60" cy="60" r="' + r + '" fill="none" stroke="#2f6bff" stroke-width="14" stroke-dasharray="' + (c * m / 100).toFixed(1) + " " + c.toFixed(1) + '" transform="rotate(-90 60 60)"/>';
+  s += '<circle cx="60" cy="60" r="' + r + '" fill="none" stroke="#7c5cff" stroke-width="14" stroke-dasharray="' + (c * d / 100).toFixed(1) + " " + c.toFixed(1) + '" stroke-dashoffset="' + (-c * m / 100).toFixed(1) + '" transform="rotate(-90 60 60)"/>';
+  s += '<text x="60" y="58" font-size="17" font-weight="680" fill="#171e2e" text-anchor="middle">' + m + "%</text>" +
+    '<text x="60" y="72" font-size="9" fill="#9aa3b4" text-anchor="middle">手机端会话</text></svg>';
+  return '<div class="donutwrap">' + s + '<div class="donutlg">' +
+    '<div class="row"><i style="background:#2f6bff"></i><span class="nm">手机端</span><b>' + m + "%</b></div>" +
+    '<div class="row"><i style="background:#7c5cff"></i><span class="nm">电脑端</span><b>' + d + "%</b></div>" +
+    '<div class="row"><span class="nm">手机人均时长</span><b>' + (p.mobileAvgMin || 0) + " 分</b></div>" +
+    '<div class="row"><span class="nm">电脑人均时长</span><b>' + (p.desktopAvgMin || 0) + " 分</b></div>" +
+    "</div></div>";
+}
+
+function heatmap(grid) {
+  if (!grid || !grid.length) return '<div class="pending">暂无数据</div>';
+  var days = ["一", "二", "三", "四", "五", "六", "日"];
+  var s = '<div class="hmwrap"><div class="hmgrid">';
+  for (var r = 0; r < 7; r++) {
+    s += '<div class="hl">周' + days[r] + "</div>";
+    for (var c = 0; c < 24; c++) {
+      var v = grid[r][c] || 0;
+      var a = Math.min(0.95, Math.max(0.04, v / 8));
+      s += '<div class="hc" style="background:rgba(47,107,255,' + a.toFixed(2) + ')" title="周' + days[r] + ' ' + c + ':00 · ' + v + ' 条"></div>';
+    }
+  }
+  s += '</div><div class="hmaxis"><span></span>';
+  for (var h = 0; h < 24; h++) s += "<span>" + (h % 3 === 0 ? h : "") + "</span>";
+  return s + "</div></div>";
+}
+
+function topUsers(rows) {
+  if (!rows || !rows.length) return '<div class="pending">暂无活跃用户数据（需登录用户产生会话）</div>';
+  var colors = ["#2f6bff", "#7c5cff", "#0ea5b7", "#f59e0b", "#16a34a", "#ec4899", "#64748b", "#0ea5b7"];
+  var h = '<table class="cohort"><thead><tr><th class="l">用户</th><th class="l">端</th><th>时长</th><th class="l">常用功能</th><th class="l">最近活跃</th></tr></thead><tbody>';
+  rows.forEach(function (u, i) {
+    var initial = (u.name || "?").slice(0, 1);
+    h += '<tr><td class="l"><span class="rank">' + (i + 1) + '</span><span class="avatar" style="background:' + colors[i % colors.length] + '">' + esc(initial) + "</span>" + esc(u.name) + "</td>" +
+      '<td class="l"><span class="ptag ' + (u.platform === "desktop" ? "desktop" : "") + '">' + (u.platform === "desktop" ? "电脑端" : "手机端") + "</span></td>" +
+      '<td>' + u.durationMin + ' 分</td><td class="l">' + esc(u.topFeature || '-') + '</td>' +
+      '<td class="l" style="color:var(--muted)">' + esc((u.lastActive || "").slice(5, 16).replace("T", " ")) + "</td></tr>";
+  });
+  return h + "</tbody></table>";
+}
+
+function usageBlock(u) {
+  if (!u || !u.ready) {
+    return '<div class="ovcard"><div class="ttl">使用习惯统计</div>' +
+      '<div class="pending">统计中 · 尚无埋点数据。手机端 / 桌面端上报会话与功能事件后，本区将显示真实数据（DAU、时长、功能偏好、留存等）。</div></div>';
+  }
+  var k = u.kpi || {};
+  var html = '<div class="kpis">' +
+    ovKpi("日活用户 DAU", k.dau, "", "上线率 " + pct(k.onlineRate), "#2f6bff") +
+    ovKpi("7 日活跃", k.dau7, "", "月活 " + (k.mau || 0) + " · 黏性 " + pct(k.stickiness), "#16a34a") +
+    ovKpi("人均使用时长", k.avgDurationMin, "分钟", "中位 " + (k.medianDurationMin || 0) + " 分", "#7c5cff") +
+    ovKpi("次日留存率", pct(k.d1Retention).replace("%", ""), "%", "Classic 同期群", "#0ea5b7") +
+    ovKpi("功能使用次数", k.featureUses || 0, "", (k.sessions || 0) + " 次会话", "#f59e0b") +
+    ovKpi("埋点事件", u.eventCount || 0, "", "近 60 日累计", "#64748b") +
+    "</div>";
+  html += '<div class="ovgrid">' +
+    '<div class="ovcard"><div class="head"><div><div class="ttl">每日上线率 <span class="tag">近 14 天</span></div><div class="desc">虚线为上周同期</div></div></div>' +
+    lineChart(u.onlineRateSeries, u.onlineRateSeries || []) + "</div>" +
+    '<div class="ovcard"><div class="head"><div><div class="ttl">人均日使用时长 <span class="tag">分钟</span></div><div class="desc">会话时长累加 · 近 14 天</div></div></div>' +
+    durationChart(u.durationSeries) + "</div></div>";
+  html += '<div class="ovgrid g32">' +
+    '<div class="ovcard"><div class="ttl">功能使用偏好 <span class="tag">Top 8</span></div><div class="desc">按 feature_use 事件计数</div>' + hbars(u.featurePrefs) + "</div>" +
+    '<div class="ovcard"><div class="ttl">用户留存 <span class="tag">Cohort</span></div><div class="desc">按首次活跃批次 · 颜色越深越高</div>' + cohortTable(u.retention) + "</div></div>";
+  html += '<div class="ovgrid">' +
+    '<div class="ovcard"><div class="ttl">使用端分布 <span class="tag">会话占比</span></div><div class="desc">手机端 / 电脑端</div>' + donut(u.platform || {}) + "</div>" +
+    '<div class="ovcard"><div class="ttl">使用时段热力图 <span class="tag">7 × 24h</span></div><div class="desc">按东八区自然日分桶</div>' + heatmap(u.heatmap) + "</div></div>";
+  html += '<div class="ovcard"><div class="ttl">活跃用户 Top 8 <span class="tag">近 7 日</span></div><div class="desc">按会话时长排序</div>' + topUsers(u.topUsers) + "</div>";
+  return html;
+}
+
 // ---------- 概览 ----------
 function loadOverview() {
   var body = $("overviewBody");
@@ -656,10 +874,24 @@ function loadOverview() {
             '，<a href="#feedback">去处理 →</a></div>'
           : "") +
         "</div></div>";
-      html += '<div class="meta">服务器：运行 ' + fmtUptime(d.server.uptimeMs) + " · 内存 " +
+
+      // —— 使用习惯统计（消费真实埋点数据；未就绪时如实提示，不造假）——
+      html += usageBlock(d.usage);
+
+      html += '<div class="meta" style="margin-top:12px">服务器：运行 ' + fmtUptime(d.server.uptimeMs) + " · 内存 " +
         fmtBytes(d.server.rssBytes) + " · " + esc(d.server.nodeVersion) + " · " + esc(d.server.platform) +
         "</div>";
       body.innerHTML = html;
+      var ovTb = $("ovToolbar");
+      if (ovTb) {
+        ovTb.style.display = "flex";
+        var ovMeta = $("ovMeta");
+        if (ovMeta) {
+          ovMeta.innerHTML = d.usage && d.usage.ready
+            ? '<span style="color:var(--ok)">● 埋点在线</span> · 数据更新于 ' + esc((d.usage.lastEventAt || "").slice(0, 16).replace("T", " ")) + " UTC · 5 分钟聚合"
+            : '<span style="color:var(--faint)">○ 使用习惯埋点待接入</span> · 基础统计为真实数据';
+        }
+      }
     })
     .catch(function (e) {
       body.innerHTML = '<div class="empty">加载失败：' + esc(e.message) + "</div>";
@@ -2044,7 +2276,14 @@ function hideAuthGate(username) {
   $("accountBox").style.display = "block";
   $("accountName").textContent = username || "admin";
   refreshPendingBadge();
-  showTab(hashTab());
+  // 进入后台默认落到第一个 tab「概览」，不沿用 URL 里残留的 hash。
+  // 常见成因：概览页「去处理 →」把 hash 留成 #feedback，下次打开直达反馈页。
+  // 用 replaceState 规范地址栏（不触发 hashchange，避免重复 loadOverview）；
+  // 页面内点导航切 tab 仍由 hashchange 正常处理。
+  if (location.hash !== "#overview") {
+    history.replaceState(null, "", location.pathname + location.search + "#overview");
+  }
+  showTab("overview");
 }
 
 function submitAuth() {
@@ -2133,6 +2372,7 @@ $("userKw").addEventListener("input", renderUserTable);
 $("userStatusSel").addEventListener("change", renderUserTable);
 $("userSortSel").addEventListener("change", renderUserTable);
 $("userRefresh").addEventListener("click", loadUsers);
+$("ovRefresh").addEventListener("click", loadOverview);
 $("payRange").addEventListener("change", function () { renderPaymentsTable(); });
 $("payExportBtn").addEventListener("click", exportPaymentsCsv);
 $("fbNewPill").addEventListener("click", loadFeedback);
