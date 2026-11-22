@@ -1,61 +1,41 @@
 /**
- * 呈现裁决唯一出口（2026-11-23 统一）：流式是否开泡、done 是否收口，
- * 全部由本模块的两个纯函数决定，WS 层不再各自拼条件。
+ * 呈现裁决唯一出口（2026-11-23 重构）：**先整段看，再判分泡还是渲染**。
  *
- * 产品口径：**分泡只服务闲聊**。
- *   - 闲聊轮：正文是口语短句，按结构闭合边界拆成多条消息；
- *   - 信息类轮（卡 / 结构化正文 / 媒体 / 摘要等最终要「渲染」的回复）：
- *     一律收成一条完整消息——否则流式阶段已发出的原文气泡会和 done 阶段
- *     重排出的卡片同时出现，同一段内容渲染两遍；
+ * 旧架构的问题：流式阶段边收边判要不要开泡，渲染阶段等全文到了才判要不要
+ * 抽卡，两个判断的输入和时机都不同，必然出现「先出泡、done 再收口」的碰撞，
+ * 同一段内容被渲染两遍，或已展示的气泡被整段替换。
+ *
+ * 现在：WS 层不再把 chunk 当气泡外发。整轮结束后这里只判一次——
+ *   - 闲聊（口语、无结构、无卡）：把 finalText 用同一套分段规则拆成多条，
+ *     客户端按 done 数组逐泡揭示；
+ *   - 信息类（卡 / 结构化正文 / 媒体 / 摘要 / 正文被重排）：收成一条渲染消息；
  *   - 语音轮与任务面轮不分泡。
  *
- * 不变量：一条 assistant 消息有且只有一个文字呈现所有者。
- *   - 开始判 single 的轮次，结束不允许再打开分泡（单调收窄）；
- *   - 正文被渲染层重排/抽走时，结束必须收成 single。
+ * 不变量：一条 assistant 消息有且只有一个文字呈现所有者，判定只发生一次。
  */
+
+import { StreamSegmenter } from "./stream-segmenter.js";
 
 export type PresentationOwner = "bubbles" | "single";
 
 export type PresentationPlan = {
   owner: PresentationOwner;
-  /** 客户端是否必须用 done.finalText 整段替换已流内容。 */
-  replacesStream: boolean;
   /** 裁决原因（日志 / 线上取证；回归时看它就能定位是哪条规则定的主）。 */
   reason: string;
 };
 
-export type StreamPlanInputs = {
-  /** 路由决策本轮是否可分段（任务面轮为 false）。 */
-  segmentable: boolean;
+export type PresentationInputs = {
   /** 语音轮不拆泡（TTS 不消费气泡边界）。 */
   voiceMode: boolean;
-};
-
-/** 开始阶段：只依据场景，决定要不要开泡。 */
-export function decideStreamPlan(input: StreamPlanInputs): PresentationPlan {
-  if (input.voiceMode) {
-    return { owner: "single", replacesStream: false, reason: "voice" };
-  }
-  if (!input.segmentable) {
-    return { owner: "single", replacesStream: false, reason: "task-surface" };
-  }
-  return { owner: "bubbles", replacesStream: false, reason: "chat" };
-}
-
-export type FinalPlanInputs = {
-  /** 开始阶段的裁决：结束阶段只允许收窄，不允许重新开泡。 */
-  stream: PresentationPlan;
-  /** 流式期间是否真的推出过气泡。 */
-  hasBubbles: boolean;
+  /** 路由决策本轮是否可分段（任务面轮为 false）。 */
+  segmentable: boolean;
   /** 发言结算把过程话吸收进结论（整轮塌缩成单条）。 */
   utteranceCollapse: boolean;
-  /** 本轮已发过 stream_reset（正文撤回，必须整段替换）。 */
-  streamResetSent: boolean;
   /** 场景显式声明 produces.singleBubble（明日速览/盘点等整块交付）。 */
   sceneSingleBubble: boolean;
   /**
    * 渲染层唯一可靠信号：本轮正文被出口重排或抽走（列表切卡、引用抽块、
-   * 长文折叠、结构化正文），流式气泡里的原文已不是最终正文。
+   * 长文折叠、结构化正文）。
    */
   bodyRewritten: boolean;
   /**
@@ -65,32 +45,55 @@ export type FinalPlanInputs = {
   presentationBlocks: boolean;
 };
 
-/** 结束阶段：在流式裁决基础上做收口，保证单调收窄。 */
-export function decideFinalPlan(input: FinalPlanInputs): PresentationPlan {
-  if (input.stream.owner !== "bubbles") {
-    return {
-      owner: "single",
-      replacesStream: false,
-      reason: `stream-${input.stream.reason}`,
-    };
+/** 整轮结束后的一次性裁决：输入已包含全文渲染结果，不存在事后翻案。 */
+export function decidePresentation(input: PresentationInputs): PresentationPlan {
+  if (input.voiceMode) {
+    return { owner: "single", reason: "voice" };
   }
-  if (!input.hasBubbles) {
-    return { owner: "single", replacesStream: false, reason: "no-bubbles" };
+  if (!input.segmentable) {
+    return { owner: "single", reason: "task-surface" };
   }
   if (input.utteranceCollapse) {
-    return { owner: "single", replacesStream: true, reason: "utterance-collapse" };
-  }
-  if (input.streamResetSent) {
-    return { owner: "single", replacesStream: true, reason: "stream-reset" };
+    return { owner: "single", reason: "utterance-collapse" };
   }
   if (input.sceneSingleBubble) {
-    return { owner: "single", replacesStream: true, reason: "scene-single-bubble" };
+    return { owner: "single", reason: "scene-single-bubble" };
   }
   if (input.bodyRewritten) {
-    return { owner: "single", replacesStream: true, reason: "body-rewritten" };
+    return { owner: "single", reason: "body-rewritten" };
   }
   if (input.presentationBlocks) {
-    return { owner: "single", replacesStream: true, reason: "presentation-blocks" };
+    return { owner: "single", reason: "presentation-blocks" };
   }
-  return { owner: "bubbles", replacesStream: false, reason: "chat" };
+  return { owner: "bubbles", reason: "chat" };
+}
+
+/**
+ * 出口分泡：与流式分泡共用同一套分段规则（结构闭合边界、每泡字数上限、
+ * 结构块不拆），只是把整段文本一次性喂进去。
+ */
+export async function splitReplyBubbles(text: string): Promise<string[]> {
+  const bubbles: string[] = [];
+  const segmenter = new StreamSegmenter(
+    (segment, _phase, meta) => {
+      const trimmed = segment.trim();
+      if (!trimmed) return;
+      if (meta?.bubble === "continue" && bubbles.length > 0) {
+        bubbles[bubbles.length - 1] += trimmed;
+      } else {
+        bubbles.push(trimmed);
+      }
+    },
+    {
+      bubbleMode: true,
+      pauseMs: 0,
+      interimReplyGapMs: 0,
+      bubbleGapMinMs: 0,
+      bubbleGapMaxMs: 0,
+      bubbleGapPerCharMs: 0,
+    },
+  );
+  segmenter.feed(text);
+  await segmenter.flushFinal();
+  return bubbles;
 }

@@ -49,9 +49,8 @@ import {
 import { shouldUsePhasedAsyncConversation } from "../../agent/interim-ack.js";
 import { StreamSegmenter, type StreamSegmentEmitMeta } from "../../agent/stream-segmenter.js";
 import {
-  decideFinalPlan,
-  decideStreamPlan,
-  type PresentationPlan,
+  decidePresentation,
+  splitReplyBubbles,
 } from "../../agent/bubble-policy.js";
 import { BubbleTracker } from "../../agent/bubble-tracker.js";
 import {
@@ -83,7 +82,6 @@ import {
   sniffItineraryDays,
   type ExecutedToolReceipt,
 } from "../../services/deterministic-card-chain.js";
-import { domainsForTool } from "../../tools/tool-search/tool-category.js";
 import { captionMediaCards, isImageCaptionEnabled } from "../../services/image-caption-service.js";
 import { stripDsmlToolCallMarkup } from "../../external-model/stream-chat-helpers.js";
 import {
@@ -183,20 +181,6 @@ const SEARCH_MEDIA_TOOL_NAMES = new Set([
   "search_images_batch",
   "search_videos",
 ]);
-
-/**
- * 信息展示类工具域（2026-11-06 深夜用户定稿）：这些域的工具开始执行时，
- * 本轮剩余正文**关泡并回一个绿泡**——查资料、天气、行情、时间这类
- * 「结果需要一次完整展示」的轮，拆成多条碎泡反而难读。域归属走
- * DOMAIN_REGISTRY（tool-category.ts 唯一事实源），零 LLM 判定。
- *
- * 与操作类工具（reminder/calendar/shopping/messages/smart_home…）的边界
- * 是刻意的：操作轮工具后正文照常分泡连发（「定好了，到点叫你。」+
- * 「不过…」必须两泡，2026-11-06 截图事故的回归红线）。新增域时问一句：
- * 该工具的产出用户是不是当「一份资料」读？是 → 加进来；是「办成了一件事」
- * → 留在外面。
- */
-const SINGLE_BUBBLE_TOOL_DOMAINS = ["search", "weather", "market", "clock"];
 
 /**
  * 工具调用成功 + LLM 末轮没出正文时，把工具结果格式化成用户可读的回复文本。
@@ -704,13 +688,9 @@ async function processBatchedMessage(
   // done 载荷带 bubbles 对账数组。非拆分轮所有字段与原协议完全一致。
   // 分配/记账逻辑见 BubbleTracker（bubble-tracker.ts，含独立单测）。
   const bubbleTracker = new BubbleTracker(false, assistantMessageId);
-  // 呈现裁决（唯一出口，bubble-policy）：开始阶段在路由就绪后置位，结束阶段
-  // 只允许在它基础上收窄；缺省 = 不开泡（路由失败也不会误开）。
-  let streamPlan: PresentationPlan = {
-    owner: "single",
-    replacesStream: false,
-    reason: "pending",
-  };
+  // 呈现裁决（唯一出口，bubble-policy）：chunk 不再外发成泡；整轮结束后按全文
+  // 判一次「分泡 or 渲染」。这里只记录路由结论（任务面轮不可分段）。
+  let turnSegmentable = false;
 
   // 发言模型（2026-10-09 重复回复根源修复）：一轮 = 一条发言（utteranceId =
   // 本轮 traceId，客户端据此把多泡归组成同一条消息）。气泡是发言的**视图分段**，
@@ -731,24 +711,8 @@ async function processBatchedMessage(
   // 空占位 + 一句描述。流中若出现模型自产结构化标记，仍由下方 guard 撤回静默。
   let turnWillCarryCards = false;
   let suppressStreamForCards = false;
-  let anyStreamChunkSent = false;
-  let streamResetSent = false;
   const retractAndSuppressStream = (): void => {
-    if (suppressStreamForCards) return;
     suppressStreamForCards = true;
-    if (anyStreamChunkSent && !isStale()) {
-      streamResetSent = true;
-      ctx.socket.send(
-        JSON.stringify({
-          type: ServerEventType.ChatStreamReset,
-          payload: {
-            sessionId: msgActor,
-            traceId: batched.originalMessageId,
-            threadId,
-          },
-        }),
-      );
-    }
   };
 
   // [ts:...] 是系统注入的元数据标记，仅供 LLM 上下文使用，绝不能透出到用户可见消息。
@@ -804,12 +768,11 @@ async function processBatchedMessage(
   const sendAssistantChunk = (
     chunk: string,
     phase: "interim" | "stream" = "stream",
-    meta?: StreamSegmentEmitMeta,
+    _meta?: StreamSegmentEmitMeta,
   ): void => {
     // 分段器回调 = 流式数据出口。全部净化照旧（时间戳帧 / 内部上下文帧 /
-    // recap 回显 / 展示标记 guard / 卡片轮静默），净化后两路消费：
-    // 分泡轮 → 按泡出站整块 chunk（逐泡实时落屏）；所有轮 → 语音数据帧。
-    // 单泡轮的文字正文唯一出口仍是 done.finalText。
+    // recap 回显 / 展示标记 guard / 卡片轮静默），净化后只消费一路：
+    // 语音数据帧。文字气泡统一在 done 裁决后一次性生成，chunk 不再落屏。
     if (isStale()) return;
     chunkSeq += 1;
     let cleanedChunk = stripLeadingTimestampFrames(chunk);
@@ -829,30 +792,8 @@ async function processBatchedMessage(
       retractAndSuppressStream();
     }
     if (suppressStreamForCards || !cleanedChunk) return;
-    // 真·分绿泡（2026-11-06 二轮定稿）：分泡轮按泡出站整块 chunk——一个
-    // 信息块 = 一个绿泡（或并回当前泡），逐泡实时出现，不等 done 一次性
-    // 砸出来。粒度是「块」不是「字」：打字机仍退役，done.finalText 仍是
-    // 单泡轮唯一正文出口；done 带 bubbles 对账数组做逐泡定稿。卡片轮在
-    // 此前已被 suppressStreamForCards 拦截，天然不产生泡 → 信息类恒单泡。
-    if (bubbleTracker.active) {
-      const assigned = bubbleTracker.assign(cleanedChunk, meta);
-      ctx.socket.send(
-        JSON.stringify({
-          type: ServerEventType.ChatAssistantChunk,
-          payload: {
-            sessionId: msgActor,
-            messageId: assigned.messageId,
-            ...(assigned.bubbleIndex != null
-              ? { bubbleIndex: assigned.bubbleIndex }
-              : {}),
-            traceId: batched.originalMessageId,
-            threadId,
-            chunk: cleanedChunk,
-            phase,
-          },
-        }),
-      );
-    }
+    // 2026-11-23 统一呈现：chunk 不再外发成文字气泡（分泡只发生在 done 裁决后）。
+    // 这里仅保留语音数据帧：语音链路仍按信息块实时合成。
     sendSpeechFrame(cleanedChunk, phase, false);
   };
 
@@ -1023,11 +964,9 @@ async function processBatchedMessage(
           }),
         );
       }
-      // 2026-09-28 放流：knowledge_qa 缓冲模式废除。此前该意图整轮缓冲到
-      // 生成完 + 出口收口之后才推 chunk，提问类消息几乎必命中——是「纯提问
-      // 也要全程黑等」的最大单点（实测 TTFT=总耗时 92%）。出口自检重跑/出口
-      // 重写与已流文本的分歧，改由 flushFinal 后的分歧裁决 + done 载荷
-      // finalTextReplacesStream 信号（客户端整段替换气泡）承接。
+      // 2026-09-28 放流：knowledge_qa 缓冲模式废除。delta 依旧实时喂分段器，
+      // 经净化后只消费语音数据帧；文字层统一在 done 由呈现裁决一次性落屏
+      // （2026-11-23 统一：不再边流边分泡）。
       // AGENT_REALTIME_STREAM=0 可整体回退缓冲模式（应急开关）。
       // 2026-11-05 二轮定稿：退役的是打字机，不是流式。delta 依旧实时喂
       // 分段器，经净化后走语音数据帧；文字层仍只有 done.finalText 一帧。
@@ -1037,16 +976,9 @@ async function processBatchedMessage(
       // 证据轮由 agent-core 置 "always"，reply.answerStreamHeld 如实带回；
       // 本层只在 done 裁决消费该信号（见下方裁决处）。意图标签/回执时机
       // 的前置/反应式扣流闸均已退役（缝补删除）。
-      // 真·分绿泡门禁：文字对话轮恒拆泡，语音轮不拆（泡间停顿会拖慢 done，
-      // 且语音 TTS 不消费气泡边界）。置位点在首个主回复 delta 之前，无竞态。
-      streamPlan = decideStreamPlan({
-        segmentable: decision.segmentable,
-        voiceMode: isVoiceMode(msgActor),
-      });
-      if (streamPlan.owner === "bubbles") {
-        bubbleTracker.active = true;
-        streamSegmenter.enableBubbleMode();
-      }
+      // 呈现裁决（2026-11-23 统一）：chunk 不再外发成泡。整轮结束后按全文
+      // 判一次「分泡 or 渲染」，这里只记录本轮是否可分段。
+      turnSegmentable = decision.segmentable;
     })
     .catch(() => {
       /* 路由决策永不 reject（内部降级）；防御性忽略 */
@@ -1410,24 +1342,6 @@ async function processBatchedMessage(
       },
       onExternalToolExecuteStart: (info) => {
         if (isStale()) return;
-        // 分泡裁决（2026-11-06 深夜用户定稿，收窄版）：
-        // - 信息展示类工具（search/weather/market/clock 域）开始执行 →
-        //   关泡模式，剩余正文并回一个绿泡（结果当「一份资料」读，不拆碎）；
-        // - 操作类工具（提醒/日程/购物/智能家居/发消息…）**不关泡**——
-        //   工具后正文照常分泡连发（「定好了，到点叫你。」+「不过…」两泡）；
-        // - 闲聊轮没有工具，泡模式全程开启，自然分泡。
-        // 判定走 DOMAIN_REGISTRY 域归属（SINGLE_BUBBLE_TOOL_DOMAINS 显式
-        // 白名单），零 LLM 调用、确定性。禁止无差别 freeze——曾经的
-        // 「工具开始执行即冻结」会把操作轮并回一泡，甚至在无预文时让
-        // BubbleTracker.assign 对空泡数组取 [-1] 静默 TypeError、炸掉整条
-        // 分泡出站（两端退化成 finalText 单泡，2026-11-06 截图事故）。
-        if (
-          SINGLE_BUBBLE_TOOL_DOMAINS.some((d) =>
-            domainsForTool(info.toolName).includes(d),
-          )
-        ) {
-          streamSegmenter.disableBubbleMode();
-        }
         // 发言模型：首个工具开始执行 = 过程话阶段截止，此后产出均为结论。
         // 先等分段器把已喂入的过程话发完（分发是异步串行的，不设屏障会与仍在
         // 链上的过程话乱序 → 过程话被误判为结论、塌缩裁决失效）。
@@ -2381,10 +2295,8 @@ async function processBatchedMessage(
     //   一次整段合成，等价流式退役前的行为，不会「有回复没声音」。
     sendSpeechFrame("", "stream", true, finalText);
 
-    // 真·分绿泡收口：唯一裁决入口（bubble-policy.decideFinalPlan）。开始阶段
-    // 已判 single 的轮次不会被重新开泡；信息类轮（正文被重排/抽走，或信封里
-    // 出现卡/形态/结构化/媒体块）统一收成一条完整消息，客户端用 finalText
-    // 整段替换流式气泡——流式原文与 done 版式不会同时出现。
+    // 呈现裁决（唯一出口，bubble-policy.decidePresentation）：整段文本已齐，
+    // 先跑完渲染，再判一次「分泡 or 渲染」——不存在流式先出泡、done 再收口。
     const sceneBlocksBubbles =
       sceneRegistry.get(renderEnvelope.meta.sceneId ?? "")?.produces?.singleBubble === true;
     const bodyRewritten = doneSceneMeta?.bodyRewritten === true;
@@ -2395,21 +2307,23 @@ async function processBatchedMessage(
       renderEnvelope.meta.blockTypes.some(
         (t) => t !== "text" && t !== "followups",
       );
-    const finalPlan = decideFinalPlan({
-      stream: streamPlan,
-      hasBubbles: bubbleTracker.hasBubbles,
+    const presentation = decidePresentation({
+      voiceMode: isVoiceMode(msgActor),
+      segmentable: turnSegmentable,
       utteranceCollapse,
-      streamResetSent,
       sceneSingleBubble: sceneBlocksBubbles,
       bodyRewritten,
       presentationBlocks,
     });
-    const bubbleSplitLive = finalPlan.owner === "bubbles";
-    // 线上取证：只有出过泡的轮次才打，直观回答「这轮为什么收口/为什么没收口」。
-    if (bubbleTracker.hasBubbles) {
+    const bubbleSplitLive = presentation.owner === "bubbles";
+    if (bubbleSplitLive) {
+      bubbleTracker.setFinalBubbles(await splitReplyBubbles(finalText));
+    }
+    // 线上取证开关：需要定位「这轮为什么分泡/为什么渲染」时置 1。
+    if (process.env.CHAT_PRESENTATION_DEBUG === "1") {
       console.info(
-        `[presentation] trace=${batched.originalMessageId} owner=${finalPlan.owner}` +
-          ` reason=${finalPlan.reason} bubbles=${bubbleTracker.snapshot.length}` +
+        `[presentation] trace=${batched.originalMessageId} owner=${presentation.owner}` +
+          ` reason=${presentation.reason} bubbles=${bubbleTracker.snapshot.length}` +
           ` bodyRewritten=${bodyRewritten} blocks=${presentationBlocks}` +
           ` forms=${renderEnvelope.meta.forms.join(",")}` +
           ` blockTypes=${renderEnvelope.meta.blockTypes.join(",")}`,
@@ -2455,9 +2369,8 @@ async function processBatchedMessage(
           messageId: bubbleTracker.outboundDoneMessageId,
           traceId: batched.originalMessageId,
           threadId,
-          // 真·分绿泡（2026-09-28）：各气泡定稿对账数组（id+定稿文本）。
-          // 客户端据此逐泡定稿/补建漏收的泡；finalTextReplacesStream=true 时
-          // 该数组同时是"待塌缩删除"的泡清单。普通轮不下发该字段。
+          // 呈现裁决（2026-11-23）：各气泡定稿对账数组（id+定稿文本），
+          // 由 done 阶段按 finalText 一次拆出；客户端逐泡揭示/补建。
           // 发言塌缩轮即使无泡也要下发（空数组语义 = 只按单条发言收口）。
           ...(bubbleTracker.hasBubbles || utteranceCollapse
             ? { bubbles: bubbleTracker.snapshot }
@@ -2473,11 +2386,6 @@ async function processBatchedMessage(
             collapseReason: utteranceSettlement.collapseReason,
             bookkeepingOnly: utteranceSettlement.bookkeepingOnly,
           },
-          // 放流配套（2026-09-28）：最终呈现不是分泡文本（重排/撤回/发言塌缩/
-          // 场景单泡）时置 true，客户端用 finalText 整段替换流式气泡并删除
-          // bubbles 清单里的泡。是否收口只由呈现裁决（decideFinalPlan）决定，
-          // WS 层不再各自拼条件；分泡活轮不带该字段。
-          ...(!bubbleSplitLive ? { finalTextReplacesStream: true } : {}),
           toolCalls: reply.toolName ? [reply.toolName] : [],
           // 任务面异步收尾：本轮已把任务派发到后台（无正文），客户端按
           // source=task_plane + traceId 结清前台处理状态、不落正文气泡——

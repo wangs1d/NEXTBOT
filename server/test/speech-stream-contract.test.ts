@@ -41,47 +41,35 @@ test("主链路 delta 实时进分段器，realtimeStream 默认开启", () => {
   );
 });
 
-test("文字显示帧：分泡轮按泡出站整块 chunk，单泡正文仍只走 done", () => {
-  // chunk 出站复活是 2026-11-06 用户裁决（逐泡实时出现），但必须严格圈在
-  // bubbleTracker.active 分支内——单泡轮/卡片轮/语音轮永不出站显示帧。
-  assert.match(
+test("文字显示帧：chunk 通道退役，分泡只在 done 裁决后按 bubbles 数组下发", () => {
+  // 2026-11-23 统一：流式阶段不再外发文字气泡，整轮结束后判一次「分泡 or 渲染」。
+  assert.doesNotMatch(
     handler,
     /type:\s*ServerEventType\.ChatAssistantChunk/,
-    "分泡轮需要按泡出站 chunk",
-  );
-  const gateIdx = handler.indexOf("if (bubbleTracker.active) {");
-  const chunkIdx = handler.indexOf("ServerEventType.ChatAssistantChunk");
-  const speechIdx = handler.indexOf("sendSpeechFrame(cleanedChunk, phase, false);");
-  assert.ok(gateIdx > 0, "chunk 出站必须有 bubbleTracker.active 门禁");
-  assert.ok(
-    gateIdx < chunkIdx && chunkIdx < speechIdx,
-    "chunk 出站必须圈在分泡分支内、语音帧之前",
+    "文字 chunk 通道必须退役（避免边流边判与整段渲染碰撞）",
   );
   assert.doesNotMatch(
     editRoute,
     /type:\s*ServerEventType\.ChatAssistantChunk/,
-    "编辑重答不得复活打字机",
+    "编辑重答同样不得复活 chunk 通道",
+  );
+  assert.match(
+    handler,
+    /bubbleTracker\.setFinalBubbles\(await splitReplyBubbles\(finalText\)\)/,
+    "闲聊分泡必须在 done 裁决后一次性生成",
   );
 });
 
-test("分泡裁决（2026-11-06 深夜收窄版）：仅信息域工具关泡，操作类照常分泡", () => {
+test("呈现裁决统一到整轮之后：工具回调不再开关气泡/拆分通道", () => {
   const startIdx = handler.indexOf("onExternalToolExecuteStart");
   assert.ok(startIdx > 0, "必须存在工具开始回调");
   const section = handler.slice(startIdx, startIdx + 3000);
+  // chunk 不再外发成泡，流式阶段的开关泡逻辑必须全部退役。
+  assert.doesNotMatch(section, /bubbleTracker\.freeze\(\)/, "禁止流式冻结气泡");
   assert.doesNotMatch(
     section,
-    /bubbleTracker\.freeze\(\)/,
-    "禁止无差别冻结——操作轮并回一泡/空泡数组崩溃是截图事故根因",
-  );
-  assert.match(
-    section,
-    /SINGLE_BUBBLE_TOOL_DOMAINS/,
-    "信息展示类单泡必须走显式域白名单（DOMAIN_REGISTRY 唯一事实源）",
-  );
-  assert.match(
-    section,
-    /streamSegmenter\.disableBubbleMode\(\)/,
-    "检索/信息类工具关泡（剩余正文并回一个绿泡）",
+    /SINGLE_BUBBLE_TOOL_DOMAINS|disableBubbleMode/,
+    "工具域白名单/关泡逻辑必须删除（呈现只在 done 判一次）",
   );
   // 发言模型的过程话截止语义保留：awaitPending + noteToolStart 必须还在
   assert.match(section, /awaitPending\(\)/, "工具边界的过程话屏障保留");
@@ -101,23 +89,21 @@ test("final 帧恒在 done 之前，且 done 仍是唯一文字正文出口", ()
   const doneIdx = handler.indexOf("type: ServerEventType.ChatAssistantDone", finalIdx);
   assert.ok(finalIdx > 0, "必须存在语音收口帧");
   assert.ok(doneIdx > finalIdx, "收口帧必须先于 done 下发");
-  assert.match(
-    handler,
-    /\.\.\.\(!bubbleSplitLive \? \{ finalTextReplacesStream: true \} : \{\}\)/,
-    "done 仍按整段落屏（收口结论只由呈现裁决给出）",
-  );
+  // chunk 不再外发成文字气泡：分泡只发生在 done 裁决后，客户端按 bubbles 数组揭示。
+  assert.doesNotMatch(handler, /ChatAssistantChunk/, "文字 chunk 通道必须退役");
+  assert.match(handler, /bubbleTracker\.setFinalBubbles\(await splitReplyBubbles\(finalText\)\)/);
 });
 
-test("呈现裁决唯一出口：开始/结束都走 bubble-policy，旧判断已删净", () => {
+test("呈现裁决唯一出口：整轮结束后只判一次，旧双阶段判断已删净", () => {
   const bubblePolicy = serverSrc("agent/bubble-policy.ts");
-  assert.match(bubblePolicy, /export function decideStreamPlan/);
-  assert.match(bubblePolicy, /export function decideFinalPlan/);
-  assert.match(handler, /decideStreamPlan\(\{/, "开泡门禁必须走统一裁决");
-  assert.match(handler, /decideFinalPlan\(\{/, "done 收口必须走统一裁决");
-  // 禁止再出现并行判断：上一版事故就是 renderedReply 与分泡判断各说各话。
+  assert.match(bubblePolicy, /export function decidePresentation/);
+  assert.match(handler, /decidePresentation\(\{/, "呈现裁决必须走统一出口");
+  // 禁止再出现并行/两阶段判断：事故根因就是分泡与渲染各说各话。
+  assert.doesNotMatch(handler, /decideStreamPlan|decideFinalPlan/, "旧两阶段裁决必须删除");
   assert.doesNotMatch(handler, /renderedReply/, "旧 renderedReply 启发式必须删除");
   assert.doesNotMatch(handler, /shouldSplitBubbles|resolveBubbleCollapse/, "旧分泡判断必须删除");
-  assert.doesNotMatch(handler, /let finalTextReplacesStream/, "旧替换开关必须删除");
+  assert.doesNotMatch(handler, /finalTextReplacesStream/, "旧替换信号必须删除");
+  assert.doesNotMatch(handler, /enableBubbleMode|disableBubbleMode/, "旧流式开泡/关泡必须删除");
   assert.match(handler, /const bodyRewritten = doneSceneMeta\?\.bodyRewritten === true/);
 });
 

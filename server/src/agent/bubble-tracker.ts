@@ -52,7 +52,24 @@ export class BubbleTracker {
 
   /** 是否已推出过气泡（决定 done 是否携带 bubbles 字段）。 */
   get hasBubbles(): boolean {
-    return this.active && this.bubbles.length > 0;
+    return this.bubbles.length > 0;
+  }
+
+  /**
+   * 出口一次性建泡：整段裁决通过后，按最终文本拆出的气泡写入对账数组。
+   * 新架构下 chunk 不再外发成泡，气泡只在这里生成（客户端按 done 数组逐泡揭示）。
+   */
+  setFinalBubbles(texts: string[]): void {
+    this.bubbles.length = 0;
+    this.seq = 0;
+    this.currentId = "";
+    for (const text of texts) {
+      const trimmed = text.trim();
+      if (!trimmed) continue;
+      this.seq += 1;
+      this.currentId = `${this.baseMessageId}-b${this.seq}`;
+      this.bubbles.push({ id: this.currentId, text: trimmed });
+    }
   }
 
   /** 末泡 id（done 的 messageId 指向它）；无泡时回退基础 id。 */

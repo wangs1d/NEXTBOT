@@ -2,119 +2,88 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  decideFinalPlan,
-  decideStreamPlan,
-  type PresentationPlan,
+  decidePresentation,
+  splitReplyBubbles,
+  type PresentationInputs,
 } from "../src/agent/bubble-policy.js";
 
-const singleStream: PresentationPlan = {
-  owner: "single",
-  replacesStream: false,
-  reason: "task-surface",
+const chatBase: PresentationInputs = {
+  voiceMode: false,
+  segmentable: true,
+  utteranceCollapse: false,
+  sceneSingleBubble: false,
+  bodyRewritten: false,
+  presentationBlocks: false,
 };
 
-test("开始裁决：闲聊开泡、语音关泡、任务面关泡", () => {
-  assert.equal(
-    decideStreamPlan({ segmentable: true, voiceMode: false }).owner,
-    "bubbles",
-  );
-  assert.equal(
-    decideStreamPlan({ segmentable: true, voiceMode: true }).owner,
-    "single",
-  );
-  assert.equal(
-    decideStreamPlan({ segmentable: false, voiceMode: false }).owner,
-    "single",
-  );
-});
-
-test("结束裁决：有泡且无收口条件 → 保留分泡，不替换流", () => {
-  const plan = decideFinalPlan({
-    stream: decideStreamPlan({ segmentable: true, voiceMode: false }),
-    hasBubbles: true,
-    utteranceCollapse: false,
-    streamResetSent: false,
-    sceneSingleBubble: false,
-    bodyRewritten: false,
-    presentationBlocks: false,
-  });
-  assert.deepEqual(plan, {
+test("统一裁决：闲聊分泡，语音/任务面/塌缩/场景/重排/展示块一律单条", () => {
+  assert.deepEqual(decidePresentation(chatBase), {
     owner: "bubbles",
-    replacesStream: false,
     reason: "chat",
   });
-});
-
-test("结束裁决：任一收口条件成立 → 单条并整段替换", () => {
-  const base = {
-    stream: decideStreamPlan({ segmentable: true, voiceMode: false }),
-    hasBubbles: true,
-    utteranceCollapse: false,
-    streamResetSent: false,
-    sceneSingleBubble: false,
-    bodyRewritten: false,
-    presentationBlocks: false,
-  };
-  for (const patch of [
-    { utteranceCollapse: true, reason: "utterance-collapse" },
-    { streamResetSent: true, reason: "stream-reset" },
-    { sceneSingleBubble: true, reason: "scene-single-bubble" },
-    { bodyRewritten: true, reason: "body-rewritten" },
-    { presentationBlocks: true, reason: "presentation-blocks" },
-  ]) {
-    const plan = decideFinalPlan({ ...base, ...patch });
-    assert.equal(plan.owner, "single", JSON.stringify(patch));
-    assert.equal(plan.replacesStream, true, JSON.stringify(patch));
-    assert.equal(plan.reason, patch.reason, JSON.stringify(patch));
+  const cases: Array<[Partial<PresentationInputs>, string]> = [
+    [{ voiceMode: true }, "voice"],
+    [{ segmentable: false }, "task-surface"],
+    [{ utteranceCollapse: true }, "utterance-collapse"],
+    [{ sceneSingleBubble: true }, "scene-single-bubble"],
+    [{ bodyRewritten: true }, "body-rewritten"],
+    [{ presentationBlocks: true }, "presentation-blocks"],
+  ];
+  for (const [patch, reason] of cases) {
+    assert.deepEqual(
+      decidePresentation({ ...chatBase, ...patch }),
+      { owner: "single", reason },
+      reason,
+    );
   }
 });
 
-test("结束裁决：无泡 → 单条，但没有可替换的流", () => {
-  const plan = decideFinalPlan({
-    stream: decideStreamPlan({ segmentable: true, voiceMode: false }),
-    hasBubbles: false,
-    utteranceCollapse: false,
-    streamResetSent: false,
-    sceneSingleBubble: false,
-    bodyRewritten: true,
-    presentationBlocks: true,
-  });
-  assert.equal(plan.owner, "single");
-  assert.equal(plan.replacesStream, false);
-  assert.equal(plan.reason, "no-bubbles");
+test("优先级：语音轮优先于一切（不因其它信号改变）", () => {
+  assert.deepEqual(
+    decidePresentation({
+      ...chatBase,
+      voiceMode: true,
+      bodyRewritten: true,
+      presentationBlocks: true,
+    }),
+    { owner: "single", reason: "voice" },
+  );
 });
 
-test("单调收窄：开始判 single 的轮次，结束不允许重新开泡", () => {
-  const plan = decideFinalPlan({
-    stream: singleStream,
-    hasBubbles: true,
-    utteranceCollapse: false,
-    streamResetSent: false,
-    sceneSingleBubble: false,
-    bodyRewritten: false,
-    presentationBlocks: false,
-  });
-  assert.equal(plan.owner, "single");
-  assert.equal(plan.replacesStream, false);
-  assert.equal(plan.reason, "stream-task-surface");
+test("出口分泡：单句闲聊保持单泡", async () => {
+  const bubbles = await splitReplyBubbles("在呢，我在。");
+  assert.equal(bubbles.length, 1);
+  assert.equal(bubbles[0], "在呢，我在。");
 });
 
-test("分泡只服务闲聊：信息类回复（正文重排 / 展示块）即使有泡也收成一条", () => {
-  const base = {
-    stream: decideStreamPlan({ segmentable: true, voiceMode: false }),
-    hasBubbles: true,
-    utteranceCollapse: false,
-    streamResetSent: false,
-    sceneSingleBubble: false,
-    bodyRewritten: false,
-    presentationBlocks: false,
-  };
-  assert.equal(
-    decideFinalPlan({ ...base, bodyRewritten: true }).owner,
-    "single",
-  );
-  assert.equal(
-    decideFinalPlan({ ...base, presentationBlocks: true }).owner,
-    "single",
-  );
+test("出口分泡：口语多句按句拆泡且不丢字", async () => {
+  const bubbles = await splitReplyBubbles("在呢。好的。");
+  assert.ok(bubbles.length >= 2);
+  assert.equal(bubbles.join(""), "在呢。好的。");
+});
+
+test("出口分泡：多段口语按段落拆泡且不丢字", async () => {
+  const text = "在呢。\n\n刚看你说今天要早点出门，闹钟我帮你往前调了十分钟。\n\n路上慢点，到了说一声。";
+  const bubbles = await splitReplyBubbles(text);
+  assert.ok(bubbles.length >= 2, `expected multi bubbles, got ${JSON.stringify(bubbles)}`);
+  const joined = bubbles.join("");
+  assert.equal(joined.replace(/\s+/g, ""), text.replace(/\s+/g, ""));
+});
+
+test("出口分泡：结构化列表不拆碎", async () => {
+  const text = [
+    "这周安排大概是这样：",
+    "",
+    "- 周一上午评审",
+    "- 周三下午对齐",
+    "- 周五出周报",
+  ].join("\n");
+  const bubbles = await splitReplyBubbles(text);
+  const listBubble = bubbles.find((b) => b.includes("- 周一上午评审"));
+  assert.ok(listBubble, "列表必须完整落在同一个泡里");
+  assert.ok(listBubble.includes("- 周五出周报"), "列表条目不得被拆到不同泡");
+});
+
+test("出口分泡：空文本不产泡", async () => {
+  assert.deepEqual(await splitReplyBubbles("   \n  "), []);
 });
