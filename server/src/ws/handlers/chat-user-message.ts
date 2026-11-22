@@ -48,7 +48,11 @@ import {
 } from "../../agent/master-chat-session.js";
 import { shouldUsePhasedAsyncConversation } from "../../agent/interim-ack.js";
 import { StreamSegmenter, type StreamSegmentEmitMeta } from "../../agent/stream-segmenter.js";
-import { resolveBubbleCollapse, shouldSplitBubbles } from "../../agent/bubble-policy.js";
+import {
+  decideFinalPlan,
+  decideStreamPlan,
+  type PresentationPlan,
+} from "../../agent/bubble-policy.js";
 import { BubbleTracker } from "../../agent/bubble-tracker.js";
 import {
   UtteranceAssembler,
@@ -63,7 +67,6 @@ import {
   type TurnEventEmitter,
 } from "../../agent/turn-events.js";
 import { getToolResultProcessor, attachMediaSearchMarker, extractMediaCards, dedupMediaCards, splitMediaCardsByTopic, hideUnrenderedMediaCardsFromLibrary, buildInterleavedRenderBlocks, buildCaptionedRenderBlocks, allImageCardsHaveCaption, isFlatImageGallery, stripMediaCardMarker, isMediaSearchTool, type MediaCardItem } from "../../services/tool-result-processor.js";
-import { receiptProducesCard } from "../../services/receipt-card-projection.js";
 import type { TurnEffect } from "../../render/types.js";
 import { collectCardPayloads, effectStatusOf } from "../../render/index.js";
 import { stripContentSummaryBlock, extractContentSummaryCard } from "../../services/content-summary-service.js";
@@ -701,6 +704,13 @@ async function processBatchedMessage(
   // done 载荷带 bubbles 对账数组。非拆分轮所有字段与原协议完全一致。
   // 分配/记账逻辑见 BubbleTracker（bubble-tracker.ts，含独立单测）。
   const bubbleTracker = new BubbleTracker(false, assistantMessageId);
+  // 呈现裁决（唯一出口，bubble-policy）：开始阶段在路由就绪后置位，结束阶段
+  // 只允许在它基础上收窄；缺省 = 不开泡（路由失败也不会误开）。
+  let streamPlan: PresentationPlan = {
+    owner: "single",
+    replacesStream: false,
+    reason: "pending",
+  };
 
   // 发言模型（2026-10-09 重复回复根源修复）：一轮 = 一条发言（utteranceId =
   // 本轮 traceId，客户端据此把多泡归组成同一条消息）。气泡是发言的**视图分段**，
@@ -740,16 +750,6 @@ async function processBatchedMessage(
       );
     }
   };
-
-  /** 直跑路径工具回执是否产得出结构化卡片（runToolIfNeeded 补判用）。
-   *  与答案留存闸（tool-loop answerHeld）共用同一份判定 receiptProducesCard：
-   *  媒体类看真实 items，天气/行程/视频有成功回执即出卡，注册工具看
-   *  buildToolCard。网页搜索不产卡（2026-11-05 定稿）→ 不在此列，
-   *  正文原样流式送达。 */
-  const directPathToolProducesCard = (
-    toolName: string,
-    result: Record<string, unknown>,
-  ): boolean => receiptProducesCard(toolName, result);
 
   // [ts:...] 是系统注入的元数据标记，仅供 LLM 上下文使用，绝不能透出到用户可见消息。
   // 2026-09-03 收紧：此前只剥首块，后续块里模型复述的时间戳帧（含残缺帧）会直透前端。
@@ -1039,7 +1039,11 @@ async function processBatchedMessage(
       // 的前置/反应式扣流闸均已退役（缝补删除）。
       // 真·分绿泡门禁：文字对话轮恒拆泡，语音轮不拆（泡间停顿会拖慢 done，
       // 且语音 TTS 不消费气泡边界）。置位点在首个主回复 delta 之前，无竞态。
-      if (shouldSplitBubbles({ segmentable: decision.segmentable, voiceMode: isVoiceMode(msgActor) })) {
+      streamPlan = decideStreamPlan({
+        segmentable: decision.segmentable,
+        voiceMode: isVoiceMode(msgActor),
+      });
+      if (streamPlan.owner === "bubbles") {
         bubbleTracker.active = true;
         streamSegmenter.enableBubbleMode();
       }
@@ -1742,7 +1746,6 @@ async function processBatchedMessage(
     // 裁决整块退役。finalFeed 只留给下方 utterance.settle 做发言记账。
     const finalFeedRaw = (reply.text && reply.text.trim()) ? reply.text : streamedText;
     const finalFeed = stripAllTimestampFrameLines(finalFeedRaw);
-    let finalTextReplacesStream = true;
 
     // 主回复流结束：放行 guard 中误扣的非标记残段 + 分段器缓冲里的尾部半句，
     // 让语音播报不丢最后一句；标记/卡片块内容 flush 时已丢弃。
@@ -1751,8 +1754,8 @@ async function processBatchedMessage(
     await streamSegmenter.flushFinal();
 
     // 发言结算（2026-10-09 重复回复根源修复）：本轮唯一发言在此定稿。
-    // - 过程话与结论语义等价、或过程话在记账轮无实质内容 → 裁掉过程话，复用既有
-    //   「整轮塌缩」通道（finalTextReplacesStream + bubbles 清单）让客户端删除
+    // - 过程话与结论语义等价、或过程话在记账轮无实质内容 → 裁掉过程话，走
+    //   「整轮塌缩」通道（呈现裁决收成单条 + bubbles 清单）让客户端删除
     //   过程话气泡、只落一条发言 —— 事故形态「好的王爷，记下了。」+「已经记上啦」
     //   从此只剩后者。
     // - 检索轮两段都保留：它们仍是同一条发言的两个分段，客户端按 utteranceId
@@ -1761,7 +1764,6 @@ async function processBatchedMessage(
     let utteranceCollapse = false;
     if (utteranceSettlement.collapse) {
       utteranceCollapse = true;
-      finalTextReplacesStream = true;
       console.log(
         `[utterance] 过程话被结论吸收（reason=${utteranceSettlement.collapseReason}，` +
           `trace=${batched.originalMessageId}，drop=[${utteranceSettlement.droppedSegmentIndexes.join(",")}]）`,
@@ -1808,17 +1810,6 @@ async function processBatchedMessage(
           },
         }),
       );
-      // 直跑路径卡片源补判：runToolIfNeeded 不走 onExternalToolExecuted，
-      // 上面的工具捕获点看不到这类回执。直跑工具在主回复流之后执行——产出
-      // 可建卡时 done 以整段替换呈现（finalTextReplacesStream，2026-10-13
-      // 根修：done 是结算点，中途不再撤回流式文本）。
-      if (
-        toolResult.ok &&
-        toolResult.result &&
-        directPathToolProducesCard(reply.toolName, toolResult.result as Record<string, unknown>)
-      ) {
-        finalTextReplacesStream = true;
-      }
     }
 
     let finalText = reply.text.trim();
@@ -1920,6 +1911,7 @@ async function processBatchedMessage(
           sceneId: string;
           failures: string[];
           preSceneIds: string[];
+          bodyRewritten: boolean;
         }
       | undefined;
     finalText = processor.processAssistantText(finalText, {
@@ -2022,9 +2014,8 @@ async function processBatchedMessage(
           toolName: "travel.plan-itinerary",
           result: forcedPlan.result as Record<string, unknown>,
         };
-        // 正文已在流式阶段以纯文本送达（没有卡片形态），补卡后 finalText ≠ 已流
-        // 文本，必须整段替换让两端重渲染出卡片（桌面端 done 默认保留已流正文）。
-        finalTextReplacesStream = true;
+        // 补卡后 done 信封必然带 card 块，呈现裁决（presentationBlocks）会把
+        // 本轮收成单条并整段替换流式正文——不需要单独的替换开关。
       }
     }
     // 「接下来你可以」接续建议（NEXT_UP 协议）：从正文提取成独立 followups
@@ -2054,8 +2045,7 @@ async function processBatchedMessage(
       /卡|推送|上车点|正文/.test(finalText)
     ) {
       finalText = "";
-      // 模型残留文字已在流式阶段送达，正文清空后必须整段替换才能把气泡收掉
-      finalTextReplacesStream = true;
+      // 正文清空 + 已推选上车点卡 → done 信封有 card 块，呈现裁决自会整段替换。
     }
     // 行程回执在这里才最终裁决（直跑 / loop 捕获 / 冷层近窗回捞），所以行程卡
     // 在正文处理之后补附；其余卡已在 processAssistantText 里由决策层一并产出。
@@ -2374,6 +2364,8 @@ async function processBatchedMessage(
             sceneId: doneSceneMeta.sceneId,
             failures: doneSceneMeta.failures,
             preSceneIds: doneSceneMeta.preSceneIds,
+            // 呈现裁决的精确信号：正文被出口重排/抽走 → 本轮必须收成单条。
+            bodyRewritten: doneSceneMeta.bodyRewritten,
           }
         : {}),
     });
@@ -2389,30 +2381,28 @@ async function processBatchedMessage(
     //   一次整段合成，等价流式退役前的行为，不会「有回复没声音」。
     sendSpeechFrame("", "stream", true, finalText);
 
-    // 真·分绿泡收口判定：有实际分泡且无塌缩/撤回时，done 不带
-    // finalTextReplacesStream——客户端按 bubbles 对账数组逐泡落屏。唯一整条
-    // 收口的例外是场景声明 produces.singleBubble（明日速览/盘点这类整块交付）。
-    // 正文是不是 markdown 不参与判定：文档类内容在分段器里按结构块（标题段/
-    // 表格/代码块/列表块）成泡，泡本身即完整块。
+    // 真·分绿泡收口：唯一裁决入口（bubble-policy.decideFinalPlan）。开始阶段
+    // 已判 single 的轮次不会被重新开泡；信息类轮（正文被重排/抽走，或信封里
+    // 出现卡/形态/结构化/媒体块）统一收成一条完整消息，客户端用 finalText
+    // 整段替换流式气泡——流式原文与 done 版式不会同时出现。
     const sceneBlocksBubbles =
       sceneRegistry.get(renderEnvelope.meta.sceneId ?? "")?.produces?.singleBubble === true;
-    // 分泡只服务闲聊（2026-11-23）：本轮正文一旦被出口排成卡 / 结构化正文 /
-    // 媒体 / 摘要（meta.forms 或 text 以外的块），就属于「信息类」渲染轮。
-    // 这类轮次必须塌缩成一条完整消息——流式分泡里的原文与 done 重排后的卡
-    // 是同一段内容，逐泡落屏就是「原文 + 渲染结果」重复两次（截图事故根因）。
-    // followups 只是追问建议，不改变正文形态，不计入。
-    const renderedReply =
-      renderEnvelope.meta.forms.length > 0 ||
-      renderEnvelope.meta.blockTypes.some(
-        (t) => t !== "text" && t !== "followups",
-      );
-    const { bubbleSplitLive } = resolveBubbleCollapse({
+    const finalPlan = decideFinalPlan({
+      stream: streamPlan,
       hasBubbles: bubbleTracker.hasBubbles,
       utteranceCollapse,
       streamResetSent,
       sceneSingleBubble: sceneBlocksBubbles,
-      renderedReply,
+      bodyRewritten: doneSceneMeta?.bodyRewritten === true,
+      // text/followups 只是正文与追问建议；其余块（卡/形态/结构化/媒体）都代表
+      // 本轮是「渲染型」回复。兜底覆盖渲染决策之后才追加的块（工具卡/补卡/照片）。
+      presentationBlocks:
+        renderEnvelope.meta.forms.length > 0 ||
+        renderEnvelope.meta.blockTypes.some(
+          (t) => t !== "text" && t !== "followups",
+        ),
     });
+    const bubbleSplitLive = finalPlan.owner === "bubbles";
 
     // 回写 WAL 定稿文本（2026-10-24）：WAL 在 turn-finalizer 落的是模型原文，
     // 出口的卡片附加与协议标记剥离都发生在它之后——不覆盖的话，聊天记录回放
@@ -2471,16 +2461,11 @@ async function processBatchedMessage(
             collapseReason: utteranceSettlement.collapseReason,
             bookkeepingOnly: utteranceSettlement.bookkeepingOnly,
           },
-          // 放流配套（2026-09-28）：最终文本与已流文本分叉（重写/重跑/确定性
-          // 收口）时置 true，客户端收到后用 finalText 整段替换流式气泡。
-          // 卡片轮撤回（2026-10-08）：stream_reset 已撤回正文，done 必须
-          // 整段替换（桌面端 done 默认保留已流正文，不强制会保留空泡）。
-          // 分泡活轮（bubbleSplitLive）不带该字段：客户端逐泡落屏，不塌缩。
-          // singleBubble 场景（明日速览/盘点）已在流式期间可能产生过泡，
-          // 必须让客户端用 finalText 收口成一条（否则同轮多泡并存）。
-          ...(!bubbleSplitLive && (finalTextReplacesStream || streamResetSent || (sceneBlocksBubbles && bubbleTracker.hasBubbles))
-            ? { finalTextReplacesStream: true }
-            : {}),
+          // 放流配套（2026-09-28）：最终呈现不是分泡文本（重排/撤回/发言塌缩/
+          // 场景单泡）时置 true，客户端用 finalText 整段替换流式气泡并删除
+          // bubbles 清单里的泡。是否收口只由呈现裁决（decideFinalPlan）决定，
+          // WS 层不再各自拼条件；分泡活轮不带该字段。
+          ...(!bubbleSplitLive ? { finalTextReplacesStream: true } : {}),
           toolCalls: reply.toolName ? [reply.toolName] : [],
           // 任务面异步收尾：本轮已把任务派发到后台（无正文），客户端按
           // source=task_plane + traceId 结清前台处理状态、不落正文气泡——

@@ -59,15 +59,26 @@ export function sentenceSet(text: string): Set<string> {
  * 剔除 incoming 中与 alreadySaid 句级重复的句子。
  * 用于 fast 主答后 complex 后台结果回传时去重，
  * 消除"整段一模一样出现两次"的重复 bug。
+ *
+ * 2026-11-23：逐句删除、其余字符（含换行）原样保留。旧实现用
+ * splitSentences（空白折叠）+ join("")，一旦命中重复句就会把整段残余
+ * 压成一行——分泡后列表项退化成「…在美国 - 马斯克说…」的流水。
  */
 export function stripSentencesAlreadySaid(alreadySaid: string, incoming: string): string {
   if (!incoming?.trim()) return incoming ?? "";
   if (!alreadySaid?.trim()) return incoming;
   const said = sentenceSet(alreadySaid);
-  const sentences = splitSentences(incoming);
-  const kept = sentences.filter((s) => !said.has(normalizeSentence(s)));
-  if (kept.length === sentences.length) return incoming;
-  return kept.join("");
+  // 与 splitSentences 同一套句末标点；\n 也作为断句边界，但不吞掉换行。
+  const sentenceRe = /[^。！？!?；;\n]+[。！？!?；;]+|[^。！？!?；;\n]+(?=\n|$)/gu;
+  let removed = false;
+  const out = incoming.replace(sentenceRe, (sentence) => {
+    if (said.has(normalizeSentence(sentence))) {
+      removed = true;
+      return "";
+    }
+    return sentence;
+  });
+  return removed ? out : incoming;
 }
 
 /**

@@ -101,7 +101,32 @@ test("final 帧恒在 done 之前，且 done 仍是唯一文字正文出口", ()
   const doneIdx = handler.indexOf("type: ServerEventType.ChatAssistantDone", finalIdx);
   assert.ok(finalIdx > 0, "必须存在语音收口帧");
   assert.ok(doneIdx > finalIdx, "收口帧必须先于 done 下发");
-  assert.match(handler, /finalTextReplacesStream = true/, "done 仍按整段落屏");
+  assert.match(
+    handler,
+    /\.\.\.\(!bubbleSplitLive \? \{ finalTextReplacesStream: true \} : \{\}\)/,
+    "done 仍按整段落屏（收口结论只由呈现裁决给出）",
+  );
+});
+
+test("呈现裁决唯一出口：开始/结束都走 bubble-policy，旧判断已删净", () => {
+  const bubblePolicy = serverSrc("agent/bubble-policy.ts");
+  assert.match(bubblePolicy, /export function decideStreamPlan/);
+  assert.match(bubblePolicy, /export function decideFinalPlan/);
+  assert.match(handler, /decideStreamPlan\(\{/, "开泡门禁必须走统一裁决");
+  assert.match(handler, /decideFinalPlan\(\{/, "done 收口必须走统一裁决");
+  // 禁止再出现并行判断：上一版事故就是 renderedReply 与分泡判断各说各话。
+  assert.doesNotMatch(handler, /renderedReply/, "旧 renderedReply 启发式必须删除");
+  assert.doesNotMatch(handler, /shouldSplitBubbles|resolveBubbleCollapse/, "旧分泡判断必须删除");
+  assert.doesNotMatch(handler, /let finalTextReplacesStream/, "旧替换开关必须删除");
+  assert.match(handler, /bodyRewritten: doneSceneMeta\?\.bodyRewritten === true/);
+});
+
+test("正文重排信号由渲染层产出并透传到 done 信封", () => {
+  const turn = serverSrc("render/turn.ts");
+  const handlerSrc = handler;
+  assert.match(turn, /bodyRewritten: mode === "full" && decision\.body\.form !== "plain"/);
+  assert.match(handlerSrc, /bodyRewritten: doneSceneMeta\.bodyRewritten/);
+  assert.match(handlerSrc, /presentationBlocks:/);
 });
 
 test("收尾不再把 finalFeed 喂回分段器（否则 TTS 会把整段复播一遍）", () => {
@@ -114,12 +139,18 @@ test("收尾不再把 finalFeed 喂回分段器（否则 TTS 会把整段复播�
 });
 
 test("客户端语音帧只进 TTS，绝不落消息列表", () => {
-  const start = mainDart.indexOf('if (type == "chat.assistant_speech")');
-  const end = mainDart.indexOf('if (type == "chat.assistant_chunk")', start);
-  assert.ok(start > 0 && end > start, "main.dart 必须有语音数据帧分支");
-  const branch = mainDart.slice(start, end);
-  assert.match(branch, /onSpeechFrame\(/);
-  assert.doesNotMatch(branch, /_appendChunkToMessageList|appendChunk\(/);
+  // 2026-11-05 分层定稿：chat.assistant_speech 已从 main.dart 迁到纯语音总线
+  // （PureVoiceModeController.onSpeechFrame），仍只消费、不写消息列表。
+  assert.match(voiceDart, /void onSpeechFrame\(\{/, "语音帧由纯语音控制器消费");
+  assert.match(voiceDart, /_speechBuffer \+= chunk;/, "增量帧只进语音缓冲");
+  assert.doesNotMatch(
+    voiceDart.slice(
+      voiceDart.indexOf("void onSpeechFrame({"),
+      voiceDart.indexOf("void _drainSpeechBuffer"),
+    ),
+    /_appendChunkToMessageList|appendChunk\(/,
+    "语音帧不得落消息列表",
+  );
   assert.match(voiceDart, /_sentenceBoundary/);
   assert.match(voiceDart, /_enqueueSpeak/);
   assert.match(voiceDart, /_speechFinalReceived/);
