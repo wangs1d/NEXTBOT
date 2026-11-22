@@ -2396,11 +2396,22 @@ async function processBatchedMessage(
     // 表格/代码块/列表块）成泡，泡本身即完整块。
     const sceneBlocksBubbles =
       sceneRegistry.get(renderEnvelope.meta.sceneId ?? "")?.produces?.singleBubble === true;
+    // 分泡只服务闲聊（2026-11-23）：本轮正文一旦被出口排成卡 / 结构化正文 /
+    // 媒体 / 摘要（meta.forms 或 text 以外的块），就属于「信息类」渲染轮。
+    // 这类轮次必须塌缩成一条完整消息——流式分泡里的原文与 done 重排后的卡
+    // 是同一段内容，逐泡落屏就是「原文 + 渲染结果」重复两次（截图事故根因）。
+    // followups 只是追问建议，不改变正文形态，不计入。
+    const renderedReply =
+      renderEnvelope.meta.forms.length > 0 ||
+      renderEnvelope.meta.blockTypes.some(
+        (t) => t !== "text" && t !== "followups",
+      );
     const { bubbleSplitLive } = resolveBubbleCollapse({
       hasBubbles: bubbleTracker.hasBubbles,
       utteranceCollapse,
       streamResetSent,
       sceneSingleBubble: sceneBlocksBubbles,
+      renderedReply,
     });
 
     // 回写 WAL 定稿文本（2026-10-24）：WAL 在 turn-finalizer 落的是模型原文，

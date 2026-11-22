@@ -16,6 +16,7 @@ test("收口判定：有泡且无塌缩/撤回/场景单泡 → 保留分泡", (
       utteranceCollapse: false,
       streamResetSent: false,
       sceneSingleBubble: false,
+      renderedReply: false,
     }),
     { bubbleSplitLive: true },
   );
@@ -27,12 +28,14 @@ test("收口判定：任一塌缩条件成立 → 整段替换", () => {
     utteranceCollapse: false,
     streamResetSent: false,
     sceneSingleBubble: false,
+    renderedReply: false,
   };
   for (const patch of [
     { hasBubbles: false },
     { utteranceCollapse: true },
     { streamResetSent: true },
     { sceneSingleBubble: true },
+    { renderedReply: true },
   ]) {
     assert.equal(
       resolveBubbleCollapse({ ...base, ...patch }).bubbleSplitLive,
@@ -40,4 +43,17 @@ test("收口判定：任一塌缩条件成立 → 整段替换", () => {
       JSON.stringify(patch),
     );
   }
+});
+
+test("分泡只服务闲聊：信息类回复（卡/结构化正文）即使有泡也收成一条", () => {
+  assert.equal(
+    resolveBubbleCollapse({
+      hasBubbles: true,
+      utteranceCollapse: false,
+      streamResetSent: false,
+      sceneSingleBubble: false,
+      renderedReply: true,
+    }).bubbleSplitLive,
+    false,
+  );
 });

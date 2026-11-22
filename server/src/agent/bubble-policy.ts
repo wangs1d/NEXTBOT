@@ -2,8 +2,11 @@
  * 分泡判定唯一出口：流式开泡门禁与 done 收口判定都从这里取结论，
  * WS 层不再各自拼条件。
  *
- * 产品口径：文字轮恒分泡（切点是结构闭合边界，见 stream-segmenter）；
- * 只有语音轮不拆、场景显式声明 singleBubble 的轮次收口成一条。
+ * 产品口径（2026-11-23 定稿）：**分泡只服务闲聊**。闲聊轮的正文是口语短句，
+ * 按结构闭合边界拆成多条消息（见 stream-segmenter）；信息类轮（卡 / 结构化
+ * 正文 / 媒体 / 摘要等最终要「渲染」的回复）一律收成一条完整消息——否则流式
+ * 阶段已经发出的原文气泡会和 done 阶段重排出的卡片同时出现在界面上。
+ * 语音轮不拆泡（TTS 不消费气泡边界）。
  */
 
 export type BubbleSplitInputs = {
@@ -27,6 +30,11 @@ export type BubbleCollapseInputs = {
   streamResetSent: boolean;
   /** 场景显式声明 produces.singleBubble（明日速览/盘点等整块交付）。 */
   sceneSingleBubble: boolean;
+  /**
+   * done 阶段回复已被渲染成卡 / 结构化正文 / 媒体 / 摘要（信息类轮）。
+   * 这类轮次只保留最终版式那一条消息，不能按流式气泡逐泡落屏。
+   */
+  renderedReply: boolean;
 };
 
 export type BubbleCollapseDecision = {
@@ -42,6 +50,7 @@ export function resolveBubbleCollapse(
     input.hasBubbles &&
     !input.utteranceCollapse &&
     !input.streamResetSent &&
-    !input.sceneSingleBubble;
+    !input.sceneSingleBubble &&
+    !input.renderedReply;
   return { bubbleSplitLive };
 }
