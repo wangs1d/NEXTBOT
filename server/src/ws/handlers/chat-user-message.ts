@@ -2387,22 +2387,34 @@ async function processBatchedMessage(
     // 整段替换流式气泡——流式原文与 done 版式不会同时出现。
     const sceneBlocksBubbles =
       sceneRegistry.get(renderEnvelope.meta.sceneId ?? "")?.produces?.singleBubble === true;
+    const bodyRewritten = doneSceneMeta?.bodyRewritten === true;
+    // text/followups 只是正文与追问建议；其余块（卡/形态/结构化/媒体）都代表
+    // 本轮是「渲染型」回复。兜底覆盖渲染决策之后才追加的块（工具卡/补卡/照片）。
+    const presentationBlocks =
+      renderEnvelope.meta.forms.length > 0 ||
+      renderEnvelope.meta.blockTypes.some(
+        (t) => t !== "text" && t !== "followups",
+      );
     const finalPlan = decideFinalPlan({
       stream: streamPlan,
       hasBubbles: bubbleTracker.hasBubbles,
       utteranceCollapse,
       streamResetSent,
       sceneSingleBubble: sceneBlocksBubbles,
-      bodyRewritten: doneSceneMeta?.bodyRewritten === true,
-      // text/followups 只是正文与追问建议；其余块（卡/形态/结构化/媒体）都代表
-      // 本轮是「渲染型」回复。兜底覆盖渲染决策之后才追加的块（工具卡/补卡/照片）。
-      presentationBlocks:
-        renderEnvelope.meta.forms.length > 0 ||
-        renderEnvelope.meta.blockTypes.some(
-          (t) => t !== "text" && t !== "followups",
-        ),
+      bodyRewritten,
+      presentationBlocks,
     });
     const bubbleSplitLive = finalPlan.owner === "bubbles";
+    // 线上取证：只有出过泡的轮次才打，直观回答「这轮为什么收口/为什么没收口」。
+    if (bubbleTracker.hasBubbles) {
+      console.info(
+        `[presentation] trace=${batched.originalMessageId} owner=${finalPlan.owner}` +
+          ` reason=${finalPlan.reason} bubbles=${bubbleTracker.snapshot.length}` +
+          ` bodyRewritten=${bodyRewritten} blocks=${presentationBlocks}` +
+          ` forms=${renderEnvelope.meta.forms.join(",")}` +
+          ` blockTypes=${renderEnvelope.meta.blockTypes.join(",")}`,
+      );
+    }
 
     // 回写 WAL 定稿文本（2026-10-24）：WAL 在 turn-finalizer 落的是模型原文，
     // 出口的卡片附加与协议标记剥离都发生在它之后——不覆盖的话，聊天记录回放

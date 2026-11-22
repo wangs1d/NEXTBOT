@@ -118,15 +118,15 @@ test("呈现裁决唯一出口：开始/结束都走 bubble-policy，旧判断�
   assert.doesNotMatch(handler, /renderedReply/, "旧 renderedReply 启发式必须删除");
   assert.doesNotMatch(handler, /shouldSplitBubbles|resolveBubbleCollapse/, "旧分泡判断必须删除");
   assert.doesNotMatch(handler, /let finalTextReplacesStream/, "旧替换开关必须删除");
-  assert.match(handler, /bodyRewritten: doneSceneMeta\?\.bodyRewritten === true/);
+  assert.match(handler, /const bodyRewritten = doneSceneMeta\?\.bodyRewritten === true/);
 });
 
 test("正文重排信号由渲染层产出并透传到 done 信封", () => {
   const turn = serverSrc("render/turn.ts");
   const handlerSrc = handler;
   assert.match(turn, /bodyRewritten: mode === "full" && decision\.body\.form !== "plain"/);
-  assert.match(handlerSrc, /bodyRewritten: doneSceneMeta\.bodyRewritten/);
-  assert.match(handlerSrc, /presentationBlocks:/);
+  assert.match(handlerSrc, /const bodyRewritten = doneSceneMeta\?\.bodyRewritten === true/);
+  assert.match(handlerSrc, /const presentationBlocks =/);
 });
 
 test("收尾不再把 finalFeed 喂回分段器（否则 TTS 会把整段复播一遍）", () => {
