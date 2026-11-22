@@ -19,6 +19,7 @@ import type { ExternalChatProvider } from "../../external-model/types.js";
 import { getAgentRuntimeConfig } from "../../agent/agent-runtime-config.js";
 import type { AgentMemorySyncService } from "../../services/agent-memory-sync-service.js";
 import { clearAllMemoryForActor } from "../../services/memory-clear-service.js";
+import { deleteActorTranscriptTurns } from "../../services/wal-transcript.js";
 
 /**
  * 回放文本的长度上限（2026-10-24）。
@@ -103,6 +104,14 @@ export function registerChatDataRoutes(
         fallbackText,
       );
 
+      // WAL 墓碑（2026-11-22）：chat thread 摘除只管模型上下文，WAL 才是聊天
+      // 记录权威源。不在 WAL 记墓碑，这轮会在换设备/重连拉 ?full=1 时复活。
+      // result.ok 或「线程里已没有」（被窗口裁掉）都要记——用户明确删了就不回来；
+      // 仅 ambiguous_text_match 不动（没删成功，避免误伤同文本的其他轮）。
+      if (result.ok || result.reason === "message_not_found") {
+        await deleteActorTranscriptTurns(actorId, [messageId]);
+      }
+
       return {
         ok: result.ok,
         reason: result.reason,
@@ -134,8 +143,12 @@ export function registerChatDataRoutes(
       if (!actorId) {
         return reply.code(400).send({ ok: false, message: "missing userId or sessionId" });
       }
+      // 回放上限 200 条（2026-11-22 恢复）：全量文本历史保留在手机/电脑本地，
+      // 服务端只回放最近 200 条（约 100 轮）+ WAL 90 天，控制 ECS 内存与读盘。
+      // 换设备时云端只回填最近一段，更早历史仍在本机本地库。
       const limitRaw = Number.parseInt(query.limit ?? "", 10);
-      const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 200) : 50;
+      const limit =
+        Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 200) : 200;
 
       // 旁聊线程历史（2026-11-07）：sessionId 必须属于当前 actor 的 `side:` 会话。
       // 旁聊是独立线程，没有 WAL 全量转录——只读该线程最近一段即可（full 忽略）。

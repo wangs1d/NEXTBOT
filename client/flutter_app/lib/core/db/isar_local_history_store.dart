@@ -198,6 +198,10 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
                     ?.whereType<String>()
                     .toList() ??
                 const <String>[],
+            localMediaPaths: (map["localMediaPaths"] as List<dynamic>?)
+                    ?.whereType<String>()
+                    .toList() ??
+                const <String>[],
             playUrl: map["playUrl"] as String?,
             pendingDelivery: map["pendingDelivery"] == true,
             mediaCards: _decryptMediaCards(map["mediaCards"]),
@@ -742,6 +746,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
       contentType: message.contentType,
       attachmentImageCount: message.attachmentImageCount,
       userImageUrls: message.userImageUrls,
+      localMediaPaths: message.localMediaPaths,
       playUrl: message.playUrl,
       pendingDelivery: message.pendingDelivery,
       mediaCards: message.mediaCards,
@@ -917,6 +922,8 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
                   "attachmentImageCount": m.attachmentImageCount,
                   if (m.userImageUrls.isNotEmpty)
                     "userImageUrls": m.userImageUrls,
+                  if (m.localMediaPaths.isNotEmpty)
+                    "localMediaPaths": m.localMediaPaths,
                   if (m.playUrl != null) "playUrl": m.playUrl,
                   if (m.pendingDelivery) "pendingDelivery": true,
                   if (m.mediaCards != null)

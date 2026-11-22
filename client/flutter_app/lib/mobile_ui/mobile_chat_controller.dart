@@ -908,6 +908,18 @@ class MobileChatController extends ChangeNotifier {
     }
   }
 
+  /// 把用户发图的本地图库文件名挂到对应消息（2026-11-22 隐私方案）。
+  /// 落盘由 UI 层异步完成后回调；这里只做消息字段更新 + 重新持久化，
+  /// 不影响发送主链路。找不到消息时静默跳过（消息可能已被清/删）。
+  void attachLocalMedia(String messageId, List<String> paths) {
+    if (paths.isEmpty) return;
+    final int idx = messages.indexWhere((m) => m.messageId == messageId);
+    if (idx < 0) return;
+    messages[idx] = messages[idx].copyWith(localMediaPaths: paths);
+    _persist(messages[idx]);
+    notifyListeners();
+  }
+
   /// 消息落盘（fire-and-forget；失败静默，聊天主链路绝不因存储阻塞）。
   void _persist(ChatMessage message) {
     unawaited(
@@ -919,14 +931,55 @@ class MobileChatController extends ChangeNotifier {
 
   /// 本地删除单条消息（2026-11-20 语音条长按菜单「删除」接线）：
   /// 从当前线程移除 + 本地历史落盘同步删除（fire-and-forget）。
+  ///
+  /// 2026-11-22 隐私/同步闭环：删除必须同步服务端 WAL 墓碑，否则换设备/重连
+  /// 拉 ?full=1 时这条会从云端复活。走与桌面端相同的 delete-turn 接口。
   void removeMessage(String messageId) {
+    // 删前取出原文与轮次锚点：WAL 的 messageId 是 user 消息的 id，助手泡要
+    // 换算成锚点才能命中；text 供旧行（无 clientMessageId）兜底定位。
+    String? userText;
+    String? anchorId;
+    try {
+      final int idx = messages.indexWhere((ChatMessage m) => m.messageId == messageId);
+      if (idx >= 0) {
+        userText = messages[idx].text;
+        anchorId = turnAnchorOfMessage(messages[idx]);
+      }
+    } catch (_) {}
     messages.removeWhere((ChatMessage m) => m.messageId == messageId);
     unawaited(
       _store.deleteMessage(messageId).catchError((Object e) {
         debugPrint("[MobileChatController] 消息删除落盘失败: $e");
       }),
     );
+    unawaited(_notifyServerDeleteTurn(anchorId ?? messageId, userText));
     notifyListeners();
+  }
+
+  /// 通知服务端删除单轮（chat thread 摘除 + WAL 墓碑）。失败不打断本地删除。
+  Future<void> _notifyServerDeleteTurn(String userMessageId, String? userText) async {
+    try {
+      final http.Response res = await NbHttp.post(
+        Uri.parse("${ApiConfig.httpBase}/api/chat-data/delete-turn"),
+        headers: <String, String>{
+          "Content-Type": "application/json",
+          ...AccessCredentialStore.instance.authHeaders,
+        },
+        body: jsonEncode(<String, dynamic>{
+          "sessionId": ApiConfig.effectiveActorId,
+          "messageId": userMessageId,
+          if (userText != null && userText.trim().isNotEmpty)
+            "text": userText.trim().length > 4000
+                ? userText.trim().substring(0, 4000)
+                : userText.trim(),
+        }),
+      ).timeout(const Duration(seconds: 10));
+      if (res.statusCode != 200) {
+        debugPrint("[MobileChatController] delete-turn HTTP ${res.statusCode}: ${res.body}");
+      }
+    } catch (e) {
+      debugPrint("[MobileChatController] delete-turn 请求失败: $e");
+    }
   }
 
   /// 服务端线程历史拉取：主会话走 WAL 全量（`full=1`），旁聊走 `sessionId=`
@@ -939,6 +992,7 @@ class MobileChatController extends ChangeNotifier {
       final Uri uri = Uri.parse("${ApiConfig.httpBase}/api/chat-data/history")
           .replace(queryParameters: <String, String>{
         "userId": ApiConfig.effectiveActorId,
+        // 2026-11-22 全量同步：文本极小，放开上限让换设备/清数据后能翻全部历史。
         "limit": "200",
         if (isSide) "sessionId": key else "full": "1",
       });

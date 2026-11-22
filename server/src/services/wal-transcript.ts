@@ -55,6 +55,15 @@ function isWalDayFile(name: string): boolean {
 }
 
 /**
+ * 服务端 WAL 转史回溯天数（2026-11-22 恢复为 90 天）。
+ *
+ * 全量聊天文本保存在手机/电脑本地；服务端只回溯最近 90 天，与回放上限
+ * 200 条一起控制 ECS 在 12 并发下的读盘与内存开销。换设备时云端只回填
+ * 最近一段，更早历史仍在本机本地库。保留上限防止误配成无限读爆目录。
+ */
+const DEFAULT_WAL_MAX_DAYS = 90;
+
+/**
  * 「清空对话」可见性标记（2026-10-16）：WAL 是 append-only 审计日志，清空
  * 不删行，改记 per-actor 的 cleared-at（ms），转史读取时过滤清空点之前的轮次。
  * 否则换设备拉取 ?full=1 会复活用户已明确清掉的对话（手机端既有缺口，
@@ -90,6 +99,60 @@ export async function setActorTranscriptClearedAt(
   }
 }
 
+/**
+ * 单轮删除墓碑（2026-11-22）：WAL 是 append-only，删一条只改 chat thread
+ * 不碰 WAL，导致换设备/重连拉 ?full=1 时已删轮次复活。每条删除记一个
+ * messageId 墓碑（per-actor Set），转史读取时按 clientMessageId 过滤。
+ * 与 cleared-at（全清时间点）互补：一个管单轮，一个管全量。
+ */
+const DELETED_TURNS_FILE = "deleted-turns.json";
+
+type DeletedTurnsMap = Record<string, string[]>;
+
+async function readDeletedTurnsMap(dir: string): Promise<DeletedTurnsMap> {
+  try {
+    const parsed = JSON.parse(await readFile(join(dir, DELETED_TURNS_FILE), "utf8")) as DeletedTurnsMap;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+/** 记录一批已删轮次 messageId（幂等：Set 去重；只增不减）。 */
+export async function tombstoneActorTurns(
+  dir: string,
+  actorId: string,
+  messageIds: string[],
+): Promise<void> {
+  const clean = messageIds.map((id) => id?.trim()).filter((id): id is string => !!id);
+  if (clean.length === 0) return;
+  const map = await readDeletedTurnsMap(dir);
+  const set = new Set(map[actorId] ?? []);
+  let changed = false;
+  for (const id of clean) {
+    if (!set.has(id)) {
+      set.add(id);
+      changed = true;
+    }
+  }
+  if (!changed) return;
+  map[actorId] = [...set];
+  try {
+    await writeFile(join(dir, DELETED_TURNS_FILE), JSON.stringify(map), "utf8");
+  } catch {
+    // 落盘失败 = 墓碑不生效（下次拉取可能复活已删轮次），静默不影响删除主流程
+  }
+}
+
+/** 生产路径：给某 actor 的单轮删除记墓碑。 */
+export function deleteActorTranscriptTurns(
+  actorId: string,
+  messageIds: string[],
+): Promise<void> {
+  const dir = resolveDataPath(getShortTermMemoryConfig().walDir);
+  return tombstoneActorTurns(dir, actorId, messageIds);
+}
+
 /** 生产路径：清空某 actor 的聊天记录可见性（clear-all 接线用）。 */
 export function clearActorTranscript(actorId: string, atMs = Date.now()): Promise<void> {
   const dir = resolveDataPath(getShortTermMemoryConfig().walDir);
@@ -113,7 +176,7 @@ function entryTsMs(entry: WalRawEntry): number | null {
 export async function readActorTranscriptFromWal(
   dir: string,
   actorId: string,
-  maxDays = 90,
+  maxDays = DEFAULT_WAL_MAX_DAYS,
 ): Promise<WalTranscriptTurn[]> {
   let names: string[] = [];
   try {
@@ -123,6 +186,7 @@ export async function readActorTranscriptFromWal(
   }
   if (names.length > maxDays) names = names.slice(-maxDays);
   const clearedAt = (await readClearedAtMap(dir))[actorId] ?? 0;
+  const deletedIds = new Set((await readDeletedTurnsMap(dir))[actorId] ?? []);
 
   const byKey = new Map<string, WalTranscriptTurn>();
   for (const name of names) {
@@ -148,6 +212,10 @@ export async function readActorTranscriptFromWal(
       if (!userText && !assistantText) continue;
       const ts = entryTsMs(entry);
       const key = entry.messageId?.trim() || `${ts ?? name}:${userText.slice(0, 80)}`;
+      // 单轮删除墓碑：已删轮次不下发（按 messageId 精确匹配；旧行无 id 时墓碑
+      // 亦按 ts+userText 合成的 key 写入，两端一致）。放在去重之前，确保被删的
+      // 轮次即使有重复行也不会漏过。
+      if (deletedIds.has(key)) continue;
       if (byKey.has(key)) continue;
       const turn: WalTranscriptTurn = { ts, userText, assistantText };
       if (entry.messageId?.trim()) turn.clientMessageId = entry.messageId.trim();
@@ -185,8 +253,8 @@ export async function readActorTranscriptFromWal(
     .sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0) || 0);
 }
 
-/** 生产路径：默认 WAL 目录下读某 actor 的转史。 */
-export function readActorTranscript(actorId: string, maxDays = 90): Promise<WalTranscriptTurn[]> {
+/** 生产路径：默认 WAL 目录下读某 actor 的转史（近 90 天回溯，见 DEFAULT_WAL_MAX_DAYS）。 */
+export function readActorTranscript(actorId: string, maxDays = DEFAULT_WAL_MAX_DAYS): Promise<WalTranscriptTurn[]> {
   const dir = resolveDataPath(getShortTermMemoryConfig().walDir);
   return readActorTranscriptFromWal(dir, actorId, maxDays);
 }

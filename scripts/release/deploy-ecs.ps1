@@ -86,15 +86,18 @@ fi
 node -v
 NODE_BIN=`$(command -v node)
 mkdir -p $DeployDir
-# Pre-deploy data snapshot (2026-11-10, memory-loss incident): the data root
-# lives OUTSIDE $DeployDir so a normal deploy never touches it, but this takes
-# a tar before every deploy anyway - if anything downstream (manual wipe, bad
-# migration, disk issue) destroys user memory, the last 5 deploys are always
-# recoverable. Keep the 5 newest, prune older ones.
+# Pre-deploy structured-data snapshot (local-first beta policy, 2026-11-22):
+# chat history and media are authoritative on the user's own device, so the
+# cloud keeps only the latest 2 small structured snapshots as a migration
+# safety net. Images / thumbnails / tile cache are excluded - they cost ~600MB
+# per archive and are local-cache data, not server-authoritative state.
 mkdir -p /opt/nextbot/backup/pre-deploy
-tar -czf /opt/nextbot/backup/pre-deploy/data-pre-deploy-`$(date +%Y%m%d-%H%M%S).tar.gz -C /root/.local/share/Nextbot data 2>/dev/null || true
-ls -1t /opt/nextbot/backup/pre-deploy/data-pre-deploy-*.tar.gz 2>/dev/null | tail -n +6 | xargs -r rm -f
-echo '[ecs] pre-deploy data snapshot done'
+tar -czf /opt/nextbot/backup/pre-deploy/data-pre-deploy-`$(date +%Y%m%d-%H%M%S).tar.gz \
+  --exclude='data/images' --exclude='data/images-thumbs' \
+  --exclude='data/tile-cache' --exclude='data/travel-media' \
+  -C /root/.local/share/Nextbot data 2>/dev/null || true
+ls -1t /opt/nextbot/backup/pre-deploy/data-pre-deploy-*.tar.gz 2>/dev/null | tail -n +3 | xargs -r rm -f
+echo '[ecs] pre-deploy data snapshot done (structured only, keep 2)'
 # .env 合并保护（2026-11-10 事故修复）：tar 解包会整文件覆盖服务器 .env，
 # 本地精简 .env（只有 4 个键）曾把线上 40 键配置（SMTP/MINIMAX/AMAP/充值计价）
 # 全部抹掉，OTP 验证码通道静默失效。现在：备份现网 .env → 解包到临时目录 →
@@ -196,15 +199,23 @@ Environment=WEBPAY_NOTIFY_URL=https://login.nextbot.top/api/webpay/notify
 # explicit value the service silently falls back to platform-default root resolution.
 # Keep this ASCII -- non-ASCII here-string content arrives mojibake on the server.
 Environment=NEXTBOT_DATA_DIR=/root/.local/share/Nextbot/data
-# Concurrency gates. Box is 2 vCPU / 1740 MB; measured service peak RSS was 1072 MB
-# with MemoryCurrent 334 MB. The resource pool reads MemoryMax below as its capacity,
-# so these env values are ceilings the pool may shrink further under RSS pressure
-# (elevated at 70%, critical at 88%) instead of waiting for an OOM kill.
-Environment=MAX_CONCURRENT_TURNS=6
+# Turn WAL (2026-11-22): server-side per-turn transcript jsonl. Kept ENABLED.
+# It feeds /api/chat-data/history?full=1 cross-device replay and the nightly
+# profile consolidation (consolidateProfileFromWal); structured memory extraction
+# itself does not depend on it. Re-enabled at the user's decision after a brief
+# privacy trial where it was turned off.
+Environment=AGENT_TURN_WAL_ENABLED=1
+# Concurrency gates. Calibrated 2026-11-22 with an isolated load test on this box:
+# 16 turns P50 10s, 32 turns 19.4s, 64 turns P90 36.2s with 26 queued, 96 turns V8 OOM.
+# 12 is the stable, good-experience ceiling; hardware budget is 1.42GB * 9 = 12
+# (TURNS_PER_GB in resource-pool.ts). Slow threshold raised 15s->30s so a normal
+# 20s turn no longer trips AIMD and collapses the gate to 2.
+Environment=MAX_CONCURRENT_TURNS=12
 Environment=ADAPTIVE_CONCURRENCY_ENABLED=1
-Environment=ADAPTIVE_CONCURRENCY_MIN=2
-Environment=ADAPTIVE_CONCURRENCY_MAX=6
-Environment=AGENT_BG_TASK_MAX_PARALLEL=2
+Environment=ADAPTIVE_CONCURRENCY_MIN=4
+Environment=ADAPTIVE_CONCURRENCY_MAX=12
+Environment=ADAPTIVE_CONCURRENCY_SLOW_MS=30000
+Environment=AGENT_BG_TASK_MAX_PARALLEL=4
 # Design the crash boundary instead of V8's default (~894 MB heap on this box):
 # old-space cap 768 MB keeps headroom under MemoryHigh=1200M for native + children.
 Environment=NODE_OPTIONS=--max-old-space-size=768

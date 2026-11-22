@@ -103,6 +103,7 @@ class ChatMessage {
     required this.timestamp,
     this.attachmentImageCount = 0,
     this.userImageUrls = const [],
+    this.localMediaPaths = const [],
     this.playUrl,
     this.attachments = const [],
     this.contentType = "text",
@@ -140,6 +141,10 @@ class ChatMessage {
   /// 本会话内气泡优先用内存字节即时渲染；重启/换设备后历史回填靠这份 URL
   /// 重建真实缩略图，替换旧的「配图 ×N」文案。服务端未落盘的旧消息为空。
   final List<String> userImageUrls;
+  /// 用户随消息发出的原图在本机持久图库（sent_media/）里的文件名（sha256）。
+  /// 隐私方案（2026-11-22）：聊天记录只留手机、服务端 7 天 GC 删原图，
+  /// 本机重启后靠这份本地路径重建用户照片泡，不依赖任何服务端 URL。
+  final List<String> localMediaPaths;
   /// 对局入口（来自 tool.result 或回复文本解析）。
   final String? playUrl;
 
@@ -319,6 +324,7 @@ class ChatMessage {
     DateTime? timestamp,
     int? attachmentImageCount,
     List<String>? userImageUrls,
+    List<String>? localMediaPaths,
     String? playUrl,
     bool? streaming,
     bool? pendingDelivery,
@@ -353,6 +359,7 @@ class ChatMessage {
       timestamp: timestamp ?? this.timestamp,
       attachmentImageCount: attachmentImageCount ?? this.attachmentImageCount,
       userImageUrls: userImageUrls ?? this.userImageUrls,
+      localMediaPaths: localMediaPaths ?? this.localMediaPaths,
       playUrl: playUrl ?? this.playUrl,
       streaming: streaming ?? this.streaming,
       pendingDelivery: pendingDelivery ?? this.pendingDelivery,

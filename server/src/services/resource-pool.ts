@@ -25,8 +25,8 @@ export type PressureTier = "normal" | "elevated" | "critical";
 const ELEVATED_RATIO = 0.7;
 const CRITICAL_RATIO = 0.88;
 
-/** 每 GB 内存对应的 turn 预算（保守值，2G -> 4，4G -> 8，8G+ -> 16）。 */
-const TURNS_PER_GB = 4;
+/** 每 GB 内存对应的 turn 预算（2026-11-22 实测校准：1.42GB cgroup -> 12）。 */
+const TURNS_PER_GB = 9;
 const MIN_TURN_BUDGET = 2;
 const MAX_TURN_BUDGET = 16;
 

@@ -1,4 +1,5 @@
 import "dart:async";
+import "dart:io";
 import "dart:typed_data";
 
 import "package:flutter/material.dart";
@@ -17,6 +18,7 @@ import "../features/chat/agent_action_choice_card.dart";
 import "../features/chat/agent_result_card.dart";
 import "../features/chat/evening_digest_card.dart";
 import "../features/chat/image_preview_panel.dart";
+import "../features/chat/local_media_store.dart";
 import "../features/chat/media_disk_cache.dart";
 import "../features/chat/message_body_renderer.dart";
 import "../features/chat/structured_assistant_message_body.dart";
@@ -305,14 +307,26 @@ class _MobileChatPageState extends State<MobileChatPage> {
       }
       return;
     }
-    if (frames != null && mounted) {
-      setState(() {
-        _sentImageBytes[messageId] = <Uint8List>[
-          for (final VisionWireFrame f in frames) Uint8List.fromList(f.bytes),
-        ];
-        _pendingFrames.clear();
-        _canSend = _canSendNow();
-      });
+    if (frames != null) {
+      final List<Uint8List> bytes = <Uint8List>[
+        for (final VisionWireFrame f in frames) Uint8List.fromList(f.bytes),
+      ];
+      if (mounted) {
+        setState(() {
+          _sentImageBytes[messageId] = bytes;
+          _pendingFrames.clear();
+          _canSend = _canSendNow();
+        });
+      }
+      // 隐私方案（2026-11-22）：原图落本机持久图库，重启后不依赖服务端 URL
+      // 也能回看用户照片泡。落盘在后台完成，回调 controller 把文件名挂到消息。
+      unawaited(
+        LocalMediaStore.instance.saveAll(bytes).then((List<String> paths) {
+          _controller.attachLocalMedia(messageId, paths);
+        }).catchError((Object e) {
+          debugPrint("[MobileChatPage] 本地图落盘失败: $e");
+        }),
+      );
     }
     _maybeScrollToBottom();
     if (_controller.isSideChatActive) {
@@ -1309,6 +1323,67 @@ class _MobileChatPageState extends State<MobileChatPage> {
     return _buildUserPhotoBubblesLayout(context, m, p, thumbs);
   }
 
+  /// 本机图库回填（2026-11-22）：重启后从 sent_media/ 读用户发的原图，
+  /// 完全不依赖服务端 URL。云端 7 天 GC 删原图后本机仍可回看。
+  Widget _buildUserLocalPhotoBubbles(BuildContext context, ChatMessage m,
+      MobilePalette p, List<String> paths) {
+    final List<Widget> thumbs = <Widget>[];
+    for (int i = 0; i < paths.length; i++) {
+      final String path = paths[i];
+      final File? hit = LocalMediaStore.instance.peek(path);
+      thumbs.add(GestureDetector(
+        onTap: () async {
+          final BuildContext tapContext = context;
+          final File? f = await LocalMediaStore.instance.fileFor(path);
+          List<Uint8List>? bytes;
+          if (f != null) {
+            try {
+              bytes = <Uint8List>[await f.readAsBytes()];
+            } catch (_) {}
+          }
+          if (bytes == null || !mounted || !tapContext.mounted) return;
+          showImagePreviewFullScreenFromBytes(
+            tapContext,
+            images: bytes,
+            index: 0,
+            source: "发出的照片",
+          );
+        },
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(8),
+          child: hit != null
+              ? Image.file(
+                  hit,
+                  width: 76,
+                  height: 76,
+                  fit: BoxFit.cover,
+                  gaplessPlayback: true,
+                )
+              : FutureBuilder<File?>(
+                  future: LocalMediaStore.instance.fileFor(path),
+                  builder: (BuildContext ctx, AsyncSnapshot<File?> snap) {
+                    if (snap.hasData && snap.data != null) {
+                      return Image.file(
+                        snap.data!,
+                        width: 76,
+                        height: 76,
+                        fit: BoxFit.cover,
+                        gaplessPlayback: true,
+                      );
+                    }
+                    return Container(
+                      width: 76,
+                      height: 76,
+                      color: p.userBubble.withValues(alpha: 0.4),
+                    );
+                  },
+                ),
+        ),
+      ));
+    }
+    return _buildUserPhotoBubblesLayout(context, m, p, thumbs);
+  }
+
   /// 历史回填：按服务端落盘的 userImageUrls 渲染真实缩略图（走磁盘缓存 +
   /// 凭证注入的 CachedMediaImage），替换旧的「配图 ×N」文案回退。
   Widget _buildUserUrlPhotoBubbles(
@@ -1440,6 +1515,11 @@ class _MobileChatPageState extends State<MobileChatPage> {
       final List<Uint8List>? sentImages = _sentImageBytes[m.messageId];
       if (sentImages != null && sentImages.isNotEmpty) {
         return _buildUserPhotoBubbles(context, m, p, sentImages);
+      }
+      // 隐私方案（2026-11-22）：重启后优先读本机持久图库，不依赖服务端 URL
+      // （服务端 7 天 GC 删原图 + WAL 关闭后历史不再回填 URL）。
+      if (m.localMediaPaths.isNotEmpty) {
+        return _buildUserLocalPhotoBubbles(context, m, p, m.localMediaPaths);
       }
       if (m.userImageUrls.isNotEmpty) {
         return _buildUserUrlPhotoBubbles(context, m, p, m.userImageUrls);

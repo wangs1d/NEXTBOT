@@ -97,6 +97,7 @@ import "features/chat/chat_page.dart";
 // 与手机端 mobile_chat_controller 同一入口、同一挂载规则。
 import "features/chat/render_envelope_dispatcher.dart" show extractEnvelopeBlocks;
 import "features/chat/history_media_warmer.dart";
+import "features/chat/local_media_store.dart";
 import "features/chat/composer_skill.dart";
 import "features/chat/chat_layout.dart";
 import "features/chat/content_summary_detail_modal.dart";
@@ -1326,6 +1327,27 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         await _store.listRelayInbound(ApiConfig.effectiveActorId);
 
     final bool? visionConsent = await _store.getVisionCameraConsent();
+
+    // 隐私方案（2026-11-22）：把本机图库里用户发过的图预读进内存，
+    // 供桌面端重启后 resolveUserGalleryImages 命中（服务端 7 天 GC 后不再可拉）。
+    for (final ChatMessage m in displayMessages) {
+      if (m.localMediaPaths.isEmpty) continue;
+      final List<Uint8List> imgs = <Uint8List>[];
+      for (final String path in m.localMediaPaths) {
+        final File? f = await LocalMediaStore.instance.fileFor(path);
+        if (f == null) continue;
+        try {
+          imgs.add(await f.readAsBytes());
+        } catch (_) {}
+      }
+      if (imgs.isNotEmpty) {
+        _sentGalleryImageBytes[m.messageId] = imgs;
+        // 与发送路径同一护栏：内存里只留最近 40 条带图消息。
+        while (_sentGalleryImageBytes.length >= 40) {
+          _sentGalleryImageBytes.remove(_sentGalleryImageBytes.keys.first);
+        }
+      }
+    }
 
     setState(() {
       _messages.addAll(displayMessages);
@@ -3801,6 +3823,28 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     _sentGalleryImageBytes[messageId] = images;
   }
 
+  /// 隐私方案（2026-11-22）：用户发图原图落本机持久图库。
+  /// 必须在消息已加入 [_messages] 之后调用，异步落盘后回填路径并重新持久化。
+  void _persistSentMediaLocally(String messageId, List<Uint8List> images) {
+    if (images.isEmpty) return;
+    unawaited(
+      LocalMediaStore.instance.saveAll(images).then((List<String> paths) {
+        if (paths.isEmpty || !mounted) return;
+        final int idx =
+            _messages.indexWhere((m) => m.messageId == messageId);
+        if (idx < 0) return;
+        setState(() {
+          _messages[idx] = _messages[idx].copyWith(localMediaPaths: paths);
+        });
+        unawaited(_store.saveMessage(_messages[idx]).catchError((Object e) {
+          debugPrint("[main] 本地图路径落盘失败: $e");
+        }));
+      }).catchError((Object e) {
+        debugPrint("[main] 本地图落盘失败: $e");
+      }),
+    );
+  }
+
   Future<void> _reportEmbodimentState() async {
     if (!_ws.isConnected || !mounted) return;
     final BuildContext? ctx = _rootNavigatorKey.currentContext;
@@ -3990,6 +4034,15 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     AgentSphereMoodBridge.instance.listening();
     if (!isRetry) {
       await _store.saveMessage(userMessage);
+    }
+    // 隐私方案（2026-11-22）：消息已入列后异步落盘用户原图到本机图库。
+    if (!isRetry && attachmentFrames != null && attachmentFrames.isNotEmpty) {
+      _persistSentMediaLocally(
+        userMessage.messageId,
+        <Uint8List>[
+          for (final VisionWireFrame f in attachmentFrames) _asUint8List(f.bytes),
+        ],
+      );
     }
     final Map<String, dynamic> userMsg = <String, dynamic>{
       "sessionId": ApiConfig.effectiveActorId,
@@ -4837,6 +4890,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       final Uri uri = Uri.parse("${ApiConfig.httpBase}/api/chat-data/history")
           .replace(queryParameters: <String, String>{
         "userId": actorId,
+        // 2026-11-22 全量同步：文本极小，放开上限让换设备/清数据后能翻全部历史。
         "limit": "200",
         "full": "1",
       });
