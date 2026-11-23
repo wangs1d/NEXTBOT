@@ -5,6 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { EveningDigestScheduler } from "../src/services/evening-digest-scheduler.js";
+import type {
+  EveningDigest,
+  TomorrowPreviewFacts,
+} from "../src/services/evening-digest-service.js";
 
 // 落盘隔离：已发标记文件指到一次性临时数据根，绝不碰真实数据
 // （直跑 node --test 时 npm_lifecycle_event 为空，调度器的测试进程守卫不生效）
@@ -35,25 +39,54 @@ function restoreEnv(saved: { hour?: string; minute?: string }): void {
   else process.env.EVENING_DIGEST_MINUTE = saved.minute;
 }
 
-function makeScheduler(bedtimeHour: number | null = null) {
+/**
+ * 推送面夹具（§3.4：主动推送只剩天气 + 闲聊）。
+ * 默认「有天气、有话可说」= 有内容可发。
+ */
+const pushDigest = (over: Partial<EveningDigest> = {}): EveningDigest => ({
+  date: "2026-10-16",
+  tomorrowWeather: { text: "小雨", minC: 15, maxC: 19, alerts: [] },
+  narrationText: "明天小雨，15~19℃。出门记得带伞。",
+  ...over,
+});
+
+/** 问答面夹具：完整明日事实（行程 + 天气），推送跳过时也要能取到 */
+const previewFacts = (over: Partial<TomorrowPreviewFacts> = {}): TomorrowPreviewFacts => ({
+  date: "2026-10-16",
+  tomorrowSchedule: [{ id: "t1", title: "部门例会", time: "09:30" }],
+  tomorrowWeather: { text: "小雨", minC: 15, maxC: 19, alerts: [] },
+  ...over,
+});
+
+function makeScheduler(
+  bedtimeHour: number | null = null,
+  bundle: { digest: EveningDigest; facts: TomorrowPreviewFacts } = {
+    digest: pushDigest(),
+    facts: previewFacts(),
+  },
+) {
   const fired: string[] = [];
+  const delivered: EveningDigest[] = [];
+  const skipped: Array<[string, string]> = [];
   const scheduler = new EveningDigestScheduler({
     digestService: {
-      generateDigest: async (sessionId: string) => {
+      // 调度器走一次取数两个出口的口径（§3.4），不再单独跑 generateDigest
+      buildPreviewBundle: async (sessionId: string) => {
         fired.push(sessionId);
-        return {
-          date: "2026-10-16",
-          tomorrowSchedule: [],
-          tomorrowWeather: null,
-          narrationText: "明天没安排，想睡就多睡会儿。",
-        };
+        return bundle;
       },
     } as never,
-    onDigestTriggered: () => {},
+    onDigestTriggered: (_sessionId, digest) => {
+      delivered.push(digest);
+    },
+    // 没内容不发的留痕口（装配层可接诊断漏斗）
+    onSkipped: (sessionId, reason) => {
+      skipped.push([sessionId, reason]);
+    },
     // 节律学习取用口（生产 = RhythmCore.learnedBedtimeHour，样本不足 null）
     bedtimeHourOf: () => bedtimeHour,
   });
-  return { scheduler, fired };
+  return { scheduler, fired, delivered, skipped };
 }
 
 /** 设定模拟时钟（HH:mm；mock.timers 需已在本用例作用域 enable） */
@@ -93,13 +126,15 @@ describe("EveningDigestScheduler：推送时刻动态学习（env 锁死 > 节�
     try {
       using _m = mock.timers;
       setClock(22, 59);
-      const { scheduler, fired } = makeScheduler(23.5);
+      const { scheduler, fired, delivered } = makeScheduler(23.5);
       scheduler.subscribe("s1");
       await tick(scheduler);
       assert.equal(fired.length, 0, "22:59 未到学到的 23:00 不发");
       setClock(23, 0);
       await tick(scheduler);
       assert.equal(fired.length, 1, "23:00 到点发");
+      assert.equal(delivered.length, 1, "有内容 → 投递一次");
+      assert.match(delivered[0]!.narrationText, /小雨/);
       scheduler.stop();
     } finally {
       restoreEnv(saved);
@@ -147,13 +182,14 @@ describe("EveningDigestScheduler：推送时刻动态学习（env 锁死 > 节�
     try {
       using _m = mock.timers;
       setClock(23, 10);
-      const { scheduler, fired } = makeScheduler(23.5); // 学到 23:00，此刻已过
+      const { scheduler, fired, delivered } = makeScheduler(23.5); // 学到 23:00，此刻已过
       scheduler.subscribe("s1");
       await tick(scheduler);
       assert.equal(fired.length, 1, "错过 23:00 → 首次 tick 补发");
       setClock(23, 55);
       await tick(scheduler);
       assert.equal(fired.length, 1, "同日已发不重复");
+      assert.equal(delivered.length, 1);
       scheduler.stop();
     } finally {
       restoreEnv(saved);
@@ -161,17 +197,93 @@ describe("EveningDigestScheduler：推送时刻动态学习（env 锁死 > 节�
   });
 });
 
-// ── 2026-11-05 接生产投递：最近一次 digest 缓存（聊天出口消费）───────────────
-describe("latestDigest：供应聊天里的明日预览", () => {
+// ── 2026-11-23 §3.4「没内容时」：明日预览只剩天气 + 闲聊，没内容就整格 skipped ──
+describe("EveningDigestScheduler：没内容不发兜底话术", () => {
+  it("天气拉不到且无闲聊素材 → 不投递，走 onSkipped 留痕，当日额度仍占用", async () => {
+    const saved = clearEnv();
+    try {
+      using _m = mock.timers;
+      setClock(21, 0);
+      const { scheduler, delivered, skipped } = makeScheduler(null, {
+        digest: pushDigest({ tomorrowWeather: null, narrationText: "" }),
+        facts: previewFacts({ tomorrowWeather: null }),
+      });
+      scheduler.subscribe("s1");
+      await tick(scheduler);
+      assert.equal(delivered.length, 0, "空文案绝不投递（不硬凑「早点睡」）");
+      assert.deepEqual(skipped, [["s1", "no_content"]], "跳过要留痕");
+      // 当日额度已占：不重试、不因为反复 tick 刷天气接口
+      setClock(21, 10);
+      await tick(scheduler);
+      assert.equal(delivered.length, 0);
+      scheduler.stop();
+    } finally {
+      restoreEnv(saved);
+    }
+  });
+
+  it("只有闲聊素材（天气挂了）→ 照发那一句", async () => {
+    const saved = clearEnv();
+    try {
+      using _m = mock.timers;
+      setClock(21, 0);
+      const { scheduler, delivered, skipped } = makeScheduler(null, {
+        digest: pushDigest({
+          tomorrowWeather: null,
+          chatLines: ["这周都一两点才睡，试着提前半小时"],
+          narrationText: "这周都一两点才睡，试着提前半小时。",
+        }),
+        facts: previewFacts({ tomorrowWeather: null }),
+      });
+      scheduler.subscribe("s1");
+      await tick(scheduler);
+      assert.equal(skipped.length, 0);
+      assert.equal(delivered.length, 1);
+      assert.match(delivered[0]!.narrationText, /一两点才睡/);
+      scheduler.stop();
+    } finally {
+      restoreEnv(saved);
+    }
+  });
+
+  it("推送跳过时问答面事实仍然记下（白天问「明天有什么安排」照样答得出）", async () => {
+    const saved = clearEnv();
+    try {
+      using _m = mock.timers;
+      setClock(21, 0);
+      const { scheduler, delivered } = makeScheduler(null, {
+        digest: pushDigest({ tomorrowWeather: null, narrationText: "" }),
+        facts: previewFacts(),
+      });
+      scheduler.subscribe("s1");
+      await tick(scheduler);
+      assert.equal(delivered.length, 0, "推送仍跳过");
+      assert.equal(scheduler.latestDigest("s1"), undefined, "空载荷不记");
+      const facts = scheduler.latestPreviewFacts("s1");
+      assert.equal(facts?.tomorrowSchedule[0]?.title, "部门例会");
+      scheduler.stop();
+    } finally {
+      restoreEnv(saved);
+    }
+  });
+});
+
+// ── 2026-11-05 接生产投递：当日缓存（问答面供聊天出口、推送面供补推回看）─────
+describe("latestDigest / latestPreviewFacts：当日缓存供应聊天里的明日预览", () => {
   const digestOf = (date: string) =>
     ({
       date,
+      tomorrowWeather: { text: "小雨", minC: 15, maxC: 19, alerts: [] },
+      narrationText: "明天小雨，15~19℃。",
+    }) as EveningDigest;
+  const factsOf = (date: string) =>
+    ({
+      date,
       tomorrowSchedule: [{ id: "t1", title: "部门例会", time: "09:30" }],
-      tomorrowWeather: null,
-      narrationText: "",
-    }) as const;
+      tomorrowWeather: { text: "小雨", minC: 15, maxC: 19, alerts: [] },
+    }) as TomorrowPreviewFacts;
 
-  it("推送后能取到当日 digest", async () => {
+  it("推送后两面都能取到当日数据", async () => {
     const saved = clearEnv();
     try {
       using _m = mock.timers;
@@ -180,21 +292,28 @@ describe("latestDigest：供应聊天里的明日预览", () => {
       scheduler.subscribe("s1");
       await tick(scheduler);
       const latest = scheduler.latestDigest("s1");
-      assert.ok(latest, "推送后应可回取");
+      assert.ok(latest, "推送后应可回取推送面");
       assert.equal(latest?.date, "2026-10-16", "取到的必须是当日 digest");
+      assert.equal(
+        scheduler.latestPreviewFacts("s1")?.tomorrowSchedule.length,
+        1,
+        "问答面带完整行程（§3.4 之后聊天里的日程只能从这一面答）",
+      );
       scheduler.stop();
     } finally {
       restoreEnv(saved);
     }
   });
 
-  it("跨日自动失效：昨天的 digest 不再当明日预览用", () => {
+  it("跨日自动失效：昨天的数据不再当明日预览用", () => {
     const scheduler = new EveningDigestScheduler({
-      digestService: { generateDigest: async () => digestOf("2020-01-01") },
+      digestService: { buildPreviewBundle: async () => ({ digest: digestOf("2020-01-01"), facts: factsOf("2020-01-01") }) },
       onDigestTriggered: () => {},
     } as unknown as ConstructorParameters<typeof EveningDigestScheduler>[0]);
-    scheduler.rememberDigest("s1", digestOf("2020-01-01") as never);
+    scheduler.rememberDigest("s1", digestOf("2020-01-01"));
+    scheduler.rememberPreviewFacts("s1", factsOf("2020-01-01"));
     assert.equal(scheduler.latestDigest("s1"), undefined);
+    assert.equal(scheduler.latestPreviewFacts("s1"), undefined);
   });
 
   it("未推送过的 session 返回 undefined（不凭空造预览）", () => {
@@ -203,5 +322,6 @@ describe("latestDigest：供应聊天里的明日预览", () => {
       onDigestTriggered: () => {},
     } as unknown as ConstructorParameters<typeof EveningDigestScheduler>[0]);
     assert.equal(scheduler.latestDigest("nobody"), undefined);
+    assert.equal(scheduler.latestPreviewFacts("nobody"), undefined);
   });
 });

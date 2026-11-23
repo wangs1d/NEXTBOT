@@ -143,22 +143,16 @@ export type HttpRouteDeps = {
    */
   agentPulseCheck?: (opts?: {
     force?: boolean;
-    fixture?: {
-      tasks?: string[];
-      unread?: string[];
-      goals?: string[];
-      interests?: string[];
-      goalLine?: string;
-      findings?: string[];
-      presence?: string;
-      screenFocus?: string;
-      recentTurns?: string[];
-    };
+    fixture?: import("../../proactivity/agent-pulse.js").PulseFixture;
   }) => Promise<unknown>;
   /** 主动触达负反馈抑制表（Task 20 统一频控框架）；可选，未注入时抑制路由不挂载 */
   proactivitySuppressionStore?: ProactivitySuppressionStore;
   /** 统一主动性管道（docs/proactivity-architecture.md）；可选，未注入时诊断路由不挂载 */
   proactivePipeline?: import("../../proactivity/proactive-pipeline.js").ProactivePipeline | null;
+  /** 手机信号 15 分钟聚合桶（§7.2）；可选，未注入时诊断不出 phoneSignals */
+  proactivityPhoneBuckets?: import("../../proactivity/phone-signal-buckets.js").PhoneSignalBucketStore | null;
+  /** 看板「完成」按钮凭据签发器（§5.2，与 WS 推送同一实例，小组件复用同一枚 token） */
+  proactivityBoardActions?: import("../../proactivity/board-complete-actions.js").BoardCompleteActions | null;
   /** 移动端推送通道（离线必达升级）；可选，未注入时推送注册路由禁用 */
   proactivePushService?: import("../../proactivity/mobile-push-service.js").MobilePushService | null;
   /**
@@ -177,6 +171,8 @@ export type HttpRouteDeps = {
   agentActivityStore: import("../../proactivity/activity-store.js").AgentActivityStore;
   /** 账单/快递汇总台账（「动态」tab bills/parcels 区块数据源；未注入时区块为空） */
   billParcelLedger?: import("../../services/bill-parcel-ledger.js").BillParcelLedger | null;
+  /** 订阅盘点（动态页月报卡的续费段数据源；未注入时订阅段为空） */
+  subscriptionAuditService?: import("../../services/subscription-audit-service.js").SubscriptionAuditService | null;
   /** 跨源统一采集库（「动态」tab mail 要事区块数据源；未注入时区块为空） */
   sourceStore?: import("../../proactivity/source-store.js").SourceStore | null;
   /** 行为审计时间线（GET /agent/audit-timeline；可选，未注入时该端点 503） */

@@ -50,14 +50,19 @@ export function renderCommitmentBlock(rows: readonly CommitmentRow[], now = Date
   return lines.join("\n");
 }
 
-function query(actorId: string): CommitmentRow[] {
-  const db = openAgenticSqlite();
+/**
+ * 【待办与承诺】只放**要去做的事**。§3.5 的跟进事件（source='follow_up'，同一张
+ * commitments 表 kind='follow_up' 的行）不注入这里：它的到期时刻总是最近，混进来会
+ * 把真待办挤出 top3，而跟进的开口由触点计划经统一管道负责，不需要模型自己想起来。
+ */
+function query(actorId: string): CommitmentRow[] {  const db = openAgenticSqlite();
   try {
     const rows = db
       .prepare(
         `SELECT id, text, deadline, created_at as createdAt, category
          FROM commitments
          WHERE actor_id = ? AND status = 'active'
+           AND source <> 'follow_up'
          ORDER BY COALESCE(deadline, '9999') ASC, created_at DESC
          LIMIT ?`,
       )

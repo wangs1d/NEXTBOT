@@ -279,6 +279,7 @@ export async function consolidateProfileFromWal(
     extraction.facts.length +
     extraction.corrections.length +
     (extraction.referents?.length ?? 0) +
+    (extraction.followUps?.length ?? 0) +
     (extraction.forget?.length ?? 0);
   stats.sideChannels = sideChannelCount;
   if (sideChannelCount > 0) deps.applySideChannels?.(extraction);
@@ -322,6 +323,10 @@ export function getDefaultProfileConsolidator(): (
             referents:
               extraction.referents && extraction.referents.length > 0
                 ? extraction.referents
+                : undefined,
+            followUps:
+              extraction.followUps && extraction.followUps.length > 0
+                ? extraction.followUps
                 : undefined,
           });
         },

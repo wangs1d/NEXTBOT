@@ -474,8 +474,10 @@ class ClientLocationService {
   /// 绝不拿磁盘旧缓存冒充实时坐标——那会把无龄期的旧坐标写进服务端缓存。
   static Future<ClientLocationPayload?> getCurrentLocationForAgentReply() async {
     try {
+      // 服务端 requestLocation 等 12s：端侧收口略早于服务端（11s），
+      // 给室内/冷启动 GPS 留更多收敛时间，减少「预选位置出不来」。
       return await _fetchAgentReplyCoords()
-          .timeout(const Duration(seconds: 8));
+          .timeout(const Duration(seconds: 11));
     } catch (e) {
       debugPrint("[ClientLocationService] 按需定位未取到坐标（回 null 交服务端兜底）: $e");
       return null;
@@ -483,8 +485,8 @@ class ClientLocationService {
   }
 
   static Future<ClientLocationPayload?> _fetchAgentReplyCoords() {
-    // 工具按需路径（服务端等 12s）：给足 7.5s，高德 + geolocator 共享预算。
-    return _fetchPreciseCoords(budget: const Duration(milliseconds: 7500));
+    // 工具按需路径（服务端等 12s）：给足 10s，高德 + geolocator 并行共享预算。
+    return _fetchPreciseCoords(budget: const Duration(milliseconds: 10000));
   }
 
   /// 高精度取点（高德 ⇄ geolocator **并行赛跑**，达标即回）。

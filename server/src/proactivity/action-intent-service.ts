@@ -59,6 +59,8 @@ export type ActionIntentRegisterInput = {
   /** 覆盖默认有效期（ms） */
   ttlMs?: number;
   deliveryId?: string;
+  /** 通知栏回复线程轮次（2026-11-29 §4.3），见 ActionIntent.replyRound */
+  replyRound?: ActionIntent["replyRound"];
 };
 
 export type ExecuteOutcome =
@@ -84,7 +86,29 @@ export type ClientActionIntent = {
   risk: ActionRisk;
   expiresAt: number;
   actions: ClientAction[];
+  /**
+   * 「打开对话」导航动作（2026-11-30 §4.4 App 被杀时的决策半屏页）。
+   *
+   * 为什么单独一枚、不塞进 actions：通知栏并排按钮上限是 2（§4.2 硬规则），
+   * 半屏页除了那两个执行按钮还需要一个「算了，去对话里说」的出口。它走的仍是
+   * 同一条 action-intent 链路（同一枚 HMAC token、同一次幂等执行），所以
+   * 不需要为它新建任何状态存储。
+   */
+  openChat?: ClientAction;
 };
+
+/**
+ * 「打开对话」的 actionId（与 notification-actions.ts 的 `NOTIFY_ACTION.openChat`
+ * 逐字相同——那边注册执行器，这边签发/识别 token；常量在这一侧，是为了让
+ * notification-actions → action-intent-service 保持单向依赖，不出环）。
+ */
+export const OPEN_CHAT_ACTION_ID = "chat.open";
+export const OPEN_CHAT_LABEL = "打开对话";
+
+/** 半屏页「打开对话」用的那枚动作（不属于任何一条意图的 actions，按需合成） */
+export function openChatAction(): ActionIntentAction {
+  return { actionId: OPEN_CHAT_ACTION_ID, label: OPEN_CHAT_LABEL, kind: "execute" };
+}
 
 /**
  * 读取/创建动作意图签名密钥。
@@ -113,6 +137,13 @@ export function loadActionIntentSecret(keyPath: string): string {
 export class ActionIntentService {
   private readonly executors = new Map<string, ActionExecutor>();
   private readonly nowFn: () => number;
+  /**
+   * 执行成功回调（2026-11-23 通知闭环 M1：跨端消除）。只在**首次真执行成功**时触发
+   * （幂等命中 / 执行失败都不触发）；装配层据此向该账号所有在线设备广播
+   * action_intent.resolved。回调异常不影响执行结果。
+   */
+  private onExecuted: ((info: { intent: ActionIntent; actionId: string; result: ActionExecutionResult }) => void) | null =
+    null;
 
   constructor(
     private readonly deps: {
@@ -127,6 +158,13 @@ export class ActionIntentService {
   /** 注册动作执行器（按 actionId 精确匹配） */
   registerExecutor(actionId: string, executor: ActionExecutor): void {
     this.executors.set(actionId, executor);
+  }
+
+  /** 装配层晚绑定执行成功回调（见 [onExecuted]）；传 null 解除 */
+  setOnExecuted(
+    cb: ((info: { intent: ActionIntent; actionId: string; result: ActionExecutionResult }) => void) | null,
+  ): void {
+    this.onExecuted = cb;
   }
 
   /**
@@ -150,6 +188,7 @@ export class ActionIntentService {
       state: "pending",
       executedActions: [],
       ...(input.deliveryId ? { deliveryId: input.deliveryId } : {}),
+      ...(input.replyRound ? { replyRound: input.replyRound } : {}),
     });
   }
 
@@ -166,24 +205,42 @@ export class ActionIntentService {
   /**
    * 渲染给客户端的视图：每个动作带上它自己的一次性 token。
    * 聊天卡与通知栏用的是**同一份**这个视图——两个渲染面，同一真相源。
+   *
+   * `displayIntentId`（2026-11-29 §4.3）：只改**写给客户端看**的那个 id，token 里
+   * 签的仍是这条意图自己的 intentId（验签/幂等各轮独立）。回复线程的每一轮都拿
+   * 根意图 id 出去，客户端才会把 agent 的新回复**原地更新到同一条通知**
+   * （通知 id = notificationIdFor(intentId)），而不是又弹一条。
+   *
+   * `withOpenChat`（2026-11-30 §4.4）：离线厂商推送那一侧专用——系统模板通知渲染
+   * 不出按钮，点开进的是**决策半屏页**，页上必须留一个「打开对话」的出口。视图
+   * 多带一枚 openChat 动作（同一套签发），聊天卡与通知栏的按钮数量不受影响。
    */
-  renderForClient(intent: ActionIntent): ClientActionIntent {
+  renderForClient(
+    intent: ActionIntent,
+    opts: { displayIntentId?: string; withOpenChat?: boolean } = {},
+  ): ClientActionIntent {
     return {
-      intentId: intent.intentId,
+      intentId: opts.displayIntentId?.trim() || intent.intentId,
       title: intent.title,
       body: intent.body,
       ...(intent.summary ? { summary: intent.summary } : {}),
       risk: intent.risk,
       expiresAt: intent.expiresAt,
-      actions: intent.actions.map((a) => ({
-        actionId: a.actionId,
-        label: a.label,
-        kind: a.kind,
-        token: this.issueToken(intent, a),
-        ...(a.inputLabel ? { inputLabel: a.inputLabel } : {}),
-        ...(a.allowFreeFormInput !== undefined ? { allowFreeFormInput: a.allowFreeFormInput } : {}),
-        ...(a.inputChoices?.length ? { inputChoices: a.inputChoices } : {}),
-      })),
+      actions: intent.actions.map((a) => this.renderAction(intent, a)),
+      ...(opts.withOpenChat ? { openChat: this.renderAction(intent, openChatAction()) } : {}),
+    };
+  }
+
+  /** 单个动作 → 客户端视图（带 token）；actions 渲染与 openChat 共用同一份口径 */
+  private renderAction(intent: ActionIntent, a: ActionIntentAction): ClientAction {
+    return {
+      actionId: a.actionId,
+      label: a.label,
+      kind: a.kind,
+      token: this.issueToken(intent, a),
+      ...(a.inputLabel ? { inputLabel: a.inputLabel } : {}),
+      ...(a.allowFreeFormInput !== undefined ? { allowFreeFormInput: a.allowFreeFormInput } : {}),
+      ...(a.inputChoices?.length ? { inputChoices: a.inputChoices } : {}),
     };
   }
 
@@ -223,7 +280,13 @@ export class ActionIntentService {
     if (intent.state === "cancelled") {
       return { error: "这件事已经不需要处理了", code: "cancelled", intent };
     }
-    const action = intent.actions.find((x) => x.actionId === parsed.a);
+    const action =
+      intent.actions.find((x) => x.actionId === parsed.a) ??
+      // 「打开对话」是**导航出口**，不是这条决策的按钮之一（通知栏只有 2 个按钮位，
+      // §4.4 的半屏页要额外留这一项）。它不在 intent.actions 里，但 token 是服务端
+      // 用同一条 HMAC 链路签发的——验签/过期/归属/幂等一个都不放宽，所以这里放行
+      // 的只是一枚本来就只有本人才拿得到的凭据。
+      (parsed.a === OPEN_CHAT_ACTION_ID ? openChatAction() : undefined);
     if (!action) return { error: "动作不存在", code: "action_not_found", intent };
     return { intent, action };
   }
@@ -305,6 +368,11 @@ export class ActionIntentService {
     if (!result.ok) {
       // 执行器明确失败：如实回报（客户端会把这句话显示给用户，不假装成功）
       return { ok: false, error: result.message, code: "action_failed", intent: updated };
+    }
+    try {
+      this.onExecuted?.({ intent: updated, actionId: action.actionId, result });
+    } catch (err) {
+      console.warn(`[ActionIntent] onExecuted 回调失败（不影响执行结果）: ${err}`);
     }
     return { ok: true, intent: updated, action, result, alreadyExecuted: false };
   }

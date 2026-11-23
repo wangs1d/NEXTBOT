@@ -122,6 +122,19 @@ class MobileDynamicsPageState extends State<MobileDynamicsPage> {
     return v ?? 0;
   }
 
+  /// 「{月份}小结」原始数据（服务端 monthly 字段；null = 台账未启用，整卡不渲染）
+  Map<String, dynamic>? get _monthly {
+    final Object? raw = _data["monthly"];
+    return raw is Map<String, dynamic> && raw.isNotEmpty ? raw : null;
+  }
+
+  /// 月报卡明细页要用的账单条目（与下方账单区块同一份，不再发第二次请求）
+  List<String> get _billTypes {
+    final List<dynamic> raw =
+        (_data["billTypes"] as List<dynamic>?) ?? const <dynamic>[];
+    return raw.whereType<String>().toList(growable: false);
+  }
+
   @override
   Widget build(BuildContext context) {
     final MobilePalette p = MobileTheme.of(context);
@@ -182,11 +195,13 @@ class MobileDynamicsPageState extends State<MobileDynamicsPage> {
     final num billTotal = _numOf("bills", "totalAmount");
     final num billCount = _numOf("bills", "count");
     final num awaiting = _numOf("parcels", "awaitingPickup");
+    final Map<String, dynamic>? monthly = _monthly;
     final bool allEmpty = bills.isEmpty &&
         parcels.isEmpty &&
         pending.isEmpty &&
         activity.isEmpty &&
-        mail.isEmpty;
+        mail.isEmpty &&
+        monthly == null;
 
     return ListView(
       padding: const EdgeInsets.only(bottom: 24),
@@ -256,12 +271,19 @@ class MobileDynamicsPageState extends State<MobileDynamicsPage> {
                 ],
               ),
             ),
-          if (bills.isNotEmpty)
+          if (bills.isNotEmpty || monthly != null)
             _Section(
               p: p,
               title: "账单",
               child: Column(
                 children: [
+                  // §9 钱的月报：区块顶部的「{月份}小结」卡，点开看明细 + 改类目
+                  if (monthly != null)
+                    _MonthlySummaryCard(
+                      p: p,
+                      monthly: monthly,
+                      onTap: () => _openMonthlyDetail(context, monthly, bills),
+                    ),
                   for (final item in bills) _BillCard(p: p, item: item),
                 ],
               ),
@@ -337,6 +359,26 @@ class MobileDynamicsPageState extends State<MobileDynamicsPage> {
         MaterialPageRoute<void>(
           builder: (_) => MobileMailDetailPage(
             items: MobileDynamicsPageState.sortMailByNewest(items),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 点「{月份}小结」卡 → 月报明细页（§9 交互：点开看明细，类目可改）。
+  /// 账单条目复用本页已拉取的 bills.recent，改类目后由详情页自己回写本地状态。
+  void _openMonthlyDetail(
+    BuildContext context,
+    Map<String, dynamic> monthly,
+    List<Map<String, dynamic>> bills,
+  ) {
+    unawaited(
+      Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => MobileMonthlyDetailPage(
+            monthly: monthly,
+            bills: bills,
+            billTypes: _billTypes,
           ),
         ),
       ),
@@ -900,6 +942,621 @@ class _MailDetailRow extends StatelessWidget {
             style: TextStyle(color: p.textMuted, fontSize: 11),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------- //
+// §9 钱的月报（PRD 需求七）：「{月份}小结」卡 + 明细页
+// ---------------------------------------------------------------------- //
+
+/// `/api/dynamics` 的 `monthly` 字段的类型化读法。
+///
+/// 原始 Map 只在这里解析一次：卡片与明细页共用同一份口径，UI 里不到处 cast。
+/// 缺字段一律按零值渲染——服务端每个区块都可选，客户端不能因为少一段就崩。
+class _MonthlyView {
+  _MonthlyView(this.raw);
+
+  final Map<String, dynamic> raw;
+
+  Map<String, dynamic> _sub(String key) {
+    final Object? v = raw[key];
+    return v is Map<String, dynamic> ? v : const <String, dynamic>{};
+  }
+
+  List<Map<String, dynamic>> _list(String key) {
+    final List<dynamic>? v = raw[key] as List<dynamic>?;
+    return v?.whereType<Map<String, dynamic>>().toList(growable: false) ??
+        const <Map<String, dynamic>>[];
+  }
+
+  static num _n(Map<String, dynamic> m, String key) => (m[key] as num?) ?? 0;
+
+  Map<String, dynamic> get totals => _sub("totals");
+  Map<String, dynamic> get previous => _sub("previous");
+  Map<String, dynamic> get mom => _sub("mom");
+  Map<String, dynamic> get subscriptions => _sub("subscriptions");
+  Map<String, dynamic>? get largest {
+    final Map<String, dynamic> v = _sub("largest");
+    return v.isEmpty ? null : v;
+  }
+
+  List<Map<String, dynamic>> get topCategories => _list("topCategories");
+
+  /// 本月已扣 / 下月预计扣款（都在 subscriptions 段里）
+  List<Map<String, dynamic>> get charged {
+    final Object? v = subscriptions["charged"];
+    return v is List<dynamic>
+        ? v.whereType<Map<String, dynamic>>().toList(growable: false)
+        : const <Map<String, dynamic>>[];
+  }
+
+  List<Map<String, dynamic>> get forecast {
+    final Object? v = subscriptions["forecast"];
+    return v is List<dynamic>
+        ? v.whereType<Map<String, dynamic>>().toList(growable: false)
+        : const <Map<String, dynamic>>[];
+  }
+
+  String get month => raw["month"]?.toString() ?? "";
+  String get monthLabel => raw["monthLabel"]?.toString() ?? "本月";
+  bool get complete => raw["complete"] == true;
+  String get coverageHint => raw["coverageHint"]?.toString() ?? "";
+
+  num get totalAmount => _n(totals, "totalAmount");
+  num get count => _n(totals, "count");
+  num get amountCount => _n(totals, "amountCount");
+  num get missingAmount => _n(totals, "missingAmount");
+
+  /// 标题：「11月小结」（1 日推出的是上月完整版，卡片自己标出来）
+  String get title => "$monthLabel小结";
+  String get phaseLabel => complete ? "上月完整版" : "本月进行中";
+
+  /// 环比一句话。上月为 0 时服务端不给 ratio，此时只说绝对差额。
+  String get momLine {
+    final String delta = "¥${MobileDynamicsPageState._fmtAmount(_n(mom, "deltaAmount"))}";
+    switch (mom["direction"]?.toString()) {
+      case "up":
+        return "比${_shortMonth()}多花 $delta${_momPct()}";
+      case "down":
+        return "比${_shortMonth()}少花 $delta${_momPct()}";
+      default:
+        return "与${_shortMonth()}持平";
+    }
+  }
+
+  String _shortMonth() {
+    // previous.month = "2026-10" → "10月"
+    final List<String> parts = previous["month"]?.toString().split("-") ?? const [];
+    if (parts.length == 2) {
+      final int? n = int.tryParse(parts[1]);
+      if (n != null) return "$n月";
+    }
+    return "上月";
+  }
+
+  String _momPct() {
+    final Object? r = mom["ratio"];
+    if (r is! num) return "";
+    final int pct = (r.abs() * 100).round();
+    return "（$pct%）";
+  }
+
+  /// 订阅/续费一句话：本月已扣 + 下月预计扣款
+  String get subscriptionLine {
+    final num charged = _n(subscriptions, "chargedCount");
+    final num forecast = _n(subscriptions, "forecastCount");
+    if (charged == 0 && forecast == 0) return "";
+    final String a = charged == 0
+        ? "本月订阅未扣款"
+        : "本月已扣 $charged 笔 ¥${MobileDynamicsPageState._fmtAmount(_n(subscriptions, "chargedAmount"))}";
+    final String b = forecast == 0
+        ? "下月无预计扣款"
+        : "下月预计 $forecast 笔 ¥${MobileDynamicsPageState._fmtAmount(_n(subscriptions, "forecastAmount"))}";
+    return "$a · $b";
+  }
+}
+
+/// 「{月份}小结」卡：合计 + 环比 + Top3 类目 + 最大单笔 + 续费 + 覆盖率提示。
+/// 整卡可点，点开进明细页（类目在那里改）。
+class _MonthlySummaryCard extends StatelessWidget {
+  const _MonthlySummaryCard({
+    required this.p,
+    required this.monthly,
+    required this.onTap,
+  });
+
+  final MobilePalette p;
+  final Map<String, dynamic> monthly;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final _MonthlyView m = _MonthlyView(monthly);
+    final Map<String, dynamic>? largest = m.largest;
+    final String subLine = m.subscriptionLine;
+    final bool noData = m.count == 0;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        width: double.infinity,
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: p.surface,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: p.divider.withValues(alpha: 0.6)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Text(
+                  m.title,
+                  style: TextStyle(
+                    color: p.textPrimary,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                _PhaseChip(p: p, label: m.phaseLabel),
+                const Spacer(),
+                Icon(Icons.chevron_right, size: 18, color: p.textMuted),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.baseline,
+              textBaseline: TextBaseline.alphabetic,
+              children: [
+                Text(
+                  noData ? "—" : "¥${MobileDynamicsPageState._fmtAmount(m.totalAmount)}",
+                  style: TextStyle(
+                    color: p.textPrimary,
+                    fontSize: 24,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  noData ? "这个月还没有识别到账单" : "${m.count} 笔 · ${m.momLine}",
+                  style: TextStyle(color: p.textSecondary, fontSize: 12),
+                ),
+              ],
+            ),
+            if (m.topCategories.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              for (final Map<String, dynamic> c in m.topCategories)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 4),
+                  child: Row(
+                    children: [
+                      SizedBox(
+                        width: 96,
+                        child: Text(
+                          c["type"]?.toString() ?? "其他",
+                          style: TextStyle(color: p.textSecondary, fontSize: 13),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      Text(
+                        "¥${MobileDynamicsPageState._fmtAmount(_MonthlyView._n(c, "amount"))}",
+                        style: TextStyle(
+                          color: p.textPrimary,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        "${(_MonthlyView._n(c, "ratio") * 100).round()}%",
+                        style: TextStyle(color: p.textMuted, fontSize: 11),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+            if (largest != null) ...[
+              const SizedBox(height: 2),
+              Text(
+                "最大单笔：${largest["title"]?.toString() ?? ""} ¥${MobileDynamicsPageState._fmtAmount(_MonthlyView._n(largest, "amount"))}",
+                style: TextStyle(color: p.textMuted, fontSize: 12),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ],
+            if (subLine.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Text(
+                subLine,
+                style: TextStyle(color: p.textSecondary, fontSize: 12),
+              ),
+            ],
+            if (m.missingAmount > 0) ...[
+              const SizedBox(height: 6),
+              Text(
+                m.coverageHint,
+                // 覆盖率提示是"要补一下"的信号，用暖色但不用报错红——
+                //  MobilePalette 没有 warning 档，这里与紧急快递的红点区分开。
+                style: const TextStyle(color: Color(0xFFB45309), fontSize: 12),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 卡片角标：区分「本月进行中」与「上月完整版」（1 日切换的可见证据）
+class _PhaseChip extends StatelessWidget {
+  const _PhaseChip({required this.p, required this.label});
+
+  final MobilePalette p;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: p.innerFieldBackground,
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(color: p.textMuted, fontSize: 10),
+      ),
+    );
+  }
+}
+
+/// 月报明细页：小结全量数字 + 本月账单明细，类目在这里改。
+///
+/// 改类目 → POST /api/dynamics/bills/category → 服务端回写台账并打纠正标记，
+/// 下一次识别把这条当训练样本用（分类器反馈闭环）。改完只更新本地这一行，
+/// 不回灌整页重拉：合计要变的是下一次打开动态页，用户当场看的是这条改对了。
+class MobileMonthlyDetailPage extends StatefulWidget {
+  const MobileMonthlyDetailPage({
+    super.key,
+    required this.monthly,
+    required this.bills,
+    required this.billTypes,
+  });
+
+  final Map<String, dynamic> monthly;
+  final List<Map<String, dynamic>> bills;
+  final List<String> billTypes;
+
+  @override
+  State<MobileMonthlyDetailPage> createState() => _MobileMonthlyDetailPageState();
+}
+
+class _MobileMonthlyDetailPageState extends State<MobileMonthlyDetailPage> {
+  late List<Map<String, dynamic>> _bills = List<Map<String, dynamic>>.of(
+    widget.bills,
+  );
+  bool _saving = false;
+
+  Future<void> _correctCategory(
+    Map<String, dynamic> item,
+    String current,
+  ) async {
+    final String? id = item["id"]?.toString();
+    if (id == null) return;
+    final List<String> options = <String>[
+      ...widget.billTypes.where((String t) => t != current),
+      if (current.isNotEmpty) current,
+    ];
+    final String? picked = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: MobileTheme.of(context).surface,
+      builder: (BuildContext ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
+              child: Text(
+                "这条账单归到哪一类？",
+                style: TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                  color: MobileTheme.of(ctx).textPrimary,
+                ),
+              ),
+            ),
+            Flexible(
+              child: ListView(
+                shrinkWrap: true,
+                children: [
+                  for (final String t in options)
+                    ListTile(
+                      dense: true,
+                      title: Text(t),
+                      onTap: () => Navigator.of(ctx).pop(t),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (picked == null || picked == current) return;
+    setState(() => _saving = true);
+    String? err;
+    try {
+      final Uri uri = Uri.parse(
+        "${ApiConfig.httpBase}/api/dynamics/bills/category",
+      );
+      final http.Response res = await NbHttp.post(
+        uri,
+        headers: const <String, String>{"Content-Type": "application/json"},
+        body: jsonEncode(<String, dynamic>{
+          "userId": ApiConfig.effectiveActorId,
+          "id": id,
+          "billType": picked,
+        }),
+      ).timeout(const Duration(seconds: 15));
+      final Map<String, dynamic> body =
+          jsonDecode(res.body) as Map<String, dynamic>;
+      if (res.statusCode != 200 || body["ok"] != true) {
+        err = body["error"]?.toString() ?? "HTTP ${res.statusCode}";
+      } else {
+        _bills = _bills
+            .map(
+              (Map<String, dynamic> e) =>
+                  e["id"]?.toString() == id
+                      ? <String, dynamic>{...e, "billType": picked}
+                      : e,
+            )
+            .toList(growable: false);
+      }
+    } catch (e) {
+      err = "$e";
+    }
+    if (!mounted) return;
+    setState(() => _saving = false);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        duration: const Duration(seconds: 2),
+        content: Text(err == null ? "已改成「$picked」，我会记住这个分类" : "改类目失败：$err"),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final MobilePalette p = MobileTheme.of(context);
+    final _MonthlyView m = _MonthlyView(widget.monthly);
+    final Map<String, dynamic>? largest = m.largest;
+    return Scaffold(
+      backgroundColor: p.background,
+      appBar: AppBar(title: Text(m.title)),
+      body: ListView(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+        children: [
+          _SummaryCard(
+            p: p,
+            label: "${m.monthLabel}合计",
+            value: m.count == 0 ? "—" : "¥${MobileDynamicsPageState._fmtAmount(m.totalAmount)}",
+            hint: m.count == 0 ? "暂无识别到的账单" : "${m.count} 笔 · ${m.momLine}",
+          ),
+          const SizedBox(height: 10),
+          _DetailBlock(
+            p: p,
+            title: "分类",
+            lines: m.topCategories
+                .map(
+                  (Map<String, dynamic> c) =>
+                      "${c["type"] ?? "其他"} ¥${MobileDynamicsPageState._fmtAmount(_MonthlyView._n(c, "amount"))}（${c["count"] ?? 0} 笔 · ${(_MonthlyView._n(c, "ratio") * 100).round()}%）",
+                )
+                .toList(growable: false),
+            empty: "还没有带金额的账单",
+          ),
+          _DetailBlock(
+            p: p,
+            title: "最大单笔",
+            lines: largest == null
+                ? const <String>[]
+                : <String>[
+                    "${largest["title"] ?? ""} ¥${MobileDynamicsPageState._fmtAmount(_MonthlyView._n(largest, "amount"))}",
+                    MobileDynamicsPageState._fmtTime(
+                      _MonthlyView._n(largest, "occurredAt"),
+                    ),
+                  ],
+            empty: "暂无带金额的账单",
+          ),
+          _DetailBlock(
+            p: p,
+            title: "订阅 / 自动续费",
+            lines: <String>[
+              if (m.subscriptionLine.isNotEmpty) m.subscriptionLine,
+              for (final Map<String, dynamic> s in m.charged)
+                "已扣：${s["merchant"]} ¥${MobileDynamicsPageState._fmtAmount(_MonthlyView._n(s, "amount"))}（${MobileDynamicsPageState._fmtTime(_MonthlyView._n(s, "chargedAt"))}）",
+              for (final Map<String, dynamic> f in m.forecast)
+                "预计：${f["merchant"]} ¥${MobileDynamicsPageState._fmtAmount(_MonthlyView._n(f, "amount"))}（${MobileDynamicsPageState._fmtTime(_MonthlyView._n(f, "expectedAt"))}）",
+            ],
+            empty: "没有识别到订阅或自动续费",
+          ),
+          _DetailBlock(
+            p: p,
+            title: "识别覆盖率",
+            lines: <String>[
+              "${m.amountCount}/${m.count} 笔带金额",
+              if (m.coverageHint.isNotEmpty) m.coverageHint,
+            ],
+            empty: "",
+          ),
+          const SizedBox(height: 16),
+          Text(
+            "账单明细（点一条改类目）",
+            style: TextStyle(
+              color: p.textSecondary,
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 8),
+          if (_bills.isEmpty)
+            Text("本月暂无明细", style: TextStyle(color: p.textMuted, fontSize: 13))
+          else
+            for (final Map<String, dynamic> item in _bills)
+              _MonthlyBillRow(
+                p: p,
+                item: item,
+                busy: _saving,
+                onCorrect: () => _correctCategory(
+                  item,
+                  item["billType"]?.toString() ?? "",
+                ),
+              ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 明细页的一组说明（标题 + 若干行；空则不渲染整块）
+class _DetailBlock extends StatelessWidget {
+  const _DetailBlock({
+    required this.p,
+    required this.title,
+    required this.lines,
+    required this.empty,
+  });
+
+  final MobilePalette p;
+  final String title;
+  final List<String> lines;
+  final String empty;
+
+  @override
+  Widget build(BuildContext context) {
+    final List<String> content =
+        lines.where((String l) => l.isNotEmpty).toList(growable: false);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: p.surface,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: p.divider.withValues(alpha: 0.6)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              title,
+              style: TextStyle(
+                color: p.textSecondary,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            const SizedBox(height: 6),
+            if (content.isEmpty)
+              Text(empty, style: TextStyle(color: p.textMuted, fontSize: 12))
+            else
+              for (final String line in content)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 3),
+                  child: Text(
+                    line,
+                    style: TextStyle(
+                      color: p.textPrimary,
+                      fontSize: 13,
+                      height: 1.4,
+                    ),
+                  ),
+                ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 明细页一条账单：摘要 + 金额 + 当前类目，点整行改类目。
+class _MonthlyBillRow extends StatelessWidget {
+  const _MonthlyBillRow({
+    required this.p,
+    required this.item,
+    required this.busy,
+    required this.onCorrect,
+  });
+
+  final MobilePalette p;
+  final Map<String, dynamic> item;
+  final bool busy;
+  final VoidCallback onCorrect;
+
+  @override
+  Widget build(BuildContext context) {
+    final String title = item["title"]?.toString() ?? "账单";
+    final String? billType = item["billType"]?.toString();
+    final num? amount = item["amount"] as num?;
+    final num at = (item["occurredAt"] as num?) ?? 0;
+    return InkWell(
+      onTap: busy ? null : onCorrect,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        width: double.infinity,
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: p.surface,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: p.divider.withValues(alpha: 0.6)),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: TextStyle(
+                      color: p.textPrimary,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    <String>[
+                      billType?.isNotEmpty == true ? "类目 $billType" : "未分类",
+                      MobileDynamicsPageState._fmtTime(at),
+                    ].join(" · "),
+                    style: TextStyle(color: p.textMuted, fontSize: 11),
+                  ),
+                ],
+              ),
+            ),
+            if (amount != null)
+              Text(
+                "¥${MobileDynamicsPageState._fmtAmount(amount)}",
+                style: TextStyle(
+                  color: p.textPrimary,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            const SizedBox(width: 4),
+            Icon(Icons.edit_outlined, size: 15, color: p.textMuted),
+          ],
+        ),
       ),
     );
   }

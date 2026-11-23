@@ -4,37 +4,44 @@ import "package:flutter/material.dart";
 /// 2026-10-24 因内容实为明日信息而改名，载荷与事件名未变）。
 ///
 /// 晚间 digest（evening.digest 事件）不再渲染纯文本气泡：本卡是每晚对
-/// 「明天要做的事」的简短汇报——narrationText（agent 口吻睡前文案）为
-/// 卡顶部的「agent 说的话」段落，下面接结构化的明日信息块（截止事项 / 行程 /
-/// 天气）。整卡恒展开，无折叠展开（2026-10-22 用户定稿：
-/// 不做今日回顾，不做折叠）。
+/// 「明天大概什么天儿 + 顺带聊一句」的简短汇报——narrationText（agent 口吻
+/// 睡前文案）为卡顶部的「agent 说的话」段落，下面接次日天气块与素材条。
+/// 整卡恒展开，无折叠展开（2026-10-22 用户定稿：不做今日回顾、不做折叠）。
+///
+/// 2026-11-23 §3.4 分工（PRD「早安 / 明日预览分工」）：**日程、截止事项（DDL）、
+/// 重要日子从这张卡上撤下，只在早安出现**；这张卡从此只讲天气，外加一两句闲聊
+/// （可接今天聊过的事、作息关怀），周日多一条作息周报。
+/// 卡上不列行程不是丢数据：用户问「明天有什么安排」时走
+/// TomorrowPreviewFacts 问答面（服务端同一份取数），照旧答全。
 ///
 /// 载荷与服务端 [EveningDigest] 同构（ws EveningDigest payload.digest）：
-///   - narrationText: agent 口吻睡前文案
+///   - narrationText: agent 口吻睡前文案（正文就是天气——2026-11-23 起
+///     旧口径「天气不上文案」作废：卡面只剩天气，文案再说一遍是分工后的正解；
+///     客户端在 narration 为空时会整卡不渲染，正文总得有点东西）
 ///   - date: 今日本地日期键（YYYY-MM-DD），明日标签由此推导
-///   - tomorrowSchedule: [{ id, title, time?, advanceNotes?: string[] }]
 ///   - tomorrowWeather: { text, minC, maxC, rainWindowLabel?, alerts[] } | null
-///   - deadlineReminders: [{ title, dueAt, overdue, dayDiff, tier }]
-///   - importantDays: [{ id, name, date, type, daysUntil, relationship?, notes? }]
-///     （2026-11-04 从晨报迁来：生日/纪念日属于「提前准备」的信息）
+///   - chatLines?: string[]（一两句闲聊素材，服务端已截断）
+///   - rhythmReport?: string[]（作息周报，仅周日那一格有）
 ///
-/// 天气上卡、文案不重复（2026-11-06 用户定稿）：narration 不再说天气；
-/// 卡上的「明天天气」块只留温度、现象与预警（穿衣信息整块移除）。
+/// 兼容：老载荷里若还带 tomorrowSchedule / deadlineReminders / importantDays
+/// （升级前落库的历史消息），本卡一律不读、不显示——分工之后睡前的卡上没有这些。
 class EveningDigestCard extends StatelessWidget {
   const EveningDigestCard({super.key, required this.digest});
 
-  /// 暖黄点缀色（原月亮图标遗留，现用于近期重要日子的蛋糕图标）：
-  /// 明暗主题下都不依赖主题色（否则夜里会变成冷紫）
+  /// 暖黄点缀色（夜里那张卡的唯一暖色）：明暗主题下都不依赖主题色
+  /// （否则夜里会变成冷紫）
   static const Color _moonColor = Color(0xFFF6C445);
 
   final Map<String, dynamic> digest;
 
-  List<Map<String, dynamic>> _readMapList(String key) {
+  /// 字符串数组读数：缺键 / 非数组 / 非字符串元素一律忽略（载荷收窄后
+  /// 这两块本来就是可选的，没给就当没有）
+  List<String> _readStringList(String key) {
     final Object? raw = digest[key];
-    if (raw is! List) return const <Map<String, dynamic>>[];
-    return <Map<String, dynamic>>[
+    if (raw is! List) return const <String>[];
+    return <String>[
       for (final Object? x in raw)
-        if (x is Map) x.cast<String, dynamic>(),
+        if (x != null && x.toString().trim().isNotEmpty) x.toString().trim(),
     ];
   }
 
@@ -56,20 +63,15 @@ class EveningDigestCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final ThemeData theme = Theme.of(context);
     final ColorScheme cs = theme.colorScheme;
-    final bool isLight = theme.brightness == Brightness.light;
 
     final String narration =
         (digest["narrationText"]?.toString() ?? "").trim();
-    final List<Map<String, dynamic>> schedule = _readMapList("tomorrowSchedule");
-    // DDL（服务端 DdlRadarService 产出）：tier=tomorrow 或 today+overdue
-    final List<Map<String, dynamic>> deadlines =
-        _readMapList("deadlineReminders");
     final Object? rawWeather = digest["tomorrowWeather"];
-    final Map<String, dynamic> weather =
-        rawWeather is Map ? rawWeather.cast<String, dynamic>() : const <String, dynamic>{};
-    // 近期重要日子（2026-11-04 从晨报迁来）：7 天窗口，服务端已按剩余天数升序
-    final List<Map<String, dynamic>> importantDays =
-        _readMapList("importantDays");
+    final Map<String, dynamic> weather = rawWeather is Map
+        ? rawWeather.cast<String, dynamic>()
+        : const <String, dynamic>{};
+    final List<String> chatLines = _readStringList("chatLines");
+    final List<String> rhythmReport = _readStringList("rhythmReport");
     final String? tomorrowLabel = _tomorrowLabel();
     // 现象文本已被预警徽章覆盖时（如「雷暴」既是 text 又是 alert）不再单写一行，
     // 与服务端口播的去重口径一致
@@ -78,6 +80,7 @@ class EveningDigestCard extends StatelessWidget {
         (weather["alerts"] as List?) ?? const <Object?>[];
     final bool alertCoversText =
         alerts.any((Object? a) => a?.toString().contains(conditionText) == true);
+    final String rainWindow = weather["rainWindowLabel"]?.toString() ?? "";
 
     return Card(
       clipBehavior: Clip.antiAlias,
@@ -118,78 +121,7 @@ class EveningDigestCard extends StatelessWidget {
                 style: theme.textTheme.bodyMedium?.copyWith(height: 1.55),
               ),
             ],
-            // ── DDL：明天要交的 / 今天已过点的（三级梯度 L2 档）──
-            // 比行程更硬，放在行程前面；琥珀与超支条同色系（不取 tertiaryContainer）。
-            if (deadlines.isNotEmpty) ...<Widget>[
-              const SizedBox(height: 14),
-              _SectionHeader(
-                icon: Icons.assignment_late_outlined,
-                text: "要交的",
-                theme: theme,
-              ),
-              const SizedBox(height: 6),
-              for (final Map<String, dynamic> d in deadlines)
-                Padding(
-                  padding: const EdgeInsets.only(top: 7),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.center,
-                    children: <Widget>[
-                      Icon(
-                        d["overdue"] == true
-                            ? Icons.error_outline
-                            : Icons.schedule_outlined,
-                        size: 15,
-                        color: d["overdue"] == true
-                            ? (isLight
-                                ? const Color(0xFFB3261E)
-                                : const Color(0xFFF2B8B5))
-                            : (isLight
-                                ? const Color(0xFF8A5A00)
-                                : const Color(0xFFE8C476)),
-                      ),
-                      const SizedBox(width: 7),
-                      Expanded(
-                        child: Text(
-                          d["title"]?.toString() ?? "",
-                          style: theme.textTheme.bodyMedium?.copyWith(
-                            height: 1.35,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        _deadlineWhen(d),
-                        style: theme.textTheme.labelMedium?.copyWith(
-                          color: d["overdue"] == true
-                              ? (isLight
-                                  ? const Color(0xFFB3261E)
-                                  : const Color(0xFFF2B8B5))
-                              : cs.onSurfaceVariant,
-                          fontFeatures: const <FontFeature>[
-                            FontFeature.tabularFigures(),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-            ],
-            // ── 明日行程（汇报主体）──
-            if (schedule.isNotEmpty) ...<Widget>[
-              const SizedBox(height: 14),
-              _SectionHeader(
-                icon: Icons.event_note_outlined,
-                text: "明天的行程",
-                theme: theme,
-              ),
-              const SizedBox(height: 6),
-              for (final Map<String, dynamic> s in schedule)
-                Padding(
-                  padding: const EdgeInsets.only(top: 7),
-                  child: _ScheduleItem(item: s, theme: theme),
-                ),
-            ],
-            // ── 明日天气（温度 + 现象；雨时段与穿衣交给顶部文案）──
+            // ── 明日天气（§3.4 之后这张卡的正文；温度 + 现象 + 雨时段 + 预警）──
             if (weather.isNotEmpty) ...<Widget>[
               const SizedBox(height: 14),
               _SectionHeader(
@@ -220,13 +152,24 @@ class EveningDigestCard extends StatelessWidget {
                   ],
                 ],
               ),
-              if ((weather["alerts"] as List?)?.isNotEmpty == true) ...<Widget>[
+              // 带伞这件事的落点：雨时段小字（旧口径里它跟着行程块，现在天气
+              // 就是主角，值得单独一行；服务端只在雨集中时给 label）
+              if (rainWindow.isNotEmpty) ...<Widget>[
+                const SizedBox(height: 6),
+                Text(
+                  "$rainWindow 前后有雨，出门记得带伞",
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: cs.onSurfaceVariant,
+                  ),
+                ),
+              ],
+              if (alerts.isNotEmpty) ...<Widget>[
                 const SizedBox(height: 8),
                 Wrap(
                   spacing: 6,
                   runSpacing: 6,
                   children: <Widget>[
-                    for (final Object? a in weather["alerts"]! as List)
+                    for (final Object? a in alerts)
                       Container(
                         padding: const EdgeInsets.symmetric(
                             horizontal: 8, vertical: 3),
@@ -245,40 +188,54 @@ class EveningDigestCard extends StatelessWidget {
                 ),
               ],
             ],
-            // ── 近期重要日子（生日/纪念日）：整卡唯一暖色，拉注意力 ──
-            if (importantDays.isNotEmpty) ...<Widget>[
+            // ── 顺带一句（今天聊过的事 / 作息关怀）：不加分节标题，
+            //     标题一上就变成「汇报」，闲聊要的就是这股随手一提的劲儿 ──
+            if (chatLines.isNotEmpty) ...<Widget>[
+              const SizedBox(height: 12),
+              for (final String line in chatLines)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(
+                    line,
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      height: 1.5,
+                      color: cs.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+            ],
+            // ── 这周作息（周日那一格才有，PRD §10 需求八搭在明日预览里）──
+            if (rhythmReport.isNotEmpty) ...<Widget>[
               const SizedBox(height: 14),
               _SectionHeader(
-                icon: Icons.celebration_outlined,
-                text: "近期重要日子",
+                icon: Icons.bedtime_outlined,
+                text: "这周作息",
                 theme: theme,
+                iconColor: _moonColor,
               ),
               const SizedBox(height: 6),
-              for (final Map<String, dynamic> d in importantDays)
+              for (final String line in rhythmReport)
                 Padding(
-                  padding: const EdgeInsets.only(top: 7),
+                  padding: const EdgeInsets.only(top: 5),
                   child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
-                      Icon(
-                        Icons.cake_outlined,
-                        size: 15,
-                        color: _moonColor,
-                      ),
-                      const SizedBox(width: 7),
-                      Expanded(
-                        child: Text(
-                          _importantDayName(d),
-                          style: theme.textTheme.bodyMedium?.copyWith(
-                            height: 1.35,
-                          ),
+                      const SizedBox(width: 2),
+                      Container(
+                        width: 4,
+                        height: 4,
+                        margin: const EdgeInsets.only(top: 8, right: 8),
+                        decoration: BoxDecoration(
+                          color: _moonColor.withValues(alpha: 0.8),
+                          shape: BoxShape.circle,
                         ),
                       ),
-                      const SizedBox(width: 8),
-                      Text(
-                        _importantDayWhen(d),
-                        style: theme.textTheme.labelMedium?.copyWith(
-                          color: cs.onSurfaceVariant,
+                      Expanded(
+                        child: Text(
+                          line,
+                          style: theme.textTheme.bodyMedium?.copyWith(
+                            height: 1.45,
+                          ),
                         ),
                       ),
                     ],
@@ -291,36 +248,6 @@ class EveningDigestCard extends StatelessWidget {
     );
   }
 
-  /// 重要日子名称行：「妈妈的生日」/「结婚纪念日的纪念日」
-  String _importantDayName(Map<String, dynamic> d) {
-    final String name = d["name"]?.toString() ?? "";
-    final String type = d["type"]?.toString() ?? "";
-    final String label =
-        type == "anniversary" ? "纪念日" : type == "custom" ? "特殊日子" : "生日";
-    return "$name的$label";
-  }
-
-  /// 重要日子时间标签：就是今天 / 明天 / 还有 N 天
-  String _importantDayWhen(Map<String, dynamic> d) {
-    final Object? raw = d["daysUntil"];
-    if (raw is! num) return d["date"]?.toString() ?? "";
-    final int days = raw.toInt();
-    if (days == 0) return "就是今天";
-    if (days == 1) return "明天";
-    return "还有 $days 天";
-  }
-
-  /// DDL 时间标签：过期 → 「已过点」；明天 → 「明天 HH:mm」；今天 → 「今天 HH:mm」
-  String _deadlineWhen(Map<String, dynamic> d) {
-    final DateTime? due = DateTime.tryParse(d["dueAt"]?.toString() ?? "")?.toLocal();
-    if (due == null) return "";
-    final String hm =
-        "${due.hour.toString().padLeft(2, "0")}:${due.minute.toString().padLeft(2, "0")}";
-    if (d["overdue"] == true) return "已过点";
-    final int dayDiff = d["dayDiff"] is num ? (d["dayDiff"] as num).toInt() : 0;
-    return dayDiff == 1 ? "明天 $hm" : "今天 $hm";
-  }
-
   /// 温度区间标签：「12~22°」（缺数降级 "--"）
   String _tempLabel(Map<String, dynamic> w) {
     final Object? min = w["minC"];
@@ -331,61 +258,30 @@ class EveningDigestCard extends StatelessWidget {
   }
 }
 
-/// 明日行程条目：时刻（primary 强调）+ 简短文字描述。
-/// 2026-10-26 用户定稿：只放「12:00 看牙医」式一行，服务端 shortTitle 口径；
-/// 不渲染提醒原文与预告段小字（「到点了该干嘛」「10:00起床闹钟」不上卡，
-/// 顶部的 narration 已承担活人描述）。
-class _ScheduleItem extends StatelessWidget {
-  const _ScheduleItem({required this.item, required this.theme});
-
-  final Map<String, dynamic> item;
-  final ThemeData theme;
-
-  @override
-  Widget build(BuildContext context) {
-    final ColorScheme cs = theme.colorScheme;
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: <Widget>[
-        SizedBox(
-          width: 44,
-          child: Text(
-            item["time"]?.toString() ?? "待定",
-            style: theme.textTheme.labelMedium?.copyWith(
-              color: cs.primary,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ),
-        const SizedBox(width: 4),
-        Expanded(
-          child: Text(
-            item["title"]?.toString() ?? "日程安排",
-            style: theme.textTheme.bodyMedium,
-          ),
-        ),
-      ],
-    );
-  }
-}
-
 /// 分节标题（小图标 + 小标题，晨报卡同款形态）
 class _SectionHeader extends StatelessWidget {
   const _SectionHeader({
     required this.icon,
     required this.text,
     required this.theme,
+    this.iconColor,
   });
 
   final IconData icon;
   final String text;
   final ThemeData theme;
+  /// 图标着色：不传就用次级文字色（暖黄只在作息那一格用一次）
+  final Color? iconColor;
 
   @override
   Widget build(BuildContext context) {
     return Row(
       children: <Widget>[
-        Icon(icon, size: 16, color: theme.colorScheme.onSurfaceVariant),
+        Icon(
+          icon,
+          size: 16,
+          color: iconColor ?? theme.colorScheme.onSurfaceVariant,
+        ),
         const SizedBox(width: 6),
         Text(text, style: theme.textTheme.titleSmall),
       ],

@@ -20,6 +20,7 @@
 import { BROWSER_SESSION_SITES } from "./browser-session-sites.js";
 import { platformSupportsCheckout } from "./shopping-platforms/index.js";
 import { stableCardId } from "./card-identity.js";
+import { rideMap3dEnabled } from "./ride-map-config.js";
 
 /** 与 agent-result-formatter 的 items 类型推断一致：check/warn/num；条目只承载展示内容，不带网页跳转链接 */
 export interface ToolCardItem {
@@ -1390,6 +1391,8 @@ function buildRideQuoteCard(r: Record<string, unknown>): ToolCardPayload | null 
     extra: {
       ride: {
         stage: "quote",
+        // 配了 AMAP_JS_KEY 才用卡内 3D 地图（WebView + 高德 JS API），否则保持 flutter_map
+        map3d: rideMap3dEnabled(),
         pickup,
         dropoff,
         providerLabel,

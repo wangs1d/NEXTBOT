@@ -64,6 +64,16 @@ export type ActionIntent = {
   executedActions: string[];
   /** 关联的投递 id（回执与 outcome 回灌用） */
   deliveryId?: string;
+  /**
+   * 通知栏回复线程的第几轮（2026-11-29 §4.3）。
+   *
+   * 为什么轮次要落在意图上而不是内存里：一条通知可能几小时后才被回，重启后
+   * 「这是第几轮」必须还在（否则第 4 轮又长出一个回复框，永远收不了口）。
+   * rootIntentId = 最初那条通知对应的意图 id；同一线程的所有轮次共用它，
+   * 客户端据此把 agent 的回复**原地更新到同一条通知**（通知 id 由它算出）。
+   * 第一轮只有 round=1、没有 root（它自己就是根）。
+   */
+  replyRound?: { rootIntentId?: string; round: number };
   /** 最近一次执行结果（回执文案来源） */
   lastResult?: { actionId: string; ok: boolean; message: string; at: number };
 };

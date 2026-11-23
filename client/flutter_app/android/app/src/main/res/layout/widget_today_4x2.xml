@@ -1,0 +1,132 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  桌面小组件 4×2（2026-11-23 主动触达 §5.3）：
+  下一件事 / 待取件取件码 / 今天到期 / 管家一句话，右上角「记一下」，各区域各自深链。
+  每一行都是独立可点区域（PendingIntent 在 TodayWidgetRenderer 里挂），
+  没有内容的那一行整行隐藏——空着的行留着会把有内容的那行挤到看不见。
+  控件只用 RemoteViews 白名单里的：LinearLayout / TextView / Chronometer / Button。
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/widget_bg"
+    android:orientation="vertical"
+    android:padding="12dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/widget_caption"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:alpha="0.7"
+            android:text="@string/widget_caption_today"
+            android:textColor="#FFFFFF"
+            android:textSize="11sp"
+            android:textStyle="bold" />
+
+        <!-- 记一下：与常驻通知那个按钮同义——把 App 带到前台的速记入口 -->
+        <Button
+            android:id="@+id/widget_note"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:background="@drawable/widget_action_bg"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:paddingLeft="10dp"
+            android:paddingTop="3dp"
+            android:paddingRight="10dp"
+            android:paddingBottom="3dp"
+            android:text="@string/widget_note_action"
+            android:textColor="#FFC46B"
+            android:textSize="11sp" />
+    </LinearLayout>
+
+    <!-- ① 下一件事 + 倒计时 -->
+    <LinearLayout
+        android:id="@+id/widget_next_row"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:background="@drawable/widget_row_bg"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingLeft="8dp"
+        android:paddingTop="5dp"
+        android:paddingRight="8dp"
+        android:paddingBottom="5dp">
+
+        <TextView
+            android:id="@+id/widget_next"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:textColor="#FFFFFF"
+            android:textSize="14sp"
+            android:textStyle="bold" />
+
+        <Chronometer
+            android:id="@+id/widget_countdown"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="6dp"
+            android:textColor="#FFC46B"
+            android:textSize="12sp"
+            android:visibility="gone" />
+    </LinearLayout>
+
+    <!-- ② 待取件（含取件码） -->
+    <TextView
+        android:id="@+id/widget_parcel"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="5dp"
+        android:ellipsize="end"
+        android:maxLines="1"
+        android:textColor="#E6FFFFFF"
+        android:textSize="12sp"
+        android:visibility="gone" />
+
+    <!-- ③ 今天到期（账单只报「今天到期」，金额不进端侧） -->
+    <TextView
+        android:id="@+id/widget_bill"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="3dp"
+        android:ellipsize="end"
+        android:maxLines="1"
+        android:textColor="#E6FFFFFF"
+        android:textSize="12sp"
+        android:visibility="gone" />
+
+    <!-- ④ 管家一句话（没有别的可说时它就是空态那一行） -->
+    <TextView
+        android:id="@+id/widget_butler"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="3dp"
+        android:layout_weight="1"
+        android:ellipsize="end"
+        android:maxLines="2"
+        android:textColor="#A6FFFFFF"
+        android:textSize="12sp" />
+
+    <TextView
+        android:id="@+id/widget_updated"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:alpha="0.5"
+        android:maxLines="1"
+        android:textColor="#FFFFFF"
+        android:textSize="9sp"
+        android:visibility="gone" />
+</LinearLayout>

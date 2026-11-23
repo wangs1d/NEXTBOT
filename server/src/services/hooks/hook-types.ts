@@ -27,6 +27,10 @@ export type WebhookEventType =
   | "tool.executed"       // 工具执行成功（Task 16 消费管家：消费类工具成功后 emit，payload 含 toolName/args 摘要/result 摘要/actorId/timestamp）
   | "schedule.reminder_fired" // 日程提醒触发
   | "life.signal"         // 生命信号产生
+  // ─── 主动触达闭环（2026-11-23 M1）───
+  | "proactive.outcome"   // 一次主动触达有了结果（accepted/dismissed/snoozed/replied/ignored/viewed）：
+                          // outcome-store 落库后由管道统一发出，节律/槽位/触点计划等下游 subscribeType 接入，
+                          // 不再各自监听各自的回调。payload: deliveryId/kind/outcome/channel/tier/topic/surface
   // ─── 监控/价格/数据 信号事件（外部系统接入价格/数据 webhook 后触发）───
   | "market.position_snapshot"   // 持仓快照（价格/盈亏/波动率）
   | "market.anomaly"             // 价格/成交量异动

@@ -11,6 +11,7 @@ import {
   summarizeBillParcel,
   type BillParcelCategory,
   type BillParcelMatch,
+  type ClassifierCorrectionSample,
 } from "./bill-parcel-classifier.js";
 import type {
   BillParcelEntry,
@@ -84,10 +85,23 @@ export class BillParcelIngestService {
    * 是否另行提示（验证码虽不进汇总，但可检索）。
    */
   ingest(input: BillParcelIngestInput): BillParcelIngestResult {
-    const match = classifyBillParcel({
-      title: input.title,
-      text: input.text,
-    });
+    // 人工纠正样本回灌（§9 月报卡「类目可改」→ 分类器训练数据）：台账里
+    // 存着改过的类目，识别时带进学习层。取样本失败绝不阻断识别。
+    let corrections: ClassifierCorrectionSample[] | undefined;
+    try {
+      corrections = this.deps.ledger
+        .corrections(input.actorId)
+        .map((c) => ({ text: c.text, billType: c.billType }));
+    } catch {
+      corrections = undefined;
+    }
+    const match = classifyBillParcel(
+      {
+        title: input.title,
+        text: input.text,
+      },
+      corrections && corrections.length > 0 ? { corrections } : {},
+    );
 
     if (!shouldReportBillParcel(match)) {
       return { matched: false, otpOnly: match.isOtpOnly, match, entries: [] };

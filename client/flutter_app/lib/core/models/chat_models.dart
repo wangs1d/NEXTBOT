@@ -119,6 +119,7 @@ class ChatMessage {
     this.pendingMediaCards,
     this.followUpPrompts,
     this.notifyActions,
+    this.why,
     this.eveningDigest,
     this.transferReminder,
     this.nameChoices,
@@ -261,6 +262,14 @@ class ChatMessage {
   /// （它有独立的降级路径：点开进 App 处理）。
   final List<NotifyAction>? notifyActions;
 
+  /// 「为什么是现在」一句话解释（需求 §3.10 可解释，2026-11-23）。
+  ///
+  /// 服务端 explainTiming 把引擎裁决链翻成人话（≤20 字，如「你设的 11:10
+  /// 提醒时间到了。」），随 `agent.proactive_message` 载荷的 `why` 字段下发。
+  /// 只有主动消息有它：普通对话回复恒为 null，长按不弹任何东西。
+  /// 手机端按「真实消息」落本地历史（与正文同策略加密），重启后长按仍可解释。
+  final String? why;
+
   /// 睡前备忘卡（contentType="evening_digest"，2026-10-22 定调）。
   ///
   /// 晚间 digest（evening.digest 事件）落对话流一张专属卡：结构化块
@@ -341,6 +350,7 @@ class ChatMessage {
     List<String>? followUpPrompts,
     bool clearFollowUps = false,
     List<NotifyAction>? notifyActions,
+    String? why,
     Map<String, dynamic>? eveningDigest,
     Map<String, dynamic>? transferReminder,
     List<String>? nameChoices,
@@ -376,6 +386,7 @@ class ChatMessage {
       followUpPrompts:
           clearFollowUps ? null : (followUpPrompts ?? this.followUpPrompts),
       notifyActions: notifyActions ?? this.notifyActions,
+      why: why ?? this.why,
       eveningDigest: eveningDigest ?? this.eveningDigest,
       transferReminder: transferReminder ?? this.transferReminder,
       nameChoices: nameChoices ?? this.nameChoices,

@@ -13,6 +13,14 @@
  *   - 调用方注入 `payloads.eveningDigest`（只有持有该数据的通道会注入）；
  *   - 且用户确实在问明日安排（或调用方显式置 `payloads.tomorrowPreview === true`）。
  * 没有载荷就绝不命中——不会凭空给每个提问塞一张预览。
+ *
+ * 2026-11-23 §3.4「早安 / 明日预览分工」：本场景两种载荷都吃得下——
+ *   - 问答（用户在对话里问「明天有什么安排」，走 tomorrow-preview-bridge）：
+ *     注入 `EveningDigestService.generatePreviewFacts()` 的**完整事实**，
+ *     行程 / 截止 / 重要日子照旧全说，本次改动不碰这条；
+ *   - 主动推送（明日预览那一格）：注入 `EveningDigest`，里面只有天气 +
+ *     一两句闲聊素材，事实块里也就不会出现行程类内容。
+ * 载荷里有什么就说什么是本场景唯一的判断依据（缺键不等于"没有"，是"没说"）。
  */
 
 import type { RenderScene, SceneContext, SceneMatch } from "./types.js";
@@ -34,10 +42,19 @@ export interface PreviewWeather {
 /** 场景只依赖字段形状，不依赖 EveningDigest 类（避免服务层反向耦合） */
 export interface PreviewDigestLike {
   date?: unknown;
+  /**
+   * 问答面载荷才有这个键（2026-11-23 §3.4 分工）：主动推送的明日预览载荷里
+   * 整块不存在（不是空数组）——缺键 = 「这一面没有内容」，事实块里连
+   * 「明天没有排日程」都不说，免得模型替早安抢答。
+   */
   tomorrowSchedule?: unknown;
   tomorrowWeather?: unknown;
   deadlineReminders?: unknown;
   importantDays?: unknown;
+  /** 主动推送面的闲聊素材（一两句），问答面没有 */
+  chatLines?: unknown;
+  /** 主动推送面的周日作息周报行 */
+  rhythmReport?: unknown;
 }
 
 const CHINESE_WEEKDAY = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
@@ -75,9 +92,11 @@ export function formatTomorrowLabel(raw: unknown): string {
 }
 
 function scheduleLines(digest: PreviewDigestLike): string[] {
-  const items = Array.isArray(digest.tomorrowSchedule) ? digest.tomorrowSchedule : [];
+  // 键缺失 = 载荷根本没有行程这一面（主动推送面，§3.4）→ 整段不出；
+  // 键在但为空数组 = 问答面查过了、明天确实没日程 → 照实说
+  if (!Array.isArray(digest.tomorrowSchedule)) return [];
   const lines: string[] = [];
-  for (const raw of items) {
+  for (const raw of digest.tomorrowSchedule) {
     const item = (raw ?? {}) as PreviewScheduleItem;
     const title = str(item.title);
     if (!title) continue;
@@ -166,14 +185,20 @@ function deadlineDesc(item: Record<string, unknown>, digest: PreviewDigestLike):
  * 把明日预览载荷序列化成给模型看的事实块（大体框架，不是版式）。
  *
  * 2026-11-09 用户定稿：**不要版式固定**——正文由模型自己写，这里只给
- * 「日期 / 行程 / 天气 / 到期 / 近期」五个事实段做骨架，模型照着讲，
+ * 「日期 / 行程 / 天气 / 到期 / 近期 / 闲聊」几个事实段做骨架，模型照着讲，
  * 不必也不该照抄成排版。同一份载荷多次调用字节一致（无时间、无随机）。
+ *
+ * 2026-11-23 §3.4 分工：载荷分两副面孔，本函数按「有什么键就说有什么」处理——
+ *   - 问答面（bridge 注入）：行程 / 到期 / 近期齐全，照旧全说；
+ *   - 主动推送面（EveningDigest）：只有天气 + 一两句闲聊素材，
+ *     行程 / 到期 / 近期三个键根本不存在，事实块里也就不会出现。
  */
 export function renderTomorrowPreviewFacts(digest: PreviewDigestLike): string {
   const tomorrow = formatTomorrowLabel(digest.date);
   const lines: string[] = [tomorrow ? `日期：明天 ${tomorrow}` : "日期：明天"];
 
-  lines.push("行程：", ...scheduleLines(digest));
+  const schedule = scheduleLines(digest);
+  if (schedule.length > 0) lines.push("行程：", ...schedule);
 
   const weather = weatherLines(digest);
   if (weather.length > 0) lines.push(...weather);
@@ -202,7 +227,24 @@ export function renderTomorrowPreviewFacts(digest: PreviewDigestLike): string {
   });
   if (important.length > 0) lines.push("近期重要日子：", ...important);
 
+  // 主动推送面专属（§3.4）：天气之外只给一两句闲聊素材 / 周日作息周报
+  const chatter = plainBulletLines(digest.chatLines);
+  if (chatter.length > 0) lines.push("可以顺带聊一句：", ...chatter);
+  const rhythm = plainBulletLines(digest.rhythmReport);
+  if (rhythm.length > 0) lines.push("这周作息：", ...rhythm);
+
   return lines.join("\n");
+}
+
+/** 纯字符串数组 → bullet 行（闲聊素材/周报这类成品短句不需要再加工） */
+function plainBulletLines(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  const out: string[] = [];
+  for (const entry of raw) {
+    const line = str(entry);
+    if (line) out.push(`- ${line}`);
+  }
+  return out;
 }
 
 const PREVIEW_INTENT = /明天|明日|明早|明晚|预告|什么安排|有啥安排|安排什么/;
@@ -224,8 +266,12 @@ export const tomorrowPreviewScene: RenderScene = {
     if (!digest || typeof digest !== "object") return null;
     const explicit = ctx.payloads?.tomorrowPreview === true;
     if (!explicit && !PREVIEW_INTENT.test(ctx.userText ?? "")) return null;
-    const count = Array.isArray(digest.tomorrowSchedule) ? digest.tomorrowSchedule.length : 0;
-    return { reason: `${explicit ? "显式预览" : "用户问明日安排"}，载荷 ${count} 条行程` };
+    const count = Array.isArray(digest.tomorrowSchedule) ? digest.tomorrowSchedule.length : null;
+    return {
+      reason: `${explicit ? "显式预览" : "用户问明日安排"}，${
+        count === null ? "载荷只有天气/闲聊面" : `载荷 ${count} 条行程`
+      }`,
+    };
   },
 
   /** 生成前把明天的真实数据喂给模型：这是本场景对回答的唯一贡献 */
@@ -237,13 +283,16 @@ export const tomorrowPreviewScene: RenderScene = {
 
   plan(ctx, match) {
     const digest = ctx.payloads?.eveningDigest as PreviewDigestLike;
+    const hasSchedule = Array.isArray(digest.tomorrowSchedule);
     return {
       sceneId: this.id,
       label: this.label,
       cards: [],
       bodyForm: "markdown",
       promptFragment: TOMORROW_PREVIEW_BOUNDARY,
-      constraints: ["行程/天气/到期来自载荷", "正文由模型自己写", "不得编造未列出的项"],
+      constraints: hasSchedule
+        ? ["行程/天气/到期来自载荷", "正文由模型自己写", "不得编造未列出的项"]
+        : ["载荷只有天气/闲聊素材（§3.4 主动推送面）", "正文由模型自己写", "不得编造未列出的项"],
       reason: match.reason,
     };
   },

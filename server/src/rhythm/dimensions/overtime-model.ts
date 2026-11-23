@@ -1,5 +1,6 @@
 import type { OvertimeDimensionState, RhythmDimensionModel, RhythmObservation } from "../types.js";
 import { localDayKey } from "../time-utils.js";
+import { daypartOfWeekday, emptyDaypart } from "./grouping.js";
 
 /** 当日最后一次活跃晚于该小时（20:30）视为"晚归/加班日" */
 export const LATE_DAY_HOUR = 20.5;
@@ -11,6 +12,7 @@ export const EMPTY_OVERTIME_STATE: OvertimeDimensionState = {
   byWeekday: new Array<number>(7).fill(0),
   weekdayDays: new Array<number>(7).fill(0),
   totalDays: 0,
+  byDaypart: emptyDaypart(() => ({ lateRatio: 0, days: 0 })),
 };
 
 /**
@@ -49,8 +51,8 @@ export class OvertimeDimensionModel implements RhythmDimensionModel<OvertimeDime
     }
 
     const recentDays = [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date)).slice(-MAX_DAYS);
-    const { byWeekday, weekdayDays } = aggregateByWeekday(recentDays);
-    return { recentDays, byWeekday, weekdayDays, totalDays: recentDays.length };
+    const { byWeekday, weekdayDays, byDaypart } = aggregateByWeekday(recentDays);
+    return { recentDays, byWeekday, weekdayDays, byDaypart, totalDays: recentDays.length };
   }
 
   /** ≥20 个活跃日即满置信 */
@@ -62,17 +64,26 @@ export class OvertimeDimensionModel implements RhythmDimensionModel<OvertimeDime
 export function aggregateByWeekday(recentDays: OvertimeDimensionState["recentDays"]): {
   byWeekday: number[];
   weekdayDays: number[];
+  byDaypart: OvertimeDimensionState["byDaypart"];
 } {
   const byWeekday = new Array<number>(7).fill(0);
   const weekdayDays = new Array<number>(7).fill(0);
+  const byDaypart = emptyDaypart(() => ({ lateRatio: 0, days: 0 }));
   for (const bit of recentDays) {
     const idx = bit.weekday;
     if (idx < 0 || idx > 6) continue;
     weekdayDays[idx] += 1;
     byWeekday[idx] += bit.late;
+    const part = daypartOfWeekday(idx);
+    byDaypart[part].days += 1;
+    if (bit.late === 1) byDaypart[part].lateRatio += 1;
   }
   for (let d = 0; d < 7; d++) {
     byWeekday[d] = weekdayDays[d] > 0 ? Math.round((byWeekday[d]! / weekdayDays[d]!) * 1000) / 1000 : 0;
   }
-  return { byWeekday, weekdayDays };
+  for (const part of ["weekday", "weekend"] as const) {
+    const g = byDaypart[part];
+    g.lateRatio = g.days > 0 ? Math.round((g.lateRatio / g.days) * 1000) / 1000 : 0;
+  }
+  return { byWeekday, weekdayDays, byDaypart };
 }

@@ -280,6 +280,22 @@ export type WsRouteDeps = {
    * 可选：未装配时台词请求降级为 ok:false（桌宠不说话，不影响其他功能）。
    */
   petReactionChat?: PetReactionChatLike | null;
+  /**
+   * 手机状态上报（2026-11-23 M1）：client.presence_state → 在场服务。
+   * 可选：未装配时事件静默忽略（不回 UNKNOWN_EVENT，避免新客户端连旧服务端刷错误）。
+   * `buckets` 是 §7.2 的 15 分钟聚合桶批次，与实时状态二选一出现在同一事件里。
+   */
+  onClientPresenceState?: (
+    actorId: string,
+    state: {
+      interactive: boolean;
+      screenOn: boolean;
+      inCall: boolean;
+      dnd: boolean;
+      charging: boolean;
+      buckets?: unknown[];
+    },
+  ) => void;
   /** 手机端对话式首启引导（可选）：session.init 时按账号级一次性闸门主动开口。 */
   onboardingIntroService?: import("../services/onboarding-intro-service.js").OnboardingIntroService | null;
   /**
@@ -337,6 +353,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     agentAccountService,
     actorModelBindings,
     petReactionChat,
+    onClientPresenceState,
     onboardingIntroService,
   } = deps;
 
@@ -570,6 +587,36 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             },
             "[client-boot] process start beacon",
           );
+          return;
+        }
+
+        // 手机状态上报（2026-11-23 M1）：前台服务在亮灭屏/解锁/通话/勿扰/充电变化时
+        // 经主连接发一帧，另有 10 分钟心跳。只记状态不回包；未绑定身份的连接忽略。
+        //
+        // 位置在「设备活跃度刷新」之前：这是机器遥测，和 ws.keepalive 同类——
+        // 揣在兜里的手机每 10 分钟心跳一次，若顺手刷新了 lastActiveAt，
+        // 「人此刻在电脑前」就永远判不出来（§3.7 验收 3）。
+        // 真正的解锁交互由 notePhoneState → noteActivity 记进在场，不丢信号。
+        if (event.type === "client.presence_state") {
+          if (boundActorId && onClientPresenceState) {
+            const pl = (event.payload ?? {}) as Record<string, unknown>;
+            try {
+              // 15 分钟聚合桶（§7.2）与实时状态同一条事件，按 payload 区分：
+              // 桶必须原样透传给落库分支，白名单筛字段会把它整帧筛没。
+              const buckets = Array.isArray(pl.buckets) ? pl.buckets : undefined;
+              onClientPresenceState(boundActorId, {
+                interactive: pl.interactive === true,
+                // 缺省按亮屏处理：只有明确报 false 才算灭屏
+                screenOn: pl.screenOn !== false,
+                inCall: pl.inCall === true,
+                dnd: pl.dnd === true,
+                charging: pl.charging === true,
+                ...(buckets === undefined ? {} : { buckets }),
+              });
+            } catch (err) {
+              app.log.warn({ err, actorId: boundActorId }, "[presence-state] handler failed");
+            }
+          }
           return;
         }
 
@@ -2553,6 +2600,15 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             event.payload,
             { chat: petReactionChat ?? null },
           );
+          return;
+        }
+
+        // 向前兼容：`client.*` 是客户端能力命名空间，新客户端可能先于服务端上线
+        // 新事件（如 client.presence_state）。未知客户端事件只记日志、不回错——
+        // 否则每帧遥测都会被渲染成「未知事件: client.xxx」的红色提示（2026-11-23
+        // 真机）。其他命名空间的未知事件仍回 UNKNOWN_EVENT：那是协议错误，该被看见。
+        if (typeof event.type === "string" && event.type.startsWith("client.")) {
+          app.log.debug({ type: event.type }, "[ws] unknown client event ignored");
           return;
         }
 

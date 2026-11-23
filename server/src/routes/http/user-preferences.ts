@@ -59,8 +59,19 @@ type UserPreferences = {
     deliveredAt: string | null;
     deliveredChannel: "desktop" | "mobile" | "scheduled" | null;
   };
+  /**
+   * 主动触达档位（2026-11-23 §3.10）：quiet=只在有事时 / normal=正常（默认）/
+   * chatty=多聊点。设置页与「了解你」的提问都能改；频控预算与触点计划都读这一档。
+   * 可选：历史落盘的 prefs 没有这个块，缺省按 normal。
+   */
+  proactivity?: {
+    frequencyTier?: ProactiveFrequencyTier;
+  };
   agentProfile: AgentProfile;
 };
+
+/** 主动触达频率档名（与 TouchpointPlanner 的 FrequencyTier 同口径） */
+type ProactiveFrequencyTier = "quiet" | "normal" | "chatty";
 
 const VALID_MOODS = new Set<AgentProfileMoodStyle>([
   "funny",
@@ -100,6 +111,7 @@ function ensurePrefsLoaded(): Promise<void> {
       const parsed = JSON.parse(raw) as PersistedPrefsShape;
       if (parsed?.sessions && typeof parsed.sessions === "object") {
         Object.assign(persistedPrefs, parsed.sessions);
+        seedFrequencyTierCache();
       }
     } catch (e: unknown) {
       const code = e && typeof e === "object" && "code" in e ? String((e as NodeJS.ErrnoException).code) : "";
@@ -113,6 +125,36 @@ function schedulePrefsPersist(): void {
   prefsPersistChain = prefsPersistChain.then(() =>
     writeJsonAtomic(prefsFilePath, { sessions: persistedPrefs } satisfies PersistedPrefsShape),
   );
+}
+
+/**
+ * 主动触达频率档（§3.10）的同步读缓存。
+ *
+ * 为什么要单独一份 Map：频控裁决（FrequencyGovernor.canTrigger）与触点计划排槽都是
+ * **同步**调用，而 prefs 落盘/读取是异步的（ensurePrefsLoaded 是 Promise）——判定路径
+ * 上不能 await。启动加载完灌一次、PUT 与「了解你」回答时更新，读侧即拿到最新值。
+ */
+const frequencyTierCache = new Map<string, ProactiveFrequencyTier>();
+
+function seedFrequencyTierCache(): void {
+  for (const [actorId, prefs] of Object.entries(persistedPrefs)) {
+    const tier = prefs?.proactivity?.frequencyTier;
+    if (tier) frequencyTierCache.set(actorId, tier);
+  }
+}
+
+/** 当前频率档（未设定 = normal）；同步语义，进程内始终反映最近一次设定 */
+function getFrequencyTier(actorId: string): ProactiveFrequencyTier {
+  return frequencyTierCache.get(actorId) ?? "normal";
+}
+
+/** 设定频率档（PUT 接口与「了解你」回答共用）；非法值忽略 */
+function setFrequencyTier(actorId: string, tier: unknown): ProactiveFrequencyTier | null {
+  if (tier !== "quiet" && tier !== "normal" && tier !== "chatty") return null;
+  frequencyTierCache.set(actorId, tier);
+  const prefs = prefsStore.get(actorId);
+  if (prefs) prefs.proactivity = { ...prefs.proactivity, frequencyTier: tier };
+  return tier;
 }
 
 const DEFAULT_PREFS: UserPreferences = {
@@ -129,6 +171,7 @@ const DEFAULT_PREFS: UserPreferences = {
     deliveredAt: null,
     deliveredChannel: null,
   },
+  proactivity: { frequencyTier: "normal" },
   agentProfile: {
     // 出厂不预设名字（2026-10-20 定调）：用户设定前各处置为「未命名」，
     // agent 不得自己给自己取名；签名同理不自拟，留空由用户或 Agent 后续打理。
@@ -239,6 +282,21 @@ export function getUserPreferences(sessionId: string): UserPreferences {
   return getOrCreatePrefs(sessionId);
 }
 
+/** 频率档读取（§3.10）：同步语义，频控与触点计划在裁决路径上直接调用 */
+export function frequencyTierOf(actorId: string): ProactiveFrequencyTier {
+  return getFrequencyTier(actorId);
+}
+
+/** 频率档写入（服务端链路用，如「了解你」的回答）：缓存 + prefs + 落盘一起更新 */
+export function applyFrequencyTier(actorId: string, tier: unknown): ProactiveFrequencyTier | null {
+  const applied = setFrequencyTier(actorId, tier);
+  if (!applied) return null;
+  const prefs = getOrCreatePrefs(actorId);
+  prefs.proactivity = { ...prefs.proactivity, frequencyTier: applied };
+  mirrorPersist(actorId, prefs);
+  return applied;
+}
+
 /**
  * 主页档案写入（主页文案/头像/心情等）。
  * 身份三字段（displayName/handle/nameOrigin）默认被拦掉——要改名请走
@@ -347,6 +405,12 @@ export function registerUserPreferencesRoutes(app: FastifyInstance): void {
         }
       }
     }
+    if (body.preferences?.proactivity?.frequencyTier !== undefined) {
+      const applied = setFrequencyTier(key, body.preferences.proactivity.frequencyTier);
+      if (!applied) {
+        return reply.code(400).send({ ok: false, error: "frequencyTier must be quiet/normal/chatty" });
+      }
+    }
     if (body.preferences?.agentProfile) {
       const incoming = body.preferences.agentProfile as Partial<AgentProfile>;
       const blocked = ["displayName", "handle", "nameOrigin"].filter((k) => k in incoming);
@@ -368,5 +432,6 @@ export type {
   AgentProfileMoodStyle,
   AgentProfileNameOrigin,
   BriefingMode,
+  ProactiveFrequencyTier,
   UserPreferences,
 };

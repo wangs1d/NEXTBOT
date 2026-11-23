@@ -9,6 +9,12 @@ export type OutcomeRecord = {
   channel: string;
   outcome: ProactiveOutcome;
   at: number;
+  /**
+   * 首次送达时刻（漏斗按天归集用）：`at` 会被后续 outcome 覆盖成「最后一次表态时间」，
+   * 只看 at 会把 11:00 送达、20:00 才回复的那条记到 20:00 那一天。
+   * recordOutcome 用 `{...prev, outcome, at}` 覆盖，这条天然随记录留存。
+   */
+  createdAt?: number;
   /** 话题键（2026-10-01：投递时从提案标题归一，话题级 dismiss 追踪用） */
   topic?: string;
   /**
@@ -17,10 +23,36 @@ export type OutcomeRecord = {
    * 旧记录无此字段，按 undefined 跳过。
    */
   tier?: "must" | "social";
+  /**
+   * 用户在哪个面上表的态（§4.6 ProactiveOutcome.surface）：以前只进 hook 载荷，
+   * 落库后漏斗才能分清「通知里点开」和「对话里点开」——§12.2 的展示→打开这一级
+   * 就靠它归因。旧记录无此字段。
+   */
+  surface?: "notification" | "chat" | "widget" | "dynamics" | "desktop" | "action_intent";
+  /** 触点槽类别（§4.6 slotKind）：从 proposal.slotId 的末段取，slot 化之前的记录没有 */
+  slotKind?: string;
+  /** 送达→表态的耗时 ms（§12.1 latencyMs）：写入时按 createdAt 差值算，缺 createdAt 则不填 */
+  latencyMs?: number;
+  /** 家庭模式字段预留（§11.1，本期不出 UI、不加分支逻辑） */
+  householdId?: string | null;
 };
 
-const POSITIVE_OUTCOMES = new Set<ProactiveOutcome>(["accepted", "replied", "snoozed"]);
-const NEGATIVE_OUTCOMES = new Set<ProactiveOutcome>(["dismissed", "ignored"]);
+/** §4.6 ProactiveOutcome.surface 的合法取值（客户端回传的是自由字符串，入库前归一） */
+const SURFACES: ReadonlySet<string> = new Set([
+  "notification",
+  "chat",
+  "widget",
+  "dynamics",
+  "desktop",
+  "action_intent",
+]);
+
+/** 把任意 surface 字符串收成合法值；认不出来返回 undefined（不猜、不落脏值） */
+export function normalizeSurface(raw?: string): OutcomeRecord["surface"] {
+  return raw && SURFACES.has(raw) ? (raw as OutcomeRecord["surface"]) : undefined;
+}
+
+const POSITIVE_OUTCOMES = new Set<ProactiveOutcome>(["accepted", "replied", "snoozed"]);const NEGATIVE_OUTCOMES = new Set<ProactiveOutcome>(["dismissed", "ignored"]);
 /** 已产生用户决策的 outcome（delivered/viewed 只是展示事实，不进时段画像） */
 const DECIDED_OUTCOMES = new Set<ProactiveOutcome>([
   "accepted",

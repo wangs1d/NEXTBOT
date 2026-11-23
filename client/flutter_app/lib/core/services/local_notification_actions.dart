@@ -8,7 +8,30 @@ import "package:http/http.dart" as http;
 
 import "../config/api_config.dart";
 import "../models/notify_action.dart";
+import "access_auth_api.dart";
+import "client_telemetry.dart";
 import "notification_id.dart";
+
+/// 回执通知的标题（跨端消除据此识别「这条已经是回执，别收掉」——见
+/// LocalNotificationService.dismissIfPending）。
+const String kReceiptTitleOk = "已处理";
+const String kReceiptTitleFailed = "没处理成";
+
+/// 通知栏内联回复（PRD §4.3）在服务端的 actionId 常量。
+/// 与服务端 notification-actions.ts 的 NOTIFY_ACTION 一一对应：
+/// [kChatReplyActionId] 回复输入框，[kOpenChatActionId] 只是把用户带回会话。
+const String kChatReplyActionId = "chat.reply";
+const String kOpenChatActionId = "chat.open";
+
+/// 回复动作用自己的回执标题：这一刻「已处理」说的是错的事——用户的下一句
+/// 回答还在路上（服务端跑完那一轮后会用**同一个通知 id** 原地替换成应答正文）。
+const String kReceiptTitleReplied = "已回复";
+
+const Set<String> kReceiptTitles = <String>{
+  kReceiptTitleOk,
+  kReceiptTitleFailed,
+  kReceiptTitleReplied,
+};
 
 /// 通知栏动作的后台回调（2026-11-13「通知即界面」）。
 ///
@@ -60,12 +83,38 @@ Future<void> executeNotificationAction(NotificationResponse response) async {
     intentId.isNotEmpty ? intentId : deliveryId,
   );
 
+  // 「打开对话」（§4.3 步骤 5：连续回复用完三轮后的留存按钮）只做导航：
+  // Android 侧这枚按钮 showsUserInterface=true，按下去系统已经把 App 拉到前台
+  // 并取消了通知。这里不能再 POST——下面那步回执 show 会用同一个 id 把刚被
+  // 取消的通知原地复活。正反馈由 _onTap 经 onOutcome 记（那条路只在主 isolate，
+  // 而点开导航必然回到前台）。
+  if (actionId == kOpenChatActionId) return;
+
   final ActionReceipt receipt = await executeNotifyAction(
     parsed,
     input: response.input ?? "",
   );
+  // 埋点（2026-11-23 M1）：可能在后台 isolate，缓冲撑不到 flush，直发一条。
+  final String input = (response.input ?? "").trim();
+  unawaited(ClientEventTelemetry.sendNow(
+    input.isNotEmpty ? "proactive_replied" : "proactive_action",
+    deliveryId: deliveryId,
+    props: <String, Object>{
+      "surface": "notification",
+      "actionId": actionId,
+      "ok": receipt.ok,
+    },
+  ));
   // 回执**原地替换**原通知（不新推一条）：通知栏里那条就地变成结果
-  await _showReceipt(notifyId, receipt.ok ? "已处理" : "没处理成", receipt.message);
+  await _showReceipt(
+    notifyId,
+    receipt.ok
+        ? (actionId == kChatReplyActionId
+            ? kReceiptTitleReplied
+            : kReceiptTitleOk)
+        : kReceiptTitleFailed,
+    receipt.message,
+  );
 }
 
 /// 动作执行结果（回执文案 + 成功与否）
@@ -97,7 +146,13 @@ Future<ActionReceipt> executeNotifyAction(
     final http.Response res = await http
         .post(
           Uri.parse("$base/api/action-intents/execute"),
-          headers: <String, String>{"Content-Type": "application/json"},
+          headers: <String, String>{
+            "Content-Type": "application/json",
+            // 前台点击时顺带带上设备凭据：旧版服务端的周界会先拦无凭据请求，
+            // 带上就能通过。后台 isolate 里凭据尚未加载 → 空 map，仍然只靠
+            // 一次性 token（服务端已把这个端点放进公开面，token 即授权）。
+            ...AccessCredentialStore.instance.authHeaders,
+          },
           body: jsonEncode(<String, dynamic>{
             "token": action.token,
             if (input.isNotEmpty) "input": input,

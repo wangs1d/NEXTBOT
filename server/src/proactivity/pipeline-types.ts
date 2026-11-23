@@ -15,11 +15,24 @@ export type PresenceState = "active" | "idle" | "offline";
  * `label` 是随内容生成的动作短语。最多两项 —— 见 MAX_NOTIFY_ACTIONS。
  */
 export type ProposalNotifyOption = {
-  action: "acknowledge" | "snooze" | "dismiss" | "approve" | "decline";
+  /**
+   * 通用五项（acknowledge/snooze/dismiss/approve/decline）只改主动性管道自身状态；
+   * 领域动作（2026-11-23 通知闭环 M1）会真的回写业务：
+   *   parcel_picked    → 台账该快递置已取件
+   *   bill_settled     → 台账该账单置已处理
+   *   schedule_complete→ 日程置完成
+   *   schedule_snooze  → 日程推迟 delayMs 后再提醒
+   * 领域动作必须带 ref（业务实体 id），否则映射时丢弃该项。
+   */
+  action:
+    | "acknowledge" | "snooze" | "dismiss" | "approve" | "decline"
+    | "parcel_picked" | "bill_settled" | "schedule_complete" | "schedule_snooze";
   /** 动作短语 2–5 字，随内容动态生成（禁止「选项1 / 确定」这类无信息文案） */
   label: string;
-  /** snooze 专用：推迟重投的间隔 ms，缺省 30 分钟 */
+  /** snooze / schedule_snooze：推迟的间隔 ms，缺省 30 分钟（schedule_snooze 缺省 15 分钟） */
   delayMs?: number;
+  /** 领域动作的业务实体 id（台账条目 id / 日程 taskId） */
+  ref?: string;
 };
 
 /** 效用评估元数据：声明了 utility 的提案在仲裁链最前面过三分支判定（方案 A/B） */
@@ -86,11 +99,40 @@ export type ProactiveProposal = {
    */
   notifyOptions?: ProposalNotifyOption[];
   /**
+   * 声明「这条没有可拍板的事，别用默认双按钮兜底」（2026-11-23）。
+   *
+   * 不设这个开关时，`notifyOptions` 为空会回退到「知道了 / 稍后再说」——
+   * 对纯告知/闲聊类提案，这是两个按了也不改变任何状态的假按钮（用户实拍：
+   * 「还去吗？」配「知道了/稍后再说」）。触发源确认自己给不出真动作时置 true，
+   * 通知层就不渲染动作行（通知照发，只是没有按钮）。
+   */
+  suppressDefaultActions?: boolean;
+  /**
    * 定向投递（2026-10-13）：缺省 = 全部在线设备 fan-out（旧行为）；声明为
    * "mobile" 时投递只面向手机端——桌面在线不构成对手机的送达，也不让桌面
    * 收到重复通知（到点提醒的手机离线补达用：挂起待手机重连 / 升级手机推送）。
    */
   targetDeviceClass?: "mobile" | "desktop";
+  /**
+   * 触点计划落点（2026-11-23 §3.4）：非紧急候选被排进某个 slot 时记下槽位 id，
+   * `deliverAfter` 同步推到该槽位的窗口起点。有值 = 这条是「到点合并说」的，
+   * 管道 flush 时同槽位的候选合成一次投递；无值 = 走的仍是即时通道。
+   */
+  slotId?: string;
+  /**
+   * 「为什么现在告诉我」（§3.10 可解释）：由 reasonChain 翻出的一句人话，
+   * 随消息下发客户端做长按详情；管道裁决出 delivered 时写入，别处不要手填。
+   */
+  why?: string;
+  /**
+   * 家庭模式字段预留（§11.1，本期不出 UI、不加分支逻辑）：
+   * `householdId` 归属家庭空间（默认 null=个人）；`targetActorId` 代他人时的实际
+   * 收件人（≠ actorId 即「帮家人设提醒」，只是业务字段，不参与身份裁决）；
+   * `scope` 可见范围。投递/记录侧原样透传，读取方现在都不该依赖它们有值。
+   */
+  householdId?: string | null;
+  targetActorId?: string;
+  scope?: "private" | "household";
 };
 
 export type ProposalVerdict =

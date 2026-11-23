@@ -1,5 +1,6 @@
 import "package:flutter/material.dart";
 
+import "../../core/services/client_telemetry.dart";
 import "../../core/services/profile_manage_api.dart";
 
 /// 「它眼里的你」（2026-09-30 起挂在 Agent 主页，原设置页分区）：
@@ -21,6 +22,8 @@ class _ProfileInsightSectionState extends State<ProfileInsightSection> {
   @override
   void initState() {
     super.initState();
+    // §12.1：资料库打开率——「它眼里的你」被翻过几次
+    ClientEventTelemetry.track("profile_viewed");
     _reload();
   }
 
@@ -61,6 +64,10 @@ class _ProfileInsightSectionState extends State<ProfileInsightSection> {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("删除失败，请重试")));
       return;
     }
+    ClientEventTelemetry.track(
+      "profile_item_deleted",
+      props: <String, Object>{"section": section.key},
+    );
     await _reload();
   }
 
@@ -97,6 +104,10 @@ class _ProfileInsightSectionState extends State<ProfileInsightSection> {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("修改失败，请重试")));
       return;
     }
+    ClientEventTelemetry.track(
+      "profile_item_edited",
+      props: <String, Object>{"section": section.key, "op": "update"},
+    );
     await _reload();
   }
 
@@ -129,6 +140,10 @@ class _ProfileInsightSectionState extends State<ProfileInsightSection> {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("添加失败（可能已存在同条）")));
       return;
     }
+    ClientEventTelemetry.track(
+      "profile_item_edited",
+      props: <String, Object>{"section": section.key, "op": "add"},
+    );
     await _reload();
   }
 

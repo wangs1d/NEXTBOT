@@ -2,6 +2,8 @@
 //
 // POST /api/telemetry/client-boot —— 桌面客户端每次启动上报一条（免鉴权，同反馈提交）。
 // GET /api/admin/clients —— 管理员令牌下的客户端列表与聚合；概览页用 clientTelemetrySummary()。
+// POST /api/telemetry/events —— 客户端行为事件批量上报（2026-11-23 M1：通知展示/打开/小组件/渠道关闭等）。
+// GET /api/admin/telemetry/events —— 管理员令牌下按事件名、天聚合（主动触达漏斗的客户端半段）。
 //
 // 用途：内测期 runtime 跑在用户本机，「装了多少台 / 后端真的起来了吗 / 起得来要多久」
 // 只能靠这里收数。channel 字段记录客户端最后一次读到的运行通道（byok=本机 runtime，
@@ -64,6 +66,50 @@ const listQuerySchema = z.object({
   offset: z.coerce.number().int().nonnegative().optional(),
 });
 
+/**
+ * 客户端行为事件白名单（与需求文档 §12.1 一一对应）。
+ * 服务端生命周期事件（候选/入时段/决策/送达）不在这里打点——它们已在
+ * reach-decision-log / silence-log / outcome-store 里，重复打点只会让两份口径打架。
+ */
+const CLIENT_EVENT_NAMES: ReadonlySet<string> = new Set([
+  "proactive_displayed",
+  "proactive_opened",
+  "proactive_action",
+  "proactive_replied",
+  "notif_channel_disabled",
+  "widget_added",
+  "widget_removed",
+  "widget_click",
+  "share_ingest_started",
+  "share_ingest_committed",
+  "share_ingest_failed",
+  "profile_viewed",
+  "profile_item_edited",
+  "profile_item_deleted",
+]);
+
+const clientEventSchema = z.object({
+  name: z.string().trim().max(48),
+  /** 客户端发生时刻 ms（端侧缓存后批量补报，所以不用服务端收到时间） */
+  at: z.number().int().positive(),
+  /** 关联的投递/意图 id（漏斗串联用，可缺省） */
+  deliveryId: z.string().trim().max(96).optional(),
+  /** 少量维度：surface / actionId / channelId / size / area / section / field / kind 等，值只收短字符串和数字 */
+  props: z.record(z.union([z.string().max(64), z.number(), z.boolean()])).optional(),
+});
+
+const eventsBodySchema = z.object({
+  installId: z.string().trim().regex(/^[A-Za-z0-9_-]{6,64}$/),
+  actorId: z.string().trim().max(254).optional(),
+  platform: z.string().trim().max(120).optional(),
+  events: z.array(clientEventSchema).min(1).max(200),
+});
+
+const eventsQuerySchema = z.object({
+  days: z.coerce.number().int().positive().max(90).optional(),
+  name: z.string().trim().max(48).optional(),
+});
+
 function telemetryDbPath(): string {
   return process.env.CLIENT_TELEMETRY_DB?.trim() || join(getDataDir(), "client-telemetry.db");
 }
@@ -96,6 +142,19 @@ class ClientTelemetryStore {
         );
         CREATE INDEX IF NOT EXISTS idx_clients_last_boot ON clients(last_boot_at DESC);
         CREATE INDEX IF NOT EXISTS idx_clients_actor ON clients(actor_id);
+        CREATE TABLE IF NOT EXISTS client_events (
+          id          INTEGER PRIMARY KEY AUTOINCREMENT,
+          install_id  TEXT NOT NULL,
+          actor_id    TEXT,
+          platform    TEXT,
+          name        TEXT NOT NULL,
+          at          INTEGER NOT NULL,
+          delivery_id TEXT,
+          props       TEXT,
+          received_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_client_events_name_at ON client_events(name, at);
+        CREATE INDEX IF NOT EXISTS idx_client_events_delivery ON client_events(delivery_id);
       `);
       this.db = db;
       return db;
@@ -138,6 +197,64 @@ class ClientTelemetryStore {
         last_boot_at = excluded.last_boot_at,
         updated_at = excluded.updated_at
     `).run({ ...input, now, incident });
+  }
+
+  /** 批量写入客户端事件（单事务）；白名单外的事件名直接丢弃，返回实际写入条数。 */
+  recordEvents(input: {
+    installId: string;
+    actorId: string | null;
+    platform: string | null;
+    events: Array<{ name: string; at: number; deliveryId?: string; props?: Record<string, unknown> }>;
+  }): number {
+    const db = this.open();
+    if (!db) return 0;
+    const receivedAt = Date.now();
+    const insert = db.prepare(`
+      INSERT INTO client_events (install_id, actor_id, platform, name, at, delivery_id, props, received_at)
+      VALUES (@installId, @actorId, @platform, @name, @at, @deliveryId, @props, @receivedAt)
+    `);
+    let written = 0;
+    db.transaction(() => {
+      for (const e of input.events) {
+        if (!CLIENT_EVENT_NAMES.has(e.name)) continue;
+        insert.run({
+          installId: input.installId,
+          actorId: input.actorId,
+          platform: input.platform,
+          name: e.name,
+          at: e.at,
+          deliveryId: e.deliveryId ?? null,
+          props: e.props ? JSON.stringify(e.props) : null,
+          receivedAt,
+        });
+        written += 1;
+      }
+    })();
+    return written;
+  }
+
+  /** 按事件名 × 本地日聚合（管理端漏斗看板用） */
+  eventSummary(days: number, name?: string): Array<{ name: string; day: string; count: number; actors: number }> {
+    const db = this.open();
+    if (!db) return [];
+    const since = Date.now() - days * 24 * 3600 * 1000;
+    const params: Record<string, string | number> = { since };
+    let where = "WHERE at >= @since";
+    if (name && CLIENT_EVENT_NAMES.has(name)) {
+      where += " AND name = @name";
+      params.name = name;
+    }
+    return db
+      .prepare(
+        `SELECT name,
+                strftime('%Y-%m-%d', at / 1000, 'unixepoch', 'localtime') AS day,
+                COUNT(*) AS count,
+                COUNT(DISTINCT COALESCE(actor_id, install_id)) AS actors
+         FROM client_events ${where}
+         GROUP BY name, day
+         ORDER BY day DESC, name`,
+      )
+      .all(params) as Array<{ name: string; day: string; count: number; actors: number }>;
   }
 
   query(filters: {
@@ -264,6 +381,34 @@ export function registerClientTelemetryRoutes(app: FastifyInstance): void {
       platform: body.platform || null,
     });
     return { ok: true };
+  });
+
+  // 客户端行为事件批量上报：与 client-boot 同为免鉴权 + fail-open（客户端失败即丢，不重试风暴）
+  app.post("/api/telemetry/events", async (request, reply) => {
+    const parsed = eventsBodySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
+    }
+    const body = parsed.data;
+    const written = store.recordEvents({
+      installId: body.installId,
+      actorId: body.actorId || null,
+      platform: body.platform || null,
+      events: body.events,
+    });
+    return { ok: true, written };
+  });
+
+  app.get("/api/admin/telemetry/events", async (request, reply) => {
+    const parsed = eventsQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
+    }
+    if (!isAdminRequest(request)) {
+      return reply.code(401).send({ ok: false, message: "Unauthorized: invalid admin token" });
+    }
+    const days = parsed.data.days ?? 14;
+    return { ok: true, days, rows: store.eventSummary(days, parsed.data.name) };
   });
 
   app.get("/api/admin/clients", async (request, reply) => {

@@ -12,9 +12,11 @@ import "../core/services/nb_http.dart";
 ///
 /// 与桌面端简报同源:GET /api/morning-briefing?sessionId=<账号 id>,
 /// 服务端实时生成(今日日程 + 待办跟进)。
-/// 2026-11-04 收敛：待复习笔记/兴趣热搜/近期重要日子撤出晨报——热搜归话题追踪
-/// （后台轮询后主动在对话里说），重要日子归明日速览；DDL 与在途行程并进
+/// 2026-11-04 收敛：待复习笔记/兴趣热搜撤出晨报；DDL 与在途行程并进
 /// 「今日日程」同一栏（服务端已按 kind 标记，条目标题带「截止／行程」前缀）。
+/// 2026-11-23 §3.4 分工：日程与截止只在早安说，夜里的明日预览只讲天气——
+/// 重要日子（当天命中的生日/纪念日）随之搬回早安这一栏（briefing.importantDays，
+/// 服务端只放 daysUntil==0 的，没命中时整个 key 不存在）。
 /// 在途行程只给手机端：带 includeInProgressTravel=1 才取，桌面端不传。
 class MobileBriefingPage extends StatefulWidget {
   const MobileBriefingPage({super.key, this.client});
@@ -154,10 +156,93 @@ class _MobileBriefingPageState extends State<MobileBriefingPage> {
           title: "今日日程",
           child: _buildScheduleItems(b, p),
         ),
+        _buildImportantDaysSection(b, p),
         _buildTodoSection(b, p),
         const SizedBox(height: 24),
       ],
     );
+  }
+
+  /// 今天的重要日子（生日/纪念日）：§3.4 分工后由夜里的明日预览搬回这一栏。
+  /// 服务端只放当天命中的（daysUntil==0），没命中时连 key 都没有 → 整栏不出，
+  /// 不留空标题；近期预告（还有几天那种）不上早安，也不上睡前的卡，
+  /// 用户问「最近有什么日子」时由问答面 TomorrowPreviewFacts 答。
+  Widget _buildImportantDaysSection(Map<String, dynamic> b, MobilePalette p) {
+    final List<dynamic> days =
+        (b["importantDays"] as List<dynamic>?) ?? const <dynamic>[];
+    if (days.isEmpty) return const SizedBox.shrink();
+    return _Section(
+      p: p,
+      icon: Icons.celebration_outlined,
+      title: "今天的重要日子",
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (final dynamic d in days)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Icon(Icons.cake_outlined,
+                      size: 16, color: Color(0xFFF6C445)),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _importantDayTitle(d),
+                          style: TextStyle(
+                            color: p.textPrimary,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                        // 备注（喜好/上次聊到什么）只在服务端给了才占一行
+                        if (_importantDayNote(d).isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 2),
+                            child: Text(
+                              _importantDayNote(d),
+                              style: TextStyle(
+                                color: p.textMuted,
+                                fontSize: 13,
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// 「妈妈的生日」/「结婚纪念日的纪念日」：类型中文标签在服务端已定，
+  /// 这里只按 type 兜个显示名（缺 type 就当生日）
+  String _importantDayTitle(dynamic d) {
+    final Map<String, dynamic> m = (d as Map).cast<String, dynamic>();
+    final String name = m["name"]?.toString() ?? "";
+    final String type = m["type"]?.toString() ?? "birthday";
+    final String label = type == "anniversary"
+        ? "纪念日"
+        : type == "custom"
+            ? "特殊日子"
+            : "生日";
+    return "$name的$label";
+  }
+
+  /// 次要一行：关系标签 + 备注（都没给就空着，不硬凑）
+  String _importantDayNote(dynamic d) {
+    final Map<String, dynamic> m = (d as Map).cast<String, dynamic>();
+    return <String>[
+      for (final String k in <String>["relationship", "notes"])
+        if ((m[k]?.toString() ?? "").trim().isNotEmpty) m[k].toString().trim(),
+    ].join(" · ");
   }
 
   /// 日程条目标题：三源合并后按 kind 加前缀（截止 / 行程），普通日程原样

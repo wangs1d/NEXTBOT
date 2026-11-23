@@ -10,8 +10,13 @@
 /// 服务）——bootstrap 启动期与回前台 resumed 各拉一次，START_STICKY 兜底。
 library;
 
+import "dart:async";
+
 import "package:flutter/foundation.dart";
 import "package:flutter/services.dart";
+
+import "ongoing_status_service.dart";
+import "phone_state_reporter.dart";
 
 class KeepAliveService {
   KeepAliveService._();
@@ -19,9 +24,25 @@ class KeepAliveService {
   static const MethodChannel _channel = MethodChannel("nextbot/keep_alive");
 
   /// 拉起前台保活服务。幂等（重复 start 只是重投 onStartCommand）。
+  ///
+  /// 2026-11-23：保活起来后顺带启动两个同进程的常驻能力——
+  ///   - [PhoneStateReporter]：手机状态上报（在场判定 + 15 分钟桶）；
+  ///   - [OngoingStatusService]：把这条保活通知刷成今日状态栏。
+  /// 两者自身都幂等，bootstrap 与回前台的重复调用是空转。
   static Future<bool> start() async {
     try {
-      return await _channel.invokeMethod<bool>("start") ?? false;
+      final bool ok = await _channel.invokeMethod<bool>("start") ?? false;
+      try {
+        PhoneStateReporter.instance.start();
+      } catch (e) {
+        debugPrint("[keep-alive] phone state reporter start failed: $e");
+      }
+      try {
+        unawaited(OngoingStatusService.instance.start());
+      } catch (e) {
+        debugPrint("[keep-alive] ongoing status start failed: $e");
+      }
+      return ok;
     } on MissingPluginException {
       return false;
     } on PlatformException catch (e) {

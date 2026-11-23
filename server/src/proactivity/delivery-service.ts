@@ -3,7 +3,7 @@
 // 不落 MessageHub 离线信箱——两端都不在线时由管道挂起提案，任一设备重连即直推。
 // 高重要度消息 payload 带 display:"popup"，客户端保证以弹窗形式展示（桌面原生弹窗 /
 // 移动端应用内弹窗卡片）。每条投递带 deliveryId，客户端回传 outcome 反馈。
-import type { ProactiveProposal } from "./pipeline-types.js";
+import type { ProactiveImportance, ProactiveProposal } from "./pipeline-types.js";
 // 类型约束：投递正文必须是"已过开口闸"的 OpenedBody（见 DiscoveryLayer.openMouth）。
 // 拿一句裸 string 调 deliver 会编译不过——主动内容无法绕开共享发现层说给用户。
 import type { OpenedBody } from "./discovery-layer.js";
@@ -27,6 +27,13 @@ export type DeliveryDeps = {
    * 未装配时投递行为与从前完全一致（只是通知里没有按钮）。
    */
   actionIntents?: ActionIntentService | null;
+  /**
+   * 横幅归属端（2026-11-23 §3.7「多端时取打断成本最低的那一端」）。
+   * 返回非 null 时，只有该端弹系统通知，其余端只把消息落对话流——
+   * 人在电脑前活跃时手机不再跟着弹一条，正是需求文档的验收项 3。
+   * 未注入 / 返回 null = 各端按原逻辑自决（单端在线时本来就没得选）。
+   */
+  bannerSurface?: (actorId: string) => "mobile" | "desktop" | null;
 };
 
 export class ProactiveDeliveryService {
@@ -69,6 +76,9 @@ export class ProactiveDeliveryService {
     const popup = p.importance === "high" || p.importance === "critical";
     // 「通知即界面」：签发带按钮的动作视图（同一 intent 也用于离线推送的降级路径）
     const actionIntent = this.buildActionIntent(p, deliveryId, title, String(text));
+    // 定向投递（targetDeviceClass）本来就只到一个端，那个端就是归属端，不再指定；
+    // 全端 fan-out 时才需要「弹在哪一端」这个额外信息。
+    const notifyOn = p.targetDeviceClass ? null : (this.deps.bannerSurface?.(p.actorId) ?? null);
     const payload = {
       type: "agent.proactive_message",
       payload: {
@@ -87,6 +97,10 @@ export class ProactiveDeliveryService {
         ...(popup ? { display: "popup" } : {}),
         // 带按钮的动作视图（2026-11-13）：通知栏与聊天卡共用同一个 intent
         ...(actionIntent ? { actionIntent } : {}),
+        // 多端归属（2026-11-23 §3.7）：只有这一端弹系统横幅，其余端静默落流
+        ...(notifyOn ? { notifyOn } : {}),
+        // 「为什么现在告诉我」（§3.10）：长按详情用，缺省不下发
+        ...(p.why ? { why: p.why } : {}),
       },
     };
     if (p.targetDeviceClass && this.deps.trySendToDeviceClasses) {
@@ -107,6 +121,66 @@ export class ProactiveDeliveryService {
         /* 台账失败不影响投递主链路 */
       }
     }
+    return { ok: true, deliveryId };
+  }
+
+  /**
+   * 「回复」闭环的第二跳（2026-11-29 §4.3 步骤 4）：把 agent 对通知栏内联回复的
+   * 应答送回用户界面。
+   *
+   * 复用 [deliver] 的同一套出站三件套（WS 直投 + 落流补发登记 + 横幅归属端），
+   * 事件类型也仍是 `agent.proactive_message`——客户端已有的三段判定（前台落对话流 /
+   * 后台用同 id 原地更新通知 / 非归属端不弹横幅）因此一行不改就接得住这条回复。
+   * 与 deliver 的唯一区别：动作视图由 `chat.reply` 执行器预先签好（回复线程的
+   * 下一轮意图，displayIntentId 钉在根意图上），这里不再走 registerIntentForProposal。
+   *
+   * 不走管道仲裁：这是对用户已经开口的一句话的应答，不是系统主动找话说，
+   * 拿它去挤频控预算会把你自己的回信拦在门外。
+   */
+  deliverNotificationReply(input: {
+    actorId: string;
+    title: string;
+    text: string;
+    /** 根意图 id：客户端按它算通知 id → agent 的回复落在原来那条通知上 */
+    rootIntentId: string;
+    /** 这是这条线程的第几轮（诊断与埋点用） */
+    round: number;
+    /** 用户那句原话：随载荷带回，客户端据此落唯一一条用户气泡（缺省靠历史 reconcile 补） */
+    userText?: string;
+    kind?: string;
+    actionIntent?: ClientActionIntent;
+    /**
+     * 横幅归属端。通知栏输入框只可能出现在手机上，所以默认把横幅钉给 mobile：
+     * 手机在后台 → 同 id 更新那条通知；电脑在线也只落流不再弹一条。
+     * 传 null = 各端按原逻辑自决。
+     */
+    notifyOn?: "mobile" | "desktop" | null;
+  }): DeliveryResult {
+    const deliveryId = `d_${Date.now().toString(36)}_${(this.seq++).toString(36)}`;
+    const payload = {
+      type: "agent.proactive_message",
+      payload: {
+        deliveryId,
+        // 稳定消息 id：与 deliver 同口径，重连补投按 (sessionId, messageId) 幂等
+        messageId: `proactive-${deliveryId}`,
+        title: input.title,
+        text: input.text,
+        importance: "medium" as ProactiveImportance,
+        kind: input.kind ?? "notification_reply",
+        // 这条消息的来源：通知栏里回的那一句话所触发的应答（客户端落流详情用）
+        source: "notification_reply",
+        reply: { rootIntentId: input.rootIntentId, round: input.round },
+        ...(input.userText ? { userText: input.userText } : {}),
+        ...(input.actionIntent ? { actionIntent: input.actionIntent } : {}),
+        ...(input.notifyOn === null ? {} : { notifyOn: input.notifyOn ?? "mobile" }),
+      },
+    };
+    // 全端 fan-out：回复要落到会话流（电脑/手机都该看见），只是横幅归一台
+    if (!this.deps.trySend(input.actorId, JSON.stringify(payload))) {
+      return { ok: false, reason: "no_online_device" };
+    }
+    // 落流补发：此刻不在线的那一端重连后照样补到这轮应答（replay 标记只落流不弹横幅）
+    getProactiveReplay().record(input.actorId, payload.payload as Record<string, unknown>);
     return { ok: true, deliveryId };
   }
 }

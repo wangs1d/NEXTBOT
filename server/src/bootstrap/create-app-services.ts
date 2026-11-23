@@ -70,6 +70,7 @@ import {
   createUserUnderstandingStoreIfEnabled,
 } from "../agentic-memory/user-understanding-store.js";
 import {
+  canonicalFactField,
   createStructuredFactStoreIfEnabled,
   isProfileField,
   isTailCategory,
@@ -125,8 +126,10 @@ import { registerPreviewDigestSource } from "../services/tomorrow-preview-bridge
 import { LifeRhythmEngine } from "../rhythm/engine.js";
 import { RhythmProfileStore } from "../rhythm/profile-store.js";
 import { UserTimingService } from "../proactivity/user-timing-service.js";
+import { TouchpointPlanner } from "../proactivity/touchpoint-planner.js";
 import { NightlyRhythmAnalyzer } from "../rhythm/nightly-rhythm-analyzer.js";
 import { SleepWindowSensor } from "../rhythm/sensors/sleep-window-sensor.js";
+import { PhoneUsageSensor, type PhoneBucketReader } from "../rhythm/sensors/phone-usage-sensor.js";
 import { DesktopActivitySensor } from "../rhythm/sensors/desktop-activity-sensor.js";
 import { InteractionSignalSensor } from "../rhythm/sensors/interaction-signal-sensor.js";
 import { createReminderReschedulerConsumer } from "../rhythm/consumers/reminder-rescheduler.js";
@@ -210,6 +213,7 @@ import { MailWatchRegistry } from "../services/mail-watch-registry.js";
 import { BillParcelLedger } from "../services/bill-parcel-ledger.js";
 import { BillParcelIngestService } from "../services/bill-parcel-ingest-service.js";
 import { BillParcelReactiveReporter } from "../services/bill-parcel-reporter.js";
+import { buildMonthlyBillSummary } from "../services/monthly-bill-summary.js";
 import {
   FinanceBillAutoFetchService,
   createPlaywrightAlipayBillFetcher,
@@ -356,8 +360,9 @@ import {
   type MorningBriefingImportantDay,
 } from "../services/morning-briefing-service.js";
 import { MorningBriefingScheduler } from "../services/morning-briefing-scheduler.js";
-import { markMorningBriefingDelivered } from "../routes/http/user-preferences.js";
+import { frequencyTierOf as getUserFrequencyTier, markMorningBriefingDelivered } from "../routes/http/user-preferences.js";
 import {
+  applyFrequencyTier,
   getUserPreferences,
   listPrefsActorIds,
   patchAgentProfile,
@@ -489,6 +494,7 @@ import { InterestWatcher } from "../proactivity/interest-watcher.js";
 import { ProactivitySuppressionStore } from "../proactivity/suppression-store.js";
 import { FrequencyGovernor } from "../proactivity/frequency-governor.js";
 import { PresenceService } from "../proactivity/presence-service.js";
+import { PhoneSignalBucketStore } from "../proactivity/phone-signal-buckets.js";
 import { ProactiveDeliveryService } from "../proactivity/delivery-service.js";
 // ─── 「通知即界面」（2026-11-13）：通知栏按钮 = 聊天卡按钮的第二个渲染面 ───
 import { ActionIntentStore } from "../proactivity/action-intent-store.js";
@@ -497,6 +503,15 @@ import {
   loadActionIntentSecret,
 } from "../proactivity/action-intent-service.js";
 import { registerNotificationActionExecutors } from "../proactivity/notification-action-executors.js";
+// §4.3「回复」闭环：通知栏回的一句话经此进主会话（与 WS chat.user_message 同一个 AgentCore）
+import { runChatTurnForActor } from "../services/chat-turn-runner.js";
+// 「了解你」画像缺口提问（PRD §3.6）：每日一问 + 答案入档
+// 承诺跟进（PRD §3.5）：未来个人事件的事后一句，落 commitments(kind='follow_up')
+import { FollowUpService, isFollowUpFeatureEnabled, setFollowUpService } from "../proactivity/followup-service.js";
+// 轻量健康（PRD §10 需求八）：用药提醒 / 作息周报 / 喝水久坐。不开定时器、不新建存储、
+// 不新造按钮——三类提案只经 submitProposal，闭环只认 proactive.outcome 回灌
+import { HealthService, isHealthFeatureEnabled, setHealthService } from "../proactivity/health-service.js";
+import { NOTIFY_ACTION, DEFAULT_SCHEDULE_SNOOZE_MS } from "../proactivity/notification-actions.js";
 import { AgentActivityStore } from "../proactivity/activity-store.js";
 import { AttentionStore } from "../proactivity/attention-store.js";
 import { ReachRouter, type ReachChannelDeps } from "../proactivity/reach-router.js";
@@ -567,6 +582,9 @@ import { AuditTrailService } from "../proactivity/audit-timeline.js";
 import { ProactiveCaller, type CallOutcome } from "../proactivity/proactive-caller.js";
 import { fabricSelftest } from "../proactivity/selftest.js";
 import { CostCalibrator } from "../proactivity/cost-calibrator.js";
+import { subscribeProactiveOutcomeFanout } from "../proactivity/outcome-fanout.js";
+import { buildTodayBoard } from "../services/today-board.js";
+import { BoardCompleteActions } from "../proactivity/board-complete-actions.js";
 import { ScheduleAssertionStore } from "../proactivity/branches/schedule-assertion-store.js";
 import { WatchTaskStore } from "../proactivity/branches/watch-tasks.js";
 import { IntelService } from "../proactivity/intel/intel-service.js";
@@ -1339,6 +1357,12 @@ export async function createAppServices(
     | ((sessionId: string, goal: string, resultText: string) => void)
     | undefined;
 
+  /**
+   * 今日看板推送（常驻通知 + 桌面小组件，需求 §5.2「投递单元变化即更新」）。
+   * 晚绑定：billParcelLedger 在装配后段才创建，日程变更处理器在前段就要挂上。
+   */
+  const pushTodayBoardRef: { current: ((actorId: string) => void) | null } = { current: null };
+
   scheduleTaskService.setTaskChangeHandler(async (action, task) => {
     notifyScheduleTasksChanged(
       wsConnectionRegistry,
@@ -1346,6 +1370,8 @@ export async function createAppServices(
         ? scheduleWsPayloadDeleted(task.sessionId, task.taskId)
         : scheduleWsPayloadFromTask(task, action),
     );
+    // 任务一有增减，状态栏那条常驻通知就得跟着换（下一件事变了）
+    pushTodayBoardRef.current?.(task.sessionId);
     // 待办权威源写路径（2026-11-12 根修）：此前 commitments 表只读不写，
     // 【待办与承诺】块恒空——提醒在对话面只有 scheduleSnapshot 一条命。
     // created/active → upsert；completed → fulfilled；cancelled/failed/deleted → cancelled。
@@ -1422,6 +1448,10 @@ export async function createAppServices(
         facts: Record<string, unknown>;
       }) => Promise<string>)
     | undefined;
+  // 通知闭环 M1（2026-11-23）：到点提醒带「完成 / 15 分钟后」两键。
+  // actionIntentService 在下方主动性装配块才创建，这里经 ref 晚绑定（同 proactivePipelineRef 惯例）；
+  // 未就绪时提醒照发，只是不带按钮。
+  const reminderActionIntentsRef: { current: ActionIntentService | null } = { current: null };
   scheduleTaskService.setReminderHandler(async (task, message, options) => {
     const displayMessage = formatReminderDisplayMessage(message);
     // 到点提醒 vs 提前量预告：客户端据此分流（岛默认短档 / 岛长驻留档；
@@ -1503,8 +1533,9 @@ export async function createAppServices(
       // kind=schedule_reminder 供客户端跳过重复横幅（reminder_fired 已弹过）。
       if (preReminder !== true) {
         const reminderRunAt = task.nextRunAt ?? task.runAt;
+        const reminderDeliveryId = `d_rm${task.taskId.slice(-6)}_${Date.now().toString(36)}`;
         const reminderPayload: Record<string, unknown> = {
-          deliveryId: `d_rm${task.taskId.slice(-6)}_${Date.now().toString(36)}`,
+          deliveryId: reminderDeliveryId,
           // 稳定 messageId（2026-11-23）：与离线补投共用同一 id——手机此刻在线
           // 直投落泡，其他设备/本机重连时由 ProactiveReplayStore 按 id 幂等补齐。
           messageId: reminderStableMessageId(task.taskId, reminderRunAt, false),
@@ -1517,6 +1548,32 @@ export async function createAppServices(
             ? { firedAt: Date.parse(reminderRunAt) }
             : {}),
         };
+        // 单次提醒才给按钮：重复提醒「完成」与「推迟」都会误改之后每一次的调度
+        const intents = reminderActionIntentsRef.current;
+        if (intents && task.recurrence === "none" && !task.cronExpression) {
+          try {
+            const intent = intents.register({
+              actorId: task.sessionId,
+              kind: "schedule_reminder",
+              title: task.shortTitle || task.title || "日程提醒",
+              body: outboundMessage.slice(0, 300),
+              risk: "L0",
+              deliveryId: reminderDeliveryId,
+              actions: [
+                { actionId: NOTIFY_ACTION.scheduleComplete, label: "完成", kind: "execute", payload: { ref: task.taskId } },
+                {
+                  actionId: NOTIFY_ACTION.scheduleSnooze,
+                  label: "15 分钟后",
+                  kind: "execute",
+                  payload: { ref: task.taskId, delayMs: DEFAULT_SCHEDULE_SNOOZE_MS },
+                },
+              ],
+            });
+            reminderPayload.actionIntent = intents.renderForClient(intent);
+          } catch (err) {
+            console.log(`[schedule] 提醒动作意图签发失败（提醒照发，不带按钮）task=${task.taskId}: ${err}`);
+          }
+        }
         const reminderSent = wsConnectionRegistry.trySendToDeviceClasses(
           task.sessionId,
           JSON.stringify({ type: "agent.proactive_message", payload: reminderPayload }),
@@ -2619,6 +2676,11 @@ export async function createAppServices(
   const morningBriefingScheduler = new MorningBriefingScheduler({
     briefingService: morningBriefingService,
     getSessionPrefs: (sessionId) => getUserPreferences(sessionId),
+    // §3.4：早安的触发条件从「固定钟到点」改成「到点且当天已解锁过手机」——
+    // 人在手机前，这句话才有意义。拿不到手机状态（纯桌面）时不拦，保持旧行为。
+    unlockedToday: (sessionId) =>
+      !proactivityPresence.hasPhoneSignal(sessionId) ||
+      proactivityPresence.firstUnlockToday(sessionId) !== null,
     onBriefingTriggered: async (sessionId, payload, desktopPayload) => {
       const frame = (p: typeof payload): string =>
         JSON.stringify({
@@ -2754,6 +2816,11 @@ export async function createAppServices(
         }
       : undefined,
   });
+  // 轻量健康（PRD §10 需求八）：本模块一个定时器都不开（§1.3），三类时刻全借既有事件——
+  // 晚间「明日预览」触发（下面 onDigestTriggered）、用户活跃、对话轮。服务本身要等触点
+  // 计划 / 节律引擎 / 统一管道就位（下方主动性装配块）才构造，这里先留晚绑定句柄
+  // （同 reminderActionIntentsRef 惯例）：没就绪时这些入口整体跳过，不影响晚报本身。
+  const healthServiceRef: { current: HealthService | null } = { current: null };
   const eveningDigestScheduler = new EveningDigestScheduler({
     digestService: eveningDigestService,
     // 推送时刻动态学习（2026-10-16）：经 UserTimingService 多源取就寝时刻
@@ -2761,6 +2828,9 @@ export async function createAppServices(
     // 发送规则（2026-10-27 用户拍板）：到点那一分钟发一次，过点不补发。
     bedtimeHourOf: (sessionId) => userTiming.bedtimeHour(sessionId),
     onDigestTriggered: (sessionId, digest) => {
+      // §10 需求八：这一刻就是当天唯一的健康检查钟——排今天/明天的用药打卡、把没落账
+      // 的那句漏服提一次、周日带一句作息周报（三条都只走 submitProposal，落点由触点计划定）
+      healthServiceRef.current?.evaluateEveningSlot(sessionId);
       const sent = wsConnectionRegistry.trySend(
         sessionId,
         JSON.stringify({
@@ -2804,17 +2874,19 @@ export async function createAppServices(
     const failedAt = new Map<string, number>();
     const FAIL_COOLDOWN_MS = 5 * 60_000;
     registerPreviewDigestSource(async (sessionId) => {
-      const cached = eveningDigestScheduler.latestDigest(sessionId);
+      const cached = eveningDigestScheduler.latestPreviewFacts(sessionId);
       if (cached) return cached as unknown as Record<string, unknown>;
       const lastFail = failedAt.get(sessionId);
       if (lastFail && Date.now() - lastFail < FAIL_COOLDOWN_MS) return undefined;
       const running = inflight.get(sessionId);
       if (running) return running;
+      // 问答面事实（含行程/截止/重要日子）——不能用 latestDigest 那个推送面，
+      // 推送面按 §3.4 只剩天气与闲聊，拿它答题会回「没有日程」
       const job = eveningDigestService
-        .generateDigest(sessionId, { skipNarration: true })
-        .then((digest) => {
-          eveningDigestScheduler.rememberDigest(sessionId, digest);
-          return digest as unknown as Record<string, unknown>;
+        .generatePreviewFacts(sessionId)
+        .then((facts) => {
+          eveningDigestScheduler.rememberPreviewFacts(sessionId, facts);
+          return facts as unknown as Record<string, unknown>;
         })
         .catch(() => {
           failedAt.set(sessionId, Date.now());
@@ -2898,6 +2970,8 @@ export async function createAppServices(
   let rhythmProfileStoreRef: RhythmProfileStore | null = null;
   /** 屏幕状态条件化的信号源（proactivity 内核 signals 日志；内核创建后赋值） */
   let screenSignalSourceRef: (() => Signal[]) | null = null;
+  /** 手机 15 分钟桶的只读口（proactivity 内核的 PhoneSignalBucketStore；晚绑定同上） */
+  let phoneBucketReaderRef: PhoneBucketReader | null = null;
   if (rhythmEnabled) {
     const rhythmProfileStore = new RhythmProfileStore(join(getDataDir(), "rhythm_profiles"));
     await rhythmProfileStore.load();
@@ -2910,6 +2984,15 @@ export async function createAppServices(
     // 屏幕状态条件化（receptivity）：内核 signals 日志（含 screen_foreground 分类）
     // → 开会/写代码/游戏等强勿扰时段的弱负观察。内核在本函数较后创建，用闭包延迟取。
     rhythmEngine.registerSensor(new ScreenFocusSensor(() => screenSignalSourceRef?.() ?? []));
+    // 手机使用桶（PRD §7.3）：夜间 collect 时按 actor 拉那段桶，自己不起轮询、
+    // 不新建存储——数据由 ws/connection.ts 的 presence_state 分支写进来。
+    // 注册在桌面睡眠窗之后：同一天手机与桌面都给样本时由模型器按来源优先级裁决
+    // （phone-usage > sleep-window，见 dimensions/grouping.ts），采集顺序不参与。
+    rhythmEngine.registerSensor(
+      new PhoneUsageSensor({
+        list: (actorId, from, to) => phoneBucketReaderRef?.list(actorId, from, to) ?? [],
+      }),
+    );
     rhythmEngine.subscribe(createReminderReschedulerConsumer(scheduleTaskService, rhythmEngine));
     rhythmEngine.subscribe(createReceptiveHoursWriterConsumer(userPersonalizationService));
     rhythmEngine.subscribe(createProactiveCandidateSourceConsumer(lifeSignalHubService, rhythmEngine));
@@ -5098,8 +5181,25 @@ export async function createAppServices(
     join(getDataDir(), "autonomy-settings.json"),
   );
   proactivityGovernor.setDndCheck((actorId) => autonomySettings.isDnd(actorId));
+  // 频率档（§3.10）：社交预算与「跟进/了解你」开关按用户在设置页选的那档走
+  proactivityGovernor.setTierCheck((actorId) => getUserFrequencyTier(actorId));
   // 在场感知（active/idle/offline）：WS 连接事件 + 对话活跃喂入，供仲裁择时与投递选通道
-  const proactivityPresence = new PresenceService();
+  // 设备类别（2026-11-23 §3.7）：多端在线时要挑「打断成本最低的那一端」弹横幅，
+  // 所以把注册表的在线类别注入进来；未注入的调用方（单测）退化为不分级。
+  const proactivityPresence = new PresenceService({
+    onlineDeviceClasses: (actorId) => wsConnectionRegistry.getOnlineDeviceClasses(actorId),
+    // 真人活动端（手机的亮灭屏心跳不算，见 ws/connection.ts 的 presence_state 分支）
+    attendedDeviceClass: (actorId) =>
+      wsConnectionRegistry.mostRecentActiveDeviceClass(actorId, PresenceService.IDLE_AFTER_MS) ?? null,
+  });
+  // 手机状态 15 分钟桶（2026-11-23 §7.2）：端侧聚合、原始事件不出端，这里只落桶。
+  // 时机模型（§3.7）读实时状态，作息分析读这份历史——两条口径分开存才不会互相污染。
+  const phoneSignalBuckets = new PhoneSignalBucketStore(
+    join(getDataDir(), "proactivity", "phone-buckets.json"),
+  );
+  // 作息采集接上这份桶（§7.3）：节律引擎在上方已注册 phone-usage 传感器，这里补上
+  // 只读口——同一个实例、同一份文件，不再第二份存储、不再第二条采集链。
+  phoneBucketReaderRef = phoneSignalBuckets;
   // 沉默日志（方案 B）：hub act 沉默与管道 silenced 共用同一实例，落盘 data/proactivity/silence-log.json
   const proactivitySilenceLog = new SilenceLog(
     join(getDataDir(), "proactivity", "silence-log.json"),
@@ -5161,8 +5261,12 @@ export async function createAppServices(
     // 每用户自主性等级：0=只建议 1=标准 2=高效（客户端设置页可调）
     autonomyLevel: (actorId) => autonomySettings.getLevel(actorId),
     // 对话轮整理进状态板会话层（决策层只看板，不翻聊天原文）
-    onConversationTurn: (actorId, text) =>
-      worldBoardRef.current?.append(actorId, "session", "recentTurns", { at: Date.now(), text }, 20),
+    onConversationTurn: (actorId, text) => {
+      worldBoardRef.current?.append(actorId, "session", "recentTurns", { at: Date.now(), text }, 20);
+      // §10 需求八的自述口：「吃过了」「别再提醒我喝水」这类短答就地收口（判不准返回 null，
+      // 不吞话、不改写，正常聊天链路完全不受影响）——这是用药打卡的第二条回执路径
+      healthServiceRef.current?.captureFromUserText(actorId, text);
+    },
     // 防重记忆持久化：跨栈去重重启不失效
     dataPath: join(getDataDir(), "proactivity"),
     // 分级触达：ask_first 挂起确认 → Router 投递+升级（hub 的 speak 信号已投
@@ -5215,6 +5319,9 @@ export async function createAppServices(
     onUserActivity: (actorId, source) => {
       rhythmCore?.noteActivity(actorId, source);
       proactivityPresence.noteActivity(actorId);
+      // §10 需求八的第二个无钟入口：用户一动就把今天漏排的用药打卡补上（一天一次）、
+      // 评估一次久坐（默认关时内部直接返回）
+      healthServiceRef.current?.onUserTouch(actorId);
     },
     // （LLM 通用路径已随 2026-09-24 架构定稿拆除：决策=状态板映射规则，零 LLM）
 
@@ -5599,8 +5706,9 @@ export async function createAppServices(
 
   // 成本自校准器（P1）：outcome 接受率 EWMA 驱动 alert 档阈值呼吸（零 LLM）
   const costCalibrator = new CostCalibrator(proactivityFabricPath);
-  // outcome 喂入走 POST /outcome 路由的 observeOutcome 实时回灌（单一来源，
-  // 不做 OutcomeStore 定时轮询——否则同一条 outcome 计数两次，EWMA 失真）。
+  // 喂入源见下方 subscribeProactiveOutcomeFanout（proactive.outcome hook 单一来源）：
+  // 各面（HTTP 回传 / 通知按钮 / 对话内表态）都汇到 pipeline.recordOutcome，
+  // 由那一个出口发事件。此前这里只挂 HTTP 路由一条路，按钮点了不涨不降。
 
   // 主动呼叫器（L5）：遇到事情真实打电话汇报 + 通话内多轮对话。
   // 触发是确定性策略（kind 白名单 + critical 豁免静默 + 分 kind 呼叫冷却），
@@ -5731,6 +5839,22 @@ export async function createAppServices(
     (outcomesStoreForCalibrator = new OutcomeStore(join(getDataDir(), "proactivity", "outcomes.json")));
   reachRefs.isOnline = (actorId) => proactivityPresence.isOnline(actorId);
 
+  // 结果回灌闭环（2026-11-23 主动触达 M1，需求 §4.6）：管道落库即发
+  // `proactive.outcome`，这里是唯一订阅方——一次用户表态同时喂三个学习器。
+  // 此前只有 HTTP 回传路由单点喂校准器，WS 确认卡与通知按钮点了等于没点：
+  // 同一个动作从不同面发生，学习信号只从一面产生，谁也调不准。
+  subscribeProactiveOutcomeFanout(hookBus, {
+    calibrate: (outcome) => costCalibrator.observe(outcome),
+    // 节律接受度：与 personalization 的 contact_feedback 桥接同一条维度，
+    // 但覆盖它够不到的面——锁屏上划走从不回传 contact_feedback。
+    // 同一动作从两面到齐时值相同（responded↔accepted 都映射 1），EWMA 方向不变。
+    contactOutcome: (actorId, outcome, at) => rhythmEngine?.recordContactOutcome(actorId, outcome, at),
+    // 提醒槽位：只认带业务实体 ref 的投递（到点提醒的「完成 / 推迟」），
+    // 学到的是「这个时刻的提醒你到底要不要」，供 reminder-rescheduler 重排。
+    reminderSlot: (actorId, taskId, outcome, at) =>
+      void rhythmEngine?.recordReminderFeedback(actorId, taskId, outcome, at),
+  });
+
   // 评估器链（L2）：信号 delta → AttentionEvent（正文模板直出，零 LLM）
   // 感知 → 目标桥晚绑定容器（goalPlanner 在下方创建后填充；见 activeGoalLine）
   const goalSignalBridgeRef: { current: import("../proactivity/goal-signal-bridge.js").GoalSignalBridge | null } = { current: null };
@@ -5828,13 +5952,20 @@ export async function createAppServices(
         .filter((a) => Date.now() - a.lastInteractionAt < 30 * 24 * 60 * 60_000)
         .map((a) => a.actorId),
     aggregate: async (actorId) => {
-      const tasks = (builtinServices.listTodayTasks?.(actorId) ?? []).map((t) => {
-        const at = typeof t.runAt === "number" ? t.runAt : Date.parse(String(t.runAt));
-        const hhmm = Number.isFinite(at)
-          ? new Date(at).toTimeString().slice(0, 5)
-          : "";
-        return hhmm ? `${hhmm} ${t.title}` : t.title;
-      });
+      const tasks = (builtinServices.listPulseTasks?.(actorId) ?? [])
+        .map((t) => {
+          const at = typeof t.runAt === "number" ? t.runAt : Date.parse(String(t.runAt ?? ""));
+          if (!Number.isFinite(at)) return null;
+          const hhmm = new Date(at).toTimeString().slice(0, 5);
+          return {
+            at: hhmm,
+            title: t.title,
+            // 只有「单次、未取消」才有可落点的领域动作；周期日程不挂按钮
+            ...(t.actionable ? { ref: t.taskId } : {}),
+            ...(t.overdue ? { overdue: true } : {}),
+          };
+        })
+        .filter((t): t is NonNullable<typeof t> => t !== null);
       const unread = [
         ...new Set(builtinServices.unreadSenders?.(actorId) ?? []),
       ];
@@ -6577,6 +6708,46 @@ export async function createAppServices(
         source: "finance",
       });
     },
+    // 钱的月报（PRD §9）：同一个月度边界多推一条「{月份}账单小结好了」。
+    //  - 触发复用本类既有的每日扫描 tick，不新起定时器；
+    //  - 出口只走统一管道（proactivePipelineRef 晚绑定），不绕过仲裁/频控/触点；
+    //  - kind 用 action.bill_parcel —— touchpoint-planner 的 SLOT_PREFERENCE 已把
+    //    bill_parcel 排进「午间 → 下班 → 早安」，正是 §9 要的早安/午间槽；
+    //  - 文案取 pushText：签名只吃月份数字，金额物理上进不了这条通知。
+    monthStartExtraActors: () => billParcelLedger.actorIds(),
+    onMonthStart: async (actorId, now) => {
+      const digest = await buildMonthlyBillSummary(
+        { ledger: billParcelLedger, subscriptionAudit: subscriptionAuditService },
+        actorId,
+        now,
+      );
+      if (digest.totals.count === 0 && digest.subscriptions.forecastCount === 0) return;
+      const proposal = {
+        proposalId: `monthly_digest:${digest.month}:${actorId}`,
+        actorId,
+        kind: "action.bill_parcel",
+        tier: "social" as const,
+        importance: "low" as const,
+        dedupKey: `monthly_digest:${digest.month}:${actorId}`,
+        title: `${digest.monthLabel}账单小结`,
+        summary: digest.pushText,
+        evidence: [
+          "monthly_digest",
+          `month:${digest.month}`,
+          `count:${digest.totals.count}`,
+          `complete:${digest.complete}`,
+        ],
+        // 推送正文就是这一句：通知里不出现任何金额（§9 硬要求）
+        directText: digest.pushText,
+        createdAt: now.getTime(),
+        source: "finance",
+        subject: "账单月报",
+        notifyOptions: [{ action: "acknowledge" as const, label: "知道了" }],
+      };
+      const pipeline = proactivePipelineRef.current;
+      if (pipeline) pipeline.submitProposal(proposal);
+      else console.log(`[Bootstrap] 月度小结暂无法投递（管道未就绪）actor=${actorId}`);
+    },
     // 单次 LLM 总结（与 ProactivityHub llmComplete 同模式，克制调用）
     llmComplete: externalChat?.isEnabled()
       ? async (prompt) => {
@@ -6719,6 +6890,27 @@ export async function createAppServices(
   const actionIntentService = new ActionIntentService({
     store: new ActionIntentStore(join(getDataDir(), "proactivity", "action-intents.json")),
     secret: loadActionIntentSecret(join(getDataDir(), "secret", "action-intent.key")),
+  });
+  // 到点提醒的「完成 / 15 分钟后」两键经此晚绑定（见 setReminderHandler 处）
+  reminderActionIntentsRef.current = actionIntentService;
+  // 跨端消除（2026-11-23 通知闭环 M1）：一处点了按钮，向该账号全部在线设备广播，
+  // 其他设备收起同一条还带按钮的通知（客户端 LocalNotificationService.dismissIfPending；
+  // 已变成回执的那条不动）。不复用 card.update：后者按 messageId 换对话卡，键不同。
+  // 服务构造早于这里的装配，经 setOnExecuted 回填（与 reminderActionIntentsRef 同为晚绑定）。
+  actionIntentService.setOnExecuted(({ intent, actionId, result }) => {
+    wsConnectionRegistry.trySend(
+      intent.actorId,
+      JSON.stringify({
+        type: "action_intent.resolved",
+        payload: {
+          intentId: intent.intentId,
+          ...(intent.deliveryId ? { deliveryId: intent.deliveryId } : {}),
+          actionId,
+          ok: result.ok,
+          message: result.message,
+        },
+      }),
+    );
   });
   // 错过提醒专用补投通道（2026-11-12 架构定稿，用户拍板「提醒不走主动消息管线」）：
   // 到点手机不在线 → 记账（missed-reminders.json，taskId+runAt 幂等、封顶、全带 firedAt）；
@@ -7098,8 +7290,130 @@ export async function createAppServices(
       summary: input.summary,
     });
   };
+  // ─── 每日触点计划（2026-11-23 §3.4）───
+  // 非紧急候选不再「想到就说」：当天的话按作息排进早/出门/午/下班/明日预览五个
+  // 触点，同一触点攒几条就一次说完。排槽只改写 deliverAfter，到点由管道既有的
+  // 30s flush 触发——计划层因此没有任何自己的定时器（PRD §1.3 硬约束）。
+  const touchpointPlanner = new TouchpointPlanner({
+    timing: userTiming,
+    // 明日预览的钟 = 晚报调度器那一个（env 覆盖 > 就寝前 30min > 21:00）：
+    // 两处各算各的会在两个时间说同一件事
+    previewMinutesOf: (actorId) => eveningDigestScheduler.triggerMinutesOf(actorId),
+    // 作息学到什么程度：直接读节律引擎的真实置信度（§7.4 替掉此前「就寝+起床都有值
+    // 就报 0.8」的二值伪码——那两个数可能同源互抄，0.8 是编的）。引擎按维度加权
+    // （wake 0.5 / sleep 0.3 / commute 0.2），样本不足就是低分，冷启动闸自然生效；
+    // RHYTHM_ENGINE_ENABLED=0 或画像还没落盘时取 0，计划层回落默认钟。
+    rhythmConfidence: (actorId) => rhythmEngine?.rhythmConfidence(actorId) ?? 0,
+    // 出门/下班两趟的钟（§7.3 新 commute 维度的分组中位数）。没学到给两个 null，
+    // 计划层就不排这两个 slot——不拿默认钟冒充"按你的作息"。
+    commuteMinutesOf: (actorId, date) =>
+      rhythmEngine?.commuteMinutesOf(actorId, date) ?? { leaveHome: null, leaveWork: null },
+    // 频率档（§3.10）：「只在有事时」只留早安与明日预览两个触点
+    frequencyTierOf: (actorId) => getUserFrequencyTier(actorId),
+    path: join(getDataDir(), "proactivity", "touchpoints.json"),
+  });
+  // ─── 承诺跟进（2026-11-25 PRD §3.5）───
+  // 对话里提过的未来事件（面试/考试/看病/搬家…）事后接一句「它记得我」。
+  // 抽取挂在统一抽取的写入钩子上（与 profileOps/事实同一批产物，零额外 LLM 调用），
+  // 事件落 commitments(kind='follow_up')，开口只经 submitProposal：kind=commitment
+  // 在触点计划里有落点偏好（下班/明日预览），本模块没有任何定时器。
+  const followUpService = new FollowUpService({
+    // 晚绑定：管道在下方才构造，跟进提案到点才提交（同 proactivePipelineRef 惯例）
+    submit: (proposal) => proactivePipelineRef.current?.submitProposal(proposal),
+    // §3.10「只在有事时」档不跟进；社交日预算由管道的 tier=social 统一管
+    governor: proactivityGovernor,
+    // 「别跟进这个」→ 同类事件 30 天抑制（复用既有负反馈抑制表，TTL 在 service 里判）
+    suppression: proactivitySuppressionStore,
+    // followAt 用真实触点时刻（planOf 只算当天，逐日问它）
+    slotTimes: (actorId, atMs) =>
+      touchpointPlanner
+        .planOf(actorId, atMs)
+        .slots.map((s) => ({ kind: s.kind as string, windowStart: s.windowStart })),
+    butlerName: (actorId) =>
+      parseAgentIdentityKv(
+        agentMemorySyncService.getSnapshot(actorId, [AGENT_NAME_KV_KEY]).entries[AGENT_NAME_KV_KEY],
+      )?.displayName ?? "",
+    enabled: isFollowUpFeatureEnabled,
+  });
+  // 「别跟进这个」按钮的执行器（notification-action-executors.ts）从这里取实例
+  setFollowUpService(followUpService);
+  agenticMemoryRuntime?.ingest.addWriteHook((event) => {
+    if (!event.followUps?.length) return;
+    try {
+      followUpService.ingestFromExtraction({
+        actorId: event.actorId,
+        sourceRef: event.sourceId,
+        followUps: event.followUps,
+      });
+    } catch (err) {
+      // 跟进是锦上添花：失败不阻断记忆写入主链路（下一次归档批会再抽到同一件事）
+      console.warn("[follow-up] 跟进事件落库失败（忽略）:", err);
+    }
+  });
+  // ─── 轻量健康（PRD §10 需求八，P2）───
+  // 用药提醒 / 作息周报 / 喝水久坐。三条硬口径（见 health-service.ts 头注释）：
+  //  · 不新建存储：用药的「吃什么、几点、多久一次」唯一出处仍是上面的 ScheduleTaskService
+  //    （对话说「每天早饭后吃维生素 D」建的就是那条重复提醒），本模块只加类型化读侧视图
+  //    + 一份打卡流水 data/proactivity/health.json（persist-file 原子写）；
+  //  · 不开定时器：时刻一律写成 deliverAfter，落点交给 touchpointPlanner，到点靠管道 flush；
+  //  · 均值只从节律引擎画像取（rhythmEngine.getProfile 的 sleep/wake 两维），不在别处重算睡眠；
+  //  · Health Connect / 步数属 §10 后续，故**故意不接** stillnessOf：没有静止时长依据时
+  //    喝水/久坐整条静默（fail-closed），开关也只在用户对话里明确要过才置为开。
+  const healthService = new HealthService({
+    // 晚绑定：管道在下方才构造（同 followUpService 惯例）
+    submit: (proposal) => proactivePipelineRef.current?.submitProposal(proposal),
+    // §3.10「只在有事时」档一句不说；社交日预算由管道的 tier=social 统一管
+    governor: proactivityGovernor,
+    medicationTasks: () => scheduleTaskService.listAllTasks(),
+    // 晚间时刻只问触点计划（§3.4），本模块不另立一套钟
+    slotTimes: (actorId, atMs) =>
+      touchpointPlanner
+        .planOf(actorId, atMs)
+        .slots.map((s) => ({ kind: s.kind as string, windowStart: s.windowStart })),
+    rhythm: (actorId) => {
+      const profile = rhythmEngine?.getProfile(actorId);
+      if (!profile) return null;
+      return {
+        sleep: profile.dimensions.sleep.samples,
+        wake: profile.dimensions.wake.samples,
+        confidence: rhythmEngine?.rhythmConfidence(actorId) ?? 0,
+      };
+    },
+    // 久坐的时段/阈值来自既有健康节奏档位（与 /api/health/rhythm 同一口径）：
+    // 事实库的职业/公司/技术栈/身份类字段
+    identityTexts: (actorId) => {
+      const clues: string[] = [];
+      try {
+        for (const f of structuredFactStore?.getActiveFacts(actorId) ?? []) {
+          const field = String(f.field ?? "");
+          const value = String(f.value ?? "").trim();
+          if (value && (field.includes("职业") || field.includes("身份") || field === "公司" || field === "技术栈")) {
+            clues.push(`${field}:${value}`);
+          }
+        }
+      } catch {
+        /* 记忆系统未启用 → 拿不到身份就按默认档（久坐阈值 60 分钟） */
+      }
+      return clues;
+    },
+    butlerName: (actorId) =>
+      parseAgentIdentityKv(
+        agentMemorySyncService.getSnapshot(actorId, [AGENT_NAME_KV_KEY]).entries[AGENT_NAME_KV_KEY],
+      )?.displayName ?? "",
+    enabled: isHealthFeatureEnabled,
+    path: join(getDataDir(), "proactivity", "health.json"),
+  });
+  // 闭环回灌（§1.3 唯一反馈通道）：按钮按下 → recordOutcome → proactive.outcome → 今天的账
+  healthService.attachOutcomeHook(hookBus);
+  // 诊断路由与后续设置页从这里取实例（同 setFollowUpService 惯例）
+  setHealthService(healthService);
+  healthServiceRef.current = healthService;
   const proactivePipeline = new ProactivePipeline({
     dataPath: join(getDataDir(), "proactivity"),
+    // 触点计划（§3.4）：submitProposal 入队前排槽，flush 到点合并投递
+    planner: touchpointPlanner,
+    // §3.10「多聊点」档：AgentPulse 不等触点即时开口；其余档照常排槽
+    pulseImmediate: (actorId) => getUserFrequencyTier(actorId) === "chatty",
     governor: proactivityGovernor,
     suppression: proactivitySuppressionStore,
     presence: proactivityPresence,
@@ -7193,6 +7507,9 @@ export async function createAppServices(
           json,
           deviceClasses.filter((c): c is "desktop" | "mobile" => c === "desktop" || c === "mobile"),
         ),
+      // 多端归属（2026-11-23 §3.7）：两端都在时只在人正在用的那一端弹横幅，
+      // 另一端静默落对话流——人在电脑前活跃时手机不再跟着弹一条。
+      bannerSurface: (actorId) => proactivityPresence.bannerSurface(actorId),
       ledger: {
         record: (p) =>
           agentActivityStore.record({
@@ -7236,7 +7553,52 @@ export async function createAppServices(
   proactivePipeline.start();
   // 通知栏动作执行器（2026-11-13）：把 actionId 接到真实管道能力上——
   // 每个按钮按下去都必须真的改变某个状态，否则就是骗人的按钮。
-  registerNotificationActionExecutors(actionIntentService, { pipeline: proactivePipeline });
+  // 2026-11-23 通知闭环 M1：领域动作（已取件 / 已处理 / 日程完成 / 推迟）接到台账与日程服务。
+  // 今日看板推送（需求 §5.2）：常驻通知与小组件的内容由服务端算好后直推，
+  // 手机不需要为了刷一行状态栏文字去轮询接口。
+  // 「完成」按钮的凭据经看板一起下发——按下去走的就是通知栏按钮那条既有执行链路
+  // （schedule.complete 执行器自己核对任务归属），常驻通知不另开一套权限。
+  const boardCompleteActions = new BoardCompleteActions(actionIntentService);
+  const todayBoardDeps = {
+    scheduleTasks: scheduleTaskService,
+    ledger: billParcelLedger,
+    intents: boardCompleteActions,
+  };
+  const pushTodayBoard = (actorId: string): void => {
+    try {
+      const board = buildTodayBoard(todayBoardDeps, actorId);
+      wsConnectionRegistry.trySend(actorId, JSON.stringify({ type: "agent.today_board", payload: board }));
+    } catch (err) {
+      console.log(`[today-board] 看板推送失败 actor=${actorId}: ${err}`);
+    }
+  };
+  pushTodayBoardRef.current = pushTodayBoard;
+  registerNotificationActionExecutors(actionIntentService, {
+    pipeline: proactivePipeline,
+    ledger: billParcelLedger,
+    schedule: scheduleTaskService,
+    onBusinessChange: (actorId) => pushTodayBoard(actorId),
+    // §4.3「回复」闭环（2026-11-29）：通知栏输入框里的一句话落成主会话一个 user
+    // turn 并跑一轮 agent，应答再用**同一条通知**原地更新。
+    // 落流复用 runChatTurnForActor —— 与 WS chat.user_message 同一个 AgentCore
+    // （工具/记忆/人设/落库全同），不再手写第二条写入路径。
+    notificationReply: {
+      ingestUserTurn: async ({ actorId, text, messageId }) => {
+        const turn = await runChatTurnForActor(runtime, actorId, {
+          text,
+          messageId,
+          userId: actorId,
+          preferFullPipeline: true,
+          // 应答最终落在通知栏正文/气泡上，卡片标记在这一跳按纯文本降级
+          capability: "plain",
+        });
+        return turn.ok
+          ? { ok: true as const, reply: turn.finalText }
+          : { ok: false as const, message: turn.message };
+      },
+      pushFollowUp: (input) => proactivePipeline.deliveryService.deliverNotificationReply(input),
+    },
+  });
   // 晚绑定回填（降价监控命中在管道构造前装配）：到价提案经此进统一管道
   proactivePipelineRef.current = proactivePipeline;
   // 管道级确认回流：hub 的确认解析入口对 origin=pipeline 条目委托管道（批准回调 + 回执）
@@ -7539,6 +7901,8 @@ export async function createAppServices(
     scheduleIntentService,
     proactivitySuppressionStore,
     proactivePipeline,
+    proactivityPhoneBuckets: phoneSignalBuckets,
+    proactivityBoardActions: boardCompleteActions,
     // 简报用户称呼第一事实源（与调度推送路径同源）
     factStore: structuredFactStore ?? undefined,
     proactivePushService,
@@ -7684,7 +8048,6 @@ export async function createAppServices(
       },
       calibration: () => costCalibrator.snapshot(),
       evaluatorProbes: () => mappingExecutor.probes(),
-      observeOutcome: (outcome) => costCalibrator.observe(outcome),
       phraseStats: () => speechHub.stats(),
       callStats: () => proactiveCaller.stats(),
       testCall: (actorId) =>
@@ -7793,8 +8156,9 @@ export async function createAppServices(
     approvalInboxService,
     attentionStore,
     reachRouter,
-    // 「动态」tab 聚合区块（账单快递台账 + 跨源 mail 要事）
+    // 「动态」tab 聚合区块（账单快递台账 + 跨源 mail 要事 + §9 月报卡订阅段）
     billParcelLedger,
+    subscriptionAuditService,
     sourceStore,
     brainCenter,
     bodyCenter,
@@ -7871,6 +8235,17 @@ export async function createAppServices(
     agentAccountService,
     actorModelBindings,
     petReactionChat: externalChat,
+    // 手机状态上报（2026-11-23 M1）：通话/勿扰进管道静默闸，解锁在用刷新在场
+    onClientPresenceState: (actorId, state) => {
+      // §7.2 的 15 分钟聚合桶与实时状态共用这一条链路，按 payload 区分。
+      // 桶必须在这里分流出去：notePhoneState 把缺失的 screenOn 当亮屏，
+      // 一帧只带 buckets 的包喂进去会把「人不在」误刷成「人在」。
+      if (state.buckets) {
+        phoneSignalBuckets.append(actorId, state.buckets);
+        return;
+      }
+      proactivityPresence.notePhoneState(actorId, state);
+    },
     onboardingIntroService,
   });
 

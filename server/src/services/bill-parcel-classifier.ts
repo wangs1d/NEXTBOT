@@ -210,6 +210,88 @@ export function extractCarrier(text: string): string | null {
 // 主判定
 // ---------------------------------------------------------------------- //
 
+// ---------------------------------------------------------------------- //
+// 人工纠正样本（分类器反馈闭环，§9 月报卡「类目可改」2026-11-24）
+// ---------------------------------------------------------------------- //
+
+/**
+ * 一条训练样本：用户改过类目的原文 + 人给的类目。
+ * 由 `BillParcelLedger.corrections()` 从台账条目里派生（纠正本身就地写在条目上，
+ * 不需要另开的训练文件）。
+ */
+export type ClassifierCorrectionSample = { text: string; billType: string };
+
+/**
+ * 学习短语里要剔除的通用词：这些词在任何账单里都出现，学进去等于把
+ * 「所有含『账单』的文本」都归到某一类——那是过拟合，不是学习。
+ */
+const CORRECTION_STOPWORDS = [
+  "账单", "扣款", "消费", "支付", "付款", "金额", "元", "通知", "提醒",
+  "成功", "您的", "你", "本次", "合计", "共计", "人民币", "账户", "余额",
+  "交易", "明细", "日期", "时间", "流水", "订单", "尾号", "银行",
+  "支付宝", "微信", "云闪付", "截至", "当前", "可用", "入账", "扣费",
+];
+
+/** 归一化：小写 + 去掉空白与标点，只留文字/数字（CJK 按整段处理） */
+function normalizeForCorrection(s: string): string {
+  return s.toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, " ").trim();
+}
+
+/**
+ * 这个词是否已被内置规则覆盖。
+ *
+ * 学习层只教规则**不认识的新词**。把「话费」这种规则词学成"→水电费"，等于让一条
+ * 误纠正去改写整条确定性规则——所有话费短信从此都错。所以凡命中内置规则的短语
+ * 一律不进学习索引；用户改对了的那次，纠正照样记在台账条目上（本条呈现正确），
+ * 只是不外溢成规则。
+ */
+function coveredByBuiltInRules(phrase: string): boolean {
+  return (
+    BILL_RULES.some((r) => r.pattern.test(phrase)) ||
+    PARCEL_RULES.some((r) => r.pattern.test(phrase))
+  );
+}
+
+/**
+ * 从一段原文里挑可学习的判别短语：切出 2~12 字的词块，去掉通用词与纯数字，
+ * 按长度降序（越长的短语越具体，误伤面越小）。
+ */
+export function correctionKeywords(text: string, limit = 6): string[] {
+  const norm = normalizeForCorrection(text ?? "");
+  if (!norm) return [];
+  const raw = norm
+    // 以数字/空白为界切块：金额、单号、日期都不该成为类目特征
+    .split(/[0-9]+/)
+    .flatMap((seg) => seg.split(" "))
+    // 再用通用词切一刀：「支付宝美团」→「美团」，商户名才是要学的那个词
+    .flatMap((t) => CORRECTION_STOPWORDS.reduce((acc, w) => acc.flatMap((s) => s.split(w)), [t]))
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 2 && t.length <= 12)
+    .filter((t) => !/^[a-z]{1,3}$/.test(t))
+    .filter((t) => !coveredByBuiltInRules(t));
+  const unique = [...new Set(raw)].sort((a, b) => b.length - a.length || a.localeCompare(b));
+  return unique.slice(0, Math.max(1, limit));
+}
+
+/** 编译样本 → 短语表（长短语优先，命中即止） */
+function buildCorrectionIndex(
+  samples: ClassifierCorrectionSample[],
+): Array<{ phrase: string; billType: string }> {
+  const index: Array<{ phrase: string; billType: string }> = [];
+  const seen = new Set<string>();
+  for (const s of samples) {
+    const billType = (s.billType ?? "").trim();
+    if (!billType || coveredByBuiltInRules(billType)) continue;
+    for (const phrase of correctionKeywords(s.text)) {
+      const key = `${phrase}→${billType}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      index.push({ phrase, billType });
+    }
+  }
+  return index.sort((a, b) => b.phrase.length - a.phrase.length || a.phrase.localeCompare(b.phrase));
+}
+
 /**
  * 判定一条内容是否为「账单」/「快递」，并抽取结构化字段。
  *
@@ -219,8 +301,17 @@ export function extractCarrier(text: string): string | null {
  *   3. 都没有 → 空 categories（不进汇总）。
  *
  * 这样「账单验证码」「取件验证码」这类复合内容不会被误判成验证码而丢弃。
+ *
+ * `opts.corrections` 是人工纠正样本（可选）：在规则表之后追加一层"学到的新词"。
+ * 纪律是**只教规则不认识的东西，绝不翻案**——命中快递或验证码的内容学习层不碰，
+ * 规则已给出子类时学习层也不改（见 `coveredByBuiltInRules`）。学习层唯一能做的事：
+ * 把规则完全不认识、且非验证码的文本认成账单并给出人给的子类。这样一条误纠正
+ * 最多影响它自己那几个词，不会污染既有确定性规则。
  */
-export function classifyBillParcel(input: BillParcelInput): BillParcelMatch {
+export function classifyBillParcel(
+  input: BillParcelInput,
+  opts: { corrections?: ClassifierCorrectionSample[] } = {},
+): BillParcelMatch {
   const title = (input.title ?? "").trim();
   const text = (input.text ?? "").trim();
   const haystack = `${title}\n${text}`;
@@ -241,8 +332,24 @@ export function classifyBillParcel(input: BillParcelInput): BillParcelMatch {
     if (!categories.includes(rule.category)) categories.push(rule.category);
   }
 
-  const hasBusiness = categories.length > 0;
   const otpHit = OTP_PATTERN.test(haystack);
+  const hasBusiness = categories.length > 0;
+
+  // —— 学习层：人工纠正样本（纪律见上方 doc：只补规则不认识的新词，不翻案） ——
+  if (opts.corrections && opts.corrections.length > 0 && !categories.includes("parcel") && !otpHit) {
+    const haystackNorm = normalizeForCorrection(haystack);
+    for (const { phrase, billType: learned } of buildCorrectionIndex(opts.corrections)) {
+      if (!haystackNorm.includes(phrase)) continue;
+      if (categories.includes("bill") && billType) break; // 规则已给出子类：不覆盖确定性规则
+      if (!categories.includes("bill")) {
+        categories.push("bill");
+        labels.push("人工纠正样本");
+      }
+      billType = learned;
+      break;
+    }
+  }
+
   // 复合内容（账单/快递 + 验证码）不算 otpOnly —— 业务信息优先。
   const isOtpOnly = !hasBusiness && otpHit;
 
@@ -271,6 +378,15 @@ export function classifyBillParcel(input: BillParcelInput): BillParcelMatch {
 /** 是否应进汇总（判定的对外唯一出口，避免各调用点各写一套条件） */
 export function shouldReportBillParcel(match: BillParcelMatch): boolean {
   return match.categories.length > 0;
+}
+
+/**
+ * 内置账单子类清单（规则表里出现过的 billType，按规则顺序去重）。
+ * 月报卡「改类目」的候选项由这里出——候选项与规则同源，客户端不另抄一份，
+ * 加一条规则不会漏一个下拉项。
+ */
+export function listBillTypes(): string[] {
+  return [...new Set(BILL_RULES.map((r) => r.billType).filter((t): t is string => !!t))];
 }
 
 /** 一行摘要（台账标题 / 主动汇报用） */

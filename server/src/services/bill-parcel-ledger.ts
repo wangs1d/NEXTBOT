@@ -40,6 +40,16 @@ export type BillParcelEntry = {
   occurredAt: number;
   /** 原文摘要（供人工核对与检索） */
   excerpt: string;
+  /** 已处理时刻 ms（通知栏「已取件 / 已处理」写入；缺省 = 仍待办） */
+  resolvedAt?: number | null;
+  /**
+   * 人工纠正后的类目（§9 月报卡「类目可改」，2026-11-24）。
+   * 与 billType 同值时表示"这条是纠正过的样本"——classifierCorrections() 据此
+   * 把它当作分类器训练数据回灌，下一次同类文本直接按纠正后的类目识别。
+   */
+  correctedBillType?: string | null;
+  /** 纠正时刻 ms（缺省 = 从未被人工纠正） */
+  correctedAt?: number | null;
 };
 
 /** 台账查询参数 */
@@ -54,6 +64,15 @@ export type BillParcelListQuery = {
   limit?: number;
 };
 
+/** 区间内金额最大的一笔（月报「最大单笔」用；只带呈现所需字段） */
+export type BillParcelLargest = {
+  id: string;
+  title: string;
+  amount: number;
+  billType: string | null;
+  occurredAt: number;
+};
+
 /** 区间汇总 */
 export type BillParcelSummary = {
   window: { days: number; from: number; to: number };
@@ -64,6 +83,8 @@ export type BillParcelSummary = {
     /** 有金额的条目数（合计的分母，避免"0 元账单"稀释平均） */
     amountCount: number;
     byType: Array<{ type: string; count: number; amount: number }>;
+    /** 区间内金额最大的一笔（§9 月报「最大单笔」；无带金额条目时 null） */
+    largest: BillParcelLargest | null;
   };
   parcels: {
     count: number;
@@ -194,14 +215,89 @@ export class BillParcelLedger {
       .slice(0, Math.max(1, limit));
   }
 
-  /** 区间汇总 */
-  summary(opts: { actorId?: string; days?: number } = {}): BillParcelSummary {
+  /**
+   * 标记一条为已处理（2026-11-23 通知闭环 M1：通知栏「已取件 / 已处理」按钮的落点）。
+   * 归属不符或条目不存在返回 null；已处理过的幂等返回原条目（不改时间）。
+   */
+  resolve(id: string, actorId: string, at?: number): BillParcelEntry | null {
+    this.load();
+    const entry = this.entries.find((e) => e.id === id);
+    if (!entry || entry.actorId !== actorId) return null;
+    if (entry.resolvedAt) return entry;
+    entry.resolvedAt = at ?? this.nowFn();
+    this.persist();
+    return entry;
+  }
+
+  /** 按 id 取一条（执行器回执文案用；归属由调用方核对） */
+  get(id: string): BillParcelEntry | undefined {
+    this.load();
+    return this.entries.find((e) => e.id === id);
+  }
+
+  /**
+   * 人工改类目（§9 月报卡「类目可改」）。与 resolve() 同一条纪律：归属不符或
+   * 条目不存在返回 null；改成同一个值幂等（不刷新 correctedAt，避免重复投训练样本）。
+   *
+   * 纠正除了改写 billType，还打 correctedBillType/correctedAt 标记——
+   * classifierCorrections() 据此把这条当作分类器训练样本回灌规则表。
+   */
+  setBillType(id: string, actorId: string, billType: string, at?: number): BillParcelEntry | null {
+    this.load();
+    const entry = this.entries.find((e) => e.id === id);
+    if (!entry || entry.actorId !== actorId || entry.category !== "bill") return null;
+    const next = billType.trim();
+    if (!next) return null;
+    if (entry.billType === next && entry.correctedBillType === next) return entry;
+    entry.billType = next;
+    entry.correctedBillType = next;
+    entry.correctedAt = at ?? this.nowFn();
+    this.persist();
+    return entry;
+  }
+
+  /**
+   * 已有人工纠正的分类器训练样本（新→旧，默认最多 50 条）。
+   * 只在内存里派生，不落新文件——纠正本身已经写在台账条目上了。
+   */
+  corrections(actorId?: string, limit = 50): Array<{ text: string; billType: string; at: number }> {
+    this.load();
+    return this.entries
+      .filter(
+        (e) =>
+          e.category === "bill" &&
+          !!e.correctedBillType &&
+          (!actorId || e.actorId === actorId),
+      )
+      .sort((a, b) => (b.correctedAt ?? 0) - (a.correctedAt ?? 0))
+      .slice(0, Math.max(1, limit))
+      .map((e) => ({
+        // 只用原文摘要：entry.title 是识别器生成的「账单·话费 ¥12.34」，
+        // 拿生成物当训练文本等于让分类器学自己的措辞。
+        text: e.excerpt,
+        billType: e.correctedBillType as string,
+        at: e.correctedAt ?? e.occurredAt,
+      }));
+  }
+
+  /**
+   * 区间汇总。
+   *
+   * 窗口两种给法（**同一套聚合代码**，这是 §9 验收「月报合计 = 明细合计，误差 0」
+   * 成立的前提——月报不许另写一份 sum 逻辑）：
+   *   - `days`：滚动窗口（默认 30 天，动态页旧口径不变）；
+   *   - `from` / `to`：绝对区间 ms（to 含），月报按自然月切窗口走这条。
+   */
+  summary(opts: { actorId?: string; days?: number; from?: number; to?: number } = {}): BillParcelSummary {
     this.load();
     const days = Math.max(1, opts.days ?? 30);
     const now = this.nowFn();
-    const from = now - days * 24 * 60 * 60 * 1000;
+    const to = Number.isFinite(opts.to) ? (opts.to as number) : now;
+    const from = Number.isFinite(opts.from)
+      ? (opts.from as number)
+      : to - days * 24 * 60 * 60 * 1000;
     const scoped = this.entries.filter(
-      (e) => (!opts.actorId || e.actorId === opts.actorId) && e.occurredAt >= from && e.occurredAt <= now,
+      (e) => (!opts.actorId || e.actorId === opts.actorId) && e.occurredAt >= from && e.occurredAt <= to,
     );
 
     const bills = scoped.filter((e) => e.category === "bill");
@@ -210,6 +306,7 @@ export class BillParcelLedger {
     const typeMap = new Map<string, { count: number; amount: number }>();
     let totalAmount = 0;
     let amountCount = 0;
+    let largest: BillParcelLargest | null = null;
     for (const b of bills) {
       const type = b.billType ?? "其他";
       const cur = typeMap.get(type) ?? { count: 0, amount: 0 };
@@ -218,6 +315,15 @@ export class BillParcelLedger {
         cur.amount += b.amount;
         totalAmount += b.amount;
         amountCount += 1;
+        if (!largest || b.amount > largest.amount) {
+          largest = {
+            id: b.id,
+            title: b.title,
+            amount: b.amount,
+            billType: b.billType,
+            occurredAt: b.occurredAt,
+          };
+        }
       }
       typeMap.set(type, cur);
     }
@@ -227,19 +333,26 @@ export class BillParcelLedger {
     for (const p of parcels) {
       const carrier = p.carrier ?? "未知";
       carrierMap.set(carrier, (carrierMap.get(carrier) ?? 0) + 1);
-      if (p.pickupCode) awaitingPickup += 1;
+      if (p.pickupCode && !p.resolvedAt) awaitingPickup += 1;
     }
 
     const pickupEntries = parcels
-      .filter((p) => p.pickupCode)
+      .filter((p) => p.pickupCode && !p.resolvedAt)
       .sort((a, b) => b.occurredAt - a.occurredAt);
 
     return {
-      window: { days, from, to: now },
+      window: {
+        days: Number.isFinite(opts.from)
+          ? Math.max(1, Math.round((to - from) / (24 * 60 * 60 * 1000)))
+          : days,
+        from,
+        to,
+      },
       bills: {
         count: bills.length,
         totalAmount: Math.round(totalAmount * 100) / 100,
         amountCount,
+        largest,
         byType: [...typeMap.entries()]
           .map(([type, v]) => ({ type, count: v.count, amount: Math.round(v.amount * 100) / 100 }))
           .sort((a, b) => b.amount - a.amount || b.count - a.count),
@@ -269,6 +382,12 @@ export class BillParcelLedger {
   size(): number {
     this.load();
     return this.entries.length;
+  }
+
+  /** 台账里出现过的 actor（月度边界要逐个发小结，§9） */
+  actorIds(): string[] {
+    this.load();
+    return [...new Set(this.entries.map((e) => e.actorId).filter(Boolean))];
   }
 
   private isValidEntry(e: unknown): e is BillParcelEntry {

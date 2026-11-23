@@ -8,8 +8,8 @@
 import { arbitrate, DELIVERY_RETRY_MS, IN_CONVERSATION_WINDOW_MS, type ArbiterContext } from "./arbiter.js";
 import type { ProactiveDeliveryService } from "./delivery-service.js";
 import { readJson, writeJson } from "./persist-file.js";
-import type { ArbitrationDecision, ProactiveOutcome, ProactiveProposal } from "./pipeline-types.js";
-import { OutcomeStore } from "./outcome-store.js";
+import type { ArbitrationDecision, ProactiveImportance, ProactiveOutcome, ProactiveProposal, ProposalVerdict } from "./pipeline-types.js";
+import { normalizeSurface, OutcomeStore } from "./outcome-store.js";
 import { getProactiveReplay } from "./proactive-replay-store.js";
 import type { PresenceService } from "./presence-service.js";
 import { ProposalStore } from "./proposal-store.js";
@@ -18,6 +18,9 @@ import { CONFIRMATION_TTL_MS, type PendingConfirmation, PendingConfirmationStore
 import { topicKeyOfProposal, TopicDismissTracker } from "./topic-dismiss-tracker.js";
 import { primarySubjectOf, type DiscoveryLayer, type OpenedBody } from "./discovery-layer.js";
 import { registerIntentForProposal } from "./notification-actions.js";
+import { explainTiming } from "./explain.js";
+import type { TouchpointPlan, TouchpointPlanner } from "./touchpoint-planner.js";
+import { emitHook } from "../services/hooks/index.js";
 
 export type ProactivePipelineDeps = {
   /** 数据目录（默认 data/proactivity）：proposals.json / frequency.json / known-actors.json */
@@ -102,6 +105,19 @@ export type ProactivePipelineDeps = {
     action: "send_now" | "defer" | "batch" | "drop";
     reason: string;
   } | null;
+  /**
+   * 每日触点计划（2026-11-23 §3.4）：非紧急候选先排槽，到点合并说。
+   *
+   * 未注入 = 完全维持旧的即时通道行为（老装配/测试可单独跑）。注入后本字段是
+   * **唯一的排槽点**：不能同时让某个触发源自己算「几点发」，否则同一个 slot 里
+   * 会出现两套时刻口径，合并也就无从谈起。
+   */
+  planner?: TouchpointPlanner | null;
+  /**
+   * 「多聊点」档判据（§3.10）：为真时 AgentPulse 不等触点即时开口。
+   * 未注入 = 全员按正常档排槽（不改变现有行为）。
+   */
+  pulseImmediate?: (actorId: string) => boolean;
 };
 
 /** 正反馈 outcome 集合（自适应冷却的方向判定） */
@@ -122,10 +138,48 @@ const REACH_GATE_RETRY_MS = 20 * 60_000;
 /** 同一提案最多被 reachGate 延后几次（防「永远等时机」把消息饿死） */
 const REACH_MAX_DEFERS = 4;
 
+/** 手机通话中 / 勿扰时非必达提案的重判间隔（2026-11-23 M1） */
+const PHONE_QUIET_RETRY_MS = 10 * 60_000;
+
 /** 未回复自动结算窗口：social 消息发出后这么久没有任何对话，按「忽略」记负样本 */
 const UNANSWERED_WINDOW_MS = 6 * 60 * 60_000;
 /** 自动结算扫描间隔（避免每 30s flush 都遍历一遍 outcomes） */
 const UNANSWERED_SWEEP_MS = 30 * 60_000;
+
+/** 同触点合并时的排序权重：重要的先说（critical 排最前） */
+const IMPORTANCE_RANK: Record<ProactiveImportance, number> = {
+  critical: 0, high: 1, medium: 2, low: 3,
+};
+
+/** 裁决后已彻底离开待发区的去向（不再重试）：槽位据此把候选退回/标记已说 */
+const VERDICTS_OUT_OF_QUEUE: ReadonlySet<ProposalVerdict> = new Set<ProposalVerdict>([
+  "delivered", "suppressed", "silenced", "expired", "dropped", "merged",
+]);
+
+/**
+ * 同触点多条候选 → 一条正文（§3.4 步骤 2）。
+ *
+ * 正文取各条已渲染好的话术（directText 优先，退回 summary）逐行拼接：合并是
+ * 「一次开口说完几件事」，不是「让 LLM 把几件事改写成一段」——前者零成本，
+ * 且不会把提醒的原文改写成不像提醒的话。按钮/详情跟随主提案（一次开口只承载
+ * 一组拍板项，MAX_NOTIFY_ACTIONS 本来也只放得下两个）。
+ */
+function mergeIntoSlotText(
+  host: ProactiveProposal,
+  rest: ProactiveProposal[],
+): ProactiveProposal {
+  const bodyOf = (p: ProactiveProposal): string => String(p.directText ?? p.summary ?? "").trim();
+  const lines = [host, ...rest].map(bodyOf).filter((t) => t.length > 0);
+  const fingerprints = [...new Set([host, ...rest].flatMap((p) => p.findingFingerprints ?? []))];
+  const summary = lines.join("\n") || host.summary;
+  return {
+    ...host,
+    summary,
+    ...(host.directText !== undefined ? { directText: summary } : {}),
+    evidence: [...host.evidence, ...rest.flatMap((p) => p.evidence)],
+    findingFingerprints: fingerprints.length > 0 ? fingerprints : undefined,
+  };
+}
 
 export class ProactivePipeline {
   private readonly store: ProposalStore;
@@ -155,6 +209,15 @@ export class ProactivePipeline {
       [],
     );
     if (actors.length) this.deps.restoreActors?.(actors);
+  }
+
+  /**
+   * 投递出口（2026-11-29 §4.3）：通知栏回复的应答要复用同一个出站三件套
+   * （WS 直投 / 落流补发 / 横幅归属），但**不能**走 submitProposal→仲裁——
+   * 那会把给用户回话当成一次主动打扰而被频控闸掉。装配层经此取用。
+   */
+  get deliveryService(): ProactiveDeliveryService {
+    return this.deps.delivery;
   }
 
   start(): void {
@@ -218,11 +281,18 @@ export class ProactivePipeline {
         proposal = { ...p, importance: preview.importance };
       }
     }
+    // ─── 触点排槽（2026-11-23 §3.4）───
+    // 排槽发生在入队之前：slot 的时刻靠 deliverAfter 表达，到点由既有 30s flush 触发，
+    // 计划层因此不需要任何自己的定时器（文档硬约束：不新增轮询器）。
+    proposal = this.applySlotPlan(proposal, now);
     if (this.store.wasDeliveredRecently(proposal.dedupKey, now) || !this.store.enqueue(proposal)) {
       // 被去重丢弃 / 入队失败：用户没看到这条，读走的发现释放回总线（信息不蒸发）
       if (this.deps.discovery && proposal.findingFingerprints?.length) {
         this.deps.discovery.settle(proposal.findingFingerprints, "dropped");
       }
+      // 槽位里也不留它：排槽登记过的候选要退回去，否则容量与「这个 slot 到底有没有
+      // 东西」都会算错（空槽本该 skipped，却被幽灵候选顶成待投递）
+      if (proposal.slotId) this.deps.planner?.releaseCandidate(proposal.dedupKey);
       const merged: ArbitrationDecision = {
         proposal,
         verdict: "merged",
@@ -235,6 +305,35 @@ export class ProactivePipeline {
     return this.decide(proposal);
   }
 
+  /**
+   * 排槽（§3.4 步骤 1）。排不进槽（无落点）与排槽异常都按即时通道放行——
+   * 「计划层没想好」不是把用户的消息吞掉的正当理由：晚说一步可接受，漏说才发现。
+   */
+  private applySlotPlan(p: ProactiveProposal, now: number): ProactiveProposal {
+    const planner = this.deps.planner;
+    if (!planner || p.slotId) return p;
+    try {
+      // §3.10「多聊点」档：AgentPulse 不等触点，想到就说（其余档仍排槽，安静档/正常档
+      // 的差别由预算与槽数承担）
+      const chattyPulse = p.kind === "agent_pulse" && this.deps.pulseImmediate?.(p.actorId) === true;
+      const at = planner.assign(
+        p.actorId,
+        p,
+        now,
+        chattyPulse ? { immediate: true, reason: "tier_chatty_pulse" } : undefined,
+      );
+      if (at.kind !== "slot") return p;
+      return {
+        ...p,
+        slotId: at.slot.slotId,
+        deliverAfter: Math.max(p.deliverAfter ?? 0, at.slot.windowStart),
+      };
+    } catch (err) {
+      console.log(`[ProactivePipeline] 排槽异常（按即时通道放行）kind=${p.kind}: ${err}`);
+      return p;
+    }
+  }
+
   /** 推进到期延迟提案（deferred/offline 挂起的在在场变化后重仲裁；at 可注入推进时钟） */
   flushDue(now = Date.now()): void {
     // 运行期僵尸清理（2026-11-12）：启动清理只覆盖重启，长驻进程内 defer-forever
@@ -243,9 +342,88 @@ export class ProactivePipeline {
     // 未回复结算（2026-11-19）：social 消息发出后长期无声 → 记「忽略」负样本，
     // 让 noteOutcome 的自适应冷却真的学到「这类话他不看」。忽略是主要负样本。
     this.sweepUnanswered(now);
+    // 槽位生命周期推进（§3.4）：到点开槽，窗口走完还空着就 skipped——
+    // 空槽是合法结果，不是需要补的欠账。
+    try {
+      this.deps.planner?.sweep(now);
+    } catch { /* 计划层异常不阻断投递 */ }
+    const bySlot = new Map<string, ProactiveProposal[]>();
+    const immediate: ProactiveProposal[] = [];
     for (const p of this.store.listPending()) {
-      if ((p.deliverAfter ?? 0) <= now) this.decide(p, now);
+      if ((p.deliverAfter ?? 0) > now) continue;
+      if (!p.slotId) {
+        immediate.push(p);
+        continue;
+      }
+      const list = bySlot.get(p.slotId) ?? [];
+      list.push(p);
+      bySlot.set(p.slotId, list);
     }
+    for (const p of immediate) this.decide(p, now);
+    // 同触点候选一次说完（§3.4 步骤 2）：攒了几条就一次开口，而不是连着弹三条
+    // 通知——「合并成一条」是触点计划这个特性的存在理由。
+    for (const [slotId, group] of bySlot) this.flushSlot(slotId, group, now);
+  }
+
+  /**
+   * 一个触点槽到点：单条走正常裁决链，多条拼成一条正文再走。
+   * 合并只拼接现成话术、不叫 LLM 重写——素材本来就是写好的话，且每次开口仍只
+   * 过一次 speak/render，条数增多不会把成本线性拉起来（PRD §14 风险表）。
+   */
+  private flushSlot(slotId: string, group: ProactiveProposal[], now: number): void {
+    const planner = this.deps.planner;
+    planner?.markOpen(slotId, now);
+    const host = [...group].sort(
+      (a, b) =>
+        (IMPORTANCE_RANK[a.importance] ?? 9) - (IMPORTANCE_RANK[b.importance] ?? 9) ||
+        a.createdAt - b.createdAt,
+    );
+    const first = host[0];
+    if (!first) return;
+    // 槽的触发条件还没成立（早安 = 当天首次解锁，§3.4）：本轮不说，候选原地留着，
+    // 下一轮 flush 再看——不新增定时器，也不因为"到点了"就硬播。
+    if (!this.slotTriggerFired(slotId, first.actorId, now)) return;
+    const rest = host.slice(1);
+    if (rest.length === 0) {
+      this.settleSlot(slotId, first, this.decide(first, now), now);
+      return;
+    }
+    // 被合并的候选先出队并记指纹：内容随正文一起说了，但 dedupKey 不是 host 的，
+    // 不取出来下一轮 flush 会把它们当未投递再各弹一次。
+    for (const r of rest) {
+      this.store.take(r.dedupKey);
+      this.store.markDelivered(r.dedupKey, now);
+      this.store.logDecision({
+        proposal: r,
+        verdict: "merged",
+        reasonChain: [`slot:${slotId} 同触点合并 → ${first.dedupKey}`],
+      });
+    }
+    const merged = mergeIntoSlotText(first, rest);
+    this.settleSlot(slotId, merged, this.decide(merged, now), now);
+  }
+
+  /**
+   * 槽的触发条件是否成立。目前只有 `first_unlock`（早安）需要判：
+   * 手机状态拿得到却还没解锁 → 不播；从来没有手机状态（纯桌面用户、状态过期）→
+   * 不拦，否则早安对这部分用户永远消失（§3.4 改的是时机，不是取消播报）。
+   */
+  private slotTriggerFired(slotId: string, actorId: string, now: number): boolean {
+    const slot = this.deps.planner?.slotOf(slotId);
+    if (!slot || slot.trigger !== "first_unlock") return true;
+    const presence = this.deps.presence;
+    if (!presence.hasPhoneSignal(actorId, now)) return true;
+    return presence.firstUnlockToday(actorId, now) !== null;
+  }
+
+  /**
+   * 槽位去向跟随裁决结果：只有真发出去了才算这个触点用过（sent）；被用户规则
+   * 丢掉就退回候选（不谎报已说）；被仲裁挂起/限流则原样留在槽里，下一轮再试。
+   */
+  private settleSlot(slotId: string, p: ProactiveProposal, d: ArbitrationDecision, now: number): void {
+    const planner = this.deps.planner;
+    if (d.verdict === "delivered") planner?.markSent(slotId, now);
+    else if (VERDICTS_OUT_OF_QUEUE.has(d.verdict)) planner?.releaseCandidate(p.dedupKey);
   }
 
   /**
@@ -276,10 +454,46 @@ export class ProactivePipeline {
   }
 
   /** 客户端回传触达结果 → 落库 + 自适应冷却（负反馈即时惩罚；接受率>0.6 回升） */
-  recordOutcome(deliveryId: string, outcome: ProactiveOutcome): boolean {
+  /**
+   * 记录一次触达结果。meta.surface 标明用户是在哪个面上做的决定
+   * （notification / chat / widget / dynamics / desktop / action_intent），只进 hook 载荷做归因，
+   * 不影响频控语义。
+   */
+  recordOutcome(
+    deliveryId: string,
+    outcome: ProactiveOutcome,
+    meta?: { surface?: string; ref?: string },
+  ): boolean {
     const prev = this.deps.outcomes.findByDeliveryId(deliveryId);
     if (!prev) return false;
-    this.deps.outcomes.record({ ...prev, outcome, at: Date.now() });
+    const at = Date.now();
+    const surface = normalizeSurface(meta?.surface);
+    this.deps.outcomes.record({
+      ...prev,
+      outcome,
+      at,
+      // 面归因（§4.6/§12.2 漏斗）只认第一次表态来自哪个面，后续补记不覆盖；
+      // latencyMs = 送达→表态，§12.1 客户端事件同名口径
+      ...(surface && !prev.surface ? { surface } : {}),
+      ...(prev.createdAt ? { latencyMs: Math.max(0, at - prev.createdAt) } : {}),
+    });
+    // 统一回灌出口（2026-11-23 M1）：落库即发 hook，下游 subscribeType("proactive.outcome") 接入。
+    // emitHook 内部不抛、订阅者异步执行，不会拖慢或打断这里的频控更新。
+    emitHook(
+      "proactive.outcome",
+      {
+        deliveryId,
+        kind: prev.kind,
+        outcome,
+        channel: prev.channel,
+        ...(prev.tier ? { tier: prev.tier } : {}),
+        ...(prev.topic ? { topic: prev.topic } : {}),
+        ...(meta?.surface ? { surface: meta.surface } : {}),
+        ...(meta?.ref ? { ref: meta.ref } : {}),
+        at,
+      },
+      { actorId: prev.actorId, source: "proactive-pipeline" },
+    );
     // viewed = 应用内已展示（impression），非用户决策：不算负反馈，
     // 也不进接受率分母（outcome-store.acceptanceRate 排除），避免污染学习信号
     if (!POSITIVE.has(outcome) && outcome !== "delivered" && outcome !== "viewed") {
@@ -346,12 +560,53 @@ export class ProactivePipeline {
       offlinePush: { enabled: !!this.deps.mobilePush },
       // 沉默决策留痕（方案 B）：最近效用评估后主动选择不动作的提案
       recentSilences: this.silenceLog.recent(10),
+      // 触点计划（§3.4）：今天给谁排了哪几个触点、各自攒了什么、有没有说出去
+      touchpoints: this.touchpointSnapshot(),
     };
+  }
+
+  /**
+   * 触点计划诊断快照（§3.4 验收第 4 条）：范围取「在线 ∪ 已知用户」前 20 人——
+   * 诊断接口不是数据导出，看得清比列得全重要。未装配 planner 时为空数组。
+   */
+  private touchpointSnapshot(): Array<{ actorId: string; plan: TouchpointPlan; dropped: string | null }> {
+    const planner = this.deps.planner;
+    if (!planner) return [];
+    const ids = new Set<string>([
+      ...this.deps.presence.listOnline(),
+      ...(this.deps.exportActors?.().map((a) => a.actorId) ?? []),
+    ]);
+    return [...ids].slice(0, 20).map((actorId) => ({ actorId, ...planner.snapshot(actorId) }));
   }
 
   /** 沉默决策检索（支持「你上周为什么没提醒我 XX」反问） */
   searchSilences(opts: Parameters<SilenceLog["search"]>[0]) {
     return this.silenceLog.search(opts);
+  }
+
+  /**
+   * 某人的触点计划（§3.4 验收「计划本身看得见」）：今天几个触点、各自几点、
+   * 依据是什么、攒了哪几条、说没说出去，外加「为什么有条没排进去」。
+   */
+  planSnapshot(actorId: string): { plan: TouchpointPlan; dropped: string | null } | null {
+    return this.deps.planner?.snapshot(actorId) ?? null;
+  }
+
+  /**
+   * 漏斗视图数据源（2026-11-23 §12.2）：把三段既有留痕按窗口切给聚合层。
+   * 裁决与结果是环形缓冲，窗口拉大不等于数据变全——聚合层会在响应里标注口径边界。
+   */
+  funnelWindow(days = 7, now = Date.now()) {
+    const fromMs = now - days * 24 * 60 * 60_000;
+    return {
+      decisions: this.store
+        .recentDecisions(200)
+        .filter((d) => (d.proposal?.createdAt ?? 0) >= fromMs),
+      outcomes: this.deps.outcomes
+        .recent(2000)
+        .filter((o) => (o.createdAt ?? o.at) >= fromMs),
+      silences: this.silenceLog.recent(500).filter((s) => s.at >= fromMs),
+    };
   }
 
   /**
@@ -385,7 +640,10 @@ export class ProactivePipeline {
           });
           if (intent) {
             intentId = intent.intentId;
-            actionIntent = intentService.renderForClient(intent);
+            // withOpenChat（2026-11-30 §4.4）：厂商通知渲染不出按钮，点开进的是决策
+            // 半屏页——页上除了那两个执行按钮，还要留一个「打开对话」的出口。
+            // 这枚动作与那两个走同一条 execute 链路（同一套签发/幂等/审计）。
+            actionIntent = intentService.renderForClient(intent, { withOpenChat: true });
           }
         } catch (err) {
           console.log(`[ProactivePipeline] 离线推送动作意图签发失败（忽略）kind=${p.kind}: ${err}`);
@@ -422,6 +680,9 @@ export class ProactivePipeline {
             kind: p.kind,
             ...(p.proposalId ? { proposalId: p.proposalId } : {}),
             ...(p.source ? { source: p.source } : {}),
+            // 这条是**厂商推送**弹出去的（2026-11-30 §4.4）：通知上没有按钮，
+            // 客户端收到补投时要把决策端给半屏页（而不是只落一个气泡让人自己找）。
+            pushed: true,
             // 气泡按原定触发时刻落位（无则用送达时刻），补投不冒充「刚刚发的」
             firedAt:
               typeof p.firedAt === "number"
@@ -441,6 +702,7 @@ export class ProactivePipeline {
             channel: "mobile_push",
             outcome: "delivered",
             at: clock(),
+            createdAt: clock(),
             tier: p.tier,
             ...(topicKeyOfProposal(p) ? { topic: topicKeyOfProposal(p) } : {}),
           });
@@ -583,13 +845,19 @@ export class ProactivePipeline {
 
   /** 仲裁并执行（提案已在待发区内；delivered 出队投递，deferred 更新时刻，其余出队） */
   private decide(p: ProactiveProposal, at?: number): ArbitrationDecision {
-    const decision = this.applyReachGate(p, arbitrate(p, this.buildContext(p, at)), at);
+    const decision = this.applyPhoneQuiet(
+      p,
+      this.applyReachGate(p, arbitrate(p, this.buildContext(p, at)), at),
+      at,
+    );
     this.store.logDecision(decision);
     if (decision.verdict !== "deferred") this.redecides.delete(p.dedupKey);
     // 提案最终去向 → 共享发现层预留结算：delivered=消费 / pending=维持预留（等真投递）/ dropped=释放
     let disposition: "delivered" | "pending" | "dropped" = "dropped";
     switch (decision.verdict) {
       case "delivered": {
+        // 可解释（§3.10）：把这条消息真正经过的那道闸翻成一句人话，随正文下发
+        p.why = explainTiming(p, decision.reasonChain);
         if (this.dispatch(p)) {
           this.store.take(p.dedupKey);
           this.store.markDelivered(p.dedupKey, this.deps.nowFn?.() ?? Date.now());
@@ -654,6 +922,33 @@ export class ProactivePipeline {
       this.deps.discovery.settle(p.findingFingerprints, disposition);
     }
     return decision;
+  }
+
+  /**
+   * 手机静默闸（2026-11-23 M1）：手机上报通话中 / 系统勿扰时，非必达提案延后重判。
+   *
+   * 放在 reachGate 之后：前面的闸都放行了，最后看一眼「人此刻是不是在打电话 / 开了勿扰」。
+   * must 层与 critical 不受影响（日程到点、闹钟类必须到）；系统勿扰本身对这些也有自己的放行规则。
+   * 不设次数上限：通话/勿扰结束即放行，长时间勿扰由提案自身 expiresAt 与 MAX_REDECISIONS 兜底。
+   */
+  private applyPhoneQuiet(
+    p: ProactiveProposal,
+    decision: ArbitrationDecision,
+    at?: number,
+  ): ArbitrationDecision {
+    if (decision.verdict !== "delivered") return decision;
+    if (p.tier === "must" || p.importance === "critical") return decision;
+    const now = at ?? this.deps.nowFn?.() ?? Date.now();
+    // 测试与旧装配可能注入只有 getPresence 的精简 presence：没有该能力 = 不设闸
+    const quiet = (this.deps.presence as Partial<PresenceService>).phoneQuietReason;
+    const reason = typeof quiet === "function" ? quiet.call(this.deps.presence, p.actorId, now) : null;
+    if (!reason) return decision;
+    return {
+      proposal: p,
+      verdict: "deferred",
+      reasonChain: [...decision.reasonChain, `phone_quiet:${reason}`],
+      deliverAfter: now + PHONE_QUIET_RETRY_MS,
+    };
   }
 
   /**
@@ -734,10 +1029,14 @@ export class ProactivePipeline {
         outcome: "delivered",
         // 用注入时钟：未回复结算按 now-r.at 算年龄，混用真实时间会让窗口判定失效
         at: this.deps.nowFn?.() ?? Date.now(),
+        createdAt: this.deps.nowFn?.() ?? Date.now(),
         tier: p.tier,
+        // 触点槽类别（§4.6 slotKind）：slotId 形如 tp:<actor>:<date>:<kind>，取末段
+        ...(p.slotId ? { slotKind: p.slotId.split(":").pop() } : {}),
         ...(topicKeyOfProposal(p) ? { topic: topicKeyOfProposal(p) } : {}),
       });
-      if (p.tier === "social") this.deps.governor.record(p.actorId, p.kind, undefined, "social");
+      // 冷却记账与裁决同键：跟进类按这件事（dedupKey）记，不同事件互不占冷却
+      if (p.tier === "social") this.deps.governor.record(p.actorId, p.kind, undefined, "social", p.dedupKey);
       // critical 提案挂起升级链（送达 ≠ 被看到；fire-and-forget 不影响投递主链路）
       if (p.importance === "critical" && this.deps.escalate) {
         try {
@@ -749,7 +1048,7 @@ export class ProactivePipeline {
       return true;
     }
     this.deps.speak?.(p);
-    if (p.tier === "social") this.deps.governor.record(p.actorId, p.kind);
+    if (p.tier === "social") this.deps.governor.record(p.actorId, p.kind, undefined, undefined, p.dedupKey);
     return true;
   }
 
@@ -768,10 +1067,14 @@ export class ProactivePipeline {
       isSuppressed: (actorId, kind, text) => this.deps.suppression.isSuppressed(actorId, kind, text),
       // 用户活跃（在设备前）时告知频控：静默时段的低打扰消息不算惊扰（见 arbitrate）
       // tier=social：走社交类独立日预算（不和事务类抢额度，见 FrequencyGovernor）
+      // identity=dedupKey：跟进类大类的冷却按「这件事」计（§3.5 限制是同一事件最多
+      // 跟进 1 次，不是同一类话一天一次）——B 事件的跟进不该被 A 事件的冷却吞掉，
+      // 跨事件的合并与顺延归 §3.4 的触点容量管
       socialCanTrigger: (actorId, kind, importance) =>
         this.deps.governor.canTrigger(actorId, kind, importance, undefined, {
           awake: presence === "active",
           tier: "social",
+          identity: p.dedupKey,
         }),
     };
   }

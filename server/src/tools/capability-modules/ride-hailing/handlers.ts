@@ -3,6 +3,7 @@ import type { ClientLocationWire } from "../../../types/client-location.js";
 import type { BookingService } from "../../../services/booking/booking-service.js";
 import type { McpClientService } from "../../../services/mcp-client-service.js";
 import { searchNearbyPickupsViaDidi } from "../../../services/ride-pickup-candidates.js";
+import { rideMap3dEnabled } from "../../../services/ride-map-config.js";
 
 /**
  * ride_hailing.* 工具 handler 工厂集合 + 注册入口。
@@ -90,6 +91,28 @@ function buildPickupParams(
 }
 
 /**
+ * 选点卡的锚点：优先用已有的实时定位；没有就按需向客户端现拉一次。
+ *
+ * 为什么需要：用户给了文字上车点（如「九华园」）但检索失败时，resolvePickup
+ * 走的是「显式 pickup」分支——它直接返回文本、不会请求定位，于是这一路推卡
+ * 时 origin 为空，即使手机有 GPS 也看不到「预选位置」。这里在推卡前补拉一次，
+ * 拉到就以它为地图中心 + 周边候选锚点。
+ */
+async function resolveCardOrigin(
+  context: ToolContext,
+  existing: { lat: number; lng: number; label: string } | null,
+): Promise<{ lat: number; lng: number; label: string } | null> {
+  if (existing) return existing;
+  const live = (await context.requestLocation?.(
+    "叫车需要当前位置校准选点地图",
+    { maxAgeMs: 0, maxAccuracyMeters: 10 },
+  )) ?? null;
+  return live
+    ? { lat: live.latitude, lng: live.longitude, label: formatLocationLabel(live) }
+    : null;
+}
+
+/**
  * 起点没着落时的确定性出口（2026-11-20）：推「选上车点」卡
  * （shopping_login 同通道 type=card），用户点候选/拖地图选好点后经
  * card.action ride.pickup.select 续报价——全程零模型轮次、零文字追问。
@@ -124,6 +147,8 @@ async function pushPickupSelectCard(
       footer: "点候选或拖动地图，选好后我直接续报价，不用再打字",
       extra: {
         ridePickup: {
+          // 配了 AMAP_JS_KEY 才走卡内 3D 地图（WebView + 高德 JS API）；否则客户端平面地图
+          map3d: rideMap3dEnabled(),
           dropoff: rideRequest.dropoff,
           ...(rideRequest.city ? { city: rideRequest.city } : {}),
           ...(rideRequest.scheduleAt ? { scheduleAt: rideRequest.scheduleAt } : {}),
@@ -237,10 +262,13 @@ export function createRideQuoteHandler(
         failedResult.code === "PICKUP_UNRESOLVED" ||
         /起点|pickup/i.test(String(failedResult.error ?? ""));
       if (pickupFailed) {
+        // 显式 pickup 检索失败这一路 resolvePickup 没拉定位，推卡前补一次，
+        // 否则手机有 GPS 也出不来「预选位置」。
+        const cardOrigin = await resolveCardOrigin(context, origin);
         const pushed = await pushPickupSelectCard(
           context,
           rideRequestBase,
-          origin,
+          cardOrigin,
           mcp,
         );
         return pickupUnresolvedResult(pushed, dropoff);

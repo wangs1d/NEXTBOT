@@ -96,6 +96,32 @@ export interface UnifiedReferent {
 }
 
 /**
+ * 未来个人事件（PRD §3.5 承诺跟进的抽取产物，2026-11-25）：带时间锚点的**用户自己的
+ * 一次性 future event**（面试/考试/看病/出差/搬家/聚会/家人生日…）。
+ *
+ * 与 facts 的分工：facts 记「长期状态」（居住地/职业，upcoming 也是状态变更），
+ * 这里记「某一天发生的一件事」——它过后值得被问一句，但不进档案字段。
+ * 与日程的分工（§3.5）：日程是「提醒你去做」，跟进是「事后问一句」，同一件事可以两者都有。
+ */
+export interface UnifiedFollowUp {
+  /** 事件本身（≤24 字第三人称短句，如「下午面试」「带猫去复查」） */
+  event: string;
+  /**
+   * 事件发生时刻（ISO 本地时间，按调用方给的当前时间把「明天下午」换算成绝对时刻）。
+   * 换算不出来就省略——宁可不抽，也不编一个日期（与 facts 的 validFrom 同一口径）。
+   */
+  eventAt?: string;
+  /**
+   * 敏感度：健康/感情/法律/财务纠纷=private（锁屏只出「有句话想跟你说」），其余 normal。
+   * 缺省 normal，但落库侧另有一道确定性判私正则兜底——模型漏判不能让隐私上锁屏。
+   */
+  sensitivity?: "normal" | "private";
+  /** 类别（interview/exam/medical/travel/move/party/birthday/other）：同类 30 天抑制的匹配键 */
+  category?: string;
+  confidence?: number;
+}
+
+/**
  * 五维重要性评分（植入裁决「评分」步，2026-09-07）：LLM 对候选逐维打 0-1 分，
  * 代码侧加权合成综合分并按阈值闸门裁决是否植入长期库——不信任单一直觉分，
  * 确保无用的消息（低持久+低影响的日常琐事）不会被植入长期记忆。
@@ -137,6 +163,11 @@ export interface UnifiedExtraction {
   /** 角色→人名指代映射（结构化事实库 指代·role 字段，realtime 消解直查） */
   referents: UnifiedReferent[];
   /**
+   * 未来个人事件（§3.5 承诺跟进）：只在原文命中事件线索词时才请求这一段抽取
+   * （见 FOLLOW_UP_EXTRACT_HINT_RE），普通轮不增加 prompt 体积，故为可选字段。
+   */
+  followUps?: UnifiedFollowUp[];
+  /**
    * 画像写入操作（仅在调用方传 `profileContext` 时请求）：
    * 与 user-profile-aggregator 的 ProfileOp 同构，由 aggregator 侧确定性落位，
    * 避免同一条用户消息再跑一次独立的画像抽取 LLM。
@@ -170,6 +201,18 @@ export function isProfileExtractHint(text: string): boolean {
 }
 
 /**
+ * 未来个人事件预筛（§3.5）：只有原文出现这类词，才在统一抽取里捎带 followUps 任务。
+ * 与 PROFILE_EXTRACT_HINT_RE 同一个道理——普通闲聊不为了跟进抽取多付一份 prompt token。
+ * 命中不等于一定要抽（判断交给 LLM 与落库闸门），漏命中只等于少一次跟进机会。
+ */
+export const FOLLOW_UP_EXTRACT_HINT_RE =
+  /面试|考试|测验|答辩|汇报|提案|讲标|复诊|体检|看病|就诊|手术|检查|结果出|放榜|出分|出差|旅行|搬家|租房|退租|签约|交房|聚会|饭局|生日|纪念日|婚礼|满月|答辩|开庭|维权|退款|退货|理赔|面试的|要考|明天(有|去|要)|后天|周[一二三四五六日].{0,4}(去|有|面试|考试|开会)|下[周个]?(要|去|有)/;
+
+export function isFollowUpExtractHint(text: string): boolean {
+  return FOLLOW_UP_EXTRACT_HINT_RE.test(text ?? "");
+}
+
+/**
  * 画像操作输出段：只在调用方传了当前画像时拼进 system prompt。
  * 普通轮不拼——不增加日常对话的输入 token。
  */
@@ -184,6 +227,21 @@ const PROFILE_OPS_PROMPT = [
   "  // 疑问不是事实；助手话里的猜测、调侃、求证不是用户事实；与现有画像语义重复的不要重复输出",
   "  // 用户纠正旧信息时必须 DELETE 旧条目再 ADD 新值；身份类字段只在用户明确自述时写入",
   "  // 无值得记录的信息时输出空数组",
+].join("\n");
+
+/**
+ * 未来个人事件输出段（§3.5）：只在原文命中 FOLLOW_UP_EXTRACT_HINT_RE 时拼进 system，
+ * 普通轮不付这份 token。
+ */
+const FOLLOW_UPS_PROMPT = [
+  "",
+  "【附加任务·未来个人事件】除上面的 JSON 字段外，再输出 followUps 数组（无则空数组）：",
+  '"followUps":[{"event":"第三人称短句（≤24字，如 下午面试）","eventAt":"YYYY-MM-DDTHH:mm（按当前时间把「明天下午」换算成绝对时刻，只知日期就写 T00:00）","category":"interview|exam|medical|travel|move|party|birthday|legal|money|other","sensitivity":"normal|private","confidence":0到1}]',
+  "  // 只收**用户本人**将来会发生、事后值得被问一句的一次性事件：面试/考试/答辩/复诊/体检/手术/出差/搬家/聚会/家人生日/开庭/等结果",
+  "  // 已经发生的事（「我昨天面试了」）、日常安排（「中午吃饭」）、用户要求 Agent 做的事（「明天提醒我」是日程，不是跟进）都不收",
+  "  // 助手建议/追问里提到的事件不算用户的事件；疑问句、假设（「要不要去体检」）不算",
+  "  // eventAt 换算不出来就省略这个字段，不要编日期；同一句话里的同一件事只输出一次",
+  "  // sensitivity：健康/看病/手术/感情/法律/财务纠纷=private，其余=normal",
 ].join("\n");
 
 export function isMemoryUnifiedExtractEnabled(): boolean {
@@ -233,6 +291,7 @@ interface RawUnified {
   forget?: unknown;
   referents?: unknown;
   profileOps?: unknown;
+  followUps?: unknown;
 }
 
 function asStringArray(raw: unknown): string[] {
@@ -398,6 +457,10 @@ export function normalize(raw: RawUnified): UnifiedExtraction | null {
 
   const scores = parseScores(raw.scores);
 
+  // 未来个人事件（§3.5）：reject 轮不产出（寒暄/琐事里冒出的「明天面试」多半是复述
+  // 别人的安排）；remember/decay 都保留——跟进事件天生是临时信息，不该被植入闸门顺带丢掉。
+  const followUps = decision === "reject" ? [] : parseFollowUps(raw.followUps);
+
   // 画像增量操作（仅在请求画像任务时出现）：严格字段校验，非法项丢弃。
   const profileOps: UnifiedProfileOp[] = Array.isArray(raw.profileOps)
     ? (raw.profileOps as unknown[])
@@ -437,8 +500,62 @@ export function normalize(raw: RawUnified): UnifiedExtraction | null {
     facts,
     forget,
     referents,
+    ...(followUps.length > 0 ? { followUps } : {}),
     ...(profileOps.length > 0 ? { profileOps } : {}),
   });
+}
+
+/**
+ * 未来个人事件的落库规范化（§3.5）。
+ *
+ * 抽出成独立函数有两个原因：① 跟进事件天然被判 `decay`（一次性、过后就过时），
+ * 不能像 memories 那样被 reject/decay 闸门顺手丢掉——只有明确判 reject 的闲聊轮才作废；
+ * ② 「宁缺勿滥」的验收线（误抽 ≤5%）由这里的一道道确定性闸把住，不靠模型自觉。
+ */
+export function parseFollowUps(raw: unknown): UnifiedFollowUp[] {
+  if (!Array.isArray(raw)) return [];
+  const categories = new Set([
+    "interview",
+    "exam",
+    "medical",
+    "travel",
+    "move",
+    "party",
+    "birthday",
+    "legal",
+    "money",
+    "other",
+  ]);
+  return raw
+    .map((item): UnifiedFollowUp | null => {
+      if (!item || typeof item !== "object") return null;
+      const o = item as Record<string, unknown>;
+      const event = typeof o.event === "string" ? o.event.replace(/\s+/g, " ").trim() : "";
+      if (event.length < 2 || event.length > 40) return null;
+      // 疑问句不是事件（「明天面试穿什么」交给常识问答，别晚上追一句「面试怎么样」）
+      if (/[？?]$/.test(event)) return null;
+      // 时刻只接受能解析的 ISO 前缀（YYYY-MM-DD[THH:mm]）；换算不出来就省略，
+      // 由落库侧按「无锚点不跟进」处理——编一个日期的跟进比漏一次跟进更糟。
+      const rawAt = typeof o.eventAt === "string" ? o.eventAt.trim().replace(" ", "T") : "";
+      const eventAt = /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2})?)?/.test(rawAt)
+        ? rawAt.slice(0, 16)
+        : "";
+      const category =
+        typeof o.category === "string" && categories.has(o.category.trim().toLowerCase())
+          ? o.category.trim().toLowerCase()
+          : "other";
+      const conf = Number(o.confidence);
+      if (Number.isFinite(conf) && conf < 0.5) return null;
+      return {
+        event,
+        ...(eventAt ? { eventAt } : {}),
+        category,
+        ...(o.sensitivity === "private" ? { sensitivity: "private" as const } : {}),
+        ...(Number.isFinite(conf) ? { confidence: Math.max(0, Math.min(1, conf)) } : {}),
+      };
+    })
+    .filter((f): f is UnifiedFollowUp => f !== null)
+    .slice(0, 3);
 }
 
 /** 五维权重：持久性 > 影响范围 > 确定性 > 情感强度 > 频率（频率在单段文本里最不可观测） */
@@ -486,7 +603,8 @@ function applyPromotionGate(e: UnifiedExtraction): UnifiedExtraction {
   const useless = getMemoryUselessThreshold();
   if (e.decision === "reject") return { ...e, importance: composite };
   if (composite < useless) {
-    return { ...e, decision: "reject", importance: composite, memories: [] };
+    // 跟进事件与 memories 同进退：闸门判这一轮是噪声，就不留「事后问一句」的把柄
+    return { ...e, decision: "reject", importance: composite, memories: [], followUps: [] };
   }
   if (e.decision === "remember") {
     const durableEnough =
@@ -563,7 +681,13 @@ export async function extractUnified(
       new OpenAI({ apiKey, baseURL: resolveAgenticMemoryLlmBaseUrl(), maxRetries: 1 });
     // 画像任务仅在调用方显式提供当前画像时拼接，普通轮 system 不变。
     const profileCtx = opts?.profileContext;
-    const systemContent = profileCtx ? `${SYSTEM_PROMPT}\n${PROFILE_OPS_PROMPT}` : SYSTEM_PROMPT;
+    // 未来个人事件段（§3.5）：只在原文命中事件线索词时拼接——普通轮不为此多付 token。
+    const followUpTask = isFollowUpExtractHint(body) ? FOLLOW_UPS_PROMPT : "";
+    const systemContent = [
+      SYSTEM_PROMPT,
+      ...(profileCtx ? [PROFILE_OPS_PROMPT] : []),
+      ...(followUpTask ? [followUpTask] : []),
+    ].join("");
     const userContent = profileCtx
       ? `当前时间：${nowIso}\n\n【当前用户画像】\n${profileCtx.currentProfile.trim() || "（空）"}\n\n对话文本：\n${body.slice(0, 8000)}`
       : `当前时间：${nowIso}\n\n对话文本：\n${body.slice(0, 8000)}`;

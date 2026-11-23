@@ -59,6 +59,7 @@ import { registerBrowserHealthRoutes } from "./browser-health.js";
 import { registerChatSuggestionRoutes } from "./chat-suggestions.js";
 import { registerMemoryCrudRoutes } from "./memory-crud.js";
 import { registerProfileManageRoutes } from "./profile-manage.js";
+import { registerProfileOverviewRoutes } from "./profile-overview.js";
 import { registerHealthRhythmRoutes } from "./health-rhythm.js";
 import { registerUserAvatarRoutes } from "./user-avatar.js";
 import { registerPaymentGuardrailRoutes } from "./payment-guardrails.js";
@@ -90,6 +91,7 @@ import { registerActionIntentRoutes } from "./action-intents.js";
 import { registerInboxRoutes } from "./inbox.js";
 import { registerAttentionRoutes } from "./attention.js";
 import { registerDynamicsRoutes } from "./dynamics.js";
+import { registerTodayBoardRoutes } from "./today-board.js";
 import { registerVoiceMessageRoutes } from "./voice-messages.js";
 import { registerImageFileRoutes } from "./image-files.js";
 import { registerPictureRoutes } from "./picture.js";
@@ -103,6 +105,7 @@ import { registerAgentHomepageRoutes } from "./agent-homepage.js";
 import { registerTravelPlanRoutes } from "./travel-plan.js";
 import { registerTravelPlanSessionRoutes } from "../../skills/travel-planning/travel-plan-session.js";
 import { registerTravelMapRoutes, registerPoiDetailsRoute } from "./travel-map.js";
+import { registerRideMapRoutes } from "./ride-map.js";
 import { registerShoppingDecisionRoutes } from "./shopping-decision.js";
 import { registerTravelDataRoutes } from "./travel-data.js";
 import { registerRecommendationRoutes } from "../../recommendation/http.js";
@@ -127,8 +130,10 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerClientConfigRoutes(app);
   // 安装包运行埋点（自包含，无 deps）：客户端启动上报 + 管理端 runtime 收回决策台账
   registerClientTelemetryRoutes(app);
-  // 跨端使用习惯埋点（自包含，无 deps）：统一事件接收 + 管理端聚合（概览 usage 字段）
-  registerUsageAnalyticsRoutes(app);
+  // 跨端使用习惯埋点：事件接收已由上方 client-telemetry 统一接管（两者同路径
+  // /api/telemetry/events，重复注册会让服务启动即失败）；本模块的聚合函数仍供
+  // 管理台概览使用，故不再在这里注册路由。
+  // registerUsageAnalyticsRoutes(app);
   // 清单变化 SSE 事件流（自包含；MANIFEST_EVENT_TOKEN 未配置时 403 禁用）：
   // 更新控制面机器（ECS）上启用，下游（云端网关/本地 runtime）订阅后秒级广播
   registerInternalManifestEventRoutes(app);
@@ -168,6 +173,8 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     registerTravelDataRoutes(app);
     registerPhoneRoutes(app, deps);
   }
+  // 叫车卡 3D 地图页面（选点卡/报价卡 WebView 加载；AMAP_JS_KEY 未配时 503）
+  registerRideMapRoutes(app);
   registerCompanionRoutes(app, deps);
   registerChatRoutes(app, deps);
   registerWalletRoutes(app, deps);
@@ -317,6 +324,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     pushService: deps.proactivePushService ?? null,
     fabric: deps.proactivityFabric ?? null,
     suppressionStore: deps.proactivitySuppressionStore ?? null,
+    phoneBuckets: deps.proactivityPhoneBuckets ?? null,
   });
   // 华为推送「消息回执」接收端（2026-11-23）：messages:send 的 80000000 只代表
   // 受理，送达与否只有回执能证明。公开路径在 auth.ts 白名单里精确放行。
@@ -337,6 +345,16 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerChatSuggestionRoutes(app);
   registerMemoryCrudRoutes(app);
   registerProfileManageRoutes(app);
+  // 档案页聚合读（需求 §6.4）：五个画像分区 + 触点计划 + 在办的事 + 反馈分寸，
+  // 一次取齐。纯读，所有数据源都来自已装配的 store，缺哪个该分区出空态。
+  registerProfileOverviewRoutes(app, {
+    pipeline: deps.proactivePipeline ?? null,
+    goalBoard: deps.goalBoard ?? null,
+    scheduleTasks: deps.scheduleTaskService,
+    ledger: deps.billParcelLedger ?? null,
+    auditTrail: deps.auditTrailService ?? null,
+    suppressions: deps.proactivitySuppressionStore ?? null,
+  });
   // 健康节奏（自包含，无 deps）：灵动岛久坐/喝水提醒的按身份档位下发
   registerHealthRhythmRoutes(app);
   // 用户头像（自包含，无 deps）：上传/查询/静态拉流
@@ -455,6 +473,13 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     attentionStore: deps.attentionStore ?? null,
     activityStore: deps.agentActivityStore,
     sourceStore: deps.sourceStore ?? null,
+    subscriptionAudit: deps.subscriptionAuditService ?? null,
+  });
+  // 今日看板（常驻通知 + 桌面小组件共用，2026-11-23 §5.2/§5.3）
+  registerTodayBoardRoutes(app, {
+    scheduleTasks: deps.scheduleTaskService,
+    ledger: deps.billParcelLedger ?? null,
+    intents: deps.proactivityBoardActions ?? null,
   });
   // Brain Center 路由（brainCenter 为 null 时端点返回 503 not enabled）
   registerBrainRoutes(app, deps);

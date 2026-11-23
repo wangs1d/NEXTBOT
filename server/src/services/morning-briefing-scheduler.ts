@@ -19,6 +19,12 @@ type SchedulerDeps = {
     desktopPayload: BriefingPayload,
   ) => void | Promise<void>;
   getSessionPrefs: (sessionId: string) => UserPreferences;
+  /**
+   * 「当天已经醒到手机前」判据（2026-11-23 §3.4：早安的触发条件从固定钟改成首次解锁）。
+   * 返回 false = 还没解锁，本 tick 跳过、下一个 tick 再看（不新增定时器）。
+   * 未注入 = 不拦：纯桌面用户/未接手机在场信号时保持旧行为，否则早安对他们消失。
+   */
+  unlockedToday?: (sessionId: string) => boolean;
 };
 
 /** 本地日期键（YYYY-MM-DD）：窗口判断与当日去重都按服务器本地时区，
@@ -79,6 +85,9 @@ export class MorningBriefingScheduler {
       if (!isWithinBriefingWindow(cfg)) continue;
       // 到点即播；服务重启/断线错过精确分钟时，窗口内补播一次
       if (nowMin < cfgMin) continue;
+      // §3.4：到点还要「今天已经解锁过手机」才播——锁屏揣在兜里播一场没人听的早安，
+      // 既没送达又烧掉了当日去重。没解锁就留给下一个 tick（窗口 05:00–12:00 内等）。
+      if (this.deps.unlockedToday && !this.deps.unlockedToday(sessionId)) continue;
       if (isSameDay(prefs.morningBriefing.lastSentAt)) continue;
       // 当日已从任意渠道投递过（如客户端启动简报已展示）→ 不再重复播报
       if (isSameDay(prefs.morningBriefing.deliveredAt)) continue;

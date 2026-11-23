@@ -6,8 +6,12 @@ import "package:flutter/foundation.dart";
 import "package:flutter_local_notifications/flutter_local_notifications.dart";
 import "package:permission_handler/permission_handler.dart";
 
+import "client_telemetry.dart";
 import "local_notification_actions.dart";
 import "notification_id.dart";
+import "proactive_decision.dart";
+import "ws_event_router.dart"
+    show WsEventCatalog, WsEventRouter, WsSubscribeScope, wsEventPayload;
 import "../models/notify_action.dart";
 
 export "../models/notify_action.dart";
@@ -30,6 +34,14 @@ class LocalNotificationService {
 
   /// 通知点按回调（main.dart 注入：回传 outcome 反馈）
   static void Function(String deliveryId, String outcome)? onOutcome;
+
+  /// 「点开一条带决策的通知」（2026-11-30 §4.4 行 2）：main.dart 注入，
+  /// 负责把 [DecisionRequest] 端成决策半屏页。
+  ///
+  /// 为什么要有这个回调而不是在通知服务里直接弹卡：本服务是**无界面层**的
+  /// （还要被后台 isolate 复用），拿不到 BuildContext；半屏页必须挂在手机主壳
+  /// 那个 MaterialApp 的导航器上（与 QuickNoteSheet 同一个坑位）。
+  static void Function(DecisionRequest decision)? onDecisionTap;
 
   /// [requestNotificationPermission] 默认 true，保持既有调用语义。
   /// 手机端冷启动传 false：通知权限改到「注册/登录成功进入主壳」时再申请
@@ -79,8 +91,74 @@ class LocalNotificationService {
               showBadge: true,
             ),
           );
+      // 渠道被用户关掉的埋点（2026-11-23 M1，护栏指标）：每次启动查一次。
+      unawaited(_reportDisabledChannels());
     }
+    // 跨端消除（2026-11-23 M1）：别的设备/对话里已经处理掉的通知，本机收起。
+    _ensureResolveSubscription();
     _initialized = true;
+  }
+
+  static bool _resolveWired = false;
+
+  static void _ensureResolveSubscription() {
+    if (_resolveWired) return;
+    _resolveWired = true;
+    WsEventRouter.instance.subscribe(
+      module: "notification-resolve-sync",
+      types: WsEventCatalog.notificationResolve,
+      scope: WsSubscribeScope.auto,
+      onEvent: (Map<String, dynamic> event) {
+        final Map<String, dynamic> p = wsEventPayload(event);
+        final String intentId = p["intentId"]?.toString() ?? "";
+        final String deliveryId = p["deliveryId"]?.toString() ?? "";
+        return dismissIfPending(intentId.isNotEmpty ? intentId : deliveryId);
+      },
+    );
+  }
+
+  /// 收起一条**还带按钮**的通知（已经变成回执的不动——那是本机刚点完的结果，
+  /// 要留给用户看一眼）。找不到这条通知（早被划掉/从没弹过）就什么都不做。
+  static Future<void> dismissIfPending(String idKey) async {
+    if (idKey.isEmpty || kIsWeb || !Platform.isAndroid) return;
+    final int id = notificationIdFor(idKey);
+    try {
+      final AndroidFlutterLocalNotificationsPlugin? android = _plugin
+          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+      final List<ActiveNotification> active =
+          await android?.getActiveNotifications() ?? const <ActiveNotification>[];
+      for (final ActiveNotification n in active) {
+        if (n.id != id) continue;
+        if (kReceiptTitles.contains(n.title)) return;
+        await _plugin.cancel(id: id);
+        return;
+      }
+    } catch (e) {
+      debugPrint("[local-notification] dismiss failed: $e");
+    }
+  }
+
+  static Future<void> _reportDisabledChannels() async {
+    try {
+      final AndroidFlutterLocalNotificationsPlugin? android = _plugin
+          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+      if (android == null) return;
+      if (await android.areNotificationsEnabled() == false) {
+        ClientEventTelemetry.track("notif_channel_disabled",
+            props: const <String, Object>{"channelId": "_app"});
+        return;
+      }
+      final List<AndroidNotificationChannel>? channels =
+          await android.getNotificationChannels();
+      for (final AndroidNotificationChannel c in channels ?? const <AndroidNotificationChannel>[]) {
+        if (c.importance == Importance.none) {
+          ClientEventTelemetry.track("notif_channel_disabled",
+              props: <String, Object>{"channelId": c.id});
+        }
+      }
+    } catch (e) {
+      debugPrint("[local-notification] channel probe failed: $e");
+    }
   }
 
   static void _onTap(NotificationResponse response) {
@@ -95,7 +173,10 @@ class LocalNotificationService {
     }
     // 点了按钮（App 在前台时插件也可能走这条回调）：执行动作。
     // 与后台 isolate 走的是同一条服务端链路，服务端幂等——两条都到也只执行一次。
-    if ((response.actionId ?? "").isNotEmpty) {
+    // 「打开对话」例外：它是导航按钮（见 show() 里的 showsUserInterface），
+    // 按下去等同于点开通知——记一次「看到了」的正反馈，不 POST 也不回执。
+    final String tappedAction = response.actionId ?? "";
+    if (tappedAction.isNotEmpty && tappedAction != kOpenChatActionId) {
       unawaited(executeNotificationAction(response));
       return;
     }
@@ -103,6 +184,15 @@ class LocalNotificationService {
     if (deliveryId != null && deliveryId.isNotEmpty) {
       onOutcome?.call(deliveryId, "accepted");
     }
+    ClientEventTelemetry.track("proactive_opened",
+        deliveryId: deliveryId,
+        props: const <String, Object>{"surface": "notification"});
+    // §4.4 行 2：点开通知 = 要处理这条决策。载荷里带得出 intentId + 动作
+    // （见 show() 的 payloadMap，服务端厂商推送的 data 用的是同一套键名），
+    // 就把它交给主壳端出的决策半屏页；认不出决策（普通通知）就什么都不做。
+    final DecisionRequest? decision =
+        DecisionRequest.parse(data, nowMs: DateTime.now().millisecondsSinceEpoch);
+    if (decision != null) onDecisionTap?.call(decision);
   }
 
   static Future<void> show({
@@ -111,6 +201,9 @@ class LocalNotificationService {
     String? deliveryId,
     String? intentId,
     List<NotifyAction> actions = const <NotifyAction>[],
+    // 「为什么是现在」一句话（§3.10，服务端 explainTiming 产出）：进通知的
+    // 副题行（subText），同一条 proactive 渠道、不新建渠道；缺省不带不动通知形态。
+    String? why,
   }) async {
     if (!_initialized) return;
     // Android 13+ 通知权限未授权时，插件的 show 是静默 no-op——用户侧表现
@@ -130,12 +223,16 @@ class LocalNotificationService {
     }
     // 动作 → Android Notification Action（按钮）；input 类动作带 RemoteInput，
     // 用户可以直接在通知栏里回一句话（不必点开 App）。
+    //
+    // 「打开对话」（§4.3 轮次用完后的留存按钮）要的是**导航**而不是回执行：
+    // showsUserInterface=true 让插件把 PendingIntent 建成 getActivity，按下去
+    // 直接把 App 拉到前台（其余按钮是 false → 后台 isolate 广播，App 被杀也能执行）。
     final List<AndroidNotificationAction> androidActions =
         actions.take(3).map((NotifyAction a) {
       return AndroidNotificationAction(
         a.actionId,
         a.label,
-        showsUserInterface: false,
+        showsUserInterface: a.actionId == kOpenChatActionId,
         cancelNotification: true,
         inputs: a.needsInput
             ? <AndroidNotificationActionInput>[
@@ -149,6 +246,10 @@ class LocalNotificationService {
       );
     }).toList();
 
+    // 「为什么是现在」一句话（§3.10，服务端 explainTiming 产出）：走 Android
+    // subText 副题行（标题下方一行小字），同一条 proactive 渠道、不新建渠道，
+    // 正文 body 一字不动；iOS 无副题槽位，忽略即可（点开回 App 长按气泡同样能看）。
+    final String? whyLine = (why ?? "").trim().isEmpty ? null : why!.trim();
     final AndroidNotificationDetails androidDetails = AndroidNotificationDetails(
       "proactive",
       "主动提醒",
@@ -157,6 +258,7 @@ class LocalNotificationService {
       priority: Priority.high,
       category: AndroidNotificationCategory.reminder,
       actions: androidActions,
+      subText: whyLine,
     );
     const DarwinNotificationDetails iosDetails = DarwinNotificationDetails(
       presentAlert: true,
@@ -176,6 +278,10 @@ class LocalNotificationService {
     final Map<String, dynamic> payloadMap = <String, dynamic>{
       if (deliveryId != null && deliveryId.isNotEmpty) "deliveryId": deliveryId,
       if (intentId != null && intentId.isNotEmpty) "intentId": intentId,
+      // 标题/正文一起进载荷（2026-11-30 §4.4）：NotificationResponse 只回传 payload，
+      // 拿不到通知本身的 title/body，而决策半屏页要照原样把这条决策念给用户。
+      "title": title,
+      "body": body,
       if (actions.isNotEmpty)
         "actions": actions.take(3).map((NotifyAction a) => a.toJson()).toList(),
     };
@@ -186,6 +292,14 @@ class LocalNotificationService {
       body: body,
       notificationDetails: details,
       payload: jsonEncode(payloadMap),
+    );
+    ClientEventTelemetry.track(
+      "proactive_displayed",
+      deliveryId: deliveryId,
+      props: <String, Object>{
+        "surface": "notification",
+        "actions": actions.length,
+      },
     );
   }
 }

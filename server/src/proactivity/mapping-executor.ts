@@ -57,6 +57,22 @@ export type RuleServices = {
    * 显示给了当前用户（实测 eval 账号的日程出现在真实用户的时间轴里）。
    */
   listTodayTasks?: (actorId: string) => Array<{ title: string; runAt?: number | string }>;
+  /**
+   * AgentPulse 材料用日程（2026-11-23）：与 listTodayTasks 的差别是**带实体信息**
+   * ——taskId（领域动作的落点）、recurrence、状态，并且把「今天已过点、单次、
+   * 还没完成」的安排也纳入。主动消息问「还去吗」时，只有带上 taskId 才挂得上
+   * 「完成 / 改天」这类真按钮；否则只能回退成按了不改变状态的假按钮。
+   */
+  listPulseTasks?: (actorId: string) => Array<{
+    taskId: string;
+    title: string;
+    runAt?: number | string;
+    recurrence?: string;
+    status?: string;
+    /** 单次、未完成：可挂 schedule_complete / schedule_snooze */
+    actionable?: boolean;
+    overdue?: boolean;
+  }>;
   weatherLine?: (actorId: string) => string | null;
   unreadSenders?: (actorId: string) => string[];
   readyGoals?: (actorId: string) => Array<{ title: string; body: string }>;

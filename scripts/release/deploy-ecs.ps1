@@ -51,6 +51,9 @@ if (-not $SkipPackage) {
   $packList = @(
     'package.json', 'package-lock.json',
     'server/dist', 'server/package.json', 'server/config', 'server/.env', 'server/public',
+    # server/web：运行期读取的自包含网页（webpay 收银台、叫车卡 3D 地图 picker.html）。
+    # 路由按 serverRoot()/web/ 读文件，不随 dist 编译——漏打包线上就是 404。
+    'server/web',
     'server/scripts/admin-set-password.mjs',
     'agent-world/package.json', 'agent-world/dist', 'agent-world/config', 'agent-world/deps', 'agent-world/data',
     'packages/agent-protocol/package.json', 'packages/agent-protocol/dist',
@@ -264,10 +267,25 @@ exit 1
 # 不走字符串管道：PS 5.1 管道给原生进程时会按控制台编码输出，流开头会被塞进
 # BOM（TrimStart 剥的是字符串内的 BOM，剥不掉编码层加的），bash 第一行的 set -e
 # 变成 "\ufeffset: command not found" 被静默吞掉，出错即中止的保护整体失效
-# （2026-11-14 实测）。改用 base64 传输：CRLF/BOM/引号问题全部免疫。
-$remoteScriptB64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($remoteScript -replace "`r`n", "`n")))
-& ssh $Remote "echo $remoteScriptB64 | base64 -d | bash -s"
+# （2026-11-14 实测）。也不能走 base64 内联：Windows OpenSSH 的远程命令行上限
+# 8191 字符，本脚本 base64 后约 8.2KB，被截断后远端 base64 -d 失败、bash -s
+# 收到空输入仍退出 0——部署"成功"但文件根本没落地（2026-11-24 实证）。
+# 现在：脚本落成本地临时文件 → scp 上传 → ssh 执行 → 以结束标记校验真的跑完了。
+$remoteScriptPath = Join-Path ([System.IO.Path]::GetTempPath()) 'nextbot-remote-deploy.sh'
+[System.IO.File]::WriteAllText(
+  $remoteScriptPath,
+  ($remoteScript -replace "`r`n", "`n"),
+  (New-Object System.Text.UTF8Encoding($false))
+)
+& scp $remoteScriptPath "${Remote}:/tmp/nextbot-remote-deploy.sh"
+if ($LASTEXITCODE -ne 0) { throw '上传部署脚本失败' }
+$deployOut = & ssh $Remote "bash /tmp/nextbot-remote-deploy.sh; rc=`$?; rm -f /tmp/nextbot-remote-deploy.sh; exit `$rc" 2>&1
+$deployOut | ForEach-Object { Write-Host $_ }
+try { [System.IO.File]::Delete($remoteScriptPath) } catch { }
 if ($LASTEXITCODE -ne 0) { throw '服务器端部署失败' }
+if (($deployOut -join "`n") -notmatch '\[ecs\] deploy verify OK') {
+  throw '服务器端部署未到达终验（脚本可能未执行或中途退出），见上方输出'
+}
 
 # ── 4. 外网验证（安全组 3000 是否放行） ──
 Write-Host '== [4/5] 外网验证 =='

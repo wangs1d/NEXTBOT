@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 桌面小组件文案（2026-11-23 主动触达 §5.3）。
+     只放小组件用到的字符串：颜色与业务文案都不在这里——内容全部来自常驻通知
+     那一帧看板（ongoing_status_prefs），原生只贴字。 -->
+<resources>
+    <string name="widget_2x2_label">今日 · 小</string>
+    <string name="widget_4x2_label">今日 · 宽</string>
+    <string name="widget_2x2_description">下一件事与倒计时，空闲时显示管家一句话</string>
+    <string name="widget_4x2_description">下一件事 / 待取件 / 今天到期 / 管家一句话，各区域可点</string>
+
+    <string name="widget_caption_today">今日</string>
+    <string name="widget_note_action">记一下</string>
+    <string name="widget_idle_line">今天没什么要操心的</string>
+    <string name="widget_agent_default">管家在</string>
+    <string name="widget_off_line">常驻通知已设为极简，详细内容不在桌面展示</string>
+    <!-- Chronometer 走字模板：原生自己跳秒，不靠刷新 -->
+    <string name="widget_countdown_format">还有 %s</string>
+    <string name="widget_updated_format">更新于 %s</string>
+
+    <!-- 分享给管家（2026-11-23 主动触达 §8.1）。这三行文案会出现在系统分享菜单
+         与长按菜单里，写的是「交给谁」而不是「做什么操作」——用户在别的 App 里
+         不需要知道本应用内部的页面结构。 -->
+    <string name="share_sheet_label">分享给管家</string>
+    <string name="shortcut_note_short">记一下</string>
+    <string name="shortcut_note_long">记一下（文字速记）</string>
+    <string name="shortcut_camera_short">拍一下</string>
+    <string name="shortcut_camera_long">拍一下（拍照给管家看）</string>
+    <string name="shortcut_ask_short">问一下</string>
+    <string name="shortcut_ask_long">问一下管家</string>
+    <string name="tile_voice_note">语音记一下</string>
+    <string name="tile_voice_note_description">不开 App，对着管家说一句就记下</string>
+</resources>

@@ -103,6 +103,13 @@ const PUBLIC_EXACT_PATHS = new Set([
   // 设备凭据；只写审计日志、不读用户数据，自己的 Basic Auth 在路由内校验。
   // 精确匹配而非前缀——避免 /api/webhooks/ 整个面被放开。
   "/api/webhooks/huawei-push-receipt",
+  // 「通知即界面」的按钮执行入口（2026-11-23）：请求方常常是后台通知 isolate
+  // 甚至已杀进程，没有登录态；安全边界是请求体里那枚 HMAC 签名、绑定归属、
+  // 限时且幂等的一次性 action token（见 routes/http/action-intents.ts）。
+  // 此前缺这一条：开启 ACCESS_AUTH_REQUIRED 后合法按钮会先被周界 401 掉，
+  // 用户看到的是「需要访问凭证：请登录后重试」——token 根本没机会验签。
+  // 精确匹配：GET /api/action-intents/:intentId 仍要设备凭据。
+  "/api/action-intents/execute",
 ]);
 
 const PUBLIC_PATH_PREFIXES = [
@@ -124,6 +131,9 @@ const PUBLIC_PATH_PREFIXES = [
   "/travel/share/",
   // ② 底图瓦片：白名单上游的瓦片/字形代理，任何账号的数据都不在这里
   "/travel-basemap/",
+  // ② 叫车卡 3D 地图页：自包含高德 JS 页面（key 服务端注入），无用户数据，
+  //    WebView 打开时不带设备凭证
+  "/ride-map/",
   // ① agent-world 入网引导（challenge/verify 自带证明；发现清单指向的路径）
   "/world/register/",
   // ④ 自带机器密钥的通道（周界不许吃它们的 ?token= / 私有头）

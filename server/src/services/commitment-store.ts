@@ -30,8 +30,15 @@ function commitmentIdForTask(taskId: string): string {
   return `sched_${taskId}`;
 }
 
-/** 建表（与生产库 2026-10 存量 schema 逐列一致；老库命中 IF NOT EXISTS 零变化）。 */
-function ensureTable(db: ReturnType<typeof openAgenticSqlite>): void {
+/**
+ * 建表（与生产库 2026-10 存量 schema 逐列一致；老库命中 IF NOT EXISTS 零变化）。
+ *
+ * `kind`（2026-11-25 §3.5 承诺跟进）：区分这一行是**提醒承诺**（'schedule'，历史行
+ * 为 NULL）还是**跟进事件**（'follow_up'，见 services/followup-store.ts）。老库没有
+ * 这一列，PRAGMA 查到缺就补——只加可空列，存量行与既有读路径零影响。
+ * 导出给跟进侧复用：一张表的 schema 只有一处定义，不各写一份 CREATE。
+ */
+export function ensureCommitmentTable(db: ReturnType<typeof openAgenticSqlite>): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS commitments (
       id TEXT PRIMARY KEY,
@@ -55,8 +62,12 @@ function ensureTable(db: ReturnType<typeof openAgenticSqlite>): void {
       cancelled_at TEXT,
       broken_at TEXT,
       notes TEXT
-    , reminder_tiers_sent TEXT NOT NULL DEFAULT '[]', superseded_at TEXT, category TEXT, confirm_reminder_sent_at TEXT, contact TEXT)
+    , reminder_tiers_sent TEXT NOT NULL DEFAULT '[]', superseded_at TEXT, category TEXT, confirm_reminder_sent_at TEXT, contact TEXT, kind TEXT)
   `);
+  const cols = db.prepare(`PRAGMA table_info(commitments)`).all() as Array<{ name?: string }>;
+  if (!cols.some((c) => c?.name === "kind")) {
+    db.exec(`ALTER TABLE commitments ADD COLUMN kind TEXT`);
+  }
 }
 
 /** 任务创建/更新为 active → upsert 一行 active 承诺（幂等）。 */
@@ -66,13 +77,13 @@ export function upsertScheduleCommitment(input: ScheduleCommitmentInput): void {
   try {
     const db = openAgenticSqlite();
     try {
-      ensureTable(db);
+      ensureCommitmentTable(db);
       const now = new Date().toISOString();
       db.prepare(
         `INSERT INTO commitments (
            id, actor_id, text, committed_by, status, deadline, dependencies,
-           escalation_policy, evidence_ledger_ids, source, created_at, updated_at, category
-         ) VALUES (?, ?, ?, 'agent', 'active', ?, '[]', '{}', '[]', 'schedule', ?, ?, ?)
+           escalation_policy, evidence_ledger_ids, source, created_at, updated_at, category, kind
+         ) VALUES (?, ?, ?, 'agent', 'active', ?, '[]', '{}', '[]', 'schedule', ?, ?, ?, 'schedule')
          ON CONFLICT(id) DO UPDATE SET
            text = excluded.text,
            deadline = excluded.deadline,
@@ -111,7 +122,7 @@ export function settleScheduleCommitment(
   try {
     const db = openAgenticSqlite();
     try {
-      ensureTable(db);
+      ensureCommitmentTable(db);
       const now = new Date().toISOString();
       const info = db
         .prepare(

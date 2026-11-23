@@ -62,6 +62,19 @@ export function arbitrate(p: ProactiveProposal, ctx: ArbiterContext): Arbitratio
       utility: utilityResult,
     };
   }
+  // 未到「最早可发时刻」（§3.4 触点排槽把这条语义用到了极致：候选排进 20:00 的槽，
+  // deliverAfter 就是槽位窗口起点）。此前这层判据只由 flushDue 的过滤承担，提交路径
+  // 少了一环——排到未来的槽会在提交那一刻直接弹出，触点计划当场形同虚设。
+  // 放在抑制判定之后：用户明确说过的「别再提这类」不必等到槽位时间才丢弃。
+  if (p.deliverAfter !== undefined && p.deliverAfter > ctx.now) {
+    return {
+      proposal: p,
+      verdict: "deferred",
+      reasonChain: [...chain, `wait_until:${new Date(p.deliverAfter).toISOString()}`],
+      deliverAfter: p.deliverAfter,
+      utility: utilityResult,
+    };
+  }
   // 分层频控：must 层（用户点名要的事）绕过社交预算，不占社交配额
   if (p.tier === "social") {
     const importance = (p.importance === "critical" ? "high" : p.importance) as "high" | "medium" | "low";

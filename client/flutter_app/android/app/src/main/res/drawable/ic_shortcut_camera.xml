@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 「拍一下」快捷方式图标（§8.1）：相机机身 + 镜头圆（两条实心圆叠加，
+     靠 evenOdd 挖出镜筒，避免依赖系统图标字体） -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFFFF">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M9,2L7.17,4H4C2.9,4 2,4.9 2,6v12c0,1.1 0.9,2 2,2h16c1.1,0 2,-0.9 2,-2V6c0,-1.1 -0.9,-2 -2,-2h-3.17L15,2H9zM12,8.2c2.1,0 3.8,1.7 3.8,3.8s-1.7,3.8 -3.8,3.8 -3.8,-1.7 -3.8,-3.8 1.7,-3.8 3.8,-3.8zM12,9.7c-1.27,0 -2.3,1.03 -2.3,2.3s1.03,2.3 2.3,2.3 2.3,-1.03 2.3,-2.3 -1.03,-2.3 -2.3,-2.3z" />
+</vector>

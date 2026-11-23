@@ -29,6 +29,67 @@ import "mobile_sidebar.dart";
 import "mobile_theme.dart";
 import "startup_media_prefetch.dart";
 
+/// 桌面小组件各区域的落点表（2026-11-23 PRD §5.3「各区域深链到对应页面」）。
+///
+/// 路由值由原生 `TodayWidgetRenderer` 写在 intent 上，经原生那条既有中转队列
+/// （ShareIntakeStore → ShareIntakeService.take）交到 Dart，这里只回答一件事：
+/// **这个路由值该落到主壳哪个 tab**。纯映射、无副作用，所以能单测。
+///
+/// 刻意不新建路由名/页面：App 只有主壳那 4 个 tab，账单与待取件本来就是动态页里
+/// 的两个区块（`MobileDynamicsPage` 同屏上下排布，没有分节锚点），所以 bill 与
+/// parcel 都落 tab 2 —— 与 PRD 里「账单/快递区块」是同一屏。
+/// note 不在表里：它是「记一下」，弹半屏速记卡，走 entry 那条队，不该切页。
+class WidgetNav {
+  WidgetNav._();
+
+  static const int tabChat = 0;
+  static const int tabSchedule = 1;
+  static const int tabDynamics = 2;
+  static const int tabLibrary = 3;
+
+  /// 路由值 → tab 下标；不在表里的（含 note / 空 / 未来新值）一律返回 null，
+  /// 意思是「只把 App 带到前台，不乱跳页」。
+  static int? tabFor(String? route) {
+    switch (route) {
+      case "schedule":
+        // 2×2 整卡 / 4×2「下一件事」那一行：下一件事的本体就是行程表今天这页
+        return tabSchedule;
+      case "bill":
+      case "parcel":
+        // 4×2 的「今天到期」「待取件」两行：动态页的账单区块 / 快递区块
+        return tabDynamics;
+      case "note":
+      default:
+        return null;
+    }
+  }
+}
+
+/// 小组件落点的去重闸（PRD §5.3 幂等要求）。
+///
+/// 切 tab 走的是主壳 IndexedStack 的 index，不是 `Navigator.push`，所以重复点按
+/// 天然不会往栈上叠第二份同一页；这里要挡掉的是**已经在那一页时再切一次**——
+/// `_switchTab` 每次都对目标页补一次 `refresh()`，重复点按就是重复打网络。
+class WidgetNavGate {
+  /// 上一次真正生效的路由（仅为诊断/测试可读，判定不依赖它）。
+  String? get lastApplied => _lastApplied;
+  String? _lastApplied;
+
+  /// 该不该为这条路由切页。返回 null = 不动。
+  /// [currentTab] 是主壳此刻的 tab 下标（取不到时传负数，表示壳还没建好）。
+  int? accept(String? route, {required int currentTab}) {
+    final int? target = WidgetNav.tabFor(route);
+    if (target == null) return null;
+    // 已经在目标页：这条点按已经达成目的，不再刷第二遍
+    if (target == currentTab) return null;
+    _lastApplied = route;
+    return target;
+  }
+
+  /// 退出登录 / 主壳销毁时清掉：换个账号的起始 tab 不该被上一份会话判定成「已在」。
+  void reset() => _lastApplied = null;
+}
+
 /// 手机端主壳：底部 4 tab —— 对话 / 日程 / 动态 / 资料库；
 /// 设置迁到左侧抽屉左下角（点击进入原「我的」页）。
 ///
@@ -284,6 +345,9 @@ class MobileHomePageState extends State<MobileHomePage>
     if (index < 0 || index > 3) return;
     _switchTab(index);
   }
+
+  /// 当前 tab 下标：小组件落点去重闸要拿它判「是不是已经在目标页」。
+  int get tabIndex => _tabIndex;
 
   void _switchTab(int index) {
     // 首次进入走页面 initState 的 _load（避免双拉）；已构建过的页面才补一次重拉。

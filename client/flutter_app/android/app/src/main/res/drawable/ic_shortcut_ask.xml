@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 「问一下」快捷方式图标（§8.1）：对话气泡 + 三个点 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24"
+    android:tint="#FFFFFFFF">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M20,2H4C2.9,2 2,2.9 2,4v18l4,-4h14c1.1,0 2,-0.9 2,-2V4C22,2.9 21.1,2 20,2zM8,11c-0.83,0 -1.5,-0.67 -1.5,-1.5S7.17,8 8,8s1.5,0.67 1.5,1.5S8.83,11 8,11zM12,11c-0.83,0 -1.5,-0.67 -1.5,-1.5S11.17,8 12,8s1.5,0.67 1.5,1.5S12.83,11 12,11zM16,11c-0.83,0 -1.5,-0.67 -1.5,-1.5S15.17,8 16,8s1.5,0.67 1.5,1.5S16.83,11 16,11z" />
+</vector>

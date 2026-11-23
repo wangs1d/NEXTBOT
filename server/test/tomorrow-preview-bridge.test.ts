@@ -17,6 +17,11 @@ import {
   resolvePreviewPayloads,
   wantsTomorrowPreview,
 } from "../src/services/tomorrow-preview-bridge.js";
+import { EveningDigestService } from "../src/services/evening-digest-service.js";
+import {
+  renderTomorrowPreviewFacts,
+  type PreviewDigestLike,
+} from "../src/render/scenes/tomorrow-preview.scene.js";
 
 const DIGEST = {
   date: "2026-11-05",
@@ -100,3 +105,43 @@ test("取数超时：按上限放弃（主对话优先，不让天气接口拖�
   assert.ok(elapsed < PREVIEW_PAYLOAD_TIMEOUT_MS + 1500, `超出上限太多：${elapsed}ms`);
   resetPreviewDigestSource();
 });
+
+// ─── 2026-11-23 §3.4：问答面与推送面分工 ────────────────────────────────
+// 主动推送的「明日预览」只剩天气 + 一两句闲聊，问答必须吃 generatePreviewFacts
+// 那份完整事实。装配层的取数口一旦接错面（把 digest 当 facts 喂进来），下面
+// 第一例会直接红——这是这条链路唯一的自动化防线（本文件不 import 装配层）。
+const digestSvc = () => {
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const iso = new Date(
+    tomorrow.getFullYear(), tomorrow.getMonth(), tomorrow.getDate(), 9, 30,
+  ).toISOString();
+  return new EveningDigestService({
+    scheduleTaskService: {
+      listTasksBySession: () => [
+        { taskId: "t1", title: "部门例会", nextRunAt: iso, runAt: iso, reminderMessage: "" },
+      ],
+    } as never,
+  });
+};
+
+test("问答取数口接 facts：聊天里问「明天有什么安排」事实块仍列全行程", async () => {
+  const svc = digestSvc();
+  registerPreviewDigestSource((sessionId) => svc.generatePreviewFacts(sessionId));
+  const payloads = await resolvePreviewPayloads("s1", "明天有什么安排");
+  assert.ok(payloads?.eveningDigest, "命中明日意图必须有载荷");
+  const block = renderTomorrowPreviewFacts(payloads!.eveningDigest as PreviewDigestLike);
+  assert.match(block, /行程：/);
+  assert.match(block, /- 09:30 部门例会/);
+  resetPreviewDigestSource();
+});
+
+test("推送载荷里没有行程面：接错源就会漏答（缺键 ≠ 明天没日程）", async () => {
+  const svc = digestSvc();
+  const pushOnly = await svc.generateDigest("s1");
+  assert.equal("tomorrowSchedule" in pushOnly, false);
+  const block = renderTomorrowPreviewFacts(pushOnly as unknown as PreviewDigestLike);
+  // 睡前的推送载荷喂进场景，一个行程字都不出——所以问答侧必须吃 facts
+  assert.doesNotMatch(block, /行程：|部门例会/);
+});
+

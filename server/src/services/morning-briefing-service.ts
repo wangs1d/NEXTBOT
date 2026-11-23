@@ -14,8 +14,10 @@
  *  - 兴趣热搜 → 归话题追踪模块（proactivity/interest-watcher.ts 后台轮询 +
  *    ProactivityHub 主动在对话里说出来），晨报不再重复播；
  *  - 待复习笔记 → 删除（没人看的复习队列，纯占版面）；
- *  - 近期重要日子 → 迁往「明日速览」（evening-digest-service.ts）；本服务只保留
- *    「当天命中 → 祝福草稿 + life_reminder」的副作用，不再展示。
+ *  - 近期重要日子 → 2026-11-04 一度迁往「明日速览」，2026-11-23 §3.4 分工写死
+ *    「日程和截止事项只在早安出现；重要日子当天是才算事」，展示位搬回本卡
+ *    （briefing.importantDays，只收当天命中的），祝福草稿 + life_reminder
+ *    副作用不变；7 天窗口内的提前预告留在问答数据面（明日预览 facts）。
  */
 import { isTriviaTask } from "./schedule-task-service.js";
 import type { ScheduleTaskService } from "./schedule-task-service.js";
@@ -103,6 +105,14 @@ export interface MorningBriefing {
   todaySchedule: MorningBriefingScheduleItem[];
   /** 待办跟进（可选块）：之前交代的未完成事项 + 今日已办结数；全空时省略 */
   todoFollowups?: MorningBriefingTodoFollowups;
+  /**
+   * 今天的重要日子（生日 / 纪念日）：2026-11-23 §3.4「早安 / 明日预览分工」
+   * 把展示位从「明日预览」搬回早安卡——PRD 那一行写的是「当天是重要日子才提」，
+   * 所以只收 daysUntil=0；7 天窗口内的提前预告仍留在问答数据面
+   * （EveningDigestService.generatePreviewFacts().importantDays），问起照旧答。
+   * 无当天命中的日子 → 整块省略。
+   */
+  importantDays?: MorningBriefingImportantDay[];
   /**
    * 2~3 天内到期的 DDL 件数（可选）：只在播报稿里带一句「这周还有 N 项要交」，
    * 不上卡（卡面「今日日程」只收今天的事）。0 / 缺省 → 不提。
@@ -258,6 +268,17 @@ function formatDeadlineSoonBit(count: number | undefined): string {
   return `这两三天内还有 ${count} 项要交。`;
 }
 
+/**
+ * 今天的重要日子一句（确定性兜底播报用）：只说当天命中的那一个，
+ * 多个日子只报第一个加件数——卡面有完整列表，播报不念名单。
+ */
+function formatImportantDaysBit(items: MorningBriefingImportantDay[] | undefined): string {
+  if (!items || items.length === 0) return "";
+  const first = items[0]!;
+  const rest = items.length > 1 ? `，另外还有 ${items.length - 1} 个日子` : "";
+  return `另外，今天是${first.name}的${importantDayTypeLabel(first.type)}${rest}。`;
+}
+
 /** 合并后的今日条目上限（截止+行程+日程一起算，防一屏刷不完） */
 const TODAY_SCHEDULE_MAX = 12;
 
@@ -349,6 +370,14 @@ export function buildNarrationFacts(briefing: MorningBriefing): string {
       `这两三天内还要交（只需提一句件数，不逐条念）：${briefing.deadlineSoonCount} 项`,
     );
   }
+  // 今天的重要日子（生日/纪念日）：§3.4 从明日预览搬回来，比日程更该先说
+  if (briefing.importantDays && briefing.importantDays.length > 0) {
+    lines.push(
+      `今天的重要日子（必须带一句）：${briefing.importantDays
+        .map((i) => `${i.name}的${importantDayTypeLabel(i.type)}`)
+        .join("；")}`,
+    );
+  }
   const planItems = briefing.todaySchedule.filter((i) => i.kind !== "deadline");
   if (planItems.length > 0) {
     lines.push(
@@ -387,6 +416,7 @@ export function buildNarrationPrompt(briefing: MorningBriefing): string {
     "4. 时间一律原样保留 HH:mm 写法（如 09:30）。",
     "5. 只说材料里有的板块；材料为空就轻松地说今天没什么安排。",
     "5.1 材料里有「今天截止」的必须说出来（最紧的事，通常放第一句），超过两件只说最紧的一件加一共几件；「这两天还要交」的只带一句件数，不逐条念，也不要用「切记」「别忘了」催促腔。",
+    "5.2 材料里有「今天的重要日子」（生日/纪念日）就顺口带一句——这是早安该说的第一等人情，说「今天是妈妈的生日」这种就够，别写成通报，也别提礼物清单。",
     "6. 禁止空话和客套收尾：不许出现「祝你今天顺利」「我随时在这儿」「想起来喊我一声」「有事随时找我」这类句子；也不许模糊地提「你之前交代的事」「我一直给你留着」——要提待办就说出材料里的具体事项，没有具体事项就一个字都不提。",
     "7. 篇幅由内容决定：有几条说几句，宁短勿凑，全文不超过 140 字，1~4 句。",
     "8. 直接输出播报稿正文，不要引号、前缀或任何解释。",
@@ -460,12 +490,18 @@ export class MorningBriefingService {
       }
     }
 
-    // 近期重要日子：展示位已迁往「明日速览」（2026-11-04），晨报只保留
-    // 「当天命中 → 祝福草稿 + life_reminder」的副作用——祝福要在当天早上发出，
+    // 重要日子：2026-11-23 §3.4 把展示位从「明日预览」搬回早安卡（PRD 那一行
+    // 是「当天是重要日子才提」，故只收 daysUntil=0），同时保留原有副作用——
+    // 「当天命中 → 祝福草稿 + life_reminder」：祝福要在当天早上发出，
     // 挪到夜里就晚了。内部按日去重保证每日至多触发一次。
-    for (const day of readUpcomingImportantDays(this.deps.agentMemorySyncService, sessionId)) {
-      if (day.daysUntil === 0) this.fireImportantDayToday(sessionId, day);
-    }
+    const importantToday = readUpcomingImportantDays(
+      this.deps.agentMemorySyncService,
+      sessionId,
+    ).filter((day) => {
+      if (day.daysUntil !== 0) return false;
+      this.fireImportantDayToday(sessionId, day);
+      return true;
+    });
 
     // 用户称呼（确定性读取 KV，无 LLM）：问候语用
     const appellation = this.resolveAppellation(sessionId);
@@ -478,6 +514,8 @@ export class MorningBriefingService {
       todaySchedule,
       // 待办跟进（可选块）：全空时省略
       ...(todoFollowups ? { todoFollowups } : {}),
+      // 今天的重要日子（生日/纪念日）：§3.4 从明日预览搬回，无命中整块省略
+      ...(importantToday.length > 0 ? { importantDays: importantToday } : {}),
       // 2~3 天内到期的件数：只在播报稿里带一句，不上卡
       ...(ddlSoonCount > 0 ? { deadlineSoonCount: ddlSoonCount } : {}),
       // 用户称呼（可选）：无称呼时省略该字段
@@ -818,6 +856,10 @@ export class MorningBriefingService {
     // 2~3 天内到期的件数：一句话带过，不逐条念
     const soonBit = formatDeadlineSoonBit(briefing.deadlineSoonCount);
     if (soonBit) parts.push(soonBit);
+
+    // 今天的重要日子（生日/纪念日，§3.4 从明日预览搬回早安）：只提当天命中的
+    const dayBit = formatImportantDaysBit(briefing.importantDays);
+    if (dayBit) parts.push(dayBit);
 
     // 待办跟进（可选块）：之前交代未完成 + 今日已办结——简报不只播新闻，
     // 还要回报用户交办事宜的进展

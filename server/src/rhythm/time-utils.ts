@@ -101,6 +101,16 @@ export function dayKeyOf(date: Date): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
+/**
+ * 日期键（YYYY-MM-DD）挪 N 天。用正午做锚点，避开 UTC 偏移/DST 把日期串到
+ * 隔壁那天（入睡在深夜、醒来在清晨，样本天生跨两天，这里错一天就全错）。
+ */
+export function shiftDayKey(dayKey: string, deltaDays: number): string {
+  const d = new Date(`${dayKey}T12:00:00`);
+  d.setDate(d.getDate() + deltaDays);
+  return localDayKey(d);
+}
+
 export function median(values: number[]): number {
   if (values.length === 0) return 0;
   const sorted = [...values].sort((a, b) => a - b);

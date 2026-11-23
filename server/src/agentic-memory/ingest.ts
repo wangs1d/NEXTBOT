@@ -48,6 +48,11 @@ export interface Mem0WriteEvent {
   /** 统一抽取路径携带：角色→人名指代映射（钩子走事实库 指代·role 字段落库） */
   referents?: import("./unified-extractor.js").UnifiedReferent[];
   /**
+   * 统一抽取路径携带：未来个人事件（§3.5 承诺跟进）。钩子消费者是 FollowUpService：
+   * 落 commitments(kind='follow_up') 一行 + 到 followAt 经统一管道开口一次。
+   */
+  followUps?: import("./unified-extractor.js").UnifiedFollowUp[];
+  /**
    * 统一抽取路径携带：用户画像增量操作（同一次 LLM 的产物）。
    * 画像聚合器注册钩子消费后确定性落位，不再单独跑画像抽取调用。
    */
@@ -281,6 +286,7 @@ export class AgenticMemoryIngestService {
     // forget 防御性取值：测试/旧调用方手工构造的 extraction 可能缺该字段
     const forget = (extraction.forget?.length ?? 0) > 0 ? extraction.forget : undefined;
     const referents = extraction.referents && extraction.referents.length > 0 ? extraction.referents : undefined;
+    const followUps = extraction.followUps && extraction.followUps.length > 0 ? extraction.followUps : undefined;
     const profileOps =
       extraction.profileOps && extraction.profileOps.length > 0 ? extraction.profileOps : undefined;
 
@@ -410,6 +416,7 @@ export class AgenticMemoryIngestService {
         facts,
         forget,
         referents,
+        followUps,
         profileOps,
       });
     }

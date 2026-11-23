@@ -32,6 +32,33 @@ class MainActivity : FlutterActivity() {
                 setTurnScreenOn(true)
             }
         }
+        // 分享给管家（§8）：冷启动时分享内容/入口提示已经在 ShareIntakeActivity
+        // 或快捷方式那一步落进原生队列，这里只是把 intent 上的入口 extra 补进
+        // 同一个队列，再催 Dart 来取（引擎此时可能还没 attach，取不到就等
+        // Dart 启动自取——队列在 SharedPreferences 里，不会丢）。
+        forwardIntake(intent)
+    }
+
+    /**
+     * 把「入口提示」+「跳页路由」写进原生中转队列并催 Dart 取件。
+     * onCreate / onNewIntent 两个时机共用：热启动（App 在后台）与冷启动
+     * 走的必须是同一条路，否则从通知栏「记一下」进来的行为会跟
+     * 从桌面图标进来不一样。
+     *
+     * 小组件各区域的落点（PRD §5.3「各区域深链到对应页面」）也走这一条队列，
+     * 不再另开一套深链解析：route 与 entry 同存同取，冷启动时引擎还没 attach、
+     * onReady 推空了也没关系——值在 SharedPreferences 里，Dart 起来自取。
+     */
+    private fun forwardIntake(intent: Intent?) {
+        val entry = intent?.getStringExtra(ShareIntakeStore.EXTRA_ENTRY)
+        if (!entry.isNullOrEmpty()) {
+            ShareIntakeStore.setEntry(this, entry)
+        }
+        val route = intent?.getStringExtra(ShareIntakeStore.EXTRA_ROUTE)
+        if (!route.isNullOrEmpty()) {
+            ShareIntakeStore.setRoute(this, route)
+        }
+        ShareIntakePlugin.pushReady()
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -62,6 +89,8 @@ class MainActivity : FlutterActivity() {
         // 里已预载的产出文件转 content:// URI 交系统应用，离线秒开。
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, FileOpenPlugin.CHANNEL)
             .setMethodCallHandler(FileOpenPlugin(this))
+        // 分享给管家（2026-11-23 §8）：原生中转队列 → Dart（内容进既有聊天链路）
+        flutterEngine.plugins.add(ShareIntakePlugin())
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -75,5 +104,7 @@ class MainActivity : FlutterActivity() {
                 setTurnScreenOn(true)
             }
         }
+        // 热启动的分享/快捷方式/磁贴/通知按钮/桌面小组件落点：singleTop 下只会走这里
+        forwardIntake(intent)
     }
 }

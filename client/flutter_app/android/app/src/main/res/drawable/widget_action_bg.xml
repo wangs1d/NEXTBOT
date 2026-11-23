@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 右上角「记一下」的胶囊底：RemoteViews 里不能挂 ripple，用静态胶囊最稳。 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <corners android:radius="14dp" />
+    <solid android:color="#26FFFFFF" />
+    <stroke
+        android:width="1dp"
+        android:color="#33FFFFFF" />
+</shape>

@@ -242,14 +242,16 @@ test("pipeline: 两端离线 + 推送通道 → must 提案自动升级系统推
   }
 });
 
-test("pipeline: social 层离线不推送（分寸：只有必达和 critical 走手机推送）", async () => {
+test("pipeline: social 层离线也走厂商推送（§4.2 目标态：被杀时闲聊弹不出来就没有第二次机会）", async () => {
   const h = makeHarness();
   try {
     h.pipeline.submitProposal(proposal({ tier: "social", importance: "medium", kind: "greeting", dedupKey: "g1" }));
     await new Promise((r) => setImmediate(r));
     await new Promise((r) => setImmediate(r));
-    assert.equal(h.pushes.length, 0);
-    assert.equal(h.pipeline.diagnostics().pending.length, 1, "挂起待重连");
+    // 通道只管送达，少说几句是频控的活（§3.10 的社交日预算在 canTrigger 里判，见 proactivity-frequency-tier）
+    assert.equal(h.pushes.length, 1, "有推送通道时 social 也升级系统推送");
+    assert.equal(h.pipeline.diagnostics().pending.length, 0, "推送成功即出队");
+    assert.equal(h.pipeline.diagnostics().recentOutcomes.at(-1)?.tier, "social");
   } finally {
     rmSync(h.dir, { recursive: true, force: true });
   }

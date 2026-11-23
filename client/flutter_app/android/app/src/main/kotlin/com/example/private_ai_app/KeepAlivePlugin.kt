@@ -43,10 +43,42 @@ class KeepAlivePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     private var networkSink: EventChannel.EventSink? = null
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    /**
+     * 手机状态事件（2026-11-23 主动触达 M1）：亮灭屏 / 解锁 / 通话 / 勿扰 / 充电变化
+     * 推给 Dart（PhoneStateReporter），由它经主连接上报 client.presence_state。
+     * 与网络事件同一个插件、同一个保活进程，不另起服务。
+     */
+    private var phoneStateEventChannel: EventChannel? = null
+    private var phoneStateSink: EventChannel.EventSink? = null
+    private var phoneStateMonitor: PhoneStateMonitor? = null
+
+    /**
+     * 常驻状态栏通知（2026-11-23 §5.2）：Dart 推看板 → 原生重画同一条通知；
+     * 通知上的「完成」按钮反向回到 Dart（引擎不在时由 [OngoingStatusReceiver] 兜底）。
+     */
+    private var ongoingChannel: MethodChannel? = null
+
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         context = binding.applicationContext
         channel = MethodChannel(binding.binaryMessenger, "nextbot/keep_alive")
         channel?.setMethodCallHandler(this)
+        ongoingChannel = MethodChannel(binding.binaryMessenger, "nextbot/ongoing_status")
+        ongoingChannel?.setMethodCallHandler { call, result -> onOngoingCall(call, result) }
+        context?.let { OngoingStatusNotifier.ensureChannel(it) }
+        OngoingStatusNotifier.dartTapHandler = { actionId, token, taskId ->
+            // invokeMethod 只能在平台线程调；广播已经在主线程，仍显式 post 一次，
+            // 免得以后有人从别的线程复用这个槽位。
+            mainHandler.post {
+                try {
+                    ongoingChannel?.invokeMethod(
+                        "ongoingTap",
+                        mapOf("actionId" to actionId, "token" to token, "taskId" to taskId),
+                    )
+                } catch (e: Exception) {
+                    android.util.Log.w("KeepAlive", "ongoing tap -> dart failed", e)
+                }
+            }
+        }
         networkEventChannel = EventChannel(binding.binaryMessenger, "nextbot/network_events")
         networkEventChannel?.setStreamHandler(object : EventChannel.StreamHandler {
             override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
@@ -60,15 +92,42 @@ class KeepAlivePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 unregisterNetworkCallback()
             }
         })
+        phoneStateEventChannel = EventChannel(binding.binaryMessenger, "nextbot/phone_state")
+        phoneStateEventChannel?.setStreamHandler(object : EventChannel.StreamHandler {
+            override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                phoneStateSink = events
+                val ctx = context ?: return
+                if (phoneStateMonitor == null) {
+                    phoneStateMonitor = PhoneStateMonitor(ctx) { state ->
+                        // PhoneStateMonitor 已在主线程回调
+                        phoneStateSink?.success(state)
+                    }
+                }
+                phoneStateMonitor?.start()
+            }
+
+            override fun onCancel(arguments: Any?) {
+                phoneStateSink = null
+                phoneStateMonitor?.stop()
+            }
+        })
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         channel?.setMethodCallHandler(null)
         channel = null
+        ongoingChannel?.setMethodCallHandler(null)
+        ongoingChannel = null
+        OngoingStatusNotifier.dartTapHandler = null
         networkEventChannel?.setStreamHandler(null)
         networkEventChannel = null
         networkSink = null
         unregisterNetworkCallback()
+        phoneStateEventChannel?.setStreamHandler(null)
+        phoneStateEventChannel = null
+        phoneStateSink = null
+        phoneStateMonitor?.stop()
+        phoneStateMonitor = null
         context = null
     }
 
@@ -136,6 +195,40 @@ class KeepAlivePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         }
     }
 
+    /**
+     * 常驻通知的三件事：贴内容、切模式、重画。
+     * 都不新建通知（同 id 原地更新），也不改变服务生命周期——服务挂了这条也就没了。
+     */
+    private fun onOngoingCall(call: MethodCall, result: MethodChannel.Result) {
+        val ctx = context
+        if (ctx == null) {
+            result.success(false)
+            return
+        }
+        when (call.method) {
+            "update" -> {
+                val args = call.arguments
+                if (args !is Map<*, *>) {
+                    result.success(false)
+                    return
+                }
+                OngoingStatusNotifier.update(ctx, args)
+                result.success(true)
+            }
+            "setMode" -> {
+                OngoingStatusNotifier.setMode(ctx, call.argument<String>("mode") ?: "full")
+                result.success(true)
+            }
+            // 模式的存在真相在原生偏好里（App 被杀后状态栏仍要正确），设置页读它回显
+            "getMode" -> result.success(OngoingStatusNotifier.mode(ctx))
+            "redraw" -> {
+                OngoingStatusNotifier.push(ctx)
+                result.success(true)
+            }
+            else -> result.notImplemented()
+        }
+    }
+
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         val ctx = context
         when (call.method) {
@@ -169,6 +262,15 @@ class KeepAlivePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             // 真实运行态（服务 onDestroy 会置假）：诊断信标与 60s 自愈都靠它，
             // 不能再把「请求过启动」当成「正在运行」。
             "isRunning" -> result.success(MessageBridgeForegroundService.running)
+            // 手机状态即时快照（心跳上报用；不经去重，监听未开时也能查）
+            "getPhoneState" -> {
+                val ctx = context
+                if (ctx == null) {
+                    result.success(null)
+                    return
+                }
+                result.success((phoneStateMonitor ?: PhoneStateMonitor(ctx) {}).snapshot())
+            }
             // 只读查询电池优化豁免状态（诊断信标用），不拉起系统对话框。
             "isBatteryExempt" -> {
                 val ctx = context

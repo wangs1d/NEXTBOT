@@ -18,6 +18,7 @@ import test from "node:test";
 
 import { DidiMcpRideProvider } from "../src/services/booking/providers/didi-mcp-ride-provider.js";
 import type { BookingDraft, BookingSearchQuery } from "../src/services/booking/booking-provider.js";
+import { wgs84ToGcj02 } from "../src/skills/travel-planning/coord-transform.js";
 import type { McpClientService } from "../src/services/mcp-client-service.js";
 
 /** 假 MCP：按工具名返回预置结果，并记录调用参数供断言 */
@@ -223,10 +224,11 @@ test("didi-mcp - search：GPS 坐标直传起点，不再倒腾文本地理编�
   const searchCalls = fake.calls.filter((c) => c.tool === "maps_textsearch");
   assert.equal(searchCalls.length, 1);
   assert.match(searchCalls[0].args.keywords as string, /太古里/);
-  // 估价拿到的是直传坐标（6 位小数字符串契约）
+  // 估价拿到的是直传坐标（WGS-84 → GCJ-02，6 位小数字符串契约）
   const est = fake.calls.find((c) => c.tool === "taxi_estimate");
-  assert.equal(est?.args.from_lat, "30.642300");
-  assert.equal(est?.args.from_lng, "104.043200");
+  const expectFrom = wgs84ToGcj02(30.6423, 104.0432);
+  assert.equal(est?.args.from_lat, expectFrom.latitude.toFixed(6));
+  assert.equal(est?.args.from_lng, expectFrom.longitude.toFixed(6));
 });
 
 /** 第一次 textsearch 返回未命中（模拟区县粗标签搜不到），其余正常 */
@@ -257,8 +259,9 @@ test("didi-mcp - search：粗标签检索失败时回退客户端 GPS 坐标，�
   const result = await provider.search(query, ctx);
   assert.equal(result.ok, true, JSON.stringify(result));
   const est = fake.calls.find((c) => c.tool === "taxi_estimate");
-  assert.equal(est?.args.from_lat, "30.650000");
-  assert.equal(est?.args.from_lng, "104.060000");
+  const expectFrom = wgs84ToGcj02(30.65, 104.06);
+  assert.equal(est?.args.from_lat, expectFrom.latitude.toFixed(6));
+  assert.equal(est?.args.from_lng, expectFrom.longitude.toFixed(6));
 });
 
 test("didi-mcp - search：生产端点格式（品类代码 + 无价列表行去重 + city 缺失回退）", async () => {

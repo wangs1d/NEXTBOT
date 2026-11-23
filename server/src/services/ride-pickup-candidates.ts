@@ -7,6 +7,16 @@
  * MCP 未注册 / 调用失败 / 解析失败 → 空数组，卡退化为纯地图选点，不阻塞。
  */
 import type { McpClientService } from "./mcp-client-service.js";
+import { gcj02ToWgs84, wgs84ToGcj02 } from "../skills/travel-planning/coord-transform.js";
+
+/**
+ * 滴滴滴图（maps_*）与网约车（taxi_*）全部使用 GCJ-02（2026-11-23 实测对照：
+ * 春熙路滴滴坐标与高德 GCJ-02 差约 2m）。本项目服务端以 WGS-84 为单一基准
+ * （手机 GPS 也是 WGS-84），所以**凡是进出滴滴的坐标都在这里转一次**：
+ *   - 入参 WGS → GCJ 再发给滴滴；
+ *   - 滴滴返回的 GCJ → WGS 再交给卡片/上层。
+ * 少转或多转一次就是 300~700m 的偏移，表现为「定位点飘到隔壁街」。
+ */
 
 export interface RidePickupCandidate {
   id: string;
@@ -47,6 +57,7 @@ function toNumber(v: unknown): number | null {
 
 /**
  * 定位坐标周边的可上车点候选（默认搜「停车场」，按距离排 top5）。
+ * 入参 `lng/lat` 与返回候选坐标均为 **WGS-84**（服务端基准）；内部转 GCJ 调滴滴。
  * 坐标/数字参数按滴滴 MCP 契约一律传字符串。
  */
 export async function searchNearbyPickupsViaDidi(
@@ -57,13 +68,14 @@ export async function searchNearbyPickupsViaDidi(
   radiusM = 800,
 ): Promise<RidePickupCandidate[]> {
   if (!mcp.listServers().some((s) => s.alias === "didi")) return [];
+  const gcj = wgs84ToGcj02(lat, lng);
   try {
     const res = await mcp.callTool(
       "didi",
       "maps_place_around",
       {
         keywords: keyword,
-        location: `${lng.toFixed(6)},${lat.toFixed(6)}`,
+        location: `${gcj.longitude.toFixed(6)},${gcj.latitude.toFixed(6)}`,
         radius: String(Math.round(radiusM)),
       },
       20_000,
@@ -87,12 +99,14 @@ export async function searchNearbyPickupsViaDidi(
           : "";
       if (lngN == null || latN == null || !name) continue;
       const distRaw = toNumber(poi.distance);
+      // 滴滴候选是 GCJ-02：转回 WGS-84 再交给卡片（客户端渲染时再转 GCJ 上底图）
+      const wgs = gcj02ToWgs84(latN, lngN);
       out.push({
         id: typeof poi.id === "string" ? poi.id : `poi_${out.length}`,
         name,
         address: typeof poi.address === "string" ? (poi.address as string).trim() : "",
-        lng: lngN,
-        lat: latN,
+        lng: wgs.longitude,
+        lat: wgs.latitude,
         distM: distRaw != null && distRaw > 0 ? Math.round(distRaw) : null,
       });
       if (out.length >= 5) break;
@@ -151,7 +165,9 @@ export async function textsearchViaDidi(
         : typeof first.name === "string"
           ? (first.name as string).trim()
           : keywords.trim();
-    return { lng: lngN, lat: latN, name };
+    // 滴滴返回 GCJ-02 → 统一成 WGS-84（服务端基准）
+    const wgs = gcj02ToWgs84(latN, lngN);
+    return { lng: wgs.longitude, lat: wgs.latitude, name };
   } catch {
     return null;
   }
@@ -160,6 +176,7 @@ export async function textsearchViaDidi(
 /**
  * 坐标 → 中文地名（滴图 maps_regeocode）。选点卡拖图选的自定义上车点
  * 用它命名，报价卡/确认卡显示真实地址而非坐标。
+ * 入参 `lng/lat` 为 WGS-84（卡内选点回传即 WGS），内部转 GCJ 调滴滴。
  * 顺带返回 city/county：无定位路径下 card-action 可用它补 textsearch 的
  * 必填 city，避免「无法定位目的地」。
  */
@@ -169,11 +186,12 @@ export async function regeocodeViaDidi(
   lat: number,
 ): Promise<{ name: string; address: string; city: string; county: string } | null> {
   if (!mcp.listServers().some((s) => s.alias === "didi")) return null;
+  const gcj = wgs84ToGcj02(lat, lng);
   try {
     const res = await mcp.callTool(
       "didi",
       "maps_regeocode",
-      { location: `${lng.toFixed(6)},${lat.toFixed(6)}` },
+      { location: `${gcj.longitude.toFixed(6)},${gcj.latitude.toFixed(6)}` },
       20_000,
     );
     if (!res.ok) return null;
@@ -202,6 +220,7 @@ export interface DrivingRouteSummary {
 /**
  * 驾车路线（滴图 maps_direction_driving）：origin/destination 为「lng,lat」
  * 字符串，返回 distance/duration{text,value} + geo_list 轨迹点。
+ * 入参起终点与返回 `points` 均为 **WGS-84**（内部与滴滴 GCJ-02 互转），
  * 选点卡确认上车点后调，路线随 ride_quote 卡下发，App 内直接看。
  */
 export async function drivingRouteViaDidi(
@@ -212,13 +231,15 @@ export async function drivingRouteViaDidi(
   toLat: number,
 ): Promise<DrivingRouteSummary | null> {
   if (!mcp.listServers().some((s) => s.alias === "didi")) return null;
+  const gFrom = wgs84ToGcj02(fromLat, fromLng);
+  const gTo = wgs84ToGcj02(toLat, toLng);
   try {
     const res = await mcp.callTool(
       "didi",
       "maps_direction_driving",
       {
-        origin: `${fromLng.toFixed(6)},${fromLat.toFixed(6)}`,
-        destination: `${toLng.toFixed(6)},${toLat.toFixed(6)}`,
+        origin: `${gFrom.longitude.toFixed(6)},${gFrom.latitude.toFixed(6)}`,
+        destination: `${gTo.longitude.toFixed(6)},${gTo.latitude.toFixed(6)}`,
       },
       30_000,
     );
@@ -238,7 +259,10 @@ export async function drivingRouteViaDidi(
         const p = (g ?? {}) as { latitude?: unknown; longitude?: unknown };
         const la = toNumber(p.latitude);
         const lo = toNumber(p.longitude);
-        return la != null && lo != null ? { lat: la, lng: lo } : null;
+        if (la == null || lo == null) return null;
+        // 滴滴轨迹点 GCJ-02 → WGS-84（客户端渲染时再转 GCJ 上高德底图）
+        const wgs = gcj02ToWgs84(la, lo);
+        return { lat: wgs.latitude, lng: wgs.longitude };
       })
       .filter((p): p is { lat: number; lng: number } => p != null)
       .slice(0, 400);
@@ -260,7 +284,7 @@ export async function drivingRouteViaDidi(
 
 /**
  * 滴滴 App 深链（taxi_generate_ride_app_link：from/to 坐标必填，
- * 可选 product_category）。报价成功后生成「去滴滴 App 发单」备用入口。
+ * 可选 product_category）。入参为 WGS-84，内部转 GCJ 交给滴滴。
  */
 export async function rideAppLinkViaDidi(
   mcp: McpClientService,
@@ -271,15 +295,17 @@ export async function rideAppLinkViaDidi(
   productCategory?: string,
 ): Promise<string | null> {
   if (!mcp.listServers().some((s) => s.alias === "didi")) return null;
+  const gFrom = wgs84ToGcj02(fromLat, fromLng);
+  const gTo = wgs84ToGcj02(toLat, toLng);
   try {
     const res = await mcp.callTool(
       "didi",
       "taxi_generate_ride_app_link",
       {
-        from_lng: fromLng.toFixed(6),
-        from_lat: fromLat.toFixed(6),
-        to_lng: toLng.toFixed(6),
-        to_lat: toLat.toFixed(6),
+        from_lng: gFrom.longitude.toFixed(6),
+        from_lat: gFrom.latitude.toFixed(6),
+        to_lng: gTo.longitude.toFixed(6),
+        to_lat: gTo.latitude.toFixed(6),
         ...(productCategory?.trim() ? { product_category: productCategory.trim() } : {}),
       },
       20_000,

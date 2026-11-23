@@ -855,6 +855,69 @@ export class ScheduleTaskService {
     return next;
   }
 
+  /**
+   * 用户确认「这件事办完了」（2026-11-23 通知闭环 M1）：通知栏「完成」按钮与
+   * App 内勾选共用这一个入口。
+   *   - 单次任务：置 completed（到点后已自动完成的再点一次 → 幂等返回 changed=false）；
+   *   - 重复任务：不改调度（"这一次"已过，下一次照常），返回 changed=false。
+   * 状态变更走 emitTaskChange("updated")：commitments 收口由装配层既有监听完成，
+   * 这里不直接碰 commitment-store。
+   */
+  async completeTask(taskId: string): Promise<{ task: ScheduleTaskRecord; changed: boolean }> {
+    const task = this.byTaskId.get(taskId);
+    if (!task) throw new Error("task not found");
+    if (task.status === "completed" || task.status === "cancelled") {
+      return { task, changed: false };
+    }
+    if (task.recurrence !== "none" || task.cronExpression) {
+      return { task, changed: false };
+    }
+    const next: ScheduleTaskRecord = {
+      ...task,
+      status: "completed",
+      nextRunAt: null,
+      updatedAt: this.now().toISOString(),
+    };
+    this.byTaskId.set(taskId, next);
+    await this.persist();
+    await this.emitTaskChange("updated", next);
+    return { task: next, changed: true };
+  }
+
+  /**
+   * 推迟提醒（2026-11-23 通知闭环 M1）：通知栏「N 分钟后」按钮。
+   * 单次任务（含刚到点、已被自动置 completed 的）重新激活到 now + minutes 再提醒一次；
+   * 提前量分段一律标记为已发，避免推迟后立刻补发一串「还有 N 分钟」。
+   * 重复任务不改主调度（推迟会把之后每一次都挪走），直接报错由调用方给出人话回执。
+   */
+  async snoozeTask(taskId: string, minutes: number): Promise<ScheduleTaskRecord> {
+    const task = this.byTaskId.get(taskId);
+    if (!task) throw new Error("task not found");
+    if (task.status === "cancelled") throw new Error("task already cancelled");
+    if (task.recurrence !== "none" || task.cronExpression) {
+      throw new Error("recurring task snooze not supported");
+    }
+    const mins = Math.min(Math.max(Math.round(Number(minutes) || 0), 1), 24 * 60);
+    const nowMs = this.now().getTime();
+    const runAt = new Date(nowMs + mins * 60_000).toISOString();
+    const allOffsets = [
+      ...(task.remindBeforeMinutes ?? []),
+      ...(task.preReminders ?? []).map((p) => p.offsetMinutes),
+    ];
+    const next: ScheduleTaskRecord = {
+      ...task,
+      status: "active",
+      runAt,
+      nextRunAt: runAt,
+      firedPreReminderOffsets: allOffsets.length ? [...new Set(allOffsets)] : undefined,
+      updatedAt: new Date(nowMs).toISOString(),
+    };
+    this.byTaskId.set(taskId, next);
+    await this.persist();
+    await this.emitTaskChange("updated", next);
+    return next;
+  }
+
   async triggerNow(taskId: string): Promise<void> {
     const task = this.byTaskId.get(taskId);
     if (!task) throw new Error("task not found");

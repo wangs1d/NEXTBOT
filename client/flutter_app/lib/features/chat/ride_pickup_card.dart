@@ -5,6 +5,8 @@ import "package:flutter_map/flutter_map.dart";
 import "package:latlong2/latlong.dart";
 
 import "../../core/utils/agent_result_parser.dart";
+import "../../core/utils/coord_transform.dart";
+import "ride_map_3d_view.dart";
 import "shopping/shopping_shared.dart";
 
 /// 上车点选择卡（cardType = "ride_pickup"，2026-11-20）。
@@ -50,8 +52,13 @@ class _SelectedPickup {
 
 class _RidePickupCardState extends State<RidePickupCard> {
   final MapController _mapController = MapController();
+  final RideMap3dController _map3d = RideMap3dController();
   bool _sent = false;
   _SelectedPickup? _selected;
+
+  /// 服务端配了 AMAP_JS_KEY 时走卡内高德 JS 3D 地图；页面失败/平台不支持时回退 FlutterMap
+  bool _use3d = false;
+  late final List<RideMapCandidate> _candidates3d;
 
   bool _hasOrigin() => widget.payload["origin"] is Map;
 
@@ -71,9 +78,73 @@ class _RidePickupCardState extends State<RidePickupCard> {
     return raw is Map ? raw : null;
   }
 
+  /// origin 是 WGS-84（手机 GPS / 服务端基准）；高德底图是 GCJ-02，
+  /// 渲染前必须转一次，否则定位点会整体偏移 300~700m。
+  ({double lat, double lng})? get _originGcj {
+    final Map<Object?, Object?>? origin = _origin;
+    if (origin == null) return null;
+    final num? lat = shopNum(origin["lat"]);
+    final num? lng = shopNum(origin["lng"]);
+    if (lat == null || lng == null) return null;
+    return wgs84ToGcj02(lat.toDouble(), lng.toDouble());
+  }
+
+  /// origin 原样（WGS-84）交给 3D 页面，由组件内部转 GCJ 注入。
+  ({double lat, double lng, String label})? get _originWgs {
+    final Map<Object?, Object?>? origin = _origin;
+    if (origin == null) return null;
+    final num? lat = shopNum(origin["lat"]);
+    final num? lng = shopNum(origin["lng"]);
+    if (lat == null || lng == null) return null;
+    return (lat: lat.toDouble(), lng: lng.toDouble(), label: shopStr(origin["label"]));
+  }
+
+  /// 候选冻结成 3D 组件的输入（WGS）。必须是稳定实例：每次 build 新建列表会让
+  /// RideMap3dView 误判数据变化并重复注入，导致页面每次重建都重新居中。
+  List<RideMapCandidate> _buildCandidates3d() {
+    final List<RideMapCandidate> out = <RideMapCandidate>[];
+    for (final Map<String, dynamic> c in _candidates) {
+      final num? lat = shopNum(c["lat"]);
+      final num? lng = shopNum(c["lng"]);
+      if (lat == null || lng == null) continue;
+      out.add(RideMapCandidate(
+        name: shopStr(c["name"]).isEmpty ? "候选上车点" : shopStr(c["name"]),
+        address: shopStr(c["address"]),
+        lat: lat.toDouble(),
+        lng: lng.toDouble(),
+        distM: shopNum(c["distM"])?.toInt(),
+      ));
+    }
+    return out;
+  }
+
+  /// 3D 页面的选点事件（坐标已由组件从 GCJ 转回 WGS）。
+  void _on3dSelect(RideMapPick pick) {
+    if (!mounted || _sent) return;
+    final bool snapped = pick.index >= 0;
+    setState(() {
+      _selected = _SelectedPickup(
+        snapped
+            ? (pick.name.isEmpty ? "候选上车点" : pick.name)
+            : "自定义上车点",
+        snapped ? pick.address : "拖到这里就选这里",
+        pick.lat,
+        pick.lng,
+        snapped: snapped,
+      );
+    });
+  }
+
+  void _fallbackTo2d() {
+    if (!mounted || !_use3d) return;
+    setState(() => _use3d = false);
+  }
+
   @override
   void initState() {
     super.initState();
+    _use3d = shopBool(widget.payload["map3d"]);
+    _candidates3d = _buildCandidates3d();
     final List<Map<String, dynamic>> cands = _candidates;
     if (cands.isNotEmpty) {
       _selected = _fromCandidate(cands.first);
@@ -103,10 +174,15 @@ class _RidePickupCardState extends State<RidePickupCard> {
 
   ColorScheme get cs => widget.cs;
 
-  /// 中心点（世界坐标）→ 就近吸附候选 / 自定义点，实时更新标签。
+  /// 中心点（地图=GCJ-02 世界坐标）→ 就近吸附候选 / 自定义点，实时更新标签。
+  ///
+  /// 候选坐标与 [selected] 一律 WGS-84（回传服务端用），所以先把地图中心
+  /// 从 GCJ 转回 WGS，再和候选（WGS）比距离。
   void _syncFromCenter() {
     if (!mounted) return;
     final LatLng center = _mapController.camera.center;
+    final ({double lat, double lng}) centerWgs =
+        gcj02ToWgs84(center.latitude, center.longitude);
     final List<Map<String, dynamic>> cands = _candidates;
     Map<String, dynamic>? best;
     double bestD = double.infinity;
@@ -115,8 +191,8 @@ class _RidePickupCardState extends State<RidePickupCard> {
       final num? lng = shopNum(c["lng"]);
       if (lat == null || lng == null) continue;
       final double d = math.sqrt(
-        math.pow(center.latitude - lat.toDouble(), 2) +
-            math.pow(center.longitude - lng.toDouble(), 2),
+        math.pow(centerWgs.lat - lat.toDouble(), 2) +
+            math.pow(centerWgs.lng - lng.toDouble(), 2),
       );
       if (d < bestD) {
         bestD = d;
@@ -133,8 +209,8 @@ class _RidePickupCardState extends State<RidePickupCard> {
           best != null
               ? "近「${shopStr(best["name"])}」"
               : "拖到这里就选这里",
-          center.latitude,
-          center.longitude,
+          centerWgs.lat,
+          centerWgs.lng,
         ));
   }
 
@@ -143,8 +219,70 @@ class _RidePickupCardState extends State<RidePickupCard> {
     final num? lat = shopNum(c["lat"]);
     final num? lng = shopNum(c["lng"]);
     if (lat != null && lng != null) {
-      _mapController.move(LatLng(lat.toDouble(), lng.toDouble()), 16.5);
+      // 候选是 WGS-84，地图是 GCJ-02：移动前转换
+      final ({double lat, double lng}) gcj =
+          wgs84ToGcj02(lat.toDouble(), lng.toDouble());
+      _mapController.move(LatLng(gcj.lat, gcj.lng), 16.5);
     }
+  }
+
+  /// 回到「我的位置」（origin 的 GCJ 坐标）。
+  void _recenter() {
+    final ({double lat, double lng})? gcj = _originGcj;
+    if (gcj == null) return;
+    _mapController.move(LatLng(gcj.lat, gcj.lng), 16);
+    Future<void>.delayed(const Duration(milliseconds: 30), _syncFromCenter);
+  }
+
+  /// 地图标记：候选点（WGS→GCJ 上底图）+「我的位置」蓝点（origin 的 GCJ）。
+  List<Marker> _mapMarkers() {
+    final List<Marker> markers = <Marker>[];
+    for (final Map<String, dynamic> c in _candidates) {
+      final num? lat = shopNum(c["lat"]);
+      final num? lng = shopNum(c["lng"]);
+      if (lat == null || lng == null) continue;
+      final ({double lat, double lng}) gcj =
+          wgs84ToGcj02(lat.toDouble(), lng.toDouble());
+      markers.add(
+        Marker(
+          point: LatLng(gcj.lat, gcj.lng),
+          width: 16,
+          height: 16,
+          child: Container(
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: cs.surface,
+              border: Border.all(color: cs.outline, width: 1.5),
+            ),
+          ),
+        ),
+      );
+    }
+    final ({double lat, double lng})? origin = _originGcj;
+    if (origin != null) {
+      markers.add(
+        Marker(
+          point: LatLng(origin.lat, origin.lng),
+          width: 20,
+          height: 20,
+          child: Container(
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: const Color(0xFF2F6BFF),
+              border: Border.all(color: Colors.white, width: 2.5),
+              boxShadow: <BoxShadow>[
+                BoxShadow(
+                  color: const Color(0xFF2F6BFF).withValues(alpha: 0.35),
+                  blurRadius: 6,
+                  spreadRadius: 2,
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+    return markers;
   }
 
   void _confirm() {
@@ -176,14 +314,8 @@ class _RidePickupCardState extends State<RidePickupCard> {
   }
 
   LatLng get _mapCenter {
-    final Map<Object?, Object?>? origin = _origin;
-    if (origin != null) {
-      final num? lat = shopNum(origin["lat"]);
-      final num? lng = shopNum(origin["lng"]);
-      if (lat != null && lng != null) {
-        return LatLng(lat.toDouble(), lng.toDouble());
-      }
-    }
+    final ({double lat, double lng})? gcj = _originGcj;
+    if (gcj != null) return LatLng(gcj.lat, gcj.lng);
     // 无定位参考：全国视野起步，用户拖到目的地附近再放大
     return const LatLng(32.5, 108.0);
   }
@@ -217,7 +349,21 @@ class _RidePickupCardState extends State<RidePickupCard> {
                 height: 190,
                 child: Stack(
                   children: <Widget>[
-                    FlutterMap(
+                    // 3D 模式：高德 JS 页面自绘图钉/候选/定位点/回定位按钮；
+                    // 页面失败（超时/无 key/非移动平台）→ onFailed 回退下面的 FlutterMap
+                    if (_use3d)
+                      Positioned.fill(
+                        child: RideMap3dView(
+                          controller: _map3d,
+                          mode: "pickup",
+                          origin: _originWgs,
+                          candidates: _candidates3d,
+                          onSelect: _on3dSelect,
+                          onFailed: _fallbackTo2d,
+                        ),
+                      )
+                    else
+                      FlutterMap(
                       mapController: _mapController,
                       options: MapOptions(
                         initialCenter: _mapCenter,
@@ -247,31 +393,12 @@ class _RidePickupCardState extends State<RidePickupCard> {
                             subdomains: const <String>["1", "2", "3", "4"],
                             userAgentPackageName: "app.nextbot.client",
                           ),
-                          MarkerLayer(
-                            markers: <Marker>[
-                              for (final Map<String, dynamic> c in _candidates)
-                                if (shopNum(c["lat"]) != null && shopNum(c["lng"]) != null)
-                                  Marker(
-                                    point: LatLng(
-                                      shopNum(c["lat"])!.toDouble(),
-                                      shopNum(c["lng"])!.toDouble(),
-                                    ),
-                                    width: 14,
-                                    height: 14,
-                                    child: Container(
-                                      decoration: BoxDecoration(
-                                        shape: BoxShape.circle,
-                                        color: cs.surface,
-                                        border: Border.all(color: cs.outline, width: 1.5),
-                                      ),
-                                    ),
-                                  ),
-                            ],
-                          ),
+                          MarkerLayer(markers: _mapMarkers()),
                         ],
                     ),
                     // 中心图钉：不随地图动，选的就是这里
-                    Center(
+                    if (!_use3d)
+                      Center(
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: <Widget>[
@@ -302,6 +429,45 @@ class _RidePickupCardState extends State<RidePickupCard> {
                         ],
                       ),
                     ),
+                    // 回到「我的位置」：有实时定位才出现（3D 版由页面内按钮承担）
+                    if (!_use3d && _hasOrigin())
+                      Positioned(
+                        top: 8,
+                        right: 8,
+                        child: GestureDetector(
+                          onTap: _recenter,
+                          child: Container(
+                            padding: const EdgeInsets.all(6),
+                            decoration: BoxDecoration(
+                              color: cs.surface,
+                              shape: BoxShape.circle,
+                              boxShadow: <BoxShadow>[
+                                BoxShadow(
+                                  color: Colors.black.withValues(alpha: 0.12),
+                                  blurRadius: 4,
+                                ),
+                              ],
+                            ),
+                            child: Icon(
+                              Icons.my_location,
+                              size: 16,
+                              color: cs.onSurface,
+                            ),
+                          ),
+                        ),
+                      ),
+                    if (!_use3d)
+                      Positioned(
+                      left: 6,
+                      bottom: 4,
+                      child: Text(
+                        "© 高德地图",
+                        style: TextStyle(
+                          fontSize: 8,
+                          color: Colors.black.withValues(alpha: 0.45),
+                        ),
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -325,7 +491,7 @@ class _RidePickupCardState extends State<RidePickupCard> {
                 ),
               ),
             ),
-            for (final Map<String, dynamic> c in _candidates) _candidateRow(c),
+            for (int i = 0; i < _candidates.length; i++) _candidateRow(i),
           ],
           if (sel != null)
             Container(
@@ -376,7 +542,8 @@ class _RidePickupCardState extends State<RidePickupCard> {
     );
   }
 
-  Widget _candidateRow(Map<String, dynamic> c) {
+  Widget _candidateRow(int index) {
+    final Map<String, dynamic> c = _candidates[index];
     final _SelectedPickup? sel = _selected;
     final bool on = sel != null &&
         sel.snapped &&
@@ -386,7 +553,16 @@ class _RidePickupCardState extends State<RidePickupCard> {
     return Padding(
       padding: const EdgeInsets.fromLTRB(13, 7, 13, 0),
       child: ShopTap(
-        onTap: _sent ? null : () => _pickCandidate(c),
+        // 3D 模式把聚焦交给页面（页面移动后回传 select 事件统一更新选中态）
+        onTap: _sent
+            ? null
+            : () {
+                if (_use3d) {
+                  _map3d.focusCandidate(index);
+                } else {
+                  _pickCandidate(c);
+                }
+              },
         child: Container(
           padding: const EdgeInsets.fromLTRB(11, 9, 11, 9),
           decoration: BoxDecoration(

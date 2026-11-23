@@ -64,6 +64,17 @@ class WsEventCatalog {
   /// 逐句 TTS 流式帧（root 域，自带 traceId 过滤）。
   static const Set<String> pureVoiceSpeech = <String>{"chat.assistant_speech"};
 
+  /// 通知跨端消除（2026-11-23 主动触达 M1）：一处点了通知按钮，服务端广播
+  /// `action_intent.resolved`，其余设备收起同一条还带按钮的通知。
+  /// 归 [NotificationResolveSync]；两端各自维护自己的通知/卡片，归属表登记为 both。
+  static const Set<String> notificationResolve = <String>{
+    "action_intent.resolved",
+  };
+
+  /// 今日看板（root 域，§5.2）：常驻通知与桌面小组件的内容帧。
+  /// 它是**状态展示**不是业务动作，落谁手里都不产生副作用，因此不进聊天流。
+  static const Set<String> todayBoard = <String>{"agent.today_board"};
+
   /// 连接态（状态型事件，见 [WsEventRouter.stateEventTypes]）。
   ///
   /// 只放**可重放的状态**：新订阅者晚到时补投一次仍然成立（「现在已连上」
@@ -124,6 +135,10 @@ class WsEventRouter {
     // （2026-11-11 actor 不一致被 FORBIDDEN 丢弃，控制器完全收不到任何信号）。
     "error.event": WsEventRoute.both,
     "card.update": WsEventRoute.chatOnly,
+
+    // ── 通知跨端消除（2026-11-23）：各端收起自己那条通知，无一次性副作用，重复消费安全 ──
+    // 不复用 card.update：后者按 messageId 原地换对话卡，这里按 intentId 收通知，键不同。
+    "action_intent.resolved": WsEventRoute.both,
 
     // ── 日程（手机端日程页由聊天控制器驱动；模块订阅走 auto 域）──
     "schedule.reminder_fired": WsEventRoute.chatOnly,

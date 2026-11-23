@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 图标长按快捷方式（2026-11-23 PRD §8.1 第三行）：记一下 / 拍一下 / 问一下。
+     静态 shortcuts 的 intent 只能带原始类型 extra，所以这里写的是入口标记
+     nb_entry，真正的「半屏速记卡 / 直接开相机」由 Dart 侧按这个标记分派——
+     三种入口和系统分享共用同一条流程，不各写一套。
+     targetPackage 是 applicationId（com.nextbot.app），与 Kotlin 包名不同。 -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="nb_quick_note"
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_note"
+        android:shortcutShortLabel="@string/shortcut_note_short"
+        android:shortcutLongLabel="@string/shortcut_note_long"
+        android:shortcutDisabledMessage="@string/shortcut_note_short">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.nextbot.app"
+            android:targetClass="com.example.private_ai_app.MainActivity">
+            <extra
+                android:name="nb_entry"
+                android:value="quick_note" />
+        </intent>
+        <categories android:name="android.shortcut.conversation" />
+    </shortcut>
+
+    <shortcut
+        android:shortcutId="nb_camera_note"
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_camera"
+        android:shortcutShortLabel="@string/shortcut_camera_short"
+        android:shortcutLongLabel="@string/shortcut_camera_long"
+        android:shortcutDisabledMessage="@string/shortcut_camera_short">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.nextbot.app"
+            android:targetClass="com.example.private_ai_app.MainActivity">
+            <extra
+                android:name="nb_entry"
+                android:value="camera_note" />
+        </intent>
+        <categories android:name="android.shortcut.conversation" />
+    </shortcut>
+
+    <shortcut
+        android:shortcutId="nb_ask_note"
+        android:enabled="true"
+        android:icon="@drawable/ic_shortcut_ask"
+        android:shortcutShortLabel="@string/shortcut_ask_short"
+        android:shortcutLongLabel="@string/shortcut_ask_long"
+        android:shortcutDisabledMessage="@string/shortcut_ask_short">
+        <intent
+            android:action="android.intent.action.VIEW"
+            android:targetPackage="com.nextbot.app"
+            android:targetClass="com.example.private_ai_app.MainActivity">
+            <extra
+                android:name="nb_entry"
+                android:value="ask_note" />
+        </intent>
+        <categories android:name="android.shortcut.conversation" />
+    </shortcut>
+</shortcuts>

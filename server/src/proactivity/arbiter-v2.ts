@@ -28,6 +28,17 @@ export type ContextSnapshot = {
   receptivity: number;
   /** 近 30min 已主动投递次数 */
   recentBurst: number;
+  /**
+   * 手机时机档位的打断成本（2026-11-23 §3.7；null = 手机没上报过状态）。
+   * 口径见 phone-presence.ts 的 PHONE_GRADE_COST。
+   */
+  phoneCost?: number | null;
+  /**
+   * 桌面端是否在线（null = 装配层没给，按「老行为」处理）。
+   * 只用手机的人 screenFocus 恒为 null、也不在对话里，桌面上下文于是算出 0 分，
+   * 把「锁屏揣兜里」冒充成最佳时机——这就是 R1。
+   */
+  desktopOnline?: boolean | null;
 };
 
 export type ArbiterV2Deps = {
@@ -103,6 +114,35 @@ export const PARK_TTL: Record<Exclude<AttentionUrgency, "interrupt" | "log">, nu
 /** 打断成本 0-10（纯函数，导出供单测与校准脚本） */
 export function interruptCost(s: ContextSnapshot): number {
   if (s.presence === "offline") return 10;
+  // 人级加成：不管从哪个端打扰都要承担（接受度低 / 刚连发过消息）
+  const person =
+    (1 - clamp01(s.receptivity)) * COST_WEIGHTS.receptivityAmp + s.recentBurst * COST_WEIGHTS.burst;
+  const base = surfaceCost(s);
+  return Math.max(0, Math.min(10, Math.round((base + person) * 10) / 10));
+}
+
+/**
+ * 两端各自的打断成本，取最低的那一端（§3.1 原则 2「手机信号优先」+
+ * §3.7「多端时取打断成本最低的那一端作为投递目标端」）。
+ *
+ * 桌面这一端只有在「真的有人在用」时才计入：桌面端不在线（只用手机的人）
+ * 或在线但没人在跟它交互，那一串屏幕权重就是凭空 0 分。
+ * 两个信号都没有时退回纯桌面口径 —— 老客户端/单测行为一字不变。
+ */
+function surfaceCost(s: ContextSnapshot): number {
+  const context = contextCost(s);
+  const surfaces: number[] = [];
+  const desktopAttended =
+    s.desktopOnline === false
+      ? false
+      : s.presence === "active" || s.screenFocus !== null || s.inConversation;
+  if (desktopAttended) surfaces.push(context);
+  if (typeof s.phoneCost === "number") surfaces.push(s.phoneCost);
+  return surfaces.length ? Math.min(...surfaces) : context;
+}
+
+/** 桌面上下文成本（屏幕专注分类 × 会议临近），不含人级加成 */
+function contextCost(s: ContextSnapshot): number {
   let cost = 0;
   if (s.inConversation) cost += COST_WEIGHTS.inConversation;
   switch (s.screenFocus) {
@@ -122,9 +162,7 @@ export function interruptCost(s: ContextSnapshot): number {
   }
   // 禁音时段已移除（2026-11-20）：深夜不再加权。s.quietHours 字段保留，
   // 仅用于 pause 跃迁检测（静默结束 → 早晨回归是开口时机，不是限制）。
-  cost += (1 - clamp01(s.receptivity)) * COST_WEIGHTS.receptivityAmp;
-  cost += s.recentBurst * COST_WEIGHTS.burst;
-  return Math.max(0, Math.min(10, Math.round(cost * 10) / 10));
+  return cost;
 }
 
 function clamp01(v: number): number {
@@ -220,6 +258,9 @@ export class ArbiterV2 {
       quietHours: isQuietHour(hour),
       receptivity: this.deps.receptivity?.(actorId) ?? 0.5,
       recentBurst: this.recentBurstCount(),
+      // 手机时机档位（未上报 / 精简注入的 presence 桩 = null，成本退回纯桌面口径）
+      phoneCost: this.deps.presence.phoneGrade?.(actorId, now.getTime())?.cost ?? null,
+      desktopOnline: this.deps.presence.desktopOnline?.(actorId) ?? null,
     };
   }
 

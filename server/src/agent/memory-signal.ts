@@ -12,7 +12,7 @@
  * 确定发生过的文本，不存在「猜意图猜错带偏整轮」的失败模式。
  */
 
-import { isProfileExtractHint } from "../agentic-memory/unified-extractor.js";
+import { isFollowUpExtractHint, isProfileExtractHint } from "../agentic-memory/unified-extractor.js";
 
 export const MEMORY_EXPLICIT_RE =
   /记住|记得|别忘了|帮我记着|记一下|不要忘记|偏好|喜欢|讨厌|不喜欢|禁忌|生日|纪念日|important|remember|prefer/i;
@@ -63,6 +63,10 @@ function firstSentence(text: string, maxLen: number): string {
  *        ⚠️ 2026-11-18：L1 仍会漏判（「我的生日是6月18」被判 personalFact=false，
  *        高信号只剩助手「记上了」），因此用 isProfileExtractHint 做确定性兜底——
  *        画像候选与抽取行必须同口径，不能把"用户事实能否落库"押在单点分类上。
+ * @param 2026-11-30 同一条兜底再加一类：用户提到的**未来个人事件**（明天面试/下周复诊）
+ *        用 isFollowUpExtractHint 判，命中即高信号（reasons 里的 future_event）。低信号
+ *        轮会被合批进一次抽取，批次判 reject 时 followUps 整批作废——「我明天下午面试」
+ *        就是这么在实测里既不进画像 hint、又常被 L1 漏判，最后一条跟进都抽不出来（§3.5）。
  */
 export function detectMemorySignals(
   userText: string,
@@ -86,10 +90,20 @@ export function detectMemorySignals(
   // 复用 turn-wal 候选的同一份 hint 正则（isProfileExtractHint），保证
   // 「标成画像候选」与「真的进了抽取」是同一口径，不再依赖 L1 单点分类。
   const selfStatement = isProfileExtractHint(user);
+  // 未来个人事件（§3.5 跟进的抽取入口）：与画像兜底同一套口径。抽取器只在原文命中
+  // FOLLOW_UP_EXTRACT_HINT_RE 时才捎带 followUps 任务，而「我明天下午面试」这类句子
+  // 实测既不命中画像 hint、L1 也常漏判 personalFact —— 低信号轮会被合批进一次抽取，
+  // 批次一旦判 reject，followUps 整批作废，跟进就永远出不来。这里只保证「这句话一定
+  // 进抽取」，要不要落库仍由 unified-extractor 的置信度与 FollowUpService 的锚点闸判。
+  const futureEvent = isFollowUpExtractHint(user);
   if (personalFact || selfStatement) {
     reasons.push("personal_fact");
     extractLines.push(`[用户事实] ${firstSentence(user, 200)}`);
+  } else if (futureEvent) {
+    // 同一个前缀：复用 memory-line-hygiene 认得的标记，不新增下游特例
+    extractLines.push(`[用户事实] ${firstSentence(user, 200)}`);
   }
+  if (futureEvent) reasons.push("future_event");
   if (AGENT_COMMITMENT_RE.test(assistant)) {
     reasons.push("agent_commitment");
     extractLines.push(`[Agent 承诺/结论] ${firstSentence(assistant, 200)}`);
@@ -98,7 +112,8 @@ export function detectMemorySignals(
   const isHighSignal =
     reasons.includes("explicit_remember") ||
     reasons.includes("personal_fact") ||
-    reasons.includes("agent_commitment");
+    reasons.includes("agent_commitment") ||
+    reasons.includes("future_event");
 
   if (isHighSignal && extractLines.length === 0) {
     extractLines.push(`用户: ${firstSentence(user, 120)} | Agent: ${firstSentence(assistant, 120)}`);

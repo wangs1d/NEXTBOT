@@ -17,11 +17,29 @@
 // 模型钉位 + 每日熔断），与兴趣推送/比价到价等主动话术同一副嗓子；polisher 未
 // 接入/失败时直接用初稿（表达永不因语气层失败而中断）。
 import { readJson, writeJson } from "./persist-file.js";
+import type { ProposalNotifyOption } from "./pipeline-types.js";
+
+/**
+ * 材料里的一条日程（2026-11-23）。
+ *
+ * 为什么不再用 `string[]`：主动消息问「还去吗」时，按钮要能真的落到那条日程上
+ * （完成 / 改天）。落点必须靠 taskId，而纯文本行在聚合时就把 id 丢了，只能回退
+ * 到「知道了 / 稍后再说」这类按了不改变任何状态的假按钮。
+ */
+export type PulseTask = {
+  /** HH:mm 展示时刻（照抄材料，禁止模型自行取整） */
+  at: string;
+  title: string;
+  /** 单次、未完成、属于本 actor 的日程 id；周期日程没有（推迟/完成不支持单次落点） */
+  ref?: string;
+  /** 今天已过点、单次、还没完成——最该问「还去吗 / 弄完了吗」的那一类 */
+  overdue?: boolean;
+};
 
 /** 一次聚合并好的原料（给 agent 审阅用；刻意不含天气——天气归明日预告） */
 export type PulseAggregate = {
-  /** 未来 24h 日程（含 HH:mm 时刻；课表生成的周期日程展开后也在这里） */
-  tasks: string[];
+  /** 今天 00:00 起至未来 24h 的日程（含已过点未完成；课表生成的周期日程展开后也在这里） */
+  tasks: PulseTask[];
   /** 未读消息发送者（MessageHub unreadCount>0 的对端） */
   unread: string[];
   /** 预执行就绪的目标（答应过用户的事有结果了） */
@@ -75,6 +93,17 @@ export type PulseAggregate = {
   mood?: "positive" | "negative" | "stressed" | null;
 };
 
+/** 测试端点的替代材料：tasks 兼容旧协议的「HH:mm 事项」字符串 */
+export type PulseFixture = Partial<Omit<PulseAggregate, "tasks">> & {
+  tasks?: Array<PulseTask | string>;
+};
+
+function normalizeFixtureTask(t: PulseTask | string): PulseTask {
+  if (typeof t !== "string") return t;
+  const m = /^(\d{1,2}:\d{2})\s+(.+)$/.exec(t.trim());
+  return m ? { at: m[1]!, title: m[2]! } : { at: "", title: t.trim() };
+}
+
 export type AgentPulseDeps = {
   /** 本轮评审的用户（多租户：一次 tick 覆盖所有活跃 actor；空数组 = 不评审） */
   actors: () => string[];
@@ -107,6 +136,10 @@ export type AgentPulseDeps = {
     evidence: string[];
     createdAt: number;
     source: string;
+    /** 按本条内容动态生成的拍板按钮（可选；领域动作必须带 ref） */
+    notifyOptions?: ProposalNotifyOption[];
+    /** true = 没有真动作时不要回退「知道了 / 稍后再说」 */
+    suppressDefaultActions?: boolean;
   }) => unknown;
   /** 状态落盘路径（重启不重评；缺省仅内存） */
   statePath?: string;
@@ -166,6 +199,8 @@ export type PulseCheckResult = {
   message?: string | null;
   /** 统一语气层最终文案；未接入语气层时与 message 相同 */
   finalText?: string | null;
+  /** 本条消息下发的拍板按钮（诊断用；空 = 没有可执行动作） */
+  notifyOptions?: ProposalNotifyOption[];
   submitted?: boolean;
   /** 管道仲裁结果（delivered / deferred / merged / suppressed / silenced / throttled / expired / dropped） */
   verdict?: string;
@@ -246,6 +281,140 @@ export function sanitizePulseMessage(raw: string | undefined): string | null {
   return text;
 }
 
+// ── 结构化输出（2026-11-23）─────────────────────────────────────────────
+// 旧协议只让模型输出一句话，按钮只能由通知层硬编码兜底（「知道了 / 稍后再说」）。
+// 现在让模型在一次输出里同时声明「说什么」与「用户点一下能怎么推进」：文案仍然
+// 自由，动作被服务端白名单收口，并且必须解析到真实实体（编号 → taskId）。
+
+/** 模型可声明的动作（approve/decline 需要 confirmAction，pulse 没有 → 不给） */
+export type PulseOptionAction =
+  | "schedule_complete"
+  | "schedule_snooze"
+  | "acknowledge"
+  | "snooze"
+  | "dismiss";
+
+export type ParsedPulseOption = {
+  action: PulseOptionAction;
+  label: string;
+  /** schedule_*：材料里的日程编号（1 起） */
+  target?: number;
+};
+
+export type ParsedPulseOutput = {
+  message: string | null;
+  options: ParsedPulseOption[];
+};
+
+const PULSE_OPTION_ACTIONS = new Set<PulseOptionAction>([
+  "schedule_complete",
+  "schedule_snooze",
+  "acknowledge",
+  "snooze",
+  "dismiss",
+]);
+
+function extractJsonObject(text: string): string | null {
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+  return text.slice(start, end + 1);
+}
+
+/**
+ * 去重后的日程材料：**提示词编号与选项解析必须用同一份**，否则 target 会错位。
+ * 同一条安排可能被多条写入路径重复落库（去重收敛在 createTask，这里再兜一层：
+ * 重复行会让审阅把「同一件事」误判成「两件事撞车」）。
+ */
+export function pulseTasksOf(a: PulseAggregate): PulseTask[] {
+  const seen = new Set<string>();
+  const out: PulseTask[] = [];
+  for (const t of a.tasks) {
+    const title = (t.title ?? "").trim();
+    if (!title) continue;
+    const key = `${t.at}|${title}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ ...t, title });
+  }
+  return out;
+}
+
+/**
+ * 解析审阅输出：优先 JSON（`{"speak":true,"text":"…","options":[…]}`），
+ * 解析不了就按旧协议当纯文本（按钮为空）。模型偶尔会包 ```json 代码块或
+ * 在 JSON 前后加解释——只截取最外层花括号再试一次；看起来像 JSON 却解析
+ * 失败时按「不说」处理（宁可不开口，也不要把半个 JSON 当消息发出去）。
+ */
+export function parsePulseOutput(raw: string | undefined): ParsedPulseOutput {
+  const text = (raw ?? "").trim();
+  const unfenced = text.replace(/^```[a-z]*\s*/i, "").replace(/```\s*$/i, "").trim();
+  const jsonText = extractJsonObject(unfenced);
+  if (jsonText) {
+    try {
+      const obj = JSON.parse(jsonText) as Record<string, unknown>;
+      const message = sanitizePulseMessage(typeof obj.text === "string" ? obj.text : "");
+      if (obj.speak === false || message === null) return { message: null, options: [] };
+      const options: ParsedPulseOption[] = [];
+      if (Array.isArray(obj.options)) {
+        for (const rawOpt of obj.options) {
+          if (!rawOpt || typeof rawOpt !== "object") continue;
+          const o = rawOpt as Record<string, unknown>;
+          const action = typeof o.action === "string" ? (o.action.trim() as PulseOptionAction) : null;
+          if (!action || !PULSE_OPTION_ACTIONS.has(action)) continue;
+          const label = typeof o.label === "string" ? o.label.trim() : "";
+          if (!label) continue;
+          const target =
+            typeof o.target === "number" && Number.isInteger(o.target) ? o.target : undefined;
+          options.push({ action, label, ...(target !== undefined ? { target } : {}) });
+        }
+      }
+      return { message, options };
+    } catch {
+      /* 不是合法 JSON → 下面按纯文本兜底 */
+    }
+  }
+  if (unfenced.startsWith("{")) return { message: null, options: [] };
+  return { message: sanitizePulseMessage(unfenced), options: [] };
+}
+
+/**
+ * 把模型声明的选项落成通知层可执行的动作。
+ *
+ * 硬规则：
+ *   · 最多两项（与通知栏并排口径一致）；
+ *   · label 随内容生成，但去掉句末标点、超过 8 字截断（按钮不是句子）；
+ *   · schedule_* 必须解析到一条**带 ref 的单次日程**（target 是材料编号），
+ *     解析不到就丢弃——绝不放一个按了不知道改哪条日程的按钮；
+ *   · 同一动作 + 同一实体只留一项。
+ */
+export function resolvePulseNotifyOptions(
+  options: ParsedPulseOption[],
+  tasks: PulseTask[],
+): ProposalNotifyOption[] {
+  const out: ProposalNotifyOption[] = [];
+  const seen = new Set<string>();
+  for (const o of options) {
+    if (out.length >= 2) break;
+    const label = o.label.replace(/[。.!！~～]+$/g, "").trim().slice(0, 8);
+    if (!label) continue;
+    let opt: ProposalNotifyOption;
+    if (o.action === "schedule_complete" || o.action === "schedule_snooze") {
+      const idx = typeof o.target === "number" ? o.target - 1 : -1;
+      const task = Number.isInteger(idx) && idx >= 0 && idx < tasks.length ? tasks[idx] : undefined;
+      if (!task?.ref) continue;
+      opt = { action: o.action, label, ref: task.ref };
+    } else {
+      opt = { action: o.action, label };
+    }
+    const key = `${opt.action}:${opt.ref ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(opt);
+  }
+  return out;
+}
+
 /** 降价/盯梢类消息判定：用户点名让 agent 盯的事有了结果 = 用户自己下的单，
  *  走 must 层随到随送（与专用盯价道 price_watch_hit 同语义，2026-10-25 用户定稿） */
 const PRICE_NEWS_RE = /降价|价格|降到|打折|便宜|好价|比价|盯[着住的]/;
@@ -267,10 +436,20 @@ export function buildPulsePrompt(
     if (a.screenFocus) state.push(`屏幕：${a.screenFocus}`);
     material.push(`【用户此刻状态】${state.join("；")}`);
   }
-  // 同一条安排可能被多条写入路径重复落库（去重收敛在 createTask，这里再兜一层：
-  // 重复行会让审阅把「同一件事」误判成「两件事撞车」）。
-  const tasks = [...new Set(a.tasks.map((t) => t.trim()).filter((t) => t.length > 0))];
-  if (tasks.length) material.push(`【今日与未来 24h 安排】\n${tasks.map((t) => `- ${t}`).join("\n")}`);
+  // 去重后的安排（编号同时是 options.target 的引用口径，见 pulseTasksOf）
+  const tasks = pulseTasksOf(a);
+  if (tasks.length) {
+    material.push(
+      `【今天到未来 24h 的安排】（要问某件事就用编号引用；标「可拍板」的才能挂完成/改天按钮）\n${tasks
+        .map((t, i) => {
+          const flags = [t.ref ? "可拍板" : "", t.overdue ? "已过点" : ""]
+            .filter(Boolean)
+            .join("，");
+          return `- [${i + 1}] ${t.at} ${t.title}${flags ? `（${flags}）` : ""}`;
+        })
+        .join("\n")}`,
+    );
+  }
   if (a.unread.length) material.push(`【未读消息】${a.unread.join("、")}`);
   if (a.goals.length) material.push(`【已备好的结果（答应过用户的事）】\n${a.goals.map((t) => `- ${t}`).join("\n")}`);
   if (a.interests.length) material.push(`【用户关注的话题】${a.interests.join("；")}`);
@@ -324,7 +503,8 @@ export function buildPulsePrompt(
     "判断标准：",
     "- C 类是好奇和搭话，不是叮嘱（「记得穿衣服」），也不是播报（「你现在在家」）：「你在外面呢？这是去哪儿」「还在公司啊」才是。没有真实观测就别硬编，改从【你记得的他】里找个具体话头。",
     "- 【他最近的状态】情绪低或压力大时，C 类收着说，别自顾自唠；宁可只说一句「今天还顺利吗」。",
-    "- 只有【今日与未来 24h 安排】里的两个不同事项同一时刻才算冲突；时间照抄材料里的 HH:mm，不要取整成「六点整」，不要拿最近对话或记忆内容推断、编造冲突和事项。",
+    "- 只有【今天到未来 24h 的安排】里的两个不同事项同一时刻才算冲突；时间照抄材料里的 HH:mm，不要取整成「六点整」，不要拿最近对话或记忆内容推断、编造冲突和事项。",
+    "- 问「还去吗 / 做完了吗」这类需要拍板的话时，必须先确认那件事就在【安排】里：照抄它的编号和时刻。只是从最近对话里听过、材料里没有的事，不要挂着按钮问。",
     "- 念一遍日程或未读数、没有信息增量的播报，不要开口。宁可沉默，不可打扰。",
     "- 用户关注的话题不是拿来念新闻的：挑一个角度说一句（「你之前提的那部剧更新了，评价两极」），比罗列标题有用。",
     "- 开口时机参考用户此刻状态：专注工作/离线时非必要不打断，刚回到电脑前、空闲时更适合说话；C 类在用户明显专注做事时不说。",
@@ -340,9 +520,15 @@ export function buildPulsePrompt(
     "- 必须有一个具体锚点：某件事、某个时间、某个他关注的东西。禁止「在吗」「最近怎么样」「今天过得如何」这类放之四海皆准的空话——那种话对谁都成立，等于没说他。",
     "- C 类要留出口：可以是一句陈述、一个念头，用户不回也算完整，不要追着要回应。",
     "",
-    "输出要求：",
-    "- 开口时像同伴随口说一句：一两句话、口语化、直接说事；不要标题、不要列表、不要 markdown、不要客套。一次只说最重要的一件事。",
-    "- 只输出消息正文本身；如果没有值得说的，只输出 NOP。",
+    "输出要求（必须是 JSON，不要代码块、不要额外解释）：",
+    '{"speak":true,"text":"要说的话","options":[{"action":"schedule_complete","label":"已完成","target":1}]}',
+    "- text：像同伴随口说一句——一两句话、口语化、直接说事；不要标题、不要列表、不要 markdown、不要客套。一次只说最重要的一件事。",
+    "- options：只有用户点一下真的能推进这件事时才给，最多 2 项；不需要拍板就省略（或给空数组）。",
+    "- 可用 action：schedule_complete（这件事做完了）、schedule_snooze（改天/稍后再提醒）、acknowledge（只是知会我一声）、snooze（过一会儿再跟我说）、dismiss（不用再提）。",
+    "- schedule_complete / schedule_snooze 必须带 target = 【安排】里的编号，只能选标了「可拍板」的；标了「已过点未完成」的优先问。",
+    "- label 是随内容生成的动作短语（2–5 个汉字），禁止「选项1」「确定」这类没信息的词。",
+    "- 只是闲聊、观察、接话，没有可执行的事，就不要给 options——宁可不给按钮，也不要编一个按了没用的。",
+    "- 没有值得说的：只输出 NOP。",
     "",
     "【本次聚合材料】",
     material.join("\n"),
@@ -396,7 +582,7 @@ export class AgentPulseService {
    *  不写指纹不污染真实评审状态。 */
   async check(opts?: {
     force?: boolean;
-    fixture?: Partial<PulseAggregate>;
+    fixture?: PulseFixture;
     /** 只评审指定用户（测试端点用）；缺省 = 本轮所有活跃用户 */
     actorId?: string;
   }): Promise<PulseCheckResult> {
@@ -422,7 +608,7 @@ export class AgentPulseService {
   private async checkOne(
     actorId: string,
     enabled: boolean,
-    opts?: { force?: boolean; fixture?: Partial<PulseAggregate> },
+    opts?: { force?: boolean; fixture?: PulseFixture },
   ): Promise<PulseCheckResult> {
     if (this.inFlight.has(actorId)) return { enabled, actorId, ran: false, reason: "in_flight" };
     this.inFlight.add(actorId);
@@ -439,12 +625,12 @@ export class AgentPulseService {
   private async reviewOnce(
     actorId: string,
     force = false,
-    fixture?: Partial<PulseAggregate>,
+    fixture?: PulseFixture,
   ): Promise<PulseCheckResult> {
     const now = new Date(this.nowFn());
     const aggregate: PulseAggregate | null = fixture
       ? {
-          tasks: fixture.tasks ?? [],
+          tasks: (fixture.tasks ?? []).map(normalizeFixtureTask),
           unread: fixture.unread ?? [],
           goals: fixture.goals ?? [],
           interests: fixture.interests ?? [],
@@ -505,9 +691,10 @@ export class AgentPulseService {
       if (!fixture) this.setSignature(actorId, signature);
       return { ...base, ran: true, reason: "llm_error", prompt, raw: String(err) };
     }
-    const message = sanitizePulseMessage(raw ?? "");
+    const parsed = parsePulseOutput(raw ?? "");
+    const message = parsed.message;
     if (!message) {
-      // agent 判断不值得说：记指纹，这批材料不再评审
+      // agent 判断不值得说（NOP / 空 / 解析失败）：记指纹，这批材料不再评审
       if (!fixture) this.setSignature(actorId, signature);
       return { ...base, ran: true, reason: "nop", prompt, raw: raw ?? "", message: null };
     }
@@ -527,7 +714,9 @@ export class AgentPulseService {
                 : { idleMinutes: aggregate.idleMinutes }),
               ...(socialPath ? { socialClock: true } : {}),
               context: [
-                aggregate.tasks.length ? `安排：${aggregate.tasks.join("；")}` : "",
+                aggregate.tasks.length
+                  ? `安排：${aggregate.tasks.map((t) => `${t.at} ${t.title}`).join("；")}`
+                  : "",
                 aggregate.unread.length ? `未读：${aggregate.unread.join("、")}` : "",
                 aggregate.goals.length ? `备好的结果：${aggregate.goals.join("；")}` : "",
                 aggregate.findings?.length ? `相关发现：${aggregate.findings.join("；")}` : "",
@@ -551,6 +740,9 @@ export class AgentPulseService {
     const dedupKey = socialPath
       ? `agent_pulse:social:${fixture ? "fixture_" : ""}${actorId}:${Math.floor(now.getTime() / SOCIAL_REVIEW_GAP_MS)}`
       : `agent_pulse:${fixture ? "fixture_" : ""}${signature}`;
+    // 拍板按钮：模型按本条内容声明，服务端白名单 + 实体解析后落成真动作。
+    // 解析不到真动作时不回退默认双按钮——纯闲聊配「知道了/稍后再说」是假按钮。
+    const notifyOptions = resolvePulseNotifyOptions(parsed.options, pulseTasksOf(aggregate));
     const decision = this.deps.submitProposal({
       proposalId: `p_${this.nowFn().toString(36)}_pulse`,
       actorId,
@@ -562,10 +754,13 @@ export class AgentPulseService {
       title: "",
       summary: finalText,
       directText: finalText,
+      ...(notifyOptions.length ? { notifyOptions } : {}),
+      suppressDefaultActions: true,
       evidence: [
         "agent_pulse",
         `sig=${signature}`,
         ...(socialPath ? ["social_clock", `idle=${aggregate.idleMinutes ?? "?"}m`] : []),
+        ...(notifyOptions.length ? [`notify_options=${notifyOptions.length}`] : []),
         ...(fixture ? ["fixture"] : []),
         ...(priceNews ? ["price_news_must"] : []),
         "proactivity_review",
@@ -591,6 +786,7 @@ export class AgentPulseService {
       raw: raw ?? "",
       message,
       finalText,
+      ...(notifyOptions.length ? { notifyOptions } : {}),
       submitted: true,
       verdict,
     };

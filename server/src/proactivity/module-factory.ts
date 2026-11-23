@@ -141,6 +141,44 @@ function buildRuleServices(deps: RulesLayerDeps): RuleServices {
         })
         .slice(0, 6);
     },
+    // AgentPulse 材料（2026-11-23）：带 taskId 的今日安排，**含已过点/已完成的
+    // 单次任务**——「11 点的游泳还去吗」问的是已经发生的那件事，而单次提醒执行后
+    // 状态会被自动置 completed（提醒发过了 ≠ 人去了），只查未来任务永远问不到它。
+    // 可拍板 = 单次且未取消：completeTask 幂等、snoozeTask 能把 completed 重新激活。
+    listPulseTasks: (actorId: string) => {
+      if (!actorId) return [];
+      const now = Date.now();
+      const dayStart = new Date(now);
+      dayStart.setHours(0, 0, 0, 0);
+      const horizon = now + 24 * 3600_000;
+      const pick = (v: string | null | undefined): string =>
+        (v ?? "").trim();
+      return scheduleTasks
+        .listTasksBySession(actorId, {
+          from: dayStart.toISOString(),
+          to: new Date(horizon).toISOString(),
+        })
+        .filter((t) => t.status !== "cancelled")
+        .map((t) => {
+          const single = t.recurrence === "none" && !t.cronExpression;
+          // 单次任务用原始计划时刻（runAt 不随完成变化）；周期用下一次实例
+          const at = Date.parse(single ? t.runAt : (t.nextRunAt ?? t.runAt));
+          const title = pick(t.title) || pick(t.shortTitle) || pick(t.description);
+          if (!title || !Number.isFinite(at) || at < dayStart.getTime() || at > horizon) return null;
+          return {
+            taskId: t.taskId,
+            title,
+            runAt: at,
+            recurrence: t.recurrence,
+            status: t.status,
+            actionable: single && (t.status === "active" || t.status === "completed"),
+            overdue: at < now,
+          };
+        })
+        .filter((t): t is NonNullable<typeof t> => t !== null)
+        .sort((a, b) => a.runAt - b.runAt)
+        .slice(0, 8);
+    },
     // 天气一行话：按 tick 的 actor 读自己的缓存（全局单值会把 A 的天气说给 B）
     weatherLine: (actorId: string) => weatherLineByActor.get(actorId) ?? null,
     // 未读发件人（digest/晨报拼接）：MessageHub 会话表中该 actor unreadCount>0 的对端

@@ -14,14 +14,16 @@ import {
   buildPulsePrompt,
   extractRapport,
   isPriceNews,
+  parsePulseOutput,
   pulseSignature,
+  resolvePulseNotifyOptions,
   sanitizePulseMessage,
   type PulseAggregate,
 } from "../src/proactivity/agent-pulse.js";
 
 function mkAggregate(overrides: Partial<PulseAggregate> = {}): PulseAggregate {
   return {
-    tasks: ["14:00 项目周会"],
+    tasks: [{ at: "14:00", title: "项目周会" }],
     unread: ["妈妈"],
     goals: [],
     interests: [],
@@ -32,7 +34,15 @@ function mkAggregate(overrides: Partial<PulseAggregate> = {}): PulseAggregate {
 
 type Harness = {
   svc: AgentPulseService;
-  submitted: Array<{ kind: string; tier: string; title: string; directText: string; dedupKey: string }>;
+  submitted: Array<{
+    kind: string;
+    tier: string;
+    title: string;
+    directText: string;
+    dedupKey: string;
+    notifyOptions?: Array<{ action: string; label: string; ref?: string }>;
+    suppressDefaultActions?: boolean;
+  }>;
   llmCalls: string[];
   polishCalls: Array<{ kind: string; facts: Record<string, unknown> }>;
   setAggregate: (a: PulseAggregate | null) => void;
@@ -72,6 +82,8 @@ function mkHarness(opts: { statePath?: string; now?: Date; polish?: boolean } = 
         title: p.title,
         directText: p.directText,
         dedupKey: p.dedupKey,
+        ...(p.notifyOptions?.length ? { notifyOptions: p.notifyOptions } : {}),
+        ...(p.suppressDefaultActions ? { suppressDefaultActions: true } : {}),
       });
       return { verdict: "delivered" };
     },
@@ -115,12 +127,17 @@ test("agent pulse: 日程行去重，且提示词禁止从对话摘录编造冲�
   const prompt = buildPulsePrompt(
     new Date("2026-11-01T17:35:00"),
     mkAggregate({
-      tasks: ["18:00 去游泳", "18:00 去游泳", "18:00 ", "17:30 去健身"],
+      tasks: [
+        { at: "18:00", title: "去游泳" },
+        { at: "18:00", title: "去游泳" },
+        { at: "18:00", title: "  " },
+        { at: "17:30", title: "去健身" },
+      ],
       recentTurns: ["一分钟后提醒我去健身"],
     }),
   );
-  assert.equal(prompt.split("- 18:00 去游泳").length - 1, 1, "重复安排只保留一行");
-  assert.ok(!prompt.includes("- 18:00 \n"), "空事项行不进材料");
+  assert.equal((prompt.match(/- \[\d+\] 18:00 去游泳/g) ?? []).length, 1, "重复安排只保留一行");
+  assert.ok(!/^- \[\d+\] 18:00\s*$/m.test(prompt), "空事项行不进材料");
   assert.ok(prompt.includes("两个不同事项同一时刻才算冲突"), "禁止无中生有冲突");
   assert.ok(prompt.includes("不要取整"), "时间必须照抄 HH:mm");
 });
@@ -205,7 +222,7 @@ test("agent pulse: 状态落盘——重启后同材料不重评", async () => {
     const r2 = await h2.svc.check();
     assert.equal(r2.reason, "unchanged", "重启后同材料指纹命中，不重评");
     assert.equal(h2.llmCalls.length, 0);
-    h2.setAggregate(mkAggregate({ tasks: ["16:00 新安排"] }));
+    h2.setAggregate(mkAggregate({ tasks: [{ at: "16:00", title: "新安排" }] }));
     await h2.svc.check();
     assert.equal(h2.llmCalls.length, 1, "新材料正常评审（无闸门）");
   } finally {
@@ -221,6 +238,79 @@ test("agent pulse: 输出清洗——剥引号/围栏、NOP 变体、折行限�
   assert.equal(sanitizePulseMessage("```\n记得交周报\n```"), "记得交周报");
   assert.equal(sanitizePulseMessage("第一句\n第二句"), "第一句 第二句", "折行折叠成一句");
   assert.ok(sanitizePulseMessage("x".repeat(300))!.length <= 220, "超长截断");
+});
+
+test("agent pulse: 结构化输出——JSON 带动作，纯文本仍兼容", () => {
+  const parsed = parsePulseOutput(
+    '```json\n{"speak":true,"text":"11 点的游泳还去吗？","options":[{"action":"schedule_complete","label":"去过了","target":1},{"action":"schedule_snooze","label":"改天再说","target":1}]}\n```',
+  );
+  assert.equal(parsed.message, "11 点的游泳还去吗？");
+  assert.deepEqual(parsed.options.map((o) => o.action), ["schedule_complete", "schedule_snooze"]);
+  // 旧协议纯文本：照常开口，只是没有按钮
+  const legacy = parsePulseOutput("你下午有个项目周会，要不要提前过一眼？");
+  assert.equal(legacy.message, "你下午有个项目周会，要不要提前过一眼？");
+  assert.equal(legacy.options.length, 0);
+  // speak=false → 不说
+  assert.equal(parsePulseOutput('{"speak":false,"text":"不该说"}').message, null);
+  // 看起来像 JSON 却解析失败 → 不说，不把半个 JSON 当消息发出去
+  assert.equal(parsePulseOutput('{"speak":true,"text":').message, null);
+});
+
+test("agent pulse: 选项落成真动作——target 必须解析到带 ref 的单次日程", () => {
+  const tasks = [
+    { at: "11:00", title: "游泳", ref: "task-swim", overdue: true },
+    { at: "15:00", title: "周会" }, // 周期日程：没有 ref
+  ];
+  const opts = resolvePulseNotifyOptions(
+    [
+      { action: "schedule_complete", label: "去过了。", target: 1 },
+      { action: "schedule_snooze", label: "改天再说", target: 2 }, // 没有 ref → 丢弃
+      { action: "schedule_snooze", label: "改天", target: 1 },
+      { action: "acknowledge", label: "知道了" }, // 超过两项上限 → 丢弃
+    ],
+    tasks,
+  );
+  assert.equal(opts.length, 2, "最多两项，且无落点的按钮被丢弃");
+  assert.deepEqual(opts[0], { action: "schedule_complete", label: "去过了", ref: "task-swim" });
+  assert.deepEqual(opts[1], { action: "schedule_snooze", label: "改天", ref: "task-swim" });
+  // 越界 target → 丢弃（不放按了不知道改哪条日程的按钮）
+  assert.deepEqual(
+    resolvePulseNotifyOptions([{ action: "schedule_complete", label: "完成", target: 9 }], tasks),
+    [],
+  );
+  // 通用动作不需要 target
+  assert.deepEqual(resolvePulseNotifyOptions([{ action: "dismiss", label: "不用提" }], tasks), [
+    { action: "dismiss", label: "不用提" },
+  ]);
+});
+
+test("agent pulse: LLM 按内容给按钮 → 提案带领域动作，且禁止默认双按钮兜底", async () => {
+  const h = mkHarness({ now: new Date("2026-11-23T17:30:00") });
+  h.setAggregate(
+    mkAggregate({
+      tasks: [{ at: "11:00", title: "游泳", ref: "task-swim", overdue: true }],
+    }),
+  );
+  h.setLlm(
+    '{"speak":true,"text":"11 点那场游泳都过六个多小时了，还去吗？","options":[{"action":"schedule_complete","label":"去过了","target":1},{"action":"schedule_snooze","label":"改天再说","target":1}]}',
+  );
+  const r = await h.svc.check();
+  assert.equal(r.reason, "sent");
+  assert.equal(h.submitted[0].directText, "11 点那场游泳都过六个多小时了，还去吗？");
+  assert.equal(h.submitted[0].suppressDefaultActions, true, "没有真动作时也不回退假按钮");
+  assert.deepEqual(h.submitted[0].notifyOptions, [
+    { action: "schedule_complete", label: "去过了", ref: "task-swim" },
+    { action: "schedule_snooze", label: "改天再说", ref: "task-swim" },
+  ]);
+  // 材料里带编号与「可拍板 / 已过点」标记，模型才有东西可引用
+  assert.ok(h.llmCalls[0].includes("[1] 11:00 游泳（可拍板，已过点）"));
+
+  // 纯闲聊（没有可执行的事）→ 不给按钮，但仍不回退默认双按钮
+  const h2 = mkHarness({ now: new Date("2026-11-23T17:30:00") });
+  h2.setLlm("在外面呢？这是去哪儿");
+  await h2.svc.check();
+  assert.equal(h2.submitted[0].notifyOptions, undefined);
+  assert.equal(h2.submitted[0].suppressDefaultActions, true);
 });
 
 test("agent pulse: 发现层材料进 prompt、计入指纹与有料判定", () => {

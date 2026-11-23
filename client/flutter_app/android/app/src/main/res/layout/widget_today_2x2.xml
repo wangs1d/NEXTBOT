@@ -1,0 +1,73 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  桌面小组件 2×2（2026-11-23 主动触达 §5.3）：下一件事 + 倒计时；空闲时显示管家一句话。
+  RemoteViews 只允许有限几种控件（LinearLayout / FrameLayout / TextView / Chronometer /
+  Button / ImageView / …），这里一个自定义 View 都不用，否则渲染期直接抛异常。
+  文字颜色写死在布局里：小组件跑在启动器进程，取不到本 App 的主题属性。
+-->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/widget_bg"
+    android:orientation="vertical"
+    android:padding="12dp">
+
+    <TextView
+        android:id="@+id/widget_caption"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:alpha="0.7"
+        android:text="@string/widget_caption_today"
+        android:textColor="#FFFFFF"
+        android:textSize="11sp"
+        android:textStyle="bold" />
+
+    <!-- 下一件事：15:00 牙医 -->
+    <TextView
+        android:id="@+id/widget_next"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:ellipsize="end"
+        android:maxLines="2"
+        android:textColor="#FFFFFF"
+        android:textSize="15sp"
+        android:textStyle="bold"
+        android:visibility="gone" />
+
+    <!-- 倒计时：Chronometer 原生走字，不靠刷新（§5.3） -->
+    <Chronometer
+        android:id="@+id/widget_countdown"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="2dp"
+        android:textColor="#FFC46B"
+        android:textSize="12sp"
+        android:visibility="gone" />
+
+    <!-- 空闲态那一句话（有下一件事时隐藏） -->
+    <TextView
+        android:id="@+id/widget_butler"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:layout_weight="1"
+        android:ellipsize="end"
+        android:maxLines="3"
+        android:textColor="#D8FFFFFF"
+        android:textSize="12sp"
+        android:visibility="gone" />
+
+    <!-- 断网时靠这一行说明「这是最后一次数据，几点拉的」（§5.4） -->
+    <TextView
+        android:id="@+id/widget_updated"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:alpha="0.55"
+        android:maxLines="1"
+        android:textColor="#FFFFFF"
+        android:textSize="9sp"
+        android:visibility="gone" />
+</LinearLayout>

@@ -2,6 +2,7 @@
 //
 // GET  /api/proactivity/diagnostics —— "为什么发/为什么没发"全程可解释：
 //       待发提案、最近 30 条仲裁决策（verdict + reasonChain）、outcome、预算用量、在场。
+//       ?funnel=1&days=7[&actorId=] 另附五级漏斗（候选→入 slot→放行→送达→接触→动作）。
 // POST /api/proactivity/outcome —— 客户端回传触达结果（accepted/dismissed/...），
 //       回灌自适应冷却：连续忽略的 kind 自动降频，高接受率自动回升。
 // POST/DELETE /api/proactivity/push/register —— 客户端上报/注销推送 token（provider + token）。
@@ -15,6 +16,8 @@ import { join } from "node:path";
 import { resolveActorId } from "../../agent/actor-id.js";
 import type { MailboxAccountInput } from "../../services/mail-watch-registry.js";
 import type { ProactivePipeline } from "../../proactivity/proactive-pipeline.js";
+import type { PhoneSignalBucketStore } from "../../proactivity/phone-signal-buckets.js";
+import { buildFunnel } from "../../proactivity/funnel-metrics.js";
 import type { MobilePushService } from "../../proactivity/mobile-push-service.js";
 import type { ProactivitySuppressionStore } from "../../proactivity/suppression-store.js";
 import type { ProactiveOutcome } from "../../proactivity/pipeline-types.js";
@@ -116,8 +119,6 @@ export type ProactivityFabricDeps = {
   calibration?: () => unknown;
   /** 评估器探针（L2：id/订阅流/状态键） */
   evaluatorProbes?: () => unknown;
-  /** outcome 回灌桥（CostCalibrator.observe） */
-  observeOutcome?: (outcome: string) => void;
   /** 主动话术生成器状态（内容型场景 LLM 用量） */
   phraseStats?: () => unknown;
   /** 主动呼叫器状态（通话轮次/冷却） */
@@ -145,6 +146,8 @@ export function registerProactivityPipelineRoutes(
     pushService?: MobilePushService | null;
     fabric?: ProactivityFabricDeps | null;
     suppressionStore?: ProactivitySuppressionStore | null;
+    /** 端侧聚合的手机信号桶（§7.2），诊断页只读 */
+    phoneBuckets?: PhoneSignalBucketStore | null;
   },
 ): void {
   const pipeline = deps.pipeline;
@@ -300,9 +303,17 @@ export function registerProactivityPipelineRoutes(
 
   // 诊断快照。可选查询参数（沉默决策反问）：
   //   ?silenceKeyword=体检&silenceDays=7 → 附加 silenceSearch（效用评估沉默留痕检索）
+  // 漏斗看板（§12.2，管理后台用）：
+  //   ?funnel=1&days=7[&actorId=]        → 附加 funnel（按天/按 kind/按触点的五级漏斗）
   app.get("/api/proactivity/diagnostics", async (request) => {
     const result: Record<string, unknown> = { ok: true, ...pipeline.diagnostics() };
-    const q = request.query as { silenceKeyword?: string; silenceDays?: string };
+    const q = request.query as {
+      silenceKeyword?: string;
+      silenceDays?: string;
+      funnel?: string;
+      days?: string;
+      actorId?: string;
+    };
     if (q.silenceKeyword?.trim() || q.silenceDays) {
       const days = Math.max(1, Math.min(90, Number(q.silenceDays) > 0 ? Number(q.silenceDays) : 7));
       result.silenceSearch = pipeline.searchSilences({
@@ -310,6 +321,21 @@ export function registerProactivityPipelineRoutes(
         sinceMs: Date.now() - days * 24 * 60 * 60 * 1000,
         limit: 20,
       });
+    }
+    if (q.funnel === "1" || q.funnel === "true") {
+      const days = Math.max(1, Math.min(90, Number(q.days) > 0 ? Number(q.days) : 7));
+      const window = pipeline.funnelWindow(days);
+      result.funnel = buildFunnel({
+        ...window,
+        actorId: q.actorId?.trim() || undefined,
+        days,
+      });
+    }
+    // 手机信号底账（§7.2）：15 分钟桶按天汇总。挑时机的解释链在这里——
+    // 「为什么这个点说话/不说话」的最终判据是用户的作息，不是我们的先验。
+    if (deps.phoneBuckets) {
+      const days = Math.max(1, Math.min(30, Number(q.days) > 0 ? Number(q.days) : 7));
+      result.phoneSignals = deps.phoneBuckets.dailySummary(q.actorId?.trim() || undefined, days);
     }
     return result;
   });
@@ -327,7 +353,8 @@ export function registerProactivityPipelineRoutes(
     }
   const applied = pipeline.recordOutcome(deliveryId, outcome);
   if (!applied) return reply.code(404).send({ ok: false, error: "deliveryId not found" });
-  deps.fabric?.observeOutcome?.(outcome);
+  // 学习回灌（校准器/节律/提醒槽）统一走 proactive.outcome hook
+  // （proactivity/outcome-fanout.ts）——这里再喂一次就是双计，EWMA 会失真。
   return { ok: true, deliveryId, outcome };
 });
 

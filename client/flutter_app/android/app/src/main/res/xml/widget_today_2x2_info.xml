@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  2×2 小组件声明（2026-11-23 §5.3）。
+  minWidth/minHeight 按 (72×格数−2)dp 取整格数，否则启动器会把它归到 1×1；
+  targetCell* 是 Android 12+ 的权威口径。
+  updatePeriodMillis 取系统允许的最小档 30min，只作断网/长时间没推看板时的兜底——
+  正常刷新走看板落盘那一刻（见 OngoingStatusNotifier → TodayWidgetRenderer）。
+  倒计时走字交给 Chronometer，不靠这个周期。
+-->
+<appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
+    android:description="@string/widget_2x2_description"
+    android:initialLayout="@layout/widget_today_2x2"
+    android:minHeight="142dp"
+    android:minResizeHeight="72dp"
+    android:minResizeWidth="72dp"
+    android:minWidth="142dp"
+    android:previewLayout="@layout/widget_today_2x2"
+    android:resizeMode="horizontal|vertical"
+    android:targetCellHeight="2"
+    android:targetCellWidth="2"
+    android:updatePeriodMillis="1800000"
+    android:widgetCategory="home_screen" />

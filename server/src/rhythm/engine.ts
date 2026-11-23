@@ -13,6 +13,12 @@ import {
   ReceptivityDimensionModel,
 } from "./dimensions/receptivity-model.js";
 import { EMPTY_SLEEP_STATE, SleepDimensionModel } from "./dimensions/sleep-model.js";
+import { EMPTY_WAKE_STATE, WakeDimensionModel } from "./dimensions/wake-model.js";
+import {
+  CommuteDimensionModel,
+  commuteMinutesOf as commuteMinutesFromState,
+  EMPTY_COMMUTE_STATE,
+} from "./dimensions/commute-model.js";
 
 import type {
   RhythmConsumer,
@@ -41,7 +47,7 @@ const MAX_PUSH_BUFFER = 200;
 
 export type LifeRhythmEngineOptions = {
   profileStore: RhythmProfileStore;
-  /** 注入自定义模型器（测试用）；缺省注册全部内置四维度模型器 */
+  /** 注入自定义模型器（测试用）；缺省注册全部内置六维度模型器 */
   dimensionModels?: RhythmDimensionModel[];
 };
 
@@ -85,6 +91,8 @@ export class LifeRhythmEngine {
   constructor(private readonly opts: LifeRhythmEngineOptions) {
     const models = opts.dimensionModels ?? [
       new SleepDimensionModel(),
+      new WakeDimensionModel(),
+      new CommuteDimensionModel(),
       new FocusDimensionModel(),
       new OvertimeDimensionModel(),
       new ReceptivityDimensionModel(),
@@ -112,6 +120,61 @@ export class LifeRhythmEngine {
 
   listActorIds(): string[] {
     return this.opts.profileStore.listActorIds();
+  }
+
+  /**
+   * 单维度置信度（0..1）：从画像状态即时派生，与 runAnalysis 内喂给消费方的
+   * confidences 同口径（同一批模型器的 confidence()，不存在第二套算法）。
+   * 画像还没有该维度状态时按空状态算——模型器对空状态一律给 0。
+   */
+  dimensionConfidence(actorId: string, dimension: RhythmDimension): number {
+    const model = this.models.get(dimension);
+    if (!model) return 0;
+    const profile = this.opts.profileStore.get(actorId);
+    const state =
+      (profile?.dimensions as Record<string, unknown> | undefined)?.[dimension] ??
+      emptyDimensionStates()[dimension];
+    try {
+      return model.confidence(state);
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * 作息整体置信度（触点计划 / 时机模型的冷启动闸用，替代此前 bootstrap 里
+   * 「学到就寝与起床就给 0.8」的二值伪码）。
+   *
+   * 权重按"这个维度学不出来对排程影响多大"给：wake 最重（早安 slot 直接用它），
+   * sleep 次之（明日预览），commute 只影响出门/下班两趟。缺维度=0 分，不做
+   * 归一化补偿——只有通勤学出来了、作息完全没学到，整体仍应算冷启动。
+   */
+  rhythmConfidence(
+    actorId: string,
+    weights: Partial<Record<RhythmDimension, number>> = { wake: 0.5, sleep: 0.3, commute: 0.2 },
+  ): number {
+    let total = 0;
+    let weightSum = 0;
+    for (const [dimension, weight] of Object.entries(weights)) {
+      const w = Number(weight) || 0;
+      if (w <= 0) continue;
+      weightSum += w;
+      total += w * this.dimensionConfidence(actorId, dimension as RhythmDimension);
+    }
+    return weightSum > 0 ? Math.round((total / weightSum) * 1000) / 1000 : 0;
+  }
+
+  /**
+   * 出门 / 下班时刻（当日分钟数，PRD §7.3 的 commute 维度 → §3.4 的两个 slot）。
+   * 按 date 落在工作日还是周末取该组中位数；组内样本不足退回总体中位数；
+   * 两条都没有 → 两个 null，触点计划就不生成这两个 slot（宁缺勿假）。
+   */
+  commuteMinutesOf(
+    actorId: string,
+    date: Date,
+  ): { leaveHome: number | null; leaveWork: number | null } {
+    const state = this.opts.profileStore.get(actorId)?.dimensions?.commute;
+    return commuteMinutesFromState(state, date);
   }
 
   // ---- 在线写入接口（无需等夜间分析）----
@@ -374,19 +437,67 @@ function mergeInsights(
 
 /** 缺省空状态（测试与诊断用） */
 export function emptyDimensionStates(): RhythmDimensionStates {
+  const focus = { ...EMPTY_FOCUS_STATE, hourHistogram: [...EMPTY_FOCUS_STATE.hourHistogram], peakBlocks: [] };
   return {
-    sleep: { ...EMPTY_SLEEP_STATE },
-    focus: { ...EMPTY_FOCUS_STATE, hourHistogram: [...EMPTY_FOCUS_STATE.hourHistogram], peakBlocks: [] },
+    sleep: {
+      ...EMPTY_SLEEP_STATE,
+      samples: [],
+      byDaypart: {
+        weekday: { ...EMPTY_SLEEP_STATE.byDaypart.weekday },
+        weekend: { ...EMPTY_SLEEP_STATE.byDaypart.weekend },
+      },
+    },
+    wake: {
+      ...EMPTY_WAKE_STATE,
+      samples: [],
+      byDaypart: {
+        weekday: { ...EMPTY_WAKE_STATE.byDaypart.weekday },
+        weekend: { ...EMPTY_WAKE_STATE.byDaypart.weekend },
+      },
+    },
+    commute: {
+      ...EMPTY_COMMUTE_STATE,
+      days: [],
+      overall: { ...EMPTY_COMMUTE_STATE.overall },
+      byDaypart: {
+        weekday: { ...EMPTY_COMMUTE_STATE.byDaypart.weekday },
+        weekend: { ...EMPTY_COMMUTE_STATE.byDaypart.weekend },
+      },
+      leaveHomeByWeekday: [...EMPTY_COMMUTE_STATE.leaveHomeByWeekday],
+    },
+    focus: {
+      ...focus,
+      byDaypart: {
+        weekday: {
+          ...EMPTY_FOCUS_STATE.byDaypart.weekday,
+          hourHistogram: [...EMPTY_FOCUS_STATE.byDaypart.weekday.hourHistogram],
+          peakBlocks: [],
+        },
+        weekend: {
+          ...EMPTY_FOCUS_STATE.byDaypart.weekend,
+          hourHistogram: [...EMPTY_FOCUS_STATE.byDaypart.weekend.hourHistogram],
+          peakBlocks: [],
+        },
+      },
+    },
     overtime: {
       ...EMPTY_OVERTIME_STATE,
       byWeekday: [...EMPTY_OVERTIME_STATE.byWeekday],
       weekdayDays: [...EMPTY_OVERTIME_STATE.weekdayDays],
       recentDays: [],
+      byDaypart: {
+        weekday: { ...EMPTY_OVERTIME_STATE.byDaypart.weekday },
+        weekend: { ...EMPTY_OVERTIME_STATE.byDaypart.weekend },
+      },
     },
     receptivity: {
       ...EMPTY_RECEPTIVITY_STATE,
       byHour: [...EMPTY_RECEPTIVITY_STATE.byHour],
       byWeekday: [...EMPTY_RECEPTIVITY_STATE.byWeekday],
+      byDaypartHour: {
+        weekday: [...EMPTY_RECEPTIVITY_STATE.byDaypartHour.weekday],
+        weekend: [...EMPTY_RECEPTIVITY_STATE.byDaypartHour.weekend],
+      },
     },
   };
 }

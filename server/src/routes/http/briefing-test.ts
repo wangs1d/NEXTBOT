@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { ServerEventType } from "../../protocol.js";
 import { MorningBriefingService } from "../../services/morning-briefing-service.js";
 import type { MorningBriefingDeps } from "../../services/morning-briefing-service.js";
+import { hasEveningDigestContent } from "../../services/evening-digest-service.js";
 import { getUserPreferences } from "./user-preferences.js";
 import { markMorningBriefingDelivered } from "./user-preferences.js";
 import type { HttpRouteDeps } from "./types.js";
@@ -148,6 +149,15 @@ export function registerEveningDigestTestRoutes(
     }
 
     const digest = await service.generateDigest(sessionId, { previewDate: body.previewDate });
+    // §3.4「没内容时」：明日预览只剩天气 + 一两句闲聊，天气拉不到又没有素材时
+    // 整格 skipped——手动补推也不发空卡（空文案会被客户端整张丢弃）。
+    if (!hasEveningDigestContent(digest)) {
+      app.log.info(
+        { sessionId, previewDate: body.previewDate },
+        "[EveningDigest] 明日预览无内容（无天气且无闲聊素材）→ skipped",
+      );
+      return { ok: true, skipped: true, reason: "no_content", sessionId, digest };
+    }
     const sent = wsRegistry.trySend(
       sessionId,
       JSON.stringify({

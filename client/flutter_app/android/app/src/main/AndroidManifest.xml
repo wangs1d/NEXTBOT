@@ -99,6 +99,51 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
+            <!-- 图标长按快捷方式（2026-11-23 §8.1）：记一下 / 拍一下 / 问一下。
+                 静态 shortcuts 不需要运行时注册，也就没有「第一次装好长按没入口」
+                 那种要等 Launcher 拉一遍的时序问题。 -->
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts"/>
+        </activity>
+
+        <!-- 分享给管家（2026-11-23 §8.1）：系统分享菜单里的「分享给管家」与
+             选中文字菜单里的入口都落这个半透明窗。它不画界面——只在授权还
+             有效时把附件抄进本应用缓存，然后把内容交棒给 Dart 的既有聊天链路
+             （见 ShareIntakeStore / ShareIntakePlugin）。
+             必须 exported=true：别的 App 发起的 intent 才能进来。 -->
+        <activity
+            android:name=".ShareIntakeActivity"
+            android:exported="true"
+            android:label="@string/share_sheet_label"
+            android:excludeFromRecents="true"
+            android:taskAffinity=""
+            android:noHistory="true"
+            android:theme="@style/DialConfirmTheme">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="text/*"/>
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="image/*"/>
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="image/*"/>
+            </intent-filter>
+            <!-- 选中文字 → 管家：与系统分享同一个 Activity、同一条队列，
+                 只在来源标记上区分（process_text），措辞不同而已。
+                 原来只在 <queries> 里声明过（那是「问系统谁能处理」，
+                 不是「本应用能处理」），本条才是让管家出现在选中文本菜单里。 -->
+            <intent-filter>
+                <action android:name="android.intent.action.PROCESS_TEXT"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="text/plain"/>
+            </intent-filter>
         </activity>
 
         <!-- 手机桥接拨号确认窗：Agent 发起 phone.dial 时弹出的全屏半透明窗 -->
@@ -162,6 +207,21 @@
             android:exported="false"
             android:foregroundServiceType="camera"/>
 
+        <!-- 快捷设置磁贴「语音记一下」（2026-11-23 §8.1）：下拉快捷面板里点一下
+             就弹半屏速记卡并开始听写。它不录音、不起服务，只写一个入口标记到
+             原生中转队列，与长按快捷方式 / 常驻通知按钮同一条流程。 -->
+        <service
+            android:name=".QuickNoteTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_tile_voice"
+            android:label="@string/tile_voice_note"
+            android:description="@string/tile_voice_note_description"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE"/>
+            </intent-filter>
+        </service>
+
         <!-- 屏幕录制：mediaProjection 类型前台服务 + MediaRecorder -->
         <service
             android:name=".ScreenRecordService"
@@ -200,6 +260,39 @@
         <receiver
             android:name=".AlarmRingActionsReceiver"
             android:exported="false"/>
+
+        <!-- 常驻通知「完成」按钮（2026-11-23 §5.2）：引擎在就交回 Dart，
+             进程被杀后服务自启、通知还挂着时由它直接打执行端点（token 即授权） -->
+        <receiver
+            android:name=".OngoingStatusReceiver"
+            android:exported="false"/>
+
+        <!-- 桌面小组件（2026-11-23 §5.3）：2×2 与 4×2 两档，读的是常驻通知同一帧看板
+             （ongoing_status_prefs），不建第二条数据链路。APPWIDGET_UPDATE 由系统发出，
+             必须 exported=true，同时用 BIND_APPWIDGET 把入口锁给启动器。 -->
+        <receiver
+            android:name=".widget.TodayWidgetProvider"
+            android:exported="true"
+            android:permission="android.permission.BIND_APPWIDGET">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_today_2x2_info"/>
+        </receiver>
+
+        <receiver
+            android:name=".widget.TodayBoardWidgetProvider"
+            android:exported="true"
+            android:permission="android.permission.BIND_APPWIDGET">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE"/>
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_today_4x2_info"/>
+        </receiver>
 
         <!-- 闹钟响铃前台服务：mediaPlayback 类型（Android 14+ 必须显式声明类型） -->
         <service

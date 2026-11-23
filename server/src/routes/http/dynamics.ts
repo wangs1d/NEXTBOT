@@ -4,17 +4,24 @@
 //
 // 一次请求聚合 Agent 主动性产出，客户端免多次往返：
 //   bills   账单汇总 + 最近条目（bill-parcel-ledger；主动记账）
+//   monthly 「{月份}小结」卡（PRD §9 钱的月报；账单区块顶部）
 //   parcels 快递汇总 + 待取件列表（同台账；快递聚合，待取件排前）
 //   alerts  未决提醒 + 主动动作足迹（attentionStore + activityStore）
 //   mail    邮件流最近要事（跨源采集库 mail 流；low 信号不进动态页）
 //
 // 各数据源均为可选注入：缺哪个该区块为空数组/零值，接口恒 ok:true——
 // 客户端按区块渲染空态，不做整体失败。days 同时约束账单汇总窗口。
+//
+// POST /api/dynamics/bills/category 改一条账单的类目（§9「类目可改」）：回写台账
+// 并打纠正标记，之后识别器把它当训练样本用（见 bill-parcel-classifier 学习层）。
 import type { FastifyInstance } from "fastify";
 
 import { resolveActorId } from "../../agent/actor-id.js";
+import { listBillTypes } from "../../services/bill-parcel-classifier.js";
 import { looksLikeOtpText } from "../../services/mail-watch-service.js";
 import type { BillParcelLedger, BillParcelEntry } from "../../services/bill-parcel-ledger.js";
+import { buildMonthlyBillSummary } from "../../services/monthly-bill-summary.js";
+import type { MonthlyBillSummaryDeps } from "../../services/monthly-bill-summary.js";
 import type { AttentionStore, AttentionRecord } from "../../proactivity/attention-store.js";
 import type { AgentActivityStore } from "../../proactivity/activity-store.js";
 import type { SourceStore } from "../../proactivity/source-store.js";
@@ -25,6 +32,8 @@ export interface DynamicsRouteDeps {
   activityStore?: AgentActivityStore | null;
   /** 跨源采集库（mail 流要事；未注入时 mail 区块为空） */
   sourceStore?: SourceStore | null;
+  /** 订阅盘点（月报卡订阅/续费段数据源；未注入时该段为空） */
+  subscriptionAudit?: MonthlyBillSummaryDeps["subscriptionAudit"];
 }
 
 function clampInt(raw: string | undefined, fallback: number, min: number, max: number): number {
@@ -81,10 +90,11 @@ export function registerDynamicsRoutes(app: FastifyInstance, deps: DynamicsRoute
     const summary = ledger ? ledger.summary({ actorId, days }) : null;
     let parcelEntries: BillParcelEntry[] = [];
     if (ledger) {
-      // 待取件（有取件码）排前；列表整体新→旧
+      // 待取件（有取件码且未确认取走）排前；列表整体新→旧。
+      // 已取件的条目（resolvedAt，2026-11-23 通知闭环）仍留在列表里作历史，排在后面。
       const parcels = ledger.list({ category: "parcel", actorId, limit: 50 });
       const seen = new Set<string>();
-      parcelEntries = [...parcels.filter((e) => e.pickupCode), ...parcels].filter((e) => {
+      parcelEntries = [...parcels.filter((e) => e.pickupCode && !e.resolvedAt), ...parcels].filter((e) => {
         if (seen.has(e.id)) return false;
         seen.add(e.id);
         return true;
@@ -107,9 +117,18 @@ export function registerDynamicsRoutes(app: FastifyInstance, deps: DynamicsRoute
             totalAmount: summary.bills.totalAmount,
             amountCount: summary.bills.amountCount,
             byType: summary.bills.byType,
+            largest: summary.bills.largest,
             recent: summary.recent.filter((e) => e.category === "bill").slice(0, limit),
           }
-        : { count: 0, totalAmount: 0, amountCount: 0, byType: [], recent: [] },
+        : { count: 0, totalAmount: 0, amountCount: 0, byType: [], largest: null, recent: [] },
+      // §9 钱的月报：账单区块顶部的「{月份}小结」卡。
+      // 台账缺失时给 null 而不是零值卡——客户端据此整块不渲染，比显示一排 0 诚实。
+      monthly: ledger
+        ? await buildMonthlyBillSummary(
+            { ledger, subscriptionAudit: deps.subscriptionAudit ?? null },
+            actorId,
+          )
+        : null,
       parcels: {
         count: summary?.parcels.count ?? 0,
         awaitingPickup: summary?.parcels.awaitingPickup ?? 0,
@@ -129,6 +148,34 @@ export function registerDynamicsRoutes(app: FastifyInstance, deps: DynamicsRoute
           .slice(0, limit)
           .map((s) => pickMailSignal(s as Record<string, unknown>)),
       },
+      // 改类目的候选项（与识别规则同源，见 listBillTypes）
+      billTypes: listBillTypes(),
     };
   });
+
+  /**
+   * 改一条账单的类目（§9「类目可改，改动作为分类器的反馈」）。
+   *
+   * 落点是台账条目本身（bill-parcel-ledger.json 的 billType + correctedBillType
+   * 标记）——不新建表、不新建文件；识别器下一次 ingest 就把这条当训练样本读走。
+   */
+  app.post<{ Body: { userId?: string; sessionId?: string; id?: string; billType?: string } }>(
+    "/api/dynamics/bills/category",
+    async (request, reply) => {
+      const ledger = deps.billParcelLedger;
+      if (!ledger) return reply.code(503).send({ ok: false, error: "账单台账未启用" });
+      const b = request.body;
+      const billType = String(b?.billType ?? "").trim();
+      if (!b?.id || !billType) {
+        return reply.code(400).send({ ok: false, error: "id / billType 必填" });
+      }
+      if (billType.length > 24) {
+        return reply.code(400).send({ ok: false, error: "billType 过长（≤24 字）" });
+      }
+      const actorId = resolveActorId({ userId: b.userId, sessionId: b.sessionId ?? "" });
+      const entry: BillParcelEntry | null = ledger.setBillType(b.id, actorId, billType);
+      if (!entry) return reply.code(404).send({ ok: false, error: "账单不存在或不属于该用户" });
+      return { ok: true, entry };
+    },
+  );
 }

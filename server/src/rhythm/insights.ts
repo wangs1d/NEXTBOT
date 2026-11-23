@@ -49,6 +49,61 @@ export function buildInsights(
     }
   }
 
+  // ── 起床（§7.3 从睡眠拆出的维度：早安 slot 直接用它，所以单独说一句话） ──
+  const wake = dimensions.wake;
+  if (wake && wake.sampleCount >= 5 && wake.wakeHour !== null) {
+    const weekday = wake.byDaypart?.weekday;
+    const weekend = wake.byDaypart?.weekend;
+    const gap =
+      weekday?.wakeHour !== null && weekday?.wakeHour !== undefined && weekend?.wakeHour !== null && weekend?.wakeHour !== undefined && weekday.sampleCount >= 2 && weekend.sampleCount >= 2
+        ? Math.round((weekend.wakeHour - weekday.wakeHour) * 60)
+        : null;
+    push({
+      dimension: "wake",
+      kind: "observation",
+      confidence: Math.min(1, wake.sampleCount / 7),
+      text:
+        gap !== null && Math.abs(gap) >= 45
+          ? `工作日大概 ${formatHour(weekday!.wakeHour!)} 起，周末要睡到 ${formatHour(weekend!.wakeHour!)}（差 ${Math.abs(gap)} 分钟）`
+          : `你一般 ${formatHour(wake.wakeHour)} 前后起床`,
+      evidence: wake.samples.slice(-5).map((s) => `${s.date} ${formatHour(s.hour)} 起`),
+      notifiable: false,
+    });
+    if (Math.abs(wake.trendMinutes) >= 45) {
+      push({
+        dimension: "wake",
+        kind: "trend",
+        confidence: Math.min(1, wake.sampleCount / 7),
+        text: `起床时间比之前${wake.trendMinutes > 0 ? "晚" : "早"}了约 ${Math.abs(wake.trendMinutes)} 分钟`,
+        evidence: wake.samples.slice(-6).map((s) => `${s.date} ${formatHour(s.hour)} 起`),
+        notifiable: false,
+      });
+    }
+  }
+
+  // ── 通勤（§7.3 新维度：出门/下班两个触点的依据） ──
+  const commute = dimensions.commute;
+  if (commute && commute.overall.days >= 3 && commute.overall.leaveHomeHour !== null) {
+    const weekday = commute.byDaypart?.weekday;
+    push({
+      dimension: "commute",
+      kind: "observation",
+      confidence: Math.min(1, commute.overall.days / 5),
+      text: `工作日差不多 ${formatHour(weekday?.leaveHomeHour ?? commute.overall.leaveHomeHour)} 出门${
+        commute.overall.leaveWorkHour !== null ? `、${formatHour(commute.overall.leaveWorkHour)} 离开公司` : ""
+      }`,
+      evidence: commute.days
+        .slice(-5)
+        .map(
+          (d) =>
+            `${d.date} 离家${d.leaveHomeHour !== null ? ` ${formatHour(d.leaveHomeHour)}` : " —"}${
+              d.leaveWorkHour !== null ? ` 离司 ${formatHour(d.leaveWorkHour)}` : ""
+            }`,
+        ),
+      notifiable: false,
+    });
+  }
+
   // ── 加班/晚归 ──
   const overtime = dimensions.overtime;
   if (overtime.totalDays >= 6) {

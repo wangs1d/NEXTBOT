@@ -22,6 +22,7 @@ import "../core/services/client_geofence_service.dart";
 import "../core/services/client_location_service.dart";
 import "../core/services/local_notification_service.dart";
 import "../core/services/local_notification_actions.dart";
+import "../core/services/proactive_decision.dart";
 import "../core/services/tts_player.dart";
 import "../core/services/ws_chat_service.dart";
 import "../core/services/ws_event_router.dart";
@@ -172,6 +173,22 @@ class MobileChatController extends ChangeNotifier {
 
   /// 服务端线程历史拉取去重闸（每个线程只拉一次）。
   final Set<String> _serverHistoryPulled = <String>{};
+
+  /// 「App 被杀时」的决策半屏页入口（2026-11-30 PRD §4.4 行 2）。
+  ///
+  /// 厂商通知（华为 Push Kit）渲染不出按钮，点开只能把 App 拉起来。拉起来之后
+  /// 这条待处理决策从哪儿来？就从这个口子：服务端把当初**推进去**的那条主动消息
+  /// 走补投通道重放（`agent.proactive_message` + `replay:true` + `pushed:true`，
+  /// 载荷里带着渲染好的 `actionIntent`：标题/正文/≤2 个动作 + HMAC token），
+  /// [DecisionRequest.fromProactiveEvent] 认出「这是一条还活着的、推送弹过的待拍板
+  /// 事项」，就交给 main.dart 端半屏页。
+  /// 与 `LocalNotificationService.onDecisionTap`（前台服务通知被点）是两条入口、
+  /// 同一个 [DecisionRequest]、同一个半屏页、同一个 execute 通道。
+  void Function(DecisionRequest decision)? onDecisionRequest;
+
+  /// 本进程已经端过半屏页的 intentId。补投区保留 24h，每次重连/每次 session.init
+  /// 都会重放一遍——不去重就会变成「点一次通知，之后每重连弹一次同一个决定」。
+  final Set<String> _decisionSheetShown = <String>{};
 
   /// 是否已连上过一次（区分首连与重连：重连要做漏消息对账，见 ws_connected）。
   bool _everConnected = false;
@@ -1641,6 +1658,18 @@ class MobileChatController extends ChangeNotifier {
         // 提醒升级链 popup 级（2026-10-14 与桌面端对齐）：决策卡落对话流。
         // 后台时应用内卡片看不见，补一条系统通知触达（点开回前台后卡在流里）。
         _handleReminderPopupEvent(payload);
+      case "action_intent.resolved":
+        // 跨面同步（§4.5）：同一件事在别的端（桌面卡片 / 小组件 / 对话内按钮）已经
+        // 办完或已过期，服务端广播回执。手机这边收起那条还挂着按钮的通知——
+        // 按钮点了只会拿到「已完成」，留着比收起更打扰。
+        {
+          final String intentKey = (payload["intentId"]?.toString() ?? "").isNotEmpty
+              ? payload["intentId"].toString()
+              : (payload["deliveryId"]?.toString() ?? "");
+          if (intentKey.isNotEmpty) {
+            unawaited(LocalNotificationService.dismissIfPending(intentKey));
+          }
+        }
       case "agent.proactive_message":
         // 主动性消息（2026-11-07）：引导开场白等告知类文本落文字气泡，
         // 服务端按分泡节奏连推两条即两泡。
@@ -1751,6 +1780,12 @@ class MobileChatController extends ChangeNotifier {
         // messageId 重投，所以这里只提示、不复位轮次——重投成功会照常由
         // turn_started/chunk/done 接手。
         final String errCode = payload["code"]?.toString() ?? "";
+        if (errCode == "UNKNOWN_EVENT") {
+          // 向前兼容：旧服务端不认识新客户端的事件（如 client.presence_state）
+          // 会回这条。它不是用户可行动的故障，展示出来只会刷一条红色提示。
+          debugPrint("[chat] ignore UNKNOWN_EVENT: ${payload["message"]}");
+          return;
+        }
         if (errCode == "FORBIDDEN" || errCode == "SESSION_REQUIRED") {
           errorMessage = _identityResyncHint;
           notifyListeners();
@@ -1937,6 +1972,15 @@ class MobileChatController extends ChangeNotifier {
   bool get _appBackgrounded =>
       AmbientFeedsController.instance.isAppBackgrounded?.call() ?? false;
 
+  /// 横幅归属端不是本机（2026-11-23 主动触达 M1，需求 §3.7「多端取打断成本最低的
+  /// 那一端」）。服务端只在两端都在线时才下发 `notifyOn`：人在电脑前活跃时这条
+  /// 只归桌面弹，本机静默落气泡——同一条消息两端各弹一次是双份打扰。
+  bool _bannerOnOtherDevice(Map<String, dynamic> payload) {
+    final String notifyOn = payload["notifyOn"]?.toString() ?? "";
+    if (notifyOn.isEmpty) return false;
+    return notifyOn != (AmbientFeedsController.instance.isMobile ? "mobile" : "desktop");
+  }
+
   /// 提醒升级链 popup 级（reminder_popup）→ 对话流文本气泡（真实消息持久化）。
   /// 后台时补系统通知触达；落流即已触达，自动回传 attention ack 让服务端
   /// 升级链收敛——升级链此后只在投递失败（离线/杀进程）时逐级升级。
@@ -2029,6 +2073,10 @@ class MobileChatController extends ChangeNotifier {
     final String title = payload["title"]?.toString() ?? "Agent 主动联系";
     final String text = payload["text"]?.toString() ?? "";
     final String deliveryId = payload["deliveryId"]?.toString() ?? "";
+    // 「为什么是现在」（§3.10 可解释，2026-11-23）：服务端把引擎裁决链翻成的
+    // 一句人话（explainTiming）随载荷下发，气泡长按面板与通知栏 infoText 共用。
+    // 缺省不下发 = 普通消息，长按无响应（与对话回复同权）。
+    final String why = payload["why"]?.toString().trim() ?? "";
     if (deliveryId.isNotEmpty) {
       AmbientFeedsController.instance
           .sendProactiveOutcome(deliveryId, "viewed");
@@ -2044,7 +2092,19 @@ class MobileChatController extends ChangeNotifier {
     // 落流补投（2026-11-23）：重连补投的历史消息只落气泡——横幅在推送送达时
     // 已经弹过一次，补投再弹就是同一内容打扰两次。
     final bool isReplay = payload["replay"] == true;
-    if (_appBackgrounded && !isReplay && text.trim().isNotEmpty) {
+    // §4.4 行 2「进程被杀、厂商通道可用」：厂商通知渲染不出按钮，点开只是把 App
+    // 冷启动起来。当初推进去的那条待拍板事项走补投通道回到这条事件里
+    // （pushed:true + actionIntent），这里认出它就端上决策半屏页——而不是把用户
+    // 丢在首页让他自己翻那条气泡。补投区留 24h、每次重连都重放，故按 intentId
+    // 做进程内去重；过期/已办/无动作的条目在 fromProactiveEvent 里已被挡掉。
+    final DecisionRequest? decision = DecisionRequest.fromProactiveEvent(
+      payload,
+      nowMs: DateTime.now().millisecondsSinceEpoch,
+    );
+    if (decision != null && _decisionSheetShown.add(decision.intentId)) {
+      onDecisionRequest?.call(decision);
+    }
+    if (_appBackgrounded && !isReplay && !_bannerOnOtherDevice(payload) && text.trim().isNotEmpty) {
       // 手机后台（类微信常在线）：系统通知触达，点开回前台看气泡
       unawaited(LocalNotificationService.show(
         title: title,
@@ -2052,7 +2112,39 @@ class MobileChatController extends ChangeNotifier {
         deliveryId: deliveryId.isEmpty ? null : deliveryId,
         intentId: intentId.isEmpty ? null : intentId,
         actions: actions,
+        why: why.isEmpty ? null : why,
       ));
+    }
+    // §4.3 步骤 3：用户在通知栏回的那一句话，作为**一条**用户气泡落进主会话。
+    // 服务端唯一写入端是 runChatTurnForActor（一次性 token 幂等 + turn 级幂等），
+    // 客户端绝不替它再发一遍 chat.user_message / chat.user_action——那条转写路
+    // 「必然多出一条用户气泡」，叠上本事件与历史 reconcile，就是「回一句冒出好几
+    // 条」的来路。回复原文随应答事件经 payload.userText 带回（服务端未带时这里
+    // 什么都不做，气泡由历史 reconcile 补上），气泡 id 直接复用服务端落库 id
+    // （notification-reply-<root>-<被应答轮次>）：重复投递与补投按同一 id 归并。
+    final Object? replyRaw = payload["reply"];
+    final String replyUserText = (payload["userText"]?.toString() ?? "").trim();
+    if (replyRaw is Map && replyUserText.isNotEmpty) {
+      final String root = replyRaw["rootIntentId"]?.toString() ?? "";
+      final int? answeredRound =
+          int.tryParse(replyRaw["round"]?.toString() ?? "");
+      // 事件里的 round 是应答的「下一轮」：被应答的那轮 = round - 1
+      if (root.isNotEmpty && answeredRound != null && answeredRound > 1) {
+        final String userMsgId =
+            "notification-reply-$root-${answeredRound - 1}";
+        if (!_mainThreadMessages
+            .any((ChatMessage m) => m.messageId == userMsgId)) {
+          final ChatMessage userMsg = ChatMessage(
+            messageId: userMsgId,
+            sessionId: _mainSessionKey,
+            role: "user",
+            text: replyUserText,
+            timestamp: DateTime.now(),
+          );
+          _mainThreadMessages.add(userMsg);
+          _persist(userMsg);
+        }
+      }
     }
     if (text.trim().isEmpty) return;
     // 应用内顶部弹窗已删除（2026-11-04 定调）：告知类只落对话流气泡，
@@ -2084,6 +2176,7 @@ class MobileChatController extends ChangeNotifier {
       // 「通知即界面」（2026-11-13）：同一批动作同时挂到气泡与通知栏——
       // 两个渲染面，同一个 actionId + 同一枚 token。
       notifyActions: actions.isEmpty ? null : actions,
+      why: why.isEmpty ? null : why,
     );
     // 首启引导两泡（kind=first_meeting_intro）：不走「收到即落屏」，进排队通道
     // 按节奏逐条揭示——服务端两条相隔不到一秒，直接 append 会两泡一起刷在
@@ -2188,6 +2281,15 @@ class MobileChatController extends ChangeNotifier {
   /// 回执气泡，让用户看见「到底发生了什么」——不回执的话按钮点了像没点。
   Future<void> runNotifyAction(NotifyAction action) async {
     final ActionReceipt receipt = await executeNotifyAction(action);
+    // 失败 ≠ 已经拍板：按钮必须留着让用户重试（2026-11-23 周界 401 事故——
+    // 按钮被撤掉、错误文案却伪装成助手回执，用户既不能重试也不知道发生了
+    // 什么）。失败走错误提示条，成功才撤按钮并落回执气泡。
+    if (!receipt.ok) {
+      errorMessage = receipt.message;
+      _armErrorHintAutoClear();
+      notifyListeners();
+      return;
+    }
     final List<ChatMessage> messages = _mainThreadMessages;
     for (int i = 0; i < messages.length; i++) {
       final List<NotifyAction>? acts = messages[i].notifyActions;

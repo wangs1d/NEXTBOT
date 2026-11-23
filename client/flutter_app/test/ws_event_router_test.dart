@@ -631,6 +631,7 @@ void main() {
       "locationResponder": WsEventCatalog.locationResponder,
       "scheduleToolResultSync": WsEventCatalog.scheduleToolResultSync,
       "pureVoiceSpeech": WsEventCatalog.pureVoiceSpeech,
+      "notificationResolve": WsEventCatalog.notificationResolve,
       "connectionState": WsEventCatalog.connectionState,
     };
 

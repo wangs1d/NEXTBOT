@@ -66,6 +66,8 @@ class UserPreferencesApi {
     bool? showOnDesktopLaunch,
     Map<String, bool>? sections,
     Map<String, Object?>? agentProfile,
+    // 主动消息频率档（§3.10）：quiet / normal / chatty
+    String? frequencyTier,
   }) async {
     final Uri uri = Uri.parse("$baseUrl/api/user-preferences");
     final Map<String, Object?> body = <String, Object?>{
@@ -80,6 +82,8 @@ class UserPreferencesApi {
           if (sections != null) "sections": sections,
         },
         if (agentProfile != null) "agentProfile": agentProfile,
+        if (frequencyTier != null)
+          "proactivity": <String, Object?>{"frequencyTier": frequencyTier},
       },
     };
     final http.Response res = await _client

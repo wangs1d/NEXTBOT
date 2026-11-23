@@ -3,7 +3,9 @@ import "package:flutter_map/flutter_map.dart";
 import "package:latlong2/latlong.dart" show LatLng;
 
 import "../../core/utils/agent_result_parser.dart";
+import "../../core/utils/coord_transform.dart";
 import "../../core/utils/link_utils.dart";
+import "ride_map_3d_view.dart";
 import "shopping/shopping_shared.dart";
 
 /// 叫车报价卡（cardType = "ride_quote"）。
@@ -39,7 +41,39 @@ class _RideQuoteCardState extends State<RideQuoteCard> {
   /// 已点选、正等服务端出确认卡：锁住整卡避免重复点单。
   String _pickedOptionId = "";
 
+  /// 服务端配了 AMAP_JS_KEY 时路线图走高德 JS 3D；失败自动回退 FlutterMap
+  bool _use3d = false;
+  late final List<({double lat, double lng})> _routeWgs;
+
   ColorScheme get cs => widget.cs;
+
+  @override
+  void initState() {
+    super.initState();
+    _use3d = shopBool(widget.payload["map3d"]);
+    // 服务端下发的轨迹是 WGS-84；3D 组件内部再转 GCJ，这里必须冻结成稳定实例
+    _routeWgs = _extractRouteWgs(_asMap(widget.payload["route"])["points"]);
+  }
+
+  List<({double lat, double lng})> _extractRouteWgs(Object? rawPoints) {
+    final List<dynamic> list = rawPoints is List ? rawPoints : const <dynamic>[];
+    final List<({double lat, double lng})> out = <({double lat, double lng})>[];
+    for (final dynamic item in list) {
+      if (item is List && item.length >= 2) {
+        final num? lat = shopNum(item[0]);
+        final num? lng = shopNum(item[1]);
+        if (lat != null && lng != null) {
+          out.add((lat: lat.toDouble(), lng: lng.toDouble()));
+        }
+      }
+    }
+    return out;
+  }
+
+  void _fallbackTo2d() {
+    if (!mounted || !_use3d) return;
+    setState(() => _use3d = false);
+  }
 
   void _emit(Map<String, dynamic> option) {
     if (_pickedOptionId.isNotEmpty) return;
@@ -81,18 +115,15 @@ class _RideQuoteCardState extends State<RideQuoteCard> {
     return const <String, dynamic>{};
   }
 
-  /// extra.ride.route.points（[[lat,lng],…]）→ LatLng 列表。
-  List<LatLng> _routePoints(Object? raw) {
-    final List<dynamic> list = raw is List ? raw : const <dynamic>[];
+  /// 轨迹 WGS-84（服务端基准）→ 平面底图 GCJ-02 的 LatLng 列表。
+  ///
+  /// 滴滴轨迹由服务端统一转成 WGS-84 下发；高德栅格底图是 GCJ-02，
+  /// 直接画会整体偏移，所以渲染前逐点转一次。（3D 模式由 WebView 组件转）
+  List<LatLng> _routeGcj(List<({double lat, double lng})> points) {
     final List<LatLng> out = <LatLng>[];
-    for (final dynamic item in list) {
-      if (item is List && item.length >= 2) {
-        final num? lat = shopNum(item[0]);
-        final num? lng = shopNum(item[1]);
-        if (lat != null && lng != null) {
-          out.add(LatLng(lat.toDouble(), lng.toDouble()));
-        }
-      }
+    for (final ({double lat, double lng}) p in points) {
+      final ({double lat, double lng}) gcj = wgs84ToGcj02(p.lat, p.lng);
+      out.add(LatLng(gcj.lat, gcj.lng));
     }
     return out;
   }
@@ -118,7 +149,7 @@ class _RideQuoteCardState extends State<RideQuoteCard> {
     final String providerLabel = shopStr(p["providerLabel"]);
     final String note = shopStr(p["note"]);
     final Map<String, dynamic> route = _asMap(p["route"]);
-    final List<LatLng> routePoints = _routePoints(route["points"]);
+    final List<LatLng> routePoints = _routeGcj(_routeWgs);
     final String rideAppLink = shopStr(p["rideAppLink"]);
 
     return ShopCardShell(
@@ -146,14 +177,20 @@ class _RideQuoteCardState extends State<RideQuoteCard> {
                   ),
           ),
           ShopDivider(cs: cs),
-          if (routePoints.length >= 2) ...<Widget>[
+          if (_routeWgs.length >= 2) ...<Widget>[
             Padding(
               padding: const EdgeInsets.fromLTRB(13, 10, 13, 0),
               child: ClipRRect(
                 borderRadius: BorderRadius.circular(10),
                 child: SizedBox(
                   height: 130,
-                  child: FlutterMap(
+                  child: _use3d
+                      ? RideMap3dView(
+                          mode: "route",
+                          routePoints: _routeWgs,
+                          onFailed: _fallbackTo2d,
+                        )
+                      : FlutterMap(
                     options: MapOptions(
                       initialCameraFit: CameraFit.coordinates(
                         coordinates: routePoints,

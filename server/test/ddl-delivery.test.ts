@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { EveningDigestService } from "../src/services/evening-digest-service.js";
+import {
+  EveningDigestService,
+  hasEveningDigestContent,
+} from "../src/services/evening-digest-service.js";
 import { MorningBriefingService } from "../src/services/morning-briefing-service.js";
 import type { DdlItem } from "../src/services/ddl-radar-service.js";
 
@@ -20,9 +23,9 @@ function item(over: Partial<DdlItem> & { id: string; title: string }): DdlItem {
   };
 }
 
-// ───────────────────────── 睡前备忘（L2） ─────────────────────────
+// ───────────────────────── 明日预览（L2 → 问答面，§3.4） ─────────────────────────
 
-test("晚间 digest 带上 L2 档：明天到期 + 今天已过期，且按截止时间升序", async () => {
+test("L2 档（明天到期 + 今天已过期）落在问答数据面，且按截止时间升序", async () => {
   const overdue = item({
     id: "commitment:late",
     title: "交实习周报",
@@ -39,22 +42,26 @@ test("晚间 digest 带上 L2 档：明天到期 + 今天已过期，且按截�
       forEvening: () => ({ tomorrow: [tomorrow], overdue: [overdue] }),
     },
   });
-  const digest = await svc.generateDigest("s1");
+  const facts = await svc.generatePreviewFacts("s1");
 
-  assert.equal(digest.deadlineReminders?.length, 2);
+  assert.equal(facts.deadlineReminders?.length, 2);
   assert.deepEqual(
-    digest.deadlineReminders?.map((i) => i.title),
+    facts.deadlineReminders?.map((i) => i.title),
     ["交实习周报", "交数据结构作业"],
     "过期项按时间排在前面",
   );
+
+  // 2026-11-23 §3.4：截止事项只在早安说，睡前的明日预览载荷里整块不存在
+  const digest = await svc.generateDigest("s1");
+  assert.equal("deadlineReminders" in digest, false);
 });
 
-test("没有 DDL 时字段整体省略（卡上不出现空块）", async () => {
+test("没有 DDL 时字段整体省略（问答面不出现空块）", async () => {
   const svc = new EveningDigestService({
     ddlRadar: { forEvening: () => ({ tomorrow: [], overdue: [] }) },
   });
-  const digest = await svc.generateDigest("s1");
-  assert.equal(digest.deadlineReminders, undefined);
+  const facts = await svc.generatePreviewFacts("s1");
+  assert.equal(facts.deadlineReminders, undefined);
 });
 
 test("radar 抛错 → 降级省略，不影响 digest 主链路", async () => {
@@ -66,11 +73,12 @@ test("radar 抛错 → 降级省略，不影响 digest 主链路", async () => {
     },
   });
   const digest = await svc.generateDigest("s1");
-  assert.equal(digest.deadlineReminders, undefined);
   assert.equal(typeof digest.narrationText, "string");
+  const facts = await svc.generatePreviewFacts("s1");
+  assert.equal(facts.deadlineReminders, undefined);
 });
 
-test("确定性兜底文案带上要交的事（LLM 未注入时也不会漏）", async () => {
+test("睡前文案不再念要交的事（§3.4：LLM 未注入的兜底文案同样只说天气 + 闲聊）", async () => {
   const svc = new EveningDigestService({
     ddlRadar: {
       forEvening: () => ({
@@ -80,8 +88,12 @@ test("确定性兜底文案带上要交的事（LLM 未注入时也不会漏）"
     },
   });
   const digest = await svc.generateDigest("s1");
-  assert.match(digest.narrationText, /要交/);
-  assert.match(digest.narrationText, /数据结构作业/);
+  // 这天既没天气也没闲聊素材 → 整格无话可说（不发，而不是发一句催促）
+  assert.doesNotMatch(digest.narrationText, /要交|数据结构作业/);
+  assert.equal(hasEveningDigestContent(digest), false);
+  // 数据没丢：问「明天有什么安排」仍然答得到
+  const facts = await svc.generatePreviewFacts("s1");
+  assert.match(facts.deadlineReminders?.[0]?.title ?? "", /数据结构作业/);
 });
 
 // ───────────────────────── 晨间简报（L3 + L1） ─────────────────────────

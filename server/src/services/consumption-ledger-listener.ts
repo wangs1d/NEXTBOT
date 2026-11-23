@@ -33,6 +33,19 @@ export interface ConsumptionLedgerListenerDeps {
   /** 月度报告生成完成回调（装配层接 ProactivityHub speak，monthly_report kind） */
   onMonthlyReport?: (actorId: string, reportText: string) => void;
   /**
+   * 每月 1 日月度边界回调（装配层接「钱的月报」卡推送，§9）。
+   *
+   * **这里不新起定时器**：月报推送需要一天一次的确定性触发，而本类的每日扫描
+   * tick（start() 的每小时检查 + lastScanDay 去重）已经在每月 1 日跑过一遍了，
+   * 挂它末尾即可。回调抛错由调用处吞掉，不影响消费月报主体。
+   */
+  onMonthStart?: (actorId: string, now: Date) => void | Promise<void>;
+  /**
+   * 月度边界额外要覆盖的 actor（§9）：账单台账里有条目的人未必在 finance-deep
+   * 有账本，只用 listActorIds() 会漏掉他们。消费月报仍只发 finance 账本的 actor。
+   */
+  monthStartExtraActors?: () => string[];
+  /**
    * 单次 LLM 总结函数（月报措辞；externalChat.streamCompletion 的薄包装，
    * 与 ProactivityHub llmComplete 同模式）。未注入时月报退化为确定性拼接文本。
    */
@@ -374,7 +387,7 @@ export class ConsumptionLedgerListener {
 
   /**
    * 每日扫描：全部有账本的 actor 预算检查；
-   * 每月 1 日追加生成上月消费月报（确定性数据 + 单次 LLM 总结）。
+   * 每月 1 日追加生成上月消费月报 + 「钱的月报」小结推送（§9）。
    * 测试可直调（注入 now）。
    */
   async runDailyScan(now: Date = new Date()): Promise<void> {
@@ -389,6 +402,18 @@ export class ConsumptionLedgerListener {
           await this.generateMonthlyReport(actorId, now);
         } catch (err) {
           console.log(`[ConsumptionLedger] 月报生成失败（忽略）actor=${actorId}: ${err}`);
+        }
+      }
+      // 钱的月报（§9）：同一个天边界另发一条只说"小结好了"的推送（不带金额）。
+      // 覆盖面上多收台账独有的 actor——月报卡的数是台账的数，不是 finance 的数。
+      const digestActors = [
+        ...new Set([...actors, ...(this.deps.monthStartExtraActors?.() ?? [])]),
+      ];
+      for (const actorId of digestActors) {
+        try {
+          await this.deps.onMonthStart?.(actorId, now);
+        } catch (err) {
+          console.log(`[ConsumptionLedger] 月度小结推送失败（忽略）actor=${actorId}: ${err}`);
         }
       }
     }

@@ -214,6 +214,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
             renderBlocks: _decryptRenderBlocks(map["renderBlocks"]),
             envelopeBlocks: _decryptRenderBlocks(map["envelopeBlocks"]),
             eveningDigest: _decryptEveningDigest(map["eveningDigest"]),
+            why: _decryptWhy(map["why"]),
           );
         }).toList();
       }
@@ -665,6 +666,8 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
       renderBlocks: message.renderBlocks,
       envelopeBlocks: message.envelopeBlocks,
       eveningDigest: message.eveningDigest,
+      // 「为什么是现在」一句话（§3.10）：随气泡落盘，重启后长按仍可解释。
+      why: message.why,
     );
     // 按 (sessionId, messageId) upsert：同一条消息（如流式期间先存部分文本、
     // done 后再存完整文本）只保留一条记录，避免本地历史出现重复气泡。
@@ -791,6 +794,17 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
     }
   }
 
+  /// 解密「为什么是现在」一句话（why，§3.10）；损坏/旧记录缺键返回 null。
+  String? _decryptWhy(Object? stored) {
+    if (stored is! String || stored.isEmpty) return null;
+    try {
+      final String plain = _decryptFor(stored, _userPin);
+      return plain.isEmpty ? null : plain;
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// 加密交错渲染块（renderBlocks）为存储字符串（结构同 mediaCards 的列表）。
   String? _encryptRenderBlocks(List<Map<String, dynamic>>? blocks) {
     if (blocks == null || blocks.isEmpty) return null;
@@ -879,6 +893,10 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
                       "envelopeBlocks": _encryptRenderBlocks(m.envelopeBlocks),
                   if (m.eveningDigest != null)
                     "eveningDigest": _encryptEveningDigest(m.eveningDigest),
+                  // why 是从正文衍生的一句用户上下文（「你设的 11:10 提醒…」），
+                  // 与 text 同策略加密落盘。
+                  if (m.why != null && m.why!.isNotEmpty)
+                    "why": _encryptFor(m.why!, _userPin),
                 },
               )
               .toList(),

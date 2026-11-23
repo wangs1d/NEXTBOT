@@ -31,6 +31,7 @@ import type {
 } from "../booking-provider.js";
 import type { McpClientService } from "../../mcp-client-service.js";
 import { drivingRouteViaDidi, rideAppLinkViaDidi, type DrivingRouteSummary } from "../../ride-pickup-candidates.js";
+import { gcj02ToWgs84, wgs84ToGcj02 } from "../../../skills/travel-planning/coord-transform.js";
 
 /** 从 MCP 工具结果提取文本（content[].text 或原始 JSON） */
 function textOf(result: Record<string, unknown>): string {
@@ -143,11 +144,15 @@ export class DidiMcpRideProvider implements BookingProvider {
     return issue ? { ok: false, reason: issue } : { ok: true };
   }
 
-  /** maps_textsearch：地址 → {lng,lat,name}（滴滴要求坐标来自本工具，不能假设） */
+  /**
+   * maps_textsearch：地址 → {lng,lat,name}。滴滴要求坐标来自本工具。
+   * 返回的坐标是 **WGS-84**（滴滴给 GCJ-02，这里统一转回服务端基准），
+   * 估价/算路时再由调用方转 GCJ——全链路只有一处转换口径。
+   */
   private async textsearch(
     keywords: string,
     city?: string,
-  ): Promise<{ lng: string; lat: string; name: string } | null> {
+  ): Promise<{ lng: number; lat: number; name: string } | null> {
     const res = await this.mcp.callTool(
       "didi",
       "maps_textsearch",
@@ -167,18 +172,22 @@ export class DidiMcpRideProvider implements BookingProvider {
       if (badCode || badStatus) return null;
     }
     const loc = deepFind(parsed, /^(location|lng_lat|coord)$/i);
-    let lng: unknown;
-    let lat: unknown;
+    let lngRaw: unknown;
+    let latRaw: unknown;
     if (loc && typeof loc === "object") {
-      lng = (loc as { lng?: unknown }).lng;
-      lat = (loc as { lat?: unknown }).lat;
+      lngRaw = (loc as { lng?: unknown }).lng;
+      latRaw = (loc as { lat?: unknown }).lat;
     }
-    if (lng === undefined || lat === undefined) return null;
+    const lngN = Number(lngRaw);
+    const latN = Number(latRaw);
+    if (!Number.isFinite(lngN) || !Number.isFinite(latN)) return null;
     // 生产端点 POI 名在 display_name（沙箱是 name/title），取不到再落回 keywords
     const name = String(
       deepFind(parsed, /^(display_?name|name|title)$/i) || keywords,
     );
-    return { lng: String(lng), lat: String(lat), name };
+    // 滴滴 GCJ-02 → WGS-84（服务端基准）
+    const wgs = gcj02ToWgs84(latN, lngN);
+    return { lng: wgs.longitude, lat: wgs.latitude, name };
   }
 
   async search(
@@ -199,7 +208,9 @@ export class DidiMcpRideProvider implements BookingProvider {
     // 起点：坐标直传 > 坐标对文本 > 地址检索 > 客户端 GPS。
     // 定位标签只有区县级粗粒度，地理编码要么失败要么锚到区中心
     // （真机实证报「无法定位/没有细地址」），有坐标就绝不倒腾回文本。
-    let from: { lng: string; lat: string; name: string } | null = null;
+    // 这里所有坐标统一为 **WGS-84**（手机 GPS / 卡内选点都是 WGS），
+    // 真正调滴滴（GCJ-02）时在下方 estimate 处一次性转换。
+    let from: { lng: number; lat: number; name: string } | null = null;
     const coords =
       isRecord(query.params.pickupCoords) &&
       typeof query.params.pickupCoords.lat === "number" &&
@@ -207,15 +218,11 @@ export class DidiMcpRideProvider implements BookingProvider {
         ? { lat: query.params.pickupCoords.lat as number, lng: query.params.pickupCoords.lng as number }
         : null;
     if (coords) {
-      from = {
-        lng: coords.lng.toFixed(6),
-        lat: coords.lat.toFixed(6),
-        name: pickupText || "当前位置",
-      };
+      from = { lng: coords.lng, lat: coords.lat, name: pickupText || "当前位置" };
     } else if (pickupText) {
       const pair = parseCoordPair(pickupText);
       if (pair) {
-        from = { lng: pair.lng.toFixed(6), lat: pair.lat.toFixed(6), name: "当前位置" };
+        from = { lng: pair.lng, lat: pair.lat, name: "当前位置" };
       } else {
         from = await this.textsearch(pickupText, city);
       }
@@ -223,11 +230,7 @@ export class DidiMcpRideProvider implements BookingProvider {
     if (!from) {
       const loc = ctx.location ?? query.location;
       if (loc) {
-        from = {
-          lng: loc.longitude.toFixed(6),
-          lat: loc.latitude.toFixed(6),
-          name: loc.label?.trim() || "当前位置",
-        };
+        from = { lng: loc.longitude, lat: loc.latitude, name: loc.label?.trim() || "当前位置" };
       }
     }
     if (!from) {
@@ -246,16 +249,18 @@ export class DidiMcpRideProvider implements BookingProvider {
     const dest = await this.textsearch(dropoffText, city);
     if (!dest) return { ok: false, error: `无法定位目的地「${dropoffText}」，请说更具体的地址（如「太古里北门」）`, retryable: true };
 
-    // 数字/坐标参数一律传字符串（滴滴 MCP 契约）
+    // 滴滴估价要 GCJ-02：WGS-84 → GCJ-02（数字/坐标参数一律传字符串）。
+    const gFrom = wgs84ToGcj02(from.lat, from.lng);
+    const gDest = wgs84ToGcj02(dest.lat, dest.lng);
     const est = await this.mcp.callTool(
       "didi",
       "taxi_estimate",
       {
-        from_lng: from.lng,
-        from_lat: from.lat,
+        from_lng: gFrom.longitude.toFixed(6),
+        from_lat: gFrom.latitude.toFixed(6),
         from_name: from.name,
-        to_lng: dest.lng,
-        to_lat: dest.lat,
+        to_lng: gDest.longitude.toFixed(6),
+        to_lat: gDest.latitude.toFixed(6),
         to_name: dest.name,
       },
       30_000,
@@ -336,13 +341,10 @@ export class DidiMcpRideProvider implements BookingProvider {
     let route: DrivingRouteSummary | undefined;
     let rideAppLink: string | undefined;
     try {
-      const fromLng = Number(from.lng);
-      const fromLat = Number(from.lat);
-      const toLng = Number(dest.lng);
-      const toLat = Number(dest.lat);
+      // 起终点为 WGS-84；drivingRouteViaDidi / rideAppLinkViaDidi 内部转 GCJ 调滴滴
       const [routeRes, linkRes] = await Promise.all([
-        drivingRouteViaDidi(this.mcp, fromLng, fromLat, toLng, toLat),
-        rideAppLinkViaDidi(this.mcp, fromLng, fromLat, toLng, toLat, usable[0]?.category),
+        drivingRouteViaDidi(this.mcp, from.lng, from.lat, dest.lng, dest.lat),
+        rideAppLinkViaDidi(this.mcp, from.lng, from.lat, dest.lng, dest.lat, usable[0]?.category),
       ]);
       route = routeRes ?? undefined;
       rideAppLink = linkRes ?? undefined;

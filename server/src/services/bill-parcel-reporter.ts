@@ -16,6 +16,11 @@ export const BILL_PARCEL_COOLDOWN_MS = 10 * 60 * 1000;
 /** 账单同类冷却：6h（同一笔扣款常在短信+邮件+银行 App 三处各来一遍） */
 export const BILL_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 
+/** 快递「晚点提醒我」的推迟间隔：2h（下班时段精确投递留给 M2 触点计划） */
+export const PARCEL_REMIND_LATER_MS = 2 * 60 * 60 * 1000;
+/** 账单「明天提醒」的推迟间隔：24h */
+export const BILL_REMIND_TOMORROW_MS = 24 * 60 * 60 * 1000;
+
 export type BillParcelReporterDeps = {
   /** 时钟（默认 Date.now）——测试注入以验证冷却，不改生产语义 */
   now?: () => number;
@@ -99,6 +104,20 @@ export class BillParcelReactiveReporter {
       source: "bill_parcel",
       subject: isParcel ? "快递" : "账单",
       detail: Object.fromEntries(detailLines.map((l) => l.split(": "))),
+      // 通知闭环（2026-11-23 M1）：两个按钮都背靠真接口——
+      // 左键回写台账（已取件 / 已处理），右键走管道推迟重投。
+      // 快递只在有取件码时给「已取件」（没码说明还在路上，取件无从谈起）。
+      notifyOptions: isParcel
+        ? parcel?.pickupCode
+          ? [
+              { action: "parcel_picked", label: "已取件", ref: parcel.id },
+              { action: "snooze", label: "晚点提醒我", delayMs: PARCEL_REMIND_LATER_MS },
+            ]
+          : [{ action: "acknowledge", label: "知道了" }]
+        : [
+            { action: "bill_settled", label: "已处理", ref: primary.id },
+            { action: "snooze", label: "明天提醒", delayMs: BILL_REMIND_TOMORROW_MS },
+          ],
     });
   }
 

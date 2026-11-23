@@ -16,12 +16,25 @@
  * 触发分钟）照常发，超窗不补（当晚彻底没开机就当天丢失，远端部署后不存在）。
  * lastSentDay 落盘 <dataDir>/evening-digest-sent.json（at-most-once：先标记
  * 再发送，重启后同一天绝不重发），内存 Map 只做热路径缓存。
+ *
+ * 2026-11-23 §3.4 分工（本文件负责的两条）：
+ *  - 时刻就是「明日预览」槽位的钟：triggerMinutesOf 公开给触点计划复用，
+ *    两处各算各的会在两个时间说同一件事；
+ *  - **没内容不发**：digest 只剩天气 + 一两句闲聊，两块都拿不到就 skipped，
+ *    不推卡也不发兜底话术（当日额度照占，不重试）。
+ *    同一次取数顺带缓存问答面事实（latestPreviewFacts），供聊天里的
+ *    「明天有什么安排」答全行程 / 截止 / 重要日子——那是问答，不受分工限制。
  */
 
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getDataDir } from "../config/data-dir.js";
-import type { EveningDigest, EveningDigestService } from "./evening-digest-service.js";
+import type {
+  EveningDigest,
+  EveningDigestService,
+  TomorrowPreviewFacts,
+} from "./evening-digest-service.js";
+import { hasEveningDigestContent } from "./evening-digest-service.js";
 
 type SchedulerDeps = {
   digestService: EveningDigestService;
@@ -32,6 +45,12 @@ type SchedulerDeps = {
    * 凌晨 0-5 点折算前一晚；有效就寝样本门槛 2 夜）。
    */
   bedtimeHourOf?: (sessionId: string) => number | null;
+  /**
+   * 「没内容不发」留痕口（2026-11-23 §3.4）：明日预览只剩天气 + 一两句闲聊，
+   * 天气拉取失败又没有闲聊素材时整格 skipped。装配层可接 silence-log /
+   * /api/proactivity/diagnostics；不接就只留一行 console 痕迹。
+   */
+  onSkipped?: (sessionId: string, reason: string) => void | Promise<void>;
 };
 
 /** 动态推送时刻钳位：不早于 20:00、不晚于 23:30（再晚的睡前提醒没有意义） */
@@ -59,11 +78,17 @@ export class EveningDigestScheduler {
   /**
    * 最近一次生成的 digest（sessionId → 载荷，仅当日有效）。
    *
-   * 用途（2026-11-05 接生产投递）：用户白天主动问「明天什么安排」时，聊天出口
-   * 直接拿这份数据喂渲染场景（tomorrow_preview），不必再跑一次天气/日程查询，
-   * 也不会因为生成慢把回复卡住。跨日自动失效——预览永远指向「明天」。
+   * 用途（2026-11-05 接生产投递）：手动补推/诊断回看拿这份「推送面」数据。
+   * 2026-11-23 §3.4 分工后主动推送面只剩天气 + 闲聊，聊天里的问答改读
+   * lastFacts（见 latestPreviewFacts）。跨日自动失效——预览永远指向「明天」。
    */
   private readonly lastDigests = new Map<string, EveningDigest>();
+  /**
+   * 最近一次算出的「问答面」完整事实（行程 + 天气 + DDL + 重要日子）。
+   * 与 digest 同一次取数产出（buildPreviewBundle 跑一遍天气/日程查询），
+   * 供聊天出口喂 tomorrow_preview 场景——用户问「明天有什么安排」照旧答全。
+   */
+  private readonly lastFacts = new Map<string, TomorrowPreviewFacts>();
 
   constructor(private readonly deps: SchedulerDeps) {}
 
@@ -79,8 +104,11 @@ export class EveningDigestScheduler {
    * 某 session 的推送时刻（当日分钟数 0-1439）：env 锁死 > 就寝前 30 分钟
    * （钳位晚间区间）> 默认 21:00。bedtimeHourOf 是同步内存中位数
    * （RhythmCore），每 tick 直算不缓存，节律画像更新当晚即生效。
+   *
+   * 公开（2026-11-23 §3.4）：触点计划的「明日预览」槽位用同一个钟——两处各算
+   * 各的会在两个时间说同一件事。
    */
-  private triggerMinutesOf(sessionId: string): number {
+  triggerMinutesOf(sessionId: string): number {
     const envHour = Number(process.env.EVENING_DIGEST_HOUR);
     if (Number.isFinite(envHour) && envHour >= 0 && envHour <= 23) {
       const envMinute = Number(process.env.EVENING_DIGEST_MINUTE);
@@ -137,7 +165,21 @@ export class EveningDigestScheduler {
         console.log(
           `[EveningDigest] 到点推送 sessionId=${sessionId}${missed > 0 ? `（过点 ${missed} 分钟补发）` : ""}`,
         );
-        const digest = await this.deps.digestService.generateDigest(sessionId);
+        // 一次取数两个出口：digest = 主动推送面（天气 + 闲聊），
+        // facts = 问答面（完整明日事实，白天问起时用，§3.4）
+        const { digest, facts } = await this.deps.digestService.buildPreviewBundle(sessionId);
+        this.rememberPreviewFacts(sessionId, facts);
+        // 「没内容不发兜底话术」（§3.4 表最后一行）：天气拉不到又没闲聊素材
+        // 就整格 skipped——当日额度已占，不重试、不硬凑一句晚安
+        if (!hasEveningDigestContent(digest)) {
+          console.log(`[EveningDigest] 明日预览无内容 sessionId=${sessionId} → skipped`);
+          try {
+            await this.deps.onSkipped?.(sessionId, "no_content");
+          } catch {
+            /* 留痕口失败不影响跳过判定 */
+          }
+          continue;
+        }
         this.rememberDigest(sessionId, digest);
         await this.deps.onDigestTriggered(sessionId, digest);
       } catch (err) {
@@ -154,11 +196,34 @@ export class EveningDigestScheduler {
   }
 
   /**
-   * 记下最近一次生成的 digest（供聊天出口消费）。
+   * 记下最近一次生成的 digest（推送面载荷）。
    * 只保留内存，不落盘：这是当日态数据，重启后由下一次生成/reconnect 补。
    */
   rememberDigest(sessionId: string, digest: EveningDigest): void {
     this.lastDigests.set(sessionId, digest);
+  }
+
+  /**
+   * 记下问答面事实（聊天出口喂 tomorrow_preview 场景用，§3.4）。
+   * 与 rememberDigest 同一次取数产出，不额外跑天气/日程查询。
+   */
+  rememberPreviewFacts(sessionId: string, facts: TomorrowPreviewFacts): void {
+    this.lastFacts.set(sessionId, facts);
+  }
+
+  /**
+   * 取当日最近一次问答面事实；跨日（date ≠ 今天）视为无——预览必须指向「明天」。
+   * 用户白天问「明天有什么安排」时优先吃这份缓存，没有再由装配层现生成
+   * （EveningDigestService.generatePreviewFacts）。
+   */
+  latestPreviewFacts(sessionId: string): TomorrowPreviewFacts | undefined {
+    const facts = this.lastFacts.get(sessionId);
+    if (!facts) return undefined;
+    if (facts.date !== this.todayOf()) {
+      this.lastFacts.delete(sessionId);
+      return undefined;
+    }
+    return facts;
   }
 
   /** 取当日最近一次 digest；跨日（date ≠ 今天）视为无——预览必须指向「明天」 */

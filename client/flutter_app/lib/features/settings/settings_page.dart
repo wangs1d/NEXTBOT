@@ -11,10 +11,12 @@ import "../../core/services/local_runtime_config.dart";
 import "../../core/services/local_runtime_manager.dart";
 import "../../core/services/cloud_model_binding_store.dart";
 import "../../core/services/model_api_tester.dart";
+import "../../core/services/ongoing_status_service.dart";
 import "../../core/services/phone_bridge_service.dart";
 import "../../core/services/phone_capture_service.dart";
 import "../../core/services/keep_alive_service.dart";
 import "../../core/services/sms_access_service.dart";
+import "../../core/services/user_preferences_api.dart";
 import "../../core/services/ws_chat_service.dart";
 import "../../core/theme/app_theme.dart";
 import "../chat/voiceprint_registration_page.dart";
@@ -24,7 +26,7 @@ import "../model_config/model_provider_catalog.dart";
 import "../../widgets/app_window_titlebar.dart";
 
 /// 设置分区（左侧侧栏一项对应右侧一块内容）。
-enum _SettingsSection { general, model, serviceAccess, pairing, phoneBridge, keepAlive }
+enum _SettingsSection { general, model, serviceAccess, pairing, phoneBridge, keepAlive, proactive }
 
 /// 「设置」页 —— 全屏独立页（类似扣子的设置布局）：
 /// 左侧分区侧栏 + 右侧内容区，顶部铺自绘标题栏保证窗口可拖拽/可关闭。
@@ -63,6 +65,9 @@ class _SettingsPageState extends State<SettingsPage>
   // —— 后台保活（电池优化豁免 / 厂商应用启动管理） ——
   bool _batteryExempt = false;
   bool _keepAliveChecking = true;
+
+  /// 常驻通知内容模式（§5.2）：full / minimal / off。存在原生偏好里，这里只是回显。
+  String _ongoingMode = "full";
 
   // —— 短信读取权限（READ_SMS；Agent「看我的短信」工具的前置条件） ——
   bool _smsGranted = false;
@@ -104,6 +109,7 @@ class _SettingsPageState extends State<SettingsPage>
     _loadCloudModelConfig();
     _refreshVoiceprintStatus();
     _refreshMailStatus();
+    _loadFrequencyTier();
   }
 
   @override
@@ -209,6 +215,9 @@ class _SettingsPageState extends State<SettingsPage>
         (_SettingsSection.phoneBridge, Icons.smartphone_outlined, "手机桥接"),
       if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android)
         (_SettingsSection.keepAlive, Icons.battery_saver_outlined, "后台保活"),
+      // 主动性（§3.10）：手机与桌面都要能调，不受 Windows 分区闸限制
+      if (!kIsWeb)
+        (_SettingsSection.proactive, Icons.campaign_outlined, "主动性"),
     ];
     return ColoredBox(
       color: bg,
@@ -313,6 +322,7 @@ class _SettingsPageState extends State<SettingsPage>
       _SettingsSection.pairing => "设备配对",
       _SettingsSection.phoneBridge => "手机桥接",
       _SettingsSection.keepAlive => "后台保活",
+      _SettingsSection.proactive => "主动性",
     };
     final Widget card = switch (_section) {
       _SettingsSection.general => _buildGeneralCard(),
@@ -321,6 +331,7 @@ class _SettingsPageState extends State<SettingsPage>
       _SettingsSection.pairing => const AccessPairingCard(),
       _SettingsSection.phoneBridge => _buildPhoneBridgeCard(),
       _SettingsSection.keepAlive => _buildKeepAliveCard(),
+      _SettingsSection.proactive => _buildProactiveCard(),
     };
     return SingleChildScrollView(
       // key 随分区变化：切换分区时滚动位置复位到顶部。
@@ -1092,6 +1103,132 @@ class _SettingsPageState extends State<SettingsPage>
 
   /// 通用卡：开机自动启动。注册表直读直写，不依赖任何服务器加载状态，
   /// 进页即可切；失败回滚开关并 toast。
+  // ------------------------------------------------------------------ //
+  // 主动性（需求 §3.10：频率与用户控制）
+  // ------------------------------------------------------------------ //
+
+  /// 主动消息频率档：quiet=只在有事时 / normal=正常（默认）/ chatty=多聊点。
+  /// 真值在服务端 prefs（频控与触点计划都读它），这里只是设置页的读写面。
+  String _frequencyTier = "normal";
+  bool _frequencySaving = false;
+
+  static const List<(String, String, String)> _tierOptions =
+      <(String, String, String)>[
+    (
+      "quiet",
+      "只在有事时",
+      "一天最多两处：早安与睡前的明日预览，而且只在真有内容时才开口。不追问、不闲聊。"
+    ),
+    (
+      "normal",
+      "正常",
+      "一天不超过 5 个触点，闲话最多两句；会跟进你提过的事。"
+    ),
+    (
+      "chatty",
+      "多聊点",
+      "触点同「正常」，另外它想到什么随时搭话（不排队等触点），闲话最多四句。"
+    ),
+  ];
+
+  Future<void> _loadFrequencyTier() async {
+    if (kIsWeb) return;
+    try {
+      final Map<String, dynamic> prefs = await UserPreferencesApi(
+        baseUrl: ApiConfig.httpBase,
+      ).getPreferences(ApiConfig.effectiveActorId);
+      final Object? proactivity = prefs["proactivity"];
+      final String tier = proactivity is Map
+          ? proactivity["frequencyTier"]?.toString() ?? "normal"
+          : "normal";
+      if (mounted) setState(() => _frequencyTier = tier);
+    } catch (_) {
+      // 拉不到就按「正常」显示；用户改动仍会写回服务端
+    }
+  }
+
+  Future<void> _setFrequencyTier(String tier) async {
+    setState(() {
+      _frequencyTier = tier;
+      _frequencySaving = true;
+    });
+    try {
+      await UserPreferencesApi(baseUrl: ApiConfig.httpBase).updatePreferences(
+        ApiConfig.effectiveActorId,
+        frequencyTier: tier,
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("频率档位保存失败：$e")),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _frequencySaving = false);
+    }
+  }
+
+  /// 主动性卡（§3.10）：三档频率 + 这一档实际会怎么做，写进一句话而不是让用户猜。
+  Widget _buildProactiveCard() {
+    final TextStyle sub = TextStyle(
+      fontSize: 12,
+      color: Theme.of(context).colorScheme.onSurfaceVariant,
+    );
+    final (String, String, String) selected = _tierOptions.firstWhere(
+      (o) => o.$1 == _frequencyTier,
+      orElse: () => _tierOptions[1],
+    );
+    return Card(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                const Icon(Icons.campaign_outlined, size: 18),
+                const SizedBox(width: 8),
+                Text("它主动找你的频率",
+                    style: Theme.of(context).textTheme.titleMedium),
+                const Spacer(),
+                if (_frequencySaving)
+                  const SizedBox(
+                    width: 14,
+                    height: 14,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: _tierOptions
+                  .map((o) => ChoiceChip(
+                      label: Text(o.$2),
+                      selected: o.$1 == selected.$1,
+                      onSelected: _frequencySaving
+                          ? null
+                          : (_) => unawaited(_setFrequencyTier(o.$1)),
+                    ),
+                  )
+                  .toList(),
+            ),
+            const SizedBox(height: 10),
+            Text(selected.$3, style: sub),
+            const SizedBox(height: 12),
+            Text(
+              "对任何一条它主动发来的消息长按「为什么」，能看到它为什么挑这个时刻说。"
+              "同一类话你连着几条都没看，它会自动少说这类；想彻底安静就选「只在有事时」。",
+              style: sub,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildGeneralCard() {
     return Card(
       margin: EdgeInsets.zero,
@@ -1256,10 +1393,71 @@ class _SettingsPageState extends State<SettingsPage>
                   ),
               ],
             ),
+            const Divider(height: 24),
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      const Text("④ 常驻通知内容"),
+                      const SizedBox(height: 2),
+                      Text(
+                        _ongoingMode == "off"
+                            ? "已关闭内容：这条通知仍在（前台服务必须挂一条通知才能保活），"
+                              "只是不再显示今天的事项。"
+                            : "把这条躲不掉的保活通知换成今日状态：下一件事、待取件、今天到期。"
+                              "「极简」只留管家名字，不展示事项内容。",
+                        style: sub,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 12),
+                PopupMenuButton<String>(
+                  initialValue: _ongoingMode,
+                  tooltip: "常驻通知内容",
+                  onSelected: (String mode) => unawaited(_setOngoingMode(mode)),
+                  itemBuilder: (BuildContext context) =>
+                      const <PopupMenuEntry<String>>[
+                    PopupMenuItem<String>(value: "full", child: Text("完整显示")),
+                    PopupMenuItem<String>(value: "minimal", child: Text("极简")),
+                    PopupMenuItem<String>(value: "off", child: Text("关闭内容")),
+                  ],
+                  child: Container(
+                    padding: const EdgeInsets.fromLTRB(14, 8, 8, 8),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                          color: Theme.of(context).colorScheme.outlineVariant),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        Text(_ongoingModeLabel, style: const TextStyle(fontSize: 13)),
+                        const Icon(Icons.arrow_drop_down, size: 18),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ],
         ),
       ),
     );
+  }
+
+  String get _ongoingModeLabel => switch (_ongoingMode) {
+        "minimal" => "极简",
+        "off" => "关闭内容",
+        _ => "完整显示",
+      };
+
+  /// 切换常驻通知的内容模式：即刻写进原生偏好并重画，不用等下一次看板推送。
+  Future<void> _setOngoingMode(String mode) async {
+    setState(() => _ongoingMode = mode);
+    await OngoingStatusService.instance.setMode(mode);
   }
 
   /// 弹系统「电池优化豁免」框；回来后由 resumed 回检刷新状态。
@@ -1278,9 +1476,11 @@ class _SettingsPageState extends State<SettingsPage>
       return;
     }
     final bool exempt = await KeepAliveService.isBatteryExempt();
+    final String ongoingMode = await OngoingStatusService.instance.mode();
     if (!mounted) return;
     setState(() {
       _batteryExempt = exempt;
+      _ongoingMode = ongoingMode;
       _keepAliveChecking = false;
     });
   }

@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import { writeJsonAtomic } from "../storage/atomic-json.js";
 import { aggregateByWeekday } from "./dimensions/overtime-model.js";
+import { daypartOfDayKey, daypartOfWeekday, medianOrNull } from "./dimensions/grouping.js";
 
 import type { RhythmProfile } from "./types.js";
 
@@ -98,6 +99,8 @@ export function normalizeProfile(raw: unknown): RhythmProfile | null {
     lastAnalyzedDay: typeof o.lastAnalyzedDay === "string" ? o.lastAnalyzedDay : null,
     dimensions: {
       sleep: normalizeSleep(dims.sleep),
+      wake: normalizeWake(dims.wake),
+      commute: normalizeCommute(dims.commute),
       focus: normalizeFocus(dims.focus),
       overtime: normalizeOvertime(dims.overtime),
       receptivity: normalizeReceptivity(dims.receptivity),
@@ -117,13 +120,111 @@ function normalizeSleep(v: Record<string, unknown> | undefined): RhythmProfile["
         (s) => s && typeof s.date === "string" && Number.isFinite(s.startHour) && Number.isFinite(s.endHour),
       )
     : [];
-  return {
+  const base: RhythmProfile["dimensions"]["sleep"] = {
     samples,
     windowStartHour: Number.isFinite(v?.windowStartHour) ? (v!.windowStartHour as number) : null,
     windowEndHour: Number.isFinite(v?.windowEndHour) ? (v!.windowEndHour as number) : null,
     sampleCount: samples.length,
     trendMinutes: Number.isFinite(v?.trendMinutes) ? (v!.trendMinutes as number) : 0,
+    byDaypart: emptySplit(() => ({ windowStartHour: null, windowEndHour: null, sampleCount: 0 })),
+    phoneSampleRatio: Number.isFinite(v?.phoneSampleRatio) ? (v!.phoneSampleRatio as number) : 0,
   };
+  // 分组读数是派生值，磁盘上有就沿用、没有就按样本重算（旧版本文件不丢分组口径）
+  return recomputeSleepSplit(base);
+}
+
+/** 起床维度（§7.3 从 sleep 拆出）：样本按"起床那天"记，分组口径与 sleep 一致 */
+function normalizeWake(v: Record<string, unknown> | undefined): RhythmProfile["dimensions"]["wake"] {
+  const samples = Array.isArray(v?.samples)
+    ? (v!.samples as RhythmProfile["dimensions"]["wake"]["samples"]).filter(
+        (s) => s && typeof s.date === "string" && Number.isFinite(s.hour),
+      )
+    : [];
+  const state: RhythmProfile["dimensions"]["wake"] = {
+    samples,
+    wakeHour: Number.isFinite(v?.wakeHour) ? (v!.wakeHour as number) : null,
+    sampleCount: samples.length,
+    trendMinutes: Number.isFinite(v?.trendMinutes) ? (v!.trendMinutes as number) : 0,
+    byDaypart: emptySplit(() => ({ wakeHour: null, sampleCount: 0 })),
+    phoneSampleRatio: Number.isFinite(v?.phoneSampleRatio) ? (v!.phoneSampleRatio as number) : 0,
+  };
+  if (state.wakeHour === null && samples.length >= 3) {
+    state.wakeHour = Math.round(medianOf(samples.map((s) => s.hour)) * 1000) / 1000;
+  }
+  for (const part of ["weekday", "weekend"] as const) {
+    const group = samples.filter((s) => daypartOfDayKey(s.date) === part);
+    state.byDaypart[part] = {
+      wakeHour:
+        group.length >= 3 ? Math.round(medianOf(group.map((s) => s.hour)) * 1000) / 1000 : null,
+      sampleCount: group.length,
+    };
+  }
+  return state;
+}
+
+/** 通勤维度：三条腿的按日样本，分组中位数全部从 days 现算（不留第二份账） */
+function normalizeCommute(v: Record<string, unknown> | undefined): RhythmProfile["dimensions"]["commute"] {
+  const days = Array.isArray(v?.days)
+    ? (v!.days as RhythmProfile["dimensions"]["commute"]["days"]).filter(
+        (d) => d && typeof d.date === "string" && Number.isInteger(d.weekday),
+      )
+    : [];
+  const leg = (arr: typeof days, key: "leaveHomeHour" | "arriveWorkHour" | "leaveWorkHour"): number | null => {
+    const values = arr.map((d) => d[key]).filter((x): x is number => Number.isFinite(x));
+    return values.length >= 2 ? Math.round(medianOf(values) * 1000) / 1000 : null;
+  };
+  const stats = (arr: typeof days): RhythmProfile["dimensions"]["commute"]["overall"] => ({
+    leaveHomeHour: leg(arr, "leaveHomeHour"),
+    arriveWorkHour: leg(arr, "arriveWorkHour"),
+    leaveWorkHour: leg(arr, "leaveWorkHour"),
+    days: arr.filter((d) => d.leaveHomeHour !== null || d.arriveWorkHour !== null || d.leaveWorkHour !== null)
+      .length,
+  });
+  const leaveHomeByWeekday: Array<number | null> = new Array<number | null>(7).fill(null);
+  for (let w = 0; w < 7; w++) {
+    leaveHomeByWeekday[w] = leg(
+      days.filter((d) => d.weekday === w),
+      "leaveHomeHour",
+    );
+  }
+  return {
+    days,
+    overall: stats(days),
+    byDaypart: {
+      weekday: stats(days.filter((d) => daypartOfWeekday(d.weekday) === "weekday")),
+      weekend: stats(days.filter((d) => daypartOfWeekday(d.weekday) === "weekend")),
+    },
+    leaveHomeByWeekday,
+  };
+}
+
+/** 中位数（分组回算用）：口径与模型器共用 grouping.medianOrNull */
+function medianOf(values: number[]): number {
+  return medianOrNull(values) ?? 0;
+}
+
+function emptySplit<T>(make: () => T): Record<"weekday" | "weekend", T> {
+  return { weekday: make(), weekend: make() };
+}
+
+/** sleep 的分组读数重算（跨午夜修正与模型器同口径：<12 点的样本 +24 再取中位） */
+function recomputeSleepSplit(
+  state: RhythmProfile["dimensions"]["sleep"],
+): RhythmProfile["dimensions"]["sleep"] {
+  for (const part of ["weekday", "weekend"] as const) {
+    const group = state.samples.filter((s) => daypartOfDayKey(s.date) === part);
+    const starts = group.map((s) => s.startHour);
+    const ends = group.map((s) => s.endHour);
+    const adj = (h: number): number => (h < 12 ? h + 24 : h);
+    state.byDaypart[part] = {
+      windowStartHour:
+        group.length >= 3 ? Math.round((medianOf(starts.map(adj)) % 24) * 1000) / 1000 : null,
+      windowEndHour:
+        group.length >= 3 ? Math.round((medianOf(ends.map(adj)) % 24) * 1000) / 1000 : null,
+      sampleCount: group.length,
+    };
+  }
+  return state;
 }
 
 function normalizeFocus(v: Record<string, unknown> | undefined): RhythmProfile["dimensions"]["focus"] {
@@ -131,10 +232,27 @@ function normalizeFocus(v: Record<string, unknown> | undefined): RhythmProfile["
     ? (v!.hourHistogram as number[]).slice(0, 24).map((x) => (Number.isFinite(x) ? x : 0))
     : [];
   while (histogram.length < 24) histogram.push(0);
+  const split = (v?.byDaypart ?? {}) as Record<string, Record<string, unknown>>;
+  const group = (part: "weekday" | "weekend") => {
+    const g = split[part] ?? {};
+    const hist = Array.isArray(g.hourHistogram)
+      ? (g.hourHistogram as number[]).slice(0, 24).map((x) => (Number.isFinite(x) ? x : 0))
+      : [];
+    while (hist.length < 24) hist.push(0);
+    return {
+      hourHistogram: hist,
+      peakBlocks: Array.isArray(g.peakBlocks)
+        ? (g.peakBlocks as RhythmProfile["dimensions"]["focus"]["peakBlocks"])
+        : [],
+      totalWeight: Number(g.totalWeight) || 0,
+    };
+  };
   return {
     hourHistogram: histogram,
     peakBlocks: Array.isArray(v?.peakBlocks) ? (v!.peakBlocks as RhythmProfile["dimensions"]["focus"]["peakBlocks"]) : [],
     totalWeight: Number(v?.totalWeight) || 0,
+    // 分组直方图是同一批观察的另一份读法：磁盘上没有就留空数组（下次分析补齐）
+    byDaypart: { weekday: group("weekday"), weekend: group("weekend") },
   };
 }
 
@@ -170,6 +288,11 @@ function normalizeReceptivity(v: Record<string, unknown> | undefined): RhythmPro
     byHour: fill(v?.byHour, 24),
     byWeekday: fill(v?.byWeekday, 7),
     attempts: Number(v?.attempts) || 0,
+    // 工作日/周末两条曲线：旧文件没有就是全 0（下次有反馈时按分组累计）
+    byDaypartHour: {
+      weekday: fill((v?.byDaypartHour as Record<string, unknown> | undefined)?.weekday, 24),
+      weekend: fill((v?.byDaypartHour as Record<string, unknown> | undefined)?.weekend, 24),
+    },
   };
 }
 

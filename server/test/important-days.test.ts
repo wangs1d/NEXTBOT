@@ -1,9 +1,8 @@
 // Task 17 人情关系管家测试：
 //  1. daysUntilMMdd：当天命中 / 明天 / 7 天窗口 / 年度周期（今年已过按明年）
-//  2. 明日速览：近期重要日子块（7 天窗口过滤 + 升序 + 无记录省略）
-//     —— 2026-11-04 展示位从晨报迁到明日速览
-//  3. 当天命中回调：onImportantDayToday 触发一次 + 同日去重（多次生成不重复打扰）
-//     —— 晨报不再展示该块，但祝福回调仍在晨报侧触发（当天早上发出才有意义）
+//  2. 近期重要日子（7 天窗口）：问答数据面保留（2026-11-23 §3.4 分工后主动推送的
+//     明日预览不再列这一格，展示位搬回早安卡）
+//  3. 当天命中：早安卡列出来 + onImportantDayToday 触发一次 / 同日去重
 //  4. 祝福草稿：单次 LLM 生成 + 未注入 LLM 退化为确定性模板
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -58,41 +57,41 @@ test("重要日子：类型中文标签", () => {
   assert.equal(importantDayTypeLabel("custom"), "特殊日子");
 });
 
-// ── 2. 明日速览：近期重要日子块 ────────────────────
+// ── 2. 问答数据面：近期重要日子块（推送面已撤下） ────────────────────
 
-test("明日速览：近期重要日子块（7 天窗口过滤 + 按剩余天数升序）", async () => {
+test("明日预览：近期重要日子只进问答面（7 天窗口过滤 + 升序），睡前卡不列（§3.4）", async () => {
   const now = new Date();
   const mm = String(now.getMonth() + 1).padStart(2, "0");
   const dd = String(now.getDate()).padStart(2, "0");
   const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
   const far = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 20);
 
-  const svc = new EveningDigestService({
-    importantDaysStore: makeStore([
-      // 今天命中（妈妈生日）
-      { id: "d1", name: "妈妈", date: `${mm}-${dd}`, type: "birthday", relationship: "母亲", notes: "喜欢养花" },
-      // 明天（纪念日）
-      {
-        id: "d2",
-        name: "结婚纪念日",
-        date: `${String(tomorrow.getMonth() + 1).padStart(2, "0")}-${String(tomorrow.getDate()).padStart(2, "0")}`,
-        type: "anniversary",
-      },
-      // 20 天后（窗口外，不出现）
-      {
-        id: "d3",
-        name: "老王生日",
-        date: `${String(far.getMonth() + 1).padStart(2, "0")}-${String(far.getDate()).padStart(2, "0")}`,
-        type: "birthday",
-      },
-      // 脏数据（缺 name / 非法 date，跳过不崩）
-      { id: "d4", date: "01-01", type: "birthday" },
-      { id: "d5", name: "脏数据", date: "not-a-date", type: "birthday" },
-    ]),
-  });
+  const store = makeStore([
+    // 今天命中（妈妈生日）
+    { id: "d1", name: "妈妈", date: `${mm}-${dd}`, type: "birthday", relationship: "母亲", notes: "喜欢养花" },
+    // 明天（纪念日）
+    {
+      id: "d2",
+      name: "结婚纪念日",
+      date: `${String(tomorrow.getMonth() + 1).padStart(2, "0")}-${String(tomorrow.getDate()).padStart(2, "0")}`,
+      type: "anniversary",
+    },
+    // 20 天后（窗口外，不出现）
+    {
+      id: "d3",
+      name: "老王生日",
+      date: `${String(far.getMonth() + 1).padStart(2, "0")}-${String(far.getDate()).padStart(2, "0")}`,
+      type: "birthday",
+    },
+    // 脏数据（缺 name / 非法 date，跳过不崩）
+    { id: "d4", date: "01-01", type: "birthday" },
+    { id: "d5", name: "脏数据", date: "not-a-date", type: "birthday" },
+  ]);
+  const svc = new EveningDigestService({ importantDaysStore: store });
 
-  const digest = await svc.generateDigest(SESSION);
-  const days = digest.importantDays ?? [];
+  // 问答面（问「明天有什么安排」/ 提前备礼）：两块日子照旧在
+  const facts = await svc.generatePreviewFacts(SESSION);
+  const days = facts.importantDays ?? [];
   assert.equal(days.length, 2);
   // 升序：今天(0) → 明天(1)
   assert.equal(days[0]!.id, "d1");
@@ -102,17 +101,19 @@ test("明日速览：近期重要日子块（7 天窗口过滤 + 按剩余天数
   assert.equal(days[1]!.id, "d2");
   assert.equal(days[1]!.daysUntil, 1);
 
-  // 兜底文案带上最近的那一个
-  assert.match(digest.narrationText, /妈妈的生日/);
-});
-
-test("明日速览：无重要日子记录时省略该块（结构不受影响）", async () => {
-  const svc = new EveningDigestService({ importantDaysStore: makeStore([]) });
+  // 主动推送的明日预览：载荷里没有这一面，文案也不念（§3.4 表「重要日子」一行）
   const digest = await svc.generateDigest(SESSION);
-  assert.equal(digest.importantDays, undefined);
+  assert.equal("importantDays" in digest, false);
+  assert.doesNotMatch(digest.narrationText, /妈妈|生日|纪念日/);
 });
 
-test("晨报：不再展示近期重要日子（展示位迁往明日速览）", async () => {
+test("明日预览：无重要日子记录时问答面也整块省略（结构不受影响）", async () => {
+  const svc = new EveningDigestService({ importantDaysStore: makeStore([]) });
+  const facts = await svc.generatePreviewFacts(SESSION);
+  assert.equal(facts.importantDays, undefined);
+});
+
+test("早安：当天命中的重要日子回到早安卡（§3.4 分工，夜里那张不再列）", async () => {
   const now = new Date();
   const mm = String(now.getMonth() + 1).padStart(2, "0");
   const dd = String(now.getDate()).padStart(2, "0");
@@ -122,8 +123,8 @@ test("晨报：不再展示近期重要日子（展示位迁往明日速览）",
     ]),
   });
   const briefing = await svc.generateBriefing(SESSION);
-  assert.equal("upcomingImportantDays" in briefing, false);
-  assert.doesNotMatch(JSON.stringify(briefing), /妈妈/);
+  assert.equal(briefing.importantDays?.[0]?.name, "妈妈");
+  assert.equal("upcomingImportantDays" in briefing, false, "7 天预告名单仍不在晨报上卡");
 });
 
 // ── 3. 当天命中回调 + 同日去重 ────────────────────────
@@ -175,8 +176,9 @@ test("当天未命中（仅 7 天内预告）：不触发回调", async () => {
 
   await svc.generateBriefing(SESSION);
   assert.equal(fired.length, 0);
-  // 但 3 天后的日子会出现在明日速览的预告块里
-  const digest = await new EveningDigestService({
+  // 但 3 天后的日子会留在问答面里（§3.4：睡前卡与早安卡都不预告名单，
+  // 用户问「最近有什么日子」时 TomorrowPreviewFacts.importantDays 照旧答）
+  const facts = await new EveningDigestService({
     importantDaysStore: makeStore([
       {
         id: "d1",
@@ -185,8 +187,8 @@ test("当天未命中（仅 7 天内预告）：不触发回调", async () => {
         type: "birthday",
       },
     ]),
-  }).generateDigest(SESSION);
-  assert.equal((digest.importantDays ?? [])[0]?.daysUntil, 3);
+  }).generatePreviewFacts(SESSION);
+  assert.equal((facts.importantDays ?? [])[0]?.daysUntil, 3);
 });
 
 // ── 4. 祝福草稿 ──────────────────────────────────────

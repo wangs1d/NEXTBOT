@@ -90,6 +90,12 @@ import "features/gallery/gallery_wall_host.dart";
 import "features/mailbox/mailbox_page.dart";
 import "features/mailbox/message_hub_page.dart";
 import "features/onboarding/onboarding_flow.dart";
+// 分享给管家（2026-11-23 PRD §8）：原生分享窗 / 快捷方式 / 磁贴 / 通知按钮
+// 五种入口在原生只落一个队列，这里接唯一的一个消费者与那张半屏速记卡。
+import "features/share/quick_note_sheet.dart";
+import "core/services/share_intake_service.dart";
+import "mobile_ui/mobile_chat_controller.dart";
+import "mobile_ui/mobile_decision_sheet.dart";
 import "features/chat/agent_profile_page.dart";
 import "features/chat/agent_home_page.dart";
 import "features/chat/chat_page.dart";
@@ -125,6 +131,7 @@ import "core/services/phone_call_session.dart";
 import "core/services/pure_voice_mode.dart";
 import "core/presentation/phone_call_page.dart";
 import "core/services/local_notification_service.dart";
+import "core/services/proactive_decision.dart";
 import "core/services/keep_alive_service.dart";
 import "core/services/phone_capture_service.dart";
 import "core/services/network_watch_service.dart";
@@ -140,6 +147,7 @@ import "features/settings/settings_page.dart";
 import "features/approvals/approvals_panel.dart";
 import "core/services/access_auth_api.dart";
 import "core/services/cloud_model_binding_store.dart";
+import "core/services/ongoing_status_service.dart";
 import "core/services/nb_http.dart";
 import "core/services/attention_api.dart";
 import "core/vision/pick_gallery_vision.dart";
@@ -503,6 +511,27 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   // 共享 GlobalKey 会触发 Navigator 收养重挂（见 _buildRegisterGate 注释）
   final GlobalKey<NavigatorState> _mobileMainNavigatorKey =
       GlobalKey<NavigatorState>();
+  /// 手机主壳句柄：桌面小组件各区域的落点要靠它切 tab（PRD §5.3）。
+  /// 只用现成的 `goToTab`，不 push 新路由——所以重复点按不会叠出第二份同页。
+  final GlobalKey<MobileHomePageState> _mobileHomeKey =
+      GlobalKey<MobileHomePageState>();
+  /// 小组件落点去重闸：已在目标页就不再补一次切页（切页会顺带 refresh 那一屏）。
+  final WidgetNavGate _widgetNavGate = WidgetNavGate();
+  /// 手机主壳的对话控制器（2026-11-23 §8）：由根状态建好后注入主壳，
+  /// 为的是「分享给管家」这类外部内容有一个不依赖页面层级的落点——
+  /// 分享进来时用户可能停在任何 tab、甚至 App 刚被系统拉起，找不到也
+  /// 不该去找那张卡片的 State。主壳退出时会替它 dispose，故登出即置空。
+  MobileChatController? _mobileChatController;
+  /// 待端出的决策半屏页队列（PRD §4.4 行 2「App 被杀、厂商通道可用」）。
+  ///
+  /// 为什么要队列而不是直接弹：推送把 App 冷启动起来时，决策是**补投事件**带回来
+  /// 的，到达时刻往往就在主壳那个 MaterialApp 还没挂上 context 的那一两帧里——
+  /// 直接丢弃等于把用户点通知这一下整个吞掉。主壳每次装配完会再来取一次件。
+  final List<DecisionRequest> _pendingDecisions = <DecisionRequest>[];
+  /// 半屏页是否正在台上（一次只端一条，第二条等它自己收台）
+  bool _decisionSheetShowing = false;
+  /// 台上那条决策的 intentId（重复入口按它去重，不给同一条决策叠出第二份页）
+  String? _decisionSheetIntentId;
   final IsarLocalHistoryStore _store =
       IsarLocalHistoryStore(userPin: ApiConfig.localPin);
   // 进程内唯一连接：根状态与手机聊天控制器共用，事件经 WsEventRouter 分拣。
@@ -1090,6 +1119,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     // 时机拉起，Android 12+ 禁止后台启动前台服务。
     if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
       unawaited(KeepAliveService.start());
+      // 分享给管家（§8）：装上原生中转队列的推送回调。此刻主壳多半还没建
+      // （登录门禁在前），所以 start 只是接上通道，真正取件在 attachChat——
+      // 内容在原生队列里等着，不会因此丢掉。
+      unawaited(ShareIntakeService.instance.start());
       // 网络路径监听（2026-11-18）：Wi‑Fi ⇄ 蜂窝切换/飞行模式恢复后旧 TCP
       // 会静默失效，原生回调一变化就让连接层立即探活，不再等 75s 心跳。
       NetworkWatchService.instance.start();
@@ -1101,6 +1134,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     LocalNotificationService.onOutcome = (String deliveryId, String outcome) {
       AmbientFeedsController.instance.sendProactiveOutcome(deliveryId, outcome);
     };
+    // 通知正文被点（不是按钮）= 要处理这条决策 → 决策半屏页（PRD §4.4 行 1 的
+    // 「一步完成」也走这同一个页面，与厂商推送补投那条路汇成一处）。
+    LocalNotificationService.onDecisionTap = _openDecisionSheet;
     try {
       await _store.init();
     } catch (e) {
@@ -2408,6 +2444,40 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             // 也不进接受率分母——决策卡删除后应用内无独立确认动作）
             if (deliveryId.isNotEmpty) {
               AmbientFeedsController.instance.sendProactiveOutcome(deliveryId, "viewed");
+            }
+            // §4.3 步骤 3（与手机端 MobileChatController 同构）：通知栏里回的
+            // 一句话作为**一条**用户气泡落进对话流。写入端只有服务端那一条
+            // ingest 链路，这里只渲染应答事件带回的 userText；气泡 id 复用服务
+            // 端落库 id（notification-reply-<root>-<被应答轮次>），重复事件按
+            // id 归并——绝不为它另发 chat.user_message（那条转写路必然多出一泡）。
+            final Object? replyRaw = payload["reply"];
+            final String replyUserText =
+                (payload["userText"]?.toString() ?? "").trim();
+            if (replyRaw is Map && replyUserText.isNotEmpty) {
+              final String root =
+                  replyRaw["rootIntentId"]?.toString() ?? "";
+              final int? answeredRound =
+                  int.tryParse(replyRaw["round"]?.toString() ?? "");
+              if (root.isNotEmpty &&
+                  answeredRound != null &&
+                  answeredRound > 1) {
+                final String userMsgId =
+                    "notification-reply-$root-${answeredRound - 1}";
+                if (!_messages
+                    .any((ChatMessage m) => m.messageId == userMsgId)) {
+                  final ChatMessage userMsg = ChatMessage(
+                    messageId: userMsgId,
+                    sessionId: ApiConfig.effectiveActorId,
+                    role: "user",
+                    text: replyUserText,
+                    timestamp: DateTime.now(),
+                  );
+                  setState(() => _messages.add(userMsg));
+                  unawaited(_store.saveMessage(userMsg).catchError((Object e) {
+                    debugPrint("[chat] 通知回复用户气泡落库失败: $e");
+                  }));
+                }
+              }
             }
             // 告知类同为 agent 主动消息（2026-10-25 用户定调：都要保存）：落
             // 对话流一条文本气泡（手机端同款），SnackBar 即时触达照旧
@@ -6156,6 +6226,22 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     return ValueListenableBuilder<ThemeMode>(
       valueListenable: _mobileThemeMode,
       builder: (BuildContext context, ThemeMode mode, _) {
+        // 控制器只建一次（主题切换会让本 builder 重跑）：MobileHomePage 拿到
+        // 注入的控制器后不再自建，两者指向同一条会话，分享进来的内容才会
+        // 落在用户眼前的这屏上。接线只在新建时做一次，重跑不重复取件。
+        final MobileChatController? existing = _mobileChatController;
+        final MobileChatController chat = existing ?? MobileChatController();
+        if (existing == null) {
+          _mobileChatController = chat;
+          ShareIntakeService.instance
+            ..attachChat(chat)
+            ..onEntryRequest = _openQuickNoteSheet
+            ..onRouteRequest = _applyWidgetRoute;
+          // 厂商通知点开 → 冷启动 → 补投事件带回来的决策，从控制器接出来端上半屏页
+          chat.onDecisionRequest = _openDecisionSheet;
+          // 上一次取件（主壳还没建好时留下的队列）现在有机会端了
+          _drainDecisionQueue();
+        }
         return MaterialApp(
           debugShowCheckedModeBanner: false,
           navigatorKey: _mobileMainNavigatorKey,
@@ -6167,6 +6253,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           home: MobileSystemBars(
             themeMode: mode,
             child: MobileHomePage(
+              key: _mobileHomeKey,
+              chatController: chat,
               themeMode: mode,
               onThemeModeChanged: (ThemeMode m) => _mobileThemeMode.value = m,
               onLogout: _performLogout,
@@ -6176,6 +6264,98 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         );
       },
     );
+  }
+
+  /// 原生入口（长按快捷方式 / 磁贴 / 常驻通知「记一下」）→ 半屏速记卡。
+  ///
+  /// 必须用 [_mobileMainNavigatorKey] 的 context：速记卡要挂在手机主壳那个
+  /// 独立 MaterialApp 里，根导航器的 context 在 MobileTheme 之外，弹出来的卡
+  /// 会是桌面端主题（与行程页/图片预览当初踩过的同一个坑）。
+  void _openQuickNoteSheet(String entry) {
+    final BuildContext? ctx = _mobileMainNavigatorKey.currentContext;
+    if (ctx == null) {
+      debugPrint("[share-intake] 主壳未就绪，入口 $entry 留到下次取件");
+      return;
+    }
+    // 取件可能正落在一次 build 里（attachChat 触发的第一次 drain），
+    // 弹模态要等这一帧画完，否则 Navigator 会在构建期改子树。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(QuickNoteSheet.show(ctx, entry));
+    });
+  }
+
+  /// 决策半屏页（PRD §4.4 行 2「App 被杀、厂商通道可用」）——两条入口的共用落点：
+  ///  · 厂商通知点开 → App 冷启动 → 补投事件带出 `actionIntent`
+  ///    （[MobileChatController.onDecisionRequest]）；
+  ///  · 本机通知正文被点（[LocalNotificationService.onDecisionTap]）。
+  ///
+  /// 「厂商通知没有按钮」这件事就是这一页存在的全部理由：点开通知不能再是「落到
+  /// 首页自己找那条消息」，而是把标题 + 正文 + 那两个按钮直接端上来；拍完板显示
+  /// 服务端那句回执，然后**自己收起**，不要用户再按一次关闭。
+  /// 弹法与 [_openQuickNoteSheet] 同款（主壳的 context + 等这一帧画完）。
+  void _openDecisionSheet(DecisionRequest decision) {
+    // 同一条决策可能从两条入口同时到（补投 + 用户又顺手点了那条通知）：只留一份
+    if (_pendingDecisions
+        .any((DecisionRequest d) => d.intentId == decision.intentId)) {
+      return;
+    }
+    if (_decisionSheetShowing && _decisionSheetIntentId == decision.intentId) {
+      return;
+    }
+    _pendingDecisions.add(decision);
+    _drainDecisionQueue();
+  }
+
+  /// 端下一条：一次只端一条，前一条自己收台后才端下一条。
+  void _drainDecisionQueue() {
+    if (_decisionSheetShowing || _pendingDecisions.isEmpty) return;
+    final BuildContext? ctx = _mobileMainNavigatorKey.currentContext;
+    if (ctx == null) {
+      debugPrint("[decision] 主壳未就绪，决策留到下次取件");
+      return;
+    }
+    final DecisionRequest decision = _pendingDecisions.removeAt(0);
+    _decisionSheetShowing = true;
+    _decisionSheetIntentId = decision.intentId;
+    // 同 _openQuickNoteSheet：取件常落在一次 build 里，弹模态要等这一帧画完
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) {
+        _decisionSheetShowing = false;
+        _decisionSheetIntentId = null;
+        return;
+      }
+      final bool wantsChat =
+          await MobileDecisionSheet.show(ctx, request: decision);
+      _decisionSheetShowing = false;
+      _decisionSheetIntentId = null;
+      if (wantsChat) {
+        // 这一步之后不该再要求第二次操作：他要的是接着把这件事聊完，
+        // 所以直接落到会话 tab（切 index，不 push 新路由，退栈干净）。
+        _mobileHomeKey.currentState?.goToTab(0);
+      }
+      _drainDecisionQueue();
+    });
+  }
+
+  /// 桌面小组件各区域（2026-11-23 PRD §5.3）→ 主壳切 tab。
+  ///
+  /// 与 [_openQuickNoteSheet] 同一个来路（原生队列 → ShareIntakeService.drain），
+  /// 所以同样要等这一帧画完再动导航器：取件常落在 attachChat 触发的那次 build 里。
+  /// 落点表与去重判定都在 [WidgetNavGate]（纯函数，可单测），这里只碰导航。
+  /// 切的是 IndexedStack 的 index 而不是 push 路由，故重复点按天然不叠栈；
+  /// 已经在目标页时闸会返回 null，连那一屏的 refresh 都不补第二次。
+  void _applyWidgetRoute(String route) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final MobileHomePageState? home = _mobileHomeKey.currentState;
+      if (home == null) {
+        debugPrint("[widget-route] 主壳未就绪，$route 留到下次取件");
+        return;
+      }
+      final int? tab = _widgetNavGate.accept(route, currentTab: home.tabIndex);
+      if (tab == null) return;
+      home.goToTab(tab);
+    });
   }
 
   /// 注册门禁页：与独立预览窗口同款深色整页（页面自带自绘标题栏与
@@ -6695,8 +6875,18 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     await CloudModelBindingStore.instance.clear();
     // 登出同样要重绑（回落默认身份），否则连接上还钉着上一个账号。
     WsChatService.shared.ensureIdentityAnnounced();
+    // 常驻通知换回当前身份的看板（§5.2）：这条躲不掉的通知不归切换账号管，
+    // 上一个账号的「15:00 牙医」不能继续挂在状态栏里。
+    unawaited(OngoingStatusService.instance.refresh());
     // 账号级名字清空，避免换账号后顶栏还挂着上一个 agent 的名牌。
     AgentNameStore.instance.clear();
+    // 手机主壳的对话控制器随主壳一起 dispose（MobileHomePageState.dispose），
+    // 这里只断引用：分享队列留在原生，重新登录、新控制器接上后再取。
+    _mobileChatController = null;
+    // 主壳随账号重建，去重闸记的那个 tab 也要作废：否则新壳停在对话 tab、
+    // 而闸还以为「已经在目标页」，第一条小组件点按会被吞掉。
+    _widgetNavGate.reset();
+    ShareIntakeService.instance.attachChat(null);
     if (!mounted) return;
     setState(() {
       _accountEmail = null;
