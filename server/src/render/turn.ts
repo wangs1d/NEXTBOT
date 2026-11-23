@@ -64,6 +64,9 @@ export function renderTurn(input: RenderInput, mode: RenderTurnMode = "full"): R
     legacyBlocks: buildReplyBlocks(text),
     sceneId: decision.scene?.id,
     failures: decision.failures,
+    // 正文是否被重排/抽走：非 plain 形态（切卡 / 引用 / 折叠 / 结构化）都算。
+    // 呈现裁决据此把本轮收成单条，避免流式原文与 done 版式重复。
+    bodyRewritten: mode === "full" && decision.body.form !== "plain",
   });
 
   return { text, cards, decision, envelope, mode };

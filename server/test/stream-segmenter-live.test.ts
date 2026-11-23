@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { StreamSegmenter } from "../src/agent/stream-segmenter.js";
+import { stripSentencesAlreadySaid } from "../src/utils/text.js";
 
 function createRecorder(): {
   seg: InstanceType<typeof StreamSegmenter>;
@@ -360,6 +361,40 @@ test("分泡：discard 后不再推送任何泡", async () => {
   await seg.chain;
   await seg.flushFinal();
   assert.equal(bubbles.length, 0);
+});
+
+test("句级去重保留原文换行：列表项不再被压成「… - xxx」流水", () => {
+  const incoming =
+    "大哥，算是开放了。\n\n- **11月21日**，开始推送 V15\n- 只支持 **HW4** 车型\n- 大规模推送要等到12月";
+  const out = stripSentencesAlreadySaid("大哥，算是开放了。", incoming);
+  assert.ok(!out.includes("大哥"), "重复句被剔除");
+  assert.ok(out.includes("\n- **11月21日**"), `列表项保留换行（实际 ${JSON.stringify(out)}）`);
+  assert.ok(out.includes("\n- 只支持"), "第二项也保留换行");
+  assert.ok(!/美国 - /.test(out), "不得把换行折叠成空格后再拼上破折号");
+});
+
+test("分泡：截图同形态长回复——列表块保留换行，不被句级去重压平", async () => {
+  const { seg, bubbles, enable } = createBubbleRecorder();
+  enable();
+  const reply =
+    "先不用急着下这个结论，我查一下。大哥，算是开放了，但这次还只是小范围开闸，不是全面放开。" +
+    "\n\n- 11月21日，特斯拉开始推送 FSD V15 监督版，首批只给早期体验计划成员，在美国" +
+    "\n- 马斯克说大规模推送要等到12月，跟假日更新一起" +
+    "\n- 只支持 HW4 车型，HW3 的老车升不了" +
+    "\n\n所以，你要是问的是能不能用，那得看你开的是哪款车。";
+  seg.feed(reply);
+  await seg.chain;
+  await seg.flushFinal();
+  const listBubble = bubbles.find((b) => b.text.includes("11月21日"));
+  assert.ok(listBubble, "列表内容必须成泡");
+  assert.ok(
+    listBubble.text.includes("\n- 马斯克说") || listBubble.text.startsWith("- "),
+    `列表项必须按行保留（实际 ${JSON.stringify(listBubble.text)}）`,
+  );
+  assert.ok(
+    !/成员，在美国 - /.test(listBubble.text),
+    "不得出现「…在美国 - 」这种换行被压成空格的形态",
+  );
 });
 
 // ---------------------------------------------------------------------------

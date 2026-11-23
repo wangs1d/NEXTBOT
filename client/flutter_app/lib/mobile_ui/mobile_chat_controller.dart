@@ -2883,6 +2883,11 @@ class MobileChatController extends ChangeNotifier {
       threadKey,
       () => <ChatMessage>[],
     );
+    // 出口一次性分泡（2026-11-23）：本轮没有流式 chunk，turn_started 留下的
+    // 空占位不让位就会在首泡上方留一条空消息——先清掉（与塌缩分支同规则）。
+    list.removeWhere(
+      (ChatMessage m) => m.streaming && m.text.trim().isEmpty,
+    );
     final String? traceId = payload["traceId"]?.toString();
     final String finalText =
         stripAssistantProtocolFrames(payload["finalText"]?.toString() ?? "");

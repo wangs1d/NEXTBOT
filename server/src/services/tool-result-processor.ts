@@ -848,7 +848,13 @@ export class ToolResultProcessor {
        * finalText 重拼信封，场景信息丢失。
        */
       onRenderEnvelope?: (envelope: {
-        meta: { sceneId: string; failures: string[]; preSceneIds: string[] };
+        meta: {
+          sceneId: string;
+          failures: string[];
+          preSceneIds: string[];
+          /** 正文是否被出口重排/抽走（呈现裁决的唯一可靠信号） */
+          bodyRewritten: boolean;
+        };
       }) => void;
     },
   ): string {

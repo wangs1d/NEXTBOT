@@ -91,6 +91,12 @@ export interface RenderEnvelope {
     blockTypes: string[];
     /** 生成前已命中的场景 id（P3：出口与 prompt 复用同一批场景） */
     preSceneIds: string[];
+    /**
+     * 正文是否被出口重排/抽走（列表切卡、引用抽块、长文折叠、结构化正文）。
+     * 呈现裁决（bubble-policy）用它决定本轮必须收成单条消息：流式气泡里的
+     * 原文已不是最终正文，继续逐泡落屏就是同一内容渲染两遍。
+     */
+    bodyRewritten: boolean;
     /** 是否可安全下发给 v1 blocks 消费者（含 v1 不认识的形态时降级） */
     v1Compatible: boolean;
   };
@@ -109,6 +115,8 @@ export interface RenderEnvelopeInput {
   failures?: string[];
   /** 生成前预决策命中的场景（由调用方注入，出口不重复猜） */
   preSceneIds?: string[];
+  /** 本轮正文是否被出口重排/抽走；缺省 false（历史重建等非决策路径）。 */
+  bodyRewritten?: boolean;
   /**
    * 工具执行中途推送过的**结构化卡**（购物登录、支付扫码等 `type=card` 的
    * ToolMediaCard）。这些卡没有图片地址，不能被当图片塞进 mediaCards；但客户端
@@ -365,6 +373,7 @@ export function buildRenderEnvelope(input: RenderEnvelopeInput): RenderEnvelope 
       forms,
       blockTypes: blocks.map((b) => b.type),
       preSceneIds: input.preSceneIds ?? [],
+      bodyRewritten: input.bodyRewritten ?? false,
       v1Compatible,
     },
   };

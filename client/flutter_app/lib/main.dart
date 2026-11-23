@@ -3215,6 +3215,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     required String? playUrl,
   }) async {
     final bool multiBubble = bubbles.length > 1;
+    // 出口一次性分泡（2026-11-23）：本轮没有流式 chunk，turn_started 留下的
+    // 空占位不让位就会在首泡上方留一条空消息——先清掉。
+    setState(() {
+      _messages.removeWhere(
+        (ChatMessage m) => m.streaming && m.text.trim().isEmpty,
+      );
+    });
     // 多泡时块序列只留卡片/媒体块；单泡（整轮一泡）块即全文视图，原样挂。
     List<Map<String, dynamic>>? lastReplyBlocks = replyBlocks;
     if (multiBubble && replyBlocks != null) {
