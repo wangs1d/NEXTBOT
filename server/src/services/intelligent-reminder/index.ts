@@ -149,7 +149,7 @@ export function createIntelligentReminderSystem(deps: IntelligentReminderSystemD
     }
 
     deps.logger?.error?.(
-      `[reminder] 离线必达全部失败（推送/短信/微信均不可用），提醒仅落站内信: ${instance.config.id}`,
+      `[reminder] 离线必达全部失败（推送/短信/微信均不可用），提醒未能送达: ${instance.config.id}（站内信只承载平台消息，不承载提醒）`,
     );
     return true; // 仍视为已处理（避免 handler 再走注定失败的 WS 路径）
   };

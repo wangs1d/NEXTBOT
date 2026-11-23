@@ -534,6 +534,13 @@ class MobileChatController extends ChangeNotifier {
   /// 连接状态文案(用于顶栏状态点)。
   bool isConnected = false;
 
+  /// 本次进程内是否成功连上过（区分「首连中」与「连过又断」）。
+  ///
+  /// 断线横幅据此选文案：冷启动首帧 `isConnected` 必为 false，旧实现一律显示
+  /// 「连接断开，正在自动重连…」——那只是正常首连，却让人以为链路有问题
+  /// （2026-11-22：手机端「老是连接断开」的观感主要来自这里）。
+  bool get hasConnectedOnce => _everConnected;
+
   /// 连接状态通知器(「我的」页账号卡监听展示在线/离线)。
   final ValueNotifier<bool> connection = ValueNotifier<bool>(false);
 

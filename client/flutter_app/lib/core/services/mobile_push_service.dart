@@ -41,10 +41,13 @@ class MobilePushRegistrar {
     // HMS 首次取 token 可能需要与华为后端握手较久：退避序列 4/8/12...60s，
     // 全窗口约 5.5 分钟；仍未就绪则等下次 WS 重连/回前台再补（见 main.dart）。
     String lastErr = "";
-    var gaveUpNoConfig = false;
     for (int attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        final Object? raw = await _channel.invokeMethod<Object>("getPushToken");
+        // 原生侧已加 15s 超时；这里再兜一层：通道/引擎异常时也不让重试循环
+        // 永久挂起（2026-11-22 实测过一次 await 8 分钟不返回，零日志零上报）。
+        final Object? raw = await _channel
+            .invokeMethod<Object>("getPushToken")
+            .timeout(const Duration(seconds: 20));
         if (raw is! Map) {
           lastErr = "native returned non-map";
           break;
@@ -53,7 +56,6 @@ class MobilePushRegistrar {
         // 原生侧无 AGC 配置：整体通道未启用——重试无意义，跳出后上报诊断
         if (raw["configured"] != true) {
           lastErr = "native configured=false (no agconnect config / HMS unavailable)";
-          gaveUpNoConfig = true;
           debugPrint("[mobile-push] provider=$provider not configured, skip");
           break;
         }
@@ -77,6 +79,15 @@ class MobilePushRegistrar {
           lastErr = "register HTTP ${response.statusCode}";
           debugPrint("[mobile-push] register failed: $lastErr");
         } else {
+          // 设备侧根本没有 HMS Core（非华为/荣耀设备）：907135003 = SDK 连不上
+          // HMS Core、907122054 = HMS Core 缺失或版本过低。这两种重试 15 次
+          // （约 8 分钟）永远不可能成功，只会刷服务端错误日志 + 耗电
+          // （2026-11-23 平板实测：每 60s 一条 907135003）。立即放弃，只留
+          // 一条诊断上报。
+          if (lastErr.contains("907135003") || lastErr.contains("907122054")) {
+            debugPrint("[mobile-push] HMS Core 不可用，放弃注册：$lastErr");
+            break;
+          }
           debugPrint("[mobile-push] registrationID pending (attempt $attempt)");
         }
       } catch (e) {

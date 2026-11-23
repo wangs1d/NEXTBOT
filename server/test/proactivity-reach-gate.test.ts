@@ -1,7 +1,10 @@
-// 2026-11-19 主动性重构 P1：期望效用择时闸 + 离线落信箱 + 未回复自动结算。
+// 2026-11-19 主动性重构 P1：期望效用择时闸 + 离线手机推送 + 未回复自动结算。
 //
 // 三条链路的共同点：让「什么时候该打扰」不再只靠静默/对话中/离线三个粗维度，
 // 也不再把「用户没反应」当成没有信息——忽略是训练分寸感的主要负样本。
+//
+// 2026-11-23 定调：离线提醒一律走手机系统推送，不再落站内信（站内信只承载
+// 后台/运营 → 用户的平台消息）。原「离线落信箱」测试已改为推送语义。
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -44,21 +47,21 @@ type Harness = {
   governor: FrequencyGovernor;
   outcomes: OutcomeStore;
   delivered: Array<{ actorId: string; json: string }>;
-  inbox: Array<{ actorId: string; title: string; body: string; kind?: string; messageId?: string }>;
+  pushed: Array<{ actorId: string; title: string; body: string; kind?: string }>;
   dir: string;
 };
 
 function makeHarness(opts: {
   now?: number;
   reachGate?: (p: ProactiveProposal) => GateResult;
-  offlineInbox?: boolean;
+  mobilePush?: boolean;
   lastConversationAt?: (actorId: string) => number | null;
 } = {}): Harness {
   const dir = mkdtempSync(join(tmpdir(), "proactive-gate-"));
   const presence = new PresenceService();
   const governor = new FrequencyGovernor({ ignoreEnv: true, dailyBudget: 20 });
   const delivered: Harness["delivered"] = [];
-  const inbox: Harness["inbox"] = [];
+  const pushed: Harness["pushed"] = [];
   const outcomes = new OutcomeStore(join(dir, "outcomes.json"));
   const pipeline = new ProactivePipeline({
     dataPath: dir,
@@ -74,20 +77,20 @@ function makeHarness(opts: {
     outcomes,
     nowFn: () => opts.now ?? NOON,
     ...(opts.reachGate ? { reachGate: opts.reachGate } : {}),
-    ...(opts.offlineInbox
+    ...(opts.mobilePush
       ? {
-          offlineInbox: {
-            send: async (input) => {
-              // 幂等：同 messageId 不重复落
-              if (!inbox.some((m) => m.messageId === input.messageId)) inbox.push(input);
-              return { deliveredLive: false };
+          mobilePush: {
+            hasChannel: () => true,
+            push: async (input) => {
+              pushed.push({ actorId: input.actorId, title: input.title, body: input.body, kind: input.kind });
+              return { ok: true, provider: "test" };
             },
           },
         }
       : {}),
     ...(opts.lastConversationAt ? { lastConversationAt: opts.lastConversationAt } : {}),
   });
-  return { pipeline, presence, governor, outcomes, delivered, inbox, dir };
+  return { pipeline, presence, governor, outcomes, delivered, pushed, dir };
 }
 
 function withHarness(h: Harness, fn: () => void): void {
@@ -175,33 +178,34 @@ test("reachGate: 决策层异常 → 放行（绝不吞消息）", () => {
   });
 });
 
-// ─── 离线落信箱 ───────────────────────────────────────────────
+// ─── 离线手机推送（2026-11-23：站内信已移除，提醒离线只走手机系统推送）───
 
-test("离线 social → 落站内信（不 push），并标记已投递不再补推", async () => {
-  const h = makeHarness({ offlineInbox: true });
+test("离线 social → 走手机系统推送（不落站内信），并标记已投递不再补推", async () => {
+  const h = makeHarness({ mobilePush: true });
   try {
     // 不 markConnected：两端在线状态为空 → arbitrate 判 offline_wait_reconnect
     const d = h.pipeline.submitProposal(proposal());
     assert.equal(d.verdict, "deferred");
     await new Promise((r) => setImmediate(r));
-    assert.equal(h.inbox.length, 1, "落了一条站内信");
-    assert.equal(h.inbox[0].kind, "proactive:agent_pulse", "客户端可识别来源");
-    assert.equal(h.inbox[0].messageId, "proactive:k_gate", "幂等键 = dedupKey");
-    assert.ok(h.inbox[0].body.includes("那家店"));
+    assert.equal(h.pushed.length, 1, "推了一次手机系统通知");
+    assert.equal(h.pushed[0].kind, "agent_pulse", "客户端可识别来源");
+    assert.ok(h.pushed[0].body.includes("那家店"));
     const rec = h.outcomes.recent(5).at(-1);
-    assert.equal(rec?.channel, "offline_inbox");
+    assert.equal(rec?.channel, "mobile_push");
     assert.equal(rec?.tier, "social");
   } finally {
     rmSync(h.dir, { recursive: true, force: true });
   }
 });
 
-test("离线 must → 不落信箱（保持挂起等推送通道/重连）", async () => {
-  const h = makeHarness({ offlineInbox: true });
+test("离线 social 无推送通道 → 维持挂起（绝不落站内信）", async () => {
+  const h = makeHarness(); // 不注入 mobilePush
   try {
-    h.pipeline.submitProposal(proposal({ tier: "must", importance: "high", dedupKey: "k_must_off" }));
+    h.pipeline.submitProposal(proposal({ dedupKey: "k_social_no_push" }));
     await new Promise((r) => setImmediate(r));
-    assert.equal(h.inbox.length, 0);
+    assert.equal(h.pushed.length, 0, "无通道不推送");
+    assert.equal(h.delivered.length, 0, "离线不直推");
+    assert.equal(h.pipeline.diagnostics().pending.length, 1, "挂起待重连直推，不退化成站内信");
   } finally {
     rmSync(h.dir, { recursive: true, force: true });
   }

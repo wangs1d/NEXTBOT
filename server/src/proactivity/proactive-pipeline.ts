@@ -44,8 +44,9 @@ export type ProactivePipelineDeps = {
   /** 可注入时钟（测试确定性；默认 Date.now） */
   nowFn?: () => number;
   /**
-   * 移动端推送通道（离线必达升级）：两端都不在线时，必达层/critical 提案
-   * 改走手机系统推送（App 被杀也能收到）。未注入 = 通道禁用，离线一律挂起待重连。
+   * 移动端推送通道（离线唯一提醒出口，2026-11-23 定调）：两端都不在线时，
+   * **所有 tier** 的提案一律改走手机系统推送（App 被杀也能收到）。未注入 =
+   * 通道禁用，离线一律挂起待重连（重连后直推进对话流），不再落站内信。
    */
   mobilePush?: import("./mobile-push-service.js").MobilePushChannel;
   /**
@@ -88,24 +89,6 @@ export type ProactivePipelineDeps = {
    */
   discovery?: DiscoveryLayer;
   /**
-   * 离线信箱（2026-11-19）：social 层提案在两端都离线时落一条站内信，
-   * 不 push、不响铃，用户下次打开 App 可见。
-   *
-   * 为什么恢复这条链路：此前（2026-10-14）为了「站内信只承载平台消息」删掉了它，
-   * 结果是**用户不在电脑前 = 主动性彻底消失**——而主动感恰恰最常发生在人离开时。
-   * 落库后即出队（markDelivered），重连不再补推，避免同一句话出现两遍。
-   */
-  offlineInbox?: {
-    send(input: {
-      actorId: string;
-      title: string;
-      body: string;
-      kind?: string;
-      importance?: "low" | "normal" | "high" | "critical";
-      messageId?: string;
-    }): Promise<unknown>;
-  };
-  /**
    * 社交提案的期望效用择时（ReachDecisionService.decide 的薄包装，2026-11-19）：
    * 让「用户是不是正忙、这类消息他还愿不愿意看」进入投递前的最后一道判断，
    * 而不只是靠静默/对话中/离线三个粗维度。
@@ -125,8 +108,6 @@ const POSITIVE = new Set<ProactiveOutcome>(["accepted", "replied", "snoozed"]);
 
 /** 离线推送重试退避（推送失败后 5min 再试，防 provider 连打；成功即出队不会重复推） */
 const OFFLINE_PUSH_RETRY_MS = 5 * 60_000;
-/** 离线落信箱失败的重试退避（同上） */
-const OFFLINE_INBOX_RETRY_MS = 5 * 60_000;
 
 /** 离线挂起重仲裁退避序列：首次挂起不退避（重连后下一次 flush 即达），此后逐级
  * 拉长封顶 30min——否则设备长期离线时同一提案每 30s 被重新仲裁一次（实测运行
@@ -373,18 +354,20 @@ export class ProactivePipeline {
   }
 
   /**
-   * 离线兜底（2026-10-14 收敛）：两端都不在线（或 WS 投递竞态失败）时——
-   *   ① must/critical 且手机推送可用 → 手机系统推送（App 被杀也能收到）
-   *   ② 其余一律维持挂起语义（重连后直推；重裁决退避防 CPU 空转）。
-   * 站内信兜底已按用户定调整体删除（2026-10-14）：站内信职责是后台→用户的
-   * 平台消息/更新通知，不承载聊天式提醒；此前 social 层落信箱链路移除。
+   * 离线兜底（2026-11-23 定调）：两端都不在线（或 WS 投递竞态失败）时——
+   *   ① 手机推送可用 → 所有 tier 的提案一律走手机系统推送（App 被杀也能收到）；
+   *   ② 无推送通道 → 维持挂起语义（重连后直推；重裁决退避防 CPU 空转）。
+   * 站内信不再承载聊天式提醒（2026-11-23 用户定调，第二次删除此类链路）：
+   * 站内信职责是后台/运营 → 用户的平台消息/更新通知。提醒文字只走「上下文
+   * （重连直推）+ 手机系统推送」，桌面端离线由灵动岛/系统通知负责，不落信箱。
    */
   private attemptOfflinePush(p: ProactiveProposal): void {
     const clock = () => this.deps.nowFn?.() ?? Date.now();
     const push = this.deps.mobilePush;
 
-    // ① 必达层/critical：手机系统推送优先（通道可用时）
-    if (push && (p.tier === "must" || p.importance === "critical") && push.hasChannel(p.actorId)) {
+    // ① 手机系统推送（所有 tier；2026-11-23 从 must/critical 放宽）：
+    //    离线时提醒的唯一必达出口，通道可用即走，不再有第二选择。
+    if (push && push.hasChannel(p.actorId)) {
       this.store.reschedule(p.dedupKey, clock() + OFFLINE_PUSH_RETRY_MS);
       const deliveryId = `dp_${clock().toString(36)}_${(this.pushSeq++).toString(36)}`;
       // 「通知即界面」：离线推送同样签发动作意图。厂商通道渲染不出按钮（系统模板），
@@ -447,49 +430,9 @@ export class ProactivePipeline {
       return;
     }
 
-    // ② social 层：落离线信箱（不 push、不响铃），用户下次打开 App 可见。
-    //    2026-11-19 恢复这条链路（10-14 曾为「站内信只承载平台消息」整体删除）：
-    //    结果是「用户不在电脑前 = 主动性消失」，而主动感最常发生在人离开的时候。
-    //    落库后即出队，重连不再补推——同一句话出现两遍比没出现更伤。
-    const inbox = this.deps.offlineInbox;
-    if (inbox && p.tier === "social") {
-      this.store.reschedule(p.dedupKey, clock() + OFFLINE_INBOX_RETRY_MS);
-      const deliveryId = `di_${clock().toString(36)}_${(this.pushSeq++).toString(36)}`;
-      void inbox
-        .send({
-          actorId: p.actorId,
-          title: p.title || "助手",
-          body: String(p.directText ?? p.summary),
-          kind: `proactive:${p.kind}`,
-          importance: p.importance === "critical" || p.importance === "high" ? "high" : "normal",
-          // 幂等键：同一条提案重试不会在信箱里长出第二条
-          messageId: `proactive:${p.dedupKey}`,
-        })
-        .then(() => {
-          if (!this.store.take(p.dedupKey)) return; // 已被 WS 重连直投抢先
-          this.store.markDelivered(p.dedupKey, clock());
-          if (this.deps.discovery && p.findingFingerprints?.length) {
-            this.deps.discovery.settle(p.findingFingerprints, "delivered");
-          }
-          this.deps.outcomes.record({
-            deliveryId,
-            actorId: p.actorId,
-            kind: p.kind,
-            channel: "offline_inbox",
-            outcome: "delivered",
-            at: clock(),
-            tier: p.tier,
-            ...(topicKeyOfProposal(p) ? { topic: topicKeyOfProposal(p) } : {}),
-          });
-          console.log(`[ProactivePipeline] 离线落信箱 kind=${p.kind} actor=${p.actorId}`);
-        })
-        .catch((err) => {
-          console.log(`[ProactivePipeline] 离线落信箱失败（保留待发区重试）kind=${p.kind}: ${err}`);
-        });
-      return;
-    }
-
-    // ③ 其余（must 但无推送通道）：维持挂起语义——保留待发区等重连直推。
+    // ② 无推送通道：维持挂起语义——保留待发区等重连直推（进对话流）。
+    //    站内信兜底已删除（2026-11-23，第二次）：站内信只承载平台/运营消息，
+    //    提醒不落信箱；无通道就挂起等重连，绝不退化成站内信。
   }
 
   /**

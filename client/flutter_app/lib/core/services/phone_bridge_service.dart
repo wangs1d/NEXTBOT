@@ -49,7 +49,7 @@ class PhoneBridgeService {
     _runner = WsConnectionRunner(
       name: "phone-bridge",
       urlProvider: () => ApiConfig.wsUrl,
-      gate: () => _enabled,
+      gate: () => _enabled && !_serverRejected,
       heartbeatInterval: _keepaliveInterval,
       // 手机桥不做入站静默判死（与收编前一致：仅依赖底层断连事件）
       reconnectDelay: _initialReconnectDelay,
@@ -102,6 +102,15 @@ class PhoneBridgeService {
 
   bool _enabled = false;
   bool get isEnabled => _enabled;
+
+  /// 服务端已明确拒绝手机桥能力（`PHONE_BRIDGE_DISABLED`）。
+  ///
+  /// 服务端没配 `PHONE_BRIDGE_ENABLED` / `PHONE_BRIDGE_TOKEN` 时，session.init
+  /// 会被拒、这条通道永远绑不上，但旧实现照样常驻一条空闲 WS 并无限重连：
+  /// 每条断线日志成对出现、连接数翻倍，让「断连」看起来比实际严重一倍
+  /// （2026-11-22 生产日志实证：7 天内 phoneBridge:true 的断开为 0 条）。
+  /// 收到明确拒因后停连并记下，等下次启动或用户重开开关再试一次。
+  bool _serverRejected = false;
 
   bool _locReportEnabled = false;
   bool get isLocationReportEnabled => _locReportEnabled;
@@ -158,6 +167,8 @@ class PhoneBridgeService {
   /// 用户在设置页开启：持久化 + 立即连接。
   Future<void> enable() async {
     _enabled = true;
+    // 用户显式重开 = 允许再试一次（服务端可能刚开放手机桥）
+    _serverRejected = false;
     final writer = _writePref;
     if (writer != null) {
       try {
@@ -204,6 +215,11 @@ class PhoneBridgeService {
 
   /// 建立桥接连接（幂等：已连接/连接中时跳过）。
   void start() {
+    if (_serverRejected) {
+      // 服务端已拒绝该能力：保持离线，不再建连（用户重开开关会清标志重试）。
+      status.value = PhoneBridgeStatus.offline;
+      return;
+    }
     PhoneCaptureService.instance.ensureInitialized();
     _captureSub ??= PhoneCaptureService.instance.onBatch.listen(
       (List<CapturedPhoneMessage> batch) => _queueCapturedMessages(batch),
@@ -223,7 +239,7 @@ class PhoneBridgeService {
   /// 已连接则空转；断线时取消挂着的退避定时器、重置退避计数后立即补连——
   /// 后台放久了指数退避拉到 30s，回前台不等退避直接试。
   void pokeReconnect() {
-    if (!_enabled) return;
+    if (!_enabled || _serverRejected) return;
     status.value = PhoneBridgeStatus.connecting;
     _runner.pokeReconnect();
   }
@@ -298,10 +314,19 @@ class PhoneBridgeService {
           "[PhoneBridge] sync online=${payload["phoneBridgeOnline"]} at=${payload["updatedAt"]}",
         );
         break;
-      case "error":
+      case "error.event":
+        // 服务端统一错误通道（线程/连接层同款 `error.event`）。旧实现写的是
+        // `case "error"`，与实际事件名对不上，等于从未处理过拒因。
+        final String code = payload["code"]?.toString() ?? "";
         debugPrint(
-          "[PhoneBridge] server error code=${payload["code"]} msg=${payload["message"]}",
+          "[PhoneBridge] server error code=$code msg=${payload["message"]}",
         );
+        if (code == "PHONE_BRIDGE_DISABLED") {
+          // 服务端明确未开放手机桥：这条通道永远绑不上，重连只是白占连接。
+          _serverRejected = true;
+          _runner.stop();
+          status.value = PhoneBridgeStatus.offline;
+        }
         break;
       default:
         break;

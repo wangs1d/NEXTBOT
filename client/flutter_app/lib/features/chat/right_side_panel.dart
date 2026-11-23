@@ -93,7 +93,7 @@ class RightSidePanel extends StatefulWidget {
   const RightSidePanel({
     super.key,
     this.scheduleFuture,
-    this.onAgentLink,
+    this.onInbox,
     this.onSchedule,
     this.onGallery,
     this.onBrowser,
@@ -102,8 +102,8 @@ class RightSidePanel extends StatefulWidget {
 
   final Future<List<ScheduleEvent>>? scheduleFuture;
 
-  /// 「好友」工具入口（好友面板从右侧滑出，2026-10-15 恢复）。
-  final VoidCallback? onAgentLink;
+  /// 「消息」（站内信）工具入口（收件箱从右侧滑出；好友入口已下线 2026-11-23）。
+  final VoidCallback? onInbox;
   final VoidCallback? onSchedule;
 
   /// 「图库」工具入口（照片浏览/上传/删除）。
@@ -938,15 +938,13 @@ class _RightSidePanelState extends State<RightSidePanel> {
   // ═══════════════════════════════════════════════════════════
   List<_ToolSpec> _allToolSpecs() {
     return <_ToolSpec>[
-      // 「好友」入口（2026-10-15 恢复；消息入口仍撤）。
-      // 版本闸（开源版剔除内测独占能力）：好友入口不出现
-      if (!ApiConfig.isOssEdition)
-        _ToolSpec(
-            id: "friends",
-            icon: Icons.people_outline,
-            label: "好友",
-            onTap: widget.onAgentLink),
-      // 「消息」入口已删除（2026-10-14）：消息类内容统一后台扫描，
+      // 「消息」（站内信）入口：好友功能下线后由原好友槽位改为站内信收件箱。
+      _ToolSpec(
+          id: "inbox",
+          icon: Icons.mail_outline,
+          label: "消息",
+          onTap: widget.onInbox),
+      // 消息聚合入口已删除（2026-10-14）：消息类内容统一后台扫描，
       // agent 判定有价值后才主动推送，不再提供前端陈列入口（垃圾消息免打扰）。
       // 「手机」工具已删除（2026-10-11）：手机桥接属内测能力，不对外暴露，
       // 入口连同其状态轮询一并移除（落地页 features/phone_devices 保留在仓库里）。

@@ -99,6 +99,10 @@ const PUBLIC_EXACT_PATHS = new Set([
   "/api/webpay/config-status",
   "/api/webpay/return/verify",
   "/api/webpay/notify",
+  // 华为推送「消息回执」回调（2026-11-23）：华为服务器直接 POST，不带任何
+  // 设备凭据；只写审计日志、不读用户数据，自己的 Basic Auth 在路由内校验。
+  // 精确匹配而非前缀——避免 /api/webhooks/ 整个面被放开。
+  "/api/webhooks/huawei-push-receipt",
 ]);
 
 const PUBLIC_PATH_PREFIXES = [

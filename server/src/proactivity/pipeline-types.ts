@@ -116,9 +116,9 @@ export type ProactiveOutcome =
 /**
  * 触达通道：
  *  - in_app：两端在线 WS fan-out 直推
- *  - mobile_push：两端离线时必达/critical 升级手机系统推送
- *  （offline_inbox 站内信兜底已删除 2026-10-14：站内信职责是后台→用户的
- *    平台消息/更新通知，不承载聊天式提醒；离线无推送通道一律挂起待重连）
+ *  - mobile_push：两端离线时所有 tier 一律走手机系统推送（2026-11-23 放宽）
+ *  （offline_inbox 站内信兜底已彻底删除：站内信职责是后台/运营→用户的平台
+ *    消息/更新通知，不承载聊天式提醒；离线无推送通道一律挂起待重连直推）
  */
 export type DeliveryChannel = "in_app" | "mobile_push";
 

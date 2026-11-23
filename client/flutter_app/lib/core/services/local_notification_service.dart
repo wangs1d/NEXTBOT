@@ -52,14 +52,19 @@ class LocalNotificationService {
       // 后台 isolate 回调：App 被杀时点通知栏按钮仍能执行（2026-11-13）
       onDidReceiveBackgroundNotificationResponse: localNotificationActionBackground,
     );
-    if (Platform.isAndroid && requestNotificationPermission) {
-      // Android 13+ 运行时通知权限
-      final PermissionStatus status = await Permission.notification.request();
-      debugPrint("[local-notification] permission=$status");
-      // 显式创建 HIGH 重要性渠道（2026-10-13）：厂商推送（JPush 离线必达）的服务端
-      // payload 指定 channel_id="proactive"——渠道必须在首条推送到达前就存在，
-      // 否则落默认渠道（静默进通知栏，无顶部横幅弹窗）。init 时建好，双路径
-      // （WS 在线 / 厂商推送离线）共用同一渠道，横幅+声音+振动。
+    if (Platform.isAndroid) {
+      // Android 13+ 运行时通知权限（只在调用方要求时申请；手机端延后到进主壳）
+      if (requestNotificationPermission) {
+        final PermissionStatus status = await Permission.notification.request();
+        debugPrint("[local-notification] permission=$status");
+      }
+      // 显式创建 HIGH 重要性渠道（2026-10-13 建 / 2026-11-23 修条件嵌套）：
+      // 厂商推送（HMS 等）的服务端 payload 指定 channel_id="proactive"，渠道必须
+      // 在首条推送到达前就存在，否则华为直接丢弃这条通知（实测：网关返回
+      // 80000000 Success，手机上什么都没有）。**建渠道与申请权限是两件事**，
+      // 旧写法 `Platform.isAndroid && requestNotificationPermission` 把两者绑在
+      // 一个 if 里，而手机端 init 传的正是 requestNotificationPermission=false
+      // （权限延后到进主壳才申请）→ 渠道从未创建 → 离线推送 100% 弹不出来。
       await _plugin
           .resolvePlatformSpecificImplementation<
               AndroidFlutterLocalNotificationsPlugin>()

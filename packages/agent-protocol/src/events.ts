@@ -263,15 +263,10 @@ export const ServerEventType = {
   ToolCall: "tool.call",
   ToolResult: "tool.result",
   WalletSimulateResult: "wallet.simulate.result",
+  // AgentPeerMessage（agent.peer_message）保留：AIP 服务复用此事件推送 Agent 间消息，
+  // 非好友专属。好友消息已整体下线（2026-11-23）。
   AgentPeerMessage: "agent.peer_message",
-  /**
-   * 站内好友消息已读回执（2026-10-17）：A 标读好友会话后，服务端把读取进度
-   * 翻译到对端 B 的会话空间（经 externalMessageId 映射两侧副本）推给 B。
-   * payload: { readerActorId, lastReadSeq, readAt }——lastReadSeq 为 B 会话
-   * 空间内的已读序号，B 客户端把自己的 seq ≤ lastReadSeq 的气泡标为已读。
-   * 尽力而为语义：离线不补投，标读动作不重复补偿。
-   */
-  AgentPeerReadReceipt: "agent.peer_read_receipt",
+  // AgentPeerReadReceipt（agent.peer_read_receipt）已删除（好友专属，2026-11-23）。
   /** 每日天气简报（日程 weather_brief 触发，需已建立 WS session） */
   WeatherBrief: "weather.brief",
   /** Agent 自动化任务到点执行完成（需已建立 WS session 才能实时收到） */

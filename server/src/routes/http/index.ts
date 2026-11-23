@@ -18,7 +18,6 @@ import { registerUsageAnalyticsRoutes } from "./usage-analytics.js";
 import { registerInternalManifestEventRoutes } from "./internal-manifest-events.js";
 import { registerModelProviderRoutes } from "./model-providers.js";
 import { registerServiceConfigRoutes } from "./service-config.js";
-import { registerFriendRoutes } from "./friends.js";
 import { registerInfoRoutes } from "./info.js";
 import { registerUnifiedProtocolRoutes } from "./protocol-unified.js";
 import { registerSystemRoutes } from "./system.js";
@@ -54,6 +53,7 @@ import { registerBriefingDeliveryRoutes } from "./briefing-delivery.js";
 import { registerPresenceDetectRoutes } from "./presence-detect.js";
 import { registerProactivitySuppressionRoutes } from "./proactivity-suppression.js";
 import { registerProactivityPipelineRoutes, registerAutonomyRoutes } from "./proactivity.js";
+import { registerPushReceiptWebhook } from "./push-receipt-webhook.js";
 import { registerCapabilityReadinessRoutes } from "./capability-readiness.js";
 import { registerBrowserHealthRoutes } from "./browser-health.js";
 import { registerChatSuggestionRoutes } from "./chat-suggestions.js";
@@ -192,10 +192,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   // 数据入口：用户自助上传（截图/表格/ics/文本）→ 抽取草稿 → 确认入库。
   // 与财务入站同构：未装配服务时端点 503，不影响其他路由。
   registerIngestRoutes(app, deps);
-  // 好友社交（world.link.* 工具族的 HTTP 面；开源版剔除）
-  if (!isOssEdition()) {
-    registerFriendRoutes(app, deps);
-  }
+  // 好友社交 HTTP 面已整体下线（2026-11-23）
   registerVoiceMessageRoutes(app, {
     voiceMessageService: deps.voiceMessageService,
   });
@@ -321,6 +318,9 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     fabric: deps.proactivityFabric ?? null,
     suppressionStore: deps.proactivitySuppressionStore ?? null,
   });
+  // 华为推送「消息回执」接收端（2026-11-23）：messages:send 的 80000000 只代表
+  // 受理，送达与否只有回执能证明。公开路径在 auth.ts 白名单里精确放行。
+  registerPushReceiptWebhook(app);
   registerAutonomyRoutes(app, {
     autonomySettings: deps.autonomySettings ?? null,
   });

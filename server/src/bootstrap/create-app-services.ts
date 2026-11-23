@@ -38,7 +38,6 @@ import { AgentAccountService } from "../services/agent-account-service.js";
 import { BetaWhitelistService } from "../services/beta-whitelist-service.js";
 import { BetaInviteService, BetaWaitlistService } from "../services/beta-invite-service.js";
 import { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";
-import { FriendService } from "../services/friend-service.js";
 import { createAgentCore } from "../agent/agent-runtime.js";
 import { DirectRuntimeAdapter, type RuntimeFacade } from "../runtime/runtime-facade.js";
 import { PromptContextBuilder, buildClientSurfacesBlock } from "../agent/prompt-context-builder.js";
@@ -164,7 +163,6 @@ import { HookBus, setHookBus } from "../services/hooks/index.js";
 import { WebhookService } from "../services/webhook/index.js";
 import { AgentPairingService } from "../services/agent-pairing-service.js";
 import { AgentRelayService } from "../services/agent-relay-service.js";
-import { FriendMessageService } from "../services/friend-message-service.js";
 import { AuditService } from "../services/audit-service.js";
 import { EmailRegistrationService } from "../services/email-registration-service.js";
 import { InfoHubService } from "../services/info-hub-service.js";
@@ -296,8 +294,7 @@ import {
   classifyFeatureByName,
 } from "../catalog/index.js";
 import { setCapabilityModuleDeps, getBuiltinAgentChatTools, invalidateBuiltinToolsCache, setDeclaredSkillTimeoutResolver, declaredSkillTimeoutFromManager } from "../external-model/openai-compatible-tool-loop.js";
-import { registerAgentLinkTools, registerWorldStatusTools } from "../tools/agent-link-tools.js";
-import { registerAgentRelayTools } from "../tools/agent-relay-tools.js";
+import { registerWorldStatusTools } from "../tools/agent-link-tools.js";
 import { formatNextRunAtLocal, registerCalendarTools } from "../tools/calendar-tools.js";
 import { registerClockTools } from "../tools/clock-tools.js";
 import { registerLifeTools } from "../tools/life-tools.js";
@@ -1533,15 +1530,6 @@ export async function createAppServices(
   // 内测自助通道：候补申请队列（登录页排队→后台批量审批）+ 邀请码（登录页填码过闸）
   const betaWaitlistService = new BetaWaitlistService();
   const betaInviteService = new BetaInviteService();
-  const friendService = new FriendService();
-  // 站内好友消息统一投递内核（2026-10-15 闭环）：world.link.send_message / HTTP /friends/messages 共用；hub 持久落库解决离线必达。
-  const friendMessageService = new FriendMessageService({
-    hub: messageHubService,
-    relay: agentRelayService,
-    wsRegistry: wsConnectionRegistry,
-    accounts: agentAccountService,
-    friends: friendService,
-  });
   // 财务入站记账服务（构造提前到 skill 注册之前；LLM/推送回调由装配层后置注入）。
   const financeIngestService = new FinanceIngestService({
     financeDeepService,
@@ -1555,7 +1543,6 @@ export async function createAppServices(
     agentPairingService.load(),
     agentAccountService.load(),
     emailRegistrationService.load(),
-    friendService.load(),
     virtualPhoneService.load(),
   ]).catch((err) => {
     app.log.error({ err }, "Failed to load persisted data");
@@ -1569,15 +1556,9 @@ export async function createAppServices(
     initUnifiedPaymentService({ alipayBotService, paymentService }),
     new QrAssistService({ imageStore: imageGenerationService }),
   );
-  // 版本闸（NEXTBOT_EDITION=oss 开源版剔除）：中继/虚拟电话工具族
-  // （好友联络工具族 registerAgentLinkTools 在 worldService 创建后注册——加好友门禁用世界身份）
+  // 版本闸（NEXTBOT_EDITION=oss 开源版剔除）：虚拟电话工具族
+  // （好友联络工具族已整体下线 2026-11-23；registerWorldStatusTools 在 worldService 后注册）
   if (!isOssEdition()) {
-    registerAgentRelayTools(
-      toolRegistry,
-      friendMessageService,
-      agentPairingService,
-      agentAccountService,
-    );
     registerAgentPhoneTools(toolRegistry, virtualPhoneService, reachDecisionService);
   }
   registerAgentVoiceTools(toolRegistry, voiceCapabilityService);
@@ -1780,10 +1761,9 @@ export async function createAppServices(
     console.log("[skip] AgentWorld social domain disabled by ENV");
   }
   toolRegistry.setWorldService(worldService);
-  // 好友联络工具族（Agent World 域 world.link.*）：门禁依赖世界身份，
-  // 须在 worldService 创建（L~1264）之后注册；oss 版剔除
+  // 世界状态工具族（Agent World 域 world.status.*）：oss 版剔除
+  // （好友联络工具族 world.link.* 已整体下线 2026-11-23）
   if (!isOssEdition()) {
-    registerAgentLinkTools(toolRegistry, friendService, agentAccountService, worldService);
     registerWorldStatusTools(toolRegistry, worldService, skillManager);
   }
   // Feature Catalog：能力分类统一层（分类视图，不注册能力）。
@@ -7121,12 +7101,9 @@ export async function createAppServices(
     lastConversationAt: (actorId) => proactivityHub.lastInteractionAtOf(actorId),
     silenceLog: proactivitySilenceLog,
     confirmations: proactivityConfirmations,
-    // 离线落信箱（2026-11-19）：social 层两端都离线时不再无限挂起——
-    // 落一条站内信（不 push），用户下次打开 App 能看到。这是「主动感」最常
-    // 发生的时间段（人离开电脑），此前被 10-14 的「站内信不承载聊天提醒」删掉了。
-    offlineInbox: {
-      send: (input) => inboxService.send(input),
-    },
+    // 离线提醒（2026-11-23 用户定调）：全部走手机系统推送（mobilePush），
+    // 不再落站内信——站内信只承载平台/运营 → 用户的消息，提醒文字只进上下文
+    // （重连直推）+ 手机系统推送。offlineInbox 通道已彻底移除，禁止复活。
     // 期望效用择时（2026-11-19）：社交提案投递前问一次「此刻时机对不对、他还愿不愿意看」，
     // 把 interruptCost / 反馈后验 p 接进投递链。PROACTIVITY_REACH_GATE=0 一键关。
     ...(process.env.PROACTIVITY_REACH_GATE === "0"
@@ -7779,8 +7756,6 @@ export async function createAppServices(
     messagePlatformGateway,
     messageBridgeService,
     browserSessionService,
-    friendService,
-    friendMessageService,
     companionService,
     runtime,
     wsConnectionRegistry,
@@ -7844,7 +7819,6 @@ export async function createAppServices(
     sharedBrowserCoordinator,
     cdpTunnelHub,
     messageHubService,
-    friendMessageService,
     locationCoordinator,
     locationIngest,
     actorContext,
@@ -7978,7 +7952,6 @@ export async function createAppServices(
     socialOutreachService,
     codeSandboxService,
     virtualPhoneService,
-    friendService,
     messageHubService,
     messagePlatformGateway,
     messageBridgeService,

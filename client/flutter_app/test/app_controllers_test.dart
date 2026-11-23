@@ -1,7 +1,6 @@
 import "package:nextbot/app/ambient_feeds_controller.dart";
 import "package:nextbot/app/chat_turn_controller.dart";
 import "package:nextbot/app/phone_call_controller.dart";
-import "package:nextbot/core/models/agent_relay_models.dart";
 import "package:nextbot/core/services/account_profile_api.dart";
 import "package:nextbot/core/presentation/dynamic_island.dart";
 import "package:flutter_test/flutter_test.dart";
@@ -16,11 +15,10 @@ void main() {
       // 每个用例重置端口，避免用例间串扰
       c.removeScheduleForDeletedTask = null;
       c.syncSchedule = null;
+      c.appendReminderToChat = null;
       c.isAppBackgrounded = () => false;
       c.bumpInboxUnread = null;
       c.showInboxSnackBar = null;
-      c.persistRelayMessage = null;
-      c.showRelayToast = null;
       c.sendContactFeedbackViaWs = null;
     });
 
@@ -99,6 +97,28 @@ void main() {
           <String, dynamic>{"title": "吃饭", "reminderMessage": "该吃饭啦"});
     });
 
+    test("reminder_fired: 桌面到点提醒落对话流，预告档不落（2026-11-23 定调）",
+        () async {
+      // flutter test 跑在桌面平台（非 Android/iOS），走桌面分支。
+      final List<String> toChat = <String>[];
+      c.appendReminderToChat = (String text) => toChat.add(text);
+      c.syncSchedule = () async {};
+
+      await c.onScheduleReminderFired(<String, dynamic>{
+        "title": "吃药",
+        "message": "该吃药了",
+        "preReminder": false,
+      });
+      expect(toChat, <String>["该吃药了"], reason: "到点提醒落对话流");
+
+      await c.onScheduleReminderFired(<String, dynamic>{
+        "title": "吃饭",
+        "message": "半小时后吃饭",
+        "preReminder": true,
+      });
+      expect(toChat, <String>["该吃药了"], reason: "预告档只上岛、不落对话流");
+    });
+
     test("inbox.message: 桌面前台走应用内呈现并 bump 角标", () async {
       int bumps = 0;
       final List<(String, String, String)> snacks =
@@ -116,28 +136,6 @@ void main() {
       });
       expect(bumps, 1);
       expect(snacks.single, ("系统通知", "欢迎", "inbox-9"));
-    });
-
-    test("peer_message: 构造入站模型并经端口落库/提示", () async {
-      AgentRelayMessage? persisted;
-      String? toastFrom;
-      c.persistRelayMessage = (AgentRelayMessage m) async {
-        persisted = m;
-      };
-      c.showRelayToast = (String from) => toastFrom = from;
-
-      await c.onPeerMessage(<String, dynamic>{
-        "messageId": "m-1",
-        "fromSessionId": "peer-a",
-        "toSessionId": "me",
-        "text": "你好",
-        "subject": "主题",
-        "receivedAt": "2026-09-27T08:00:00.000",
-      });
-      expect(persisted!.messageId, "m-1");
-      expect(persisted!.fromSessionId, "peer-a");
-      expect(persisted!.subject, "主题");
-      expect(toastFrom, "peer-a");
     });
 
     test("isQuietHoursNow: 23 点后与 8 点前为静音时段", () {

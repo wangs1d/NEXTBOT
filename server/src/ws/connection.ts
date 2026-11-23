@@ -13,7 +13,6 @@ import type { AuditService } from "../services/audit-service.js";
 import type { SessionService } from "../services/session-service.js";
 import type { RealFundsWalletService } from "../services/real-funds-wallet-service.js";
 import type { AgentPairingService } from "../services/agent-pairing-service.js";
-import type { FriendMessageService } from "../services/friend-message-service.js";
 import type { WsConnectionRegistry } from "../services/ws-connection-registry.js";
 import { notifySessionInit } from "../services/client-update-pusher.js";
 import { normalizeDeviceClass } from "../services/ws-connection-registry.js";
@@ -220,8 +219,6 @@ export type WsRouteDeps = {
   cdpTunnelHub?: import("../services/shared-browser/cdp-tunnel.js").CdpTunnelHub | null;
   /** 消息聚合中心：手机桥接 phone.msg.report 批量落库用；null=未装配 */
   messageHubService?: MessageHubService | null;
-  /** 站内好友消息投递内核：session.init 时补投未读好友消息（可选） */
-  friendMessageService?: FriendMessageService | null;
   /** 按需位置协调器：Agent 需要位置时向客户端请求实时 GPS */
   locationCoordinator: LocationCoordinator;
   /** 位置上报管线（方案 A-D）：历史落库 / 围栏判定 / 到达触发；null=未装配 */
@@ -318,7 +315,6 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     sharedBrowserCoordinator,
     cdpTunnelHub,
     messageHubService,
-    friendMessageService,
     locationCoordinator,
     locationIngest,
     actorContext,
@@ -564,6 +560,10 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
               lastAliveAgeMs: bootPl.lastAliveAgeMs,
               fgsRunning: bootPl.fgsRunning,
               batteryExempt: bootPl.batteryExempt,
+              // 通知使用权（2026-11-22）：系统会持续绑定本应用的
+              // NotificationListenerService，进程重要性提升、更不易被回收。
+              // 断连归因时用来区分「用户没授权」与「授权了但 ROM 仍杀」。
+              notificationListenerEnabled: bootPl.notificationListenerEnabled,
               diagBuild: bootPl.diagBuild,
               platform: bootPl.platform,
             },
@@ -1040,16 +1040,6 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             // 离线结果重放（2026-09-08 outbox）：用户离线期间完成的任务面结果
             // 暂存于 TaskOutbox，重连时按 FIFO 原样重推，闭合「离线=结果丢失」缺口。
             getTaskOutbox().replayFor(actorId, socket);
-            // 好友消息补投（2026-10-15 闭环）：离线期间好友发来的站内消息在 hub
-            // 持久落库；重连时把未读会话的最新一条以 AgentPeerMessage 重推
-            // （客户端按 messageId 幂等，已提示过的不重复打扰）。
-            if (friendMessageService) {
-              friendMessageService
-                .replayUnread(actorId)
-                .catch(() => {
-                  /* 补投失败不影响连接建立 */
-                });
-            }
             // 活跃任务快照重播（2026-09-08 任务回执）：断线重连/换设备后，
             // 客户端凭 running/awaiting_input 任务的幂等快照重建对话流内回执。
             // quiet 任务（原地同步执行的轻任务）不补发（2026-09-09）。

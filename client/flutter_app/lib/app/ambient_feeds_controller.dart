@@ -8,14 +8,13 @@ import "../core/services/ws_event_router.dart"
     show WsEventRouter, WsSubscribeScope, WsEventCatalog, wsEventPayload;
 
 import "../core/config/api_config.dart";
-import "../core/models/agent_relay_models.dart";
 import "../core/services/local_notification_service.dart";
 import "../core/presentation/dynamic_island.dart";
 
 /// 环境信息流控制器 —— 主窗口「被动信息」事件域的编排层
-/// （schedule.tasks_changed / reminder_fired、inbox.message、
-/// agent.peer_message 与主动性反馈回传），原 `_PrivateAiAppState`
-/// 内联事件块的收口。
+/// （schedule.tasks_changed / reminder_fired、inbox.message 与主动性反馈
+/// 回传），原 `_PrivateAiAppState` 内联事件块的收口。
+/// 好友消息（agent.peer_message）已整体下线（2026-11-23）。
 ///
 /// 职责边界：这里只做**编排**——payload 解析、触达分流、服务调用、
 /// 岛条目喂点、反馈回传；任何需要 BuildContext 的呈现（SnackBar、
@@ -53,8 +52,6 @@ class AmbientFeedsController {
         } else if (type == "inbox.message") {
           // 站内信：服务端已落盘必达，这里只做即时提醒，两端同一处理。
           return instance.onInboxMessage(payload);
-        } else if (type == "agent.peer_message") {
-          return instance.onPeerMessage(payload);
         }
       },
     );
@@ -67,6 +64,13 @@ class AmbientFeedsController {
 
   /// 日程同步（联动右侧面板刷新 + 岛日程卡 + 提醒计划重建）。
   Future<void> Function()? syncSchedule;
+
+  /// 到点提醒落对话流（2026-11-23 用户定调：提醒文字只应发送到上下文中）。
+  /// 桌面端原只在灵动岛出瞬时胶囊、对话流无痕迹——与手机端「到点气泡落流」
+  /// 不一致。控制器不持 BuildContext，落流动作经此端口交回 main.dart
+  /// （复用 _appendAssistantText，真实消息持久化）。手机端由服务端定向的
+  /// agent.proactive_message(schedule_reminder) 落流，不调用此端口。
+  void Function(String text)? appendReminderToChat;
 
   /// 是否处于手机后台（类微信常在线分流：后台走系统通知）。
   bool Function()? isAppBackgrounded;
@@ -81,15 +85,6 @@ class AmbientFeedsController {
   /// 站内信应用内呈现（SnackBar + 知道了按钮，含 markRead 刷新链）。
   Future<void> Function(String title, String body, String messageId)?
       showInboxSnackBar;
-
-  /// 中继消息落本地库 + 入列表（State 做 setState 持久化）。
-  Future<void> Function(AgentRelayMessage message)? persistRelayMessage;
-
-  /// 中继消息是否已在本端落库（按 messageId 去重；重连补投/重启后不重复打扰）。
-  bool Function(String messageId)? isRelayMessageKnown;
-
-  /// 中继消息应用内提示。
-  void Function(String fromSessionId)? showRelayToast;
 
   /// 联系反馈 WS 桥（控制器不依赖 WS 客户端单例）。
   void Function({
@@ -170,6 +165,13 @@ class AmbientFeedsController {
           holdSeconds: isPreReminder ? 0 : 26,
           urgent: true,
         );
+        // 到点提醒同时落对话流（2026-11-23 用户定调：提醒文字只应发到
+        // 上下文中）。此前桌面端只有瞬时灵动岛胶囊、对话流留不下痕迹，
+        // 与手机端到点气泡落流不一致；预告档不落流（与手机端口径一致——
+        // 服务端只对 preReminder != true 的到点档补对话流消息）。
+        if (!isPreReminder) {
+          appendReminderToChat?.call(text);
+        }
       }
 
       await syncSchedule?.call();
@@ -209,47 +211,6 @@ class AmbientFeedsController {
       ));
     } else {
       await showInboxSnackBar?.call(inboxTitle, inboxBody, inboxId);
-    }
-  }
-
-  /// 中继消息（好友站内信 peer 互发）：构造入站模型 → 落库/入列表 → 触达分流。
-  /// 2026-10-15 闭环：服务端 hub 持久落库 + 重连补投（replayed 标记）；
-  /// 本端按 messageId 去重——已落库的只更新不重复提示；手机后台走系统通知
-  /// （与站内信 onInboxMessage 同分流），前台 SnackBar 提示。
-  Future<void> onPeerMessage(Map<String, dynamic> payload) async {
-    final String messageId =
-        payload["messageId"]?.toString() ?? "relay-unknown";
-    final String fromSessionId = payload["fromSessionId"]?.toString() ?? "";
-    final String body = payload["text"]?.toString() ?? "";
-    final String? subject = payload["subject"]?.toString();
-    final String fromName =
-        payload["fromName"]?.toString().trim().isNotEmpty == true
-            ? payload["fromName"].toString()
-            : fromSessionId;
-    final String receivedRaw =
-        payload["receivedAt"]?.toString() ?? DateTime.now().toIso8601String();
-    DateTime receivedAt = DateTime.now();
-    try {
-      receivedAt = DateTime.parse(receivedRaw);
-    } catch (_) {}
-    final bool known = isRelayMessageKnown?.call(messageId) ?? false;
-    final AgentRelayMessage inbound = AgentRelayMessage(
-      messageId: messageId,
-      fromSessionId: fromSessionId,
-      toSessionId: payload["toSessionId"]?.toString() ?? "",
-      text: body,
-      subject: (subject == null || subject.isEmpty) ? null : subject,
-      receivedAt: receivedAt,
-    );
-    await persistRelayMessage?.call(inbound);
-    if (known) return; // 补投/重放：只更新落库，不重复打扰
-    if (isMobile && _backgrounded) {
-      unawaited(LocalNotificationService.show(
-        title: "来自 $fromName 的消息",
-        body: body,
-      ));
-    } else {
-      showRelayToast?.call(fromName);
     }
   }
 

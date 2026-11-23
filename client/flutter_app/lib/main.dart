@@ -28,7 +28,6 @@ import "core/presentation/update_corner_toast.dart";
 import "core/presentation/voice_call_ui_labels.dart";
 import "core/presentation/boot_animation.dart";
 import "core/db/isar_local_history_store.dart";
-import "core/models/agent_relay_models.dart";
 import "core/models/chat_models.dart";
 import "core/models/schedule_models.dart";
 import "core/models/wallet_models.dart";
@@ -127,6 +126,7 @@ import "core/services/pure_voice_mode.dart";
 import "core/presentation/phone_call_page.dart";
 import "core/services/local_notification_service.dart";
 import "core/services/keep_alive_service.dart";
+import "core/services/phone_capture_service.dart";
 import "core/services/network_watch_service.dart";
 import "core/services/media_playback_service.dart";
 import "core/services/mobile_briefing_launcher.dart";
@@ -558,7 +558,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   final Map<String, int> _assistantMessageIndexById = <String, int>{};
   final Map<String, String> _pendingPlayUrlByTraceId = <String, String>{};
   final List<WalletLedgerItem> _ledger = <WalletLedgerItem>[];
-  final List<AgentRelayMessage> _relayInbound = <AgentRelayMessage>[];
   double _balance = 1000;
   double _frozen = 0;
   int _tabIndex = 0;
@@ -592,10 +591,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
 
   /// 当前右侧面板要展示的内容
   /// - null: 未打开
-  /// - RightPanelKind.friends:     好友（MailboxPage）
   /// - RightPanelKind.messages:   消息聚合（MessageHubPage）——入口已撤
   ///   （2026-10-14，消息统一后台扫描按价值主动推送），枚举分支保留，
   ///   无 UI 触发点。
+  /// 好友面板已删除（好友功能 2026-11-23 整体下线）；槽位改为站内信。
   RightPanelKind? _rightPanel;
 
   /// 图片预览面板当前要展示的图片快照（来自媒体卡点击）。
@@ -637,10 +636,18 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   static const String _kLastAlivePrefKey = "client.lastAliveAtMs";
   /// 构建标记：随 `ws.client_boot` 上报，用来确认手机上跑的到底是不是
   /// 本次修复后的包（服务端日志直接可见，不再靠时间戳猜）。
-  static const String _kClientDiagBuild = "2026-11-19-wsfix1";
+  static const String _kClientDiagBuild = "2026-11-23-pushfix1";
   int _aliveTick = 0;
   int _bootLastAliveAgeMs = -1;
   bool _bootBeaconSent = false;
+
+  /// 上次信标用的身份（2026-11-23 修「明明是登录态却被记成游客」）。
+  ///
+  /// 冷启动时凭据是异步恢复的，WS 往往先以安装标识 `inst_xxx` 建连并发信标，
+  /// 服务端于是把「已登录用户」记成游客（实测 00:37 平板、00:15 手机都被记错，
+  /// 远程诊断据此误判「未登录」）。登录后 WS 重连时身份变成账号，此时补发一次，
+  /// 让服务端能看到真实身份；同一身份不重复发。
+  String _bootBeaconActor = "";
 
   /// 「上次存活时刻」是否已读完（2026-11-18 修复信标恒 -1）。
   ///
@@ -1331,9 +1338,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       }
     }
 
-    final List<AgentRelayMessage> cachedRelay =
-        await _store.listRelayInbound(ApiConfig.effectiveActorId);
-
     final bool? visionConsent = await _store.getVisionCameraConsent();
 
     // 隐私方案（2026-11-22）：把本机图库里用户发过的图预读进内存，
@@ -1363,9 +1367,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       // 否则后续 chat.assistant_chunk / chat.assistant_done 事件按 messageId
       // 去重时找不到记录，会把同一条 agent 消息重复入列表，造成「同一条回复渲染两次」。
       _rebuildAssistantIndex();
-      _relayInbound
-        ..clear()
-        ..addAll(cachedRelay);
       _visionCameraConsent = visionConsent;
       // agent 名字占位：未设定前留空，界面统一显示「未命名」（不预设名字）
       _agentName = "";
@@ -2727,6 +2728,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             _appendAssistantText("assistant-reminder", reminderBody,
                 persist: true);
           }
+          // 桌面灵动岛提醒（2026-11-23 用户定调）：此前 reminder_popup 只落
+          // 对话流文本、桌面端没有瞬时悬浮提醒——智能提醒级 popup 也应像日程
+          // 到点一样上岛。用与日程提醒同一生产级入口 IslandReminderScheduler，
+          // 默认短档（非到点档，不占全屏打断白名单），文案与落流正文一致。
+          if (reminderBody.isNotEmpty) {
+            IslandReminderScheduler.instance.fireNow(title: reminderBody);
+          }
         }
 
         // ====== Legacy 来电事件（agent.phone.incoming）—— 无前摇直接来电 ======
@@ -3980,16 +3988,32 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// 两个触发点：WS 连上、`_bootstrap` 读完「上次存活时刻」。谁后到谁负责发，
   /// 保证 `lastAliveAgeMs` 一定是真实差值而不是 -1。
   void _maybeSendBootBeacon() {
-    if (!_bootBeaconReady || _bootBeaconSent || !_ws.isConnected) return;
+    if (!_bootBeaconReady || !_ws.isConnected) return;
+    // 身份变了（安装标识 → 登录账号）就补发一次；同身份不重复发。
+    final String actor = ApiConfig.effectiveActorId;
+    if (_bootBeaconSent && actor == _bootBeaconActor) return;
     _bootBeaconSent = true;
+    _bootBeaconActor = actor;
     unawaited(() async {
       try {
         final bool fgsRunning = await KeepAliveService.isRunning();
         final bool batteryExempt = await KeepAliveService.isBatteryExempt();
+        // 通知使用权（2026-11-22 断连诊断补强）：授权后系统会持续绑定本应用
+        // 的 NotificationListenerService，进程重要性提升、更不容易被回收。
+        // 之前这个状态只在手机桥 session.init 里上报，而手机桥被服务端拒时
+        // 字段从未上过线——用户「明明授权了」却无法远程核实。
+        bool listenerEnabled = false;
+        try {
+          listenerEnabled = await PhoneCaptureService.instance.isListenerEnabled();
+        } catch (_) {
+          // 非 Android / 通道未就绪：按未授权处理
+        }
         _ws.sendEvent("ws.client_boot", <String, dynamic>{
+          "actorId": actor,
           "lastAliveAgeMs": _bootLastAliveAgeMs,
           "fgsRunning": fgsRunning,
           "batteryExempt": batteryExempt,
+          "notificationListenerEnabled": listenerEnabled,
           "diagBuild": _kClientDiagBuild,
           "platform": defaultTargetPlatform.name,
           "bootAt": DateTime.now().toIso8601String(),
@@ -4371,20 +4395,18 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     setState(() => _tabIndex = index);
   }
 
-  /// 好友入口：不再切整页 tab，而是从右侧滑出好友面板（2026-10-15 恢复）
-  void _openAgentLinkTab() {
+  /// 消息面板（站内信）：从右侧滑出收件箱（原好友入口槽位，好友下线后改用）。
+  void _openInboxPanel() {
     setState(() {
       _tabIndex = 0;
-      _rightPanel = RightPanelKind.friends;
-      // 保存当前 splitRatio，关闭时恢复
+      _rightPanel = RightPanelKind.inbox;
       _previousSplitRatio = _splitRatio;
-      // 保存 side 模式下的原右面板宽度，关闭时恢复
       _previousRightPanelWidth = _rightPanelWidth;
-      _splitRatio = RightPanelKind.friends.defaultSplitRatio;
+      _splitRatio = RightPanelKind.inbox.defaultSplitRatio;
     });
   }
 
-  /// 消息面板入口已删除（2026-10-14）：消息类内容统一后台扫描，agent
+  /// 消息聚合面板入口已删除（2026-10-14）：消息类内容统一后台扫描，agent
   /// 判定有价值后才主动推送，不再提供前端陈列入口。RightPanelKind.messages
   /// 面板分支保留（代码路径仍可达性由服务端事件决定），仅撤 UI 触发点。
 
@@ -5188,6 +5210,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     c.removeScheduleForDeletedTask = (String taskId) =>
         removeLocalScheduleForDeletedTask(_store, taskId);
     c.syncSchedule = _syncScheduleFromServer;
+    // 到点提醒落对话流（2026-11-23）：桌面端提醒文字进上下文的唯一出口，
+    // 与手机端 agent.proactive_message(schedule_reminder) 落流同形态。
+    c.appendReminderToChat = (String text) {
+      if (text.trim().isNotEmpty) {
+        _appendAssistantText("assistant-reminder", text.trim(), persist: true);
+      }
+    };
     c.isAppBackgrounded = () => _appBackgrounded;
     c.bumpInboxUnread = () {
       if (!mounted) return;
@@ -5213,27 +5242,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                   },
                 ),
         ),
-      );
-    };
-    c.persistRelayMessage = (AgentRelayMessage inbound) async {
-      setState(() {
-        final int dup = _relayInbound
-            .indexWhere((AgentRelayMessage x) => x.messageId == inbound.messageId);
-        if (dup >= 0) {
-          _relayInbound[dup] = inbound;
-        } else {
-          _relayInbound.insert(0, inbound);
-        }
-      });
-      await _store.upsertRelayMessage(ApiConfig.effectiveActorId, inbound);
-    };
-    // 补投/重放去重：服务端重连补投按 messageId 重推，本端已落库的不再重复提示
-    c.isRelayMessageKnown = (String messageId) => _relayInbound
-        .any((AgentRelayMessage x) => x.messageId == messageId);
-    c.showRelayToast = (String fromSessionId) {
-      if (!mounted) return;
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-        SnackBar(content: Text("收到来自 $fromSessionId 的中继消息")),
       );
     };
     c.sendContactFeedbackViaWs = sendContactFeedbackViaWsBridge;
@@ -7065,7 +7073,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       width: _rightPanelWidth - _kSidePanelDividerWidth,
       child: RightSidePanel(
         scheduleFuture: _cachedScheduleFuture,
-        onAgentLink: _openAgentLinkTab,
+        onInbox: _openInboxPanel,
         onSchedule: _openSchedulePanel,
         onGallery: _openGalleryPanel,
         onBrowser: _openBrowserPanel,
@@ -7165,7 +7173,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// 右侧面板要渲染的具体内容
   Widget _buildRightPanelContent() {
     switch (_rightPanel) {
-      case RightPanelKind.friends:
+      case RightPanelKind.inbox:
         return MailboxPage(api: _worldApi, ws: _ws);
       case RightPanelKind.messages:
         return MessageHubPage(api: _worldApi);

@@ -36,12 +36,13 @@ class WsEventCatalog {
   };
 
   /// 日程触达 + 环境消息编排（auto 域）：到点提醒、日程变更同步、
-  /// 站内信即时提醒、Agent 间消息。
+  /// 站内信即时提醒。
+  /// agent.peer_message 原好友消息订阅已随好友功能下线移除（2026-11-23）；
+  /// AIP 复用该事件走 avatar 表情映射器的独立订阅，不经本目录。
   static const Set<String> ambientFeeds = <String>{
     "schedule.tasks_changed",
     "schedule.reminder_fired",
     "inbox.message",
-    "agent.peer_message",
   };
 
   /// 媒体播放（root 域）。

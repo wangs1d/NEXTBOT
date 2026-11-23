@@ -48,10 +48,35 @@ class KeepAliveService {
     }
   }
 
-  /// 电池优化是否已被豁免（诊断上报用）。
+  /// 电池优化是否已被豁免（诊断上报 / 保活引导展示用）。
   static Future<bool> isBatteryExempt() async {
     try {
       return await _channel.invokeMethod<bool>("isBatteryExempt") ?? false;
+    } on Exception {
+      return false;
+    }
+  }
+
+  /// 弹系统「电池优化豁免」授权框（已豁免时原生直接返回 true，不重复弹）。
+  ///
+  /// 2026-11-22：生产日志实证断开的同一秒进程消失（死前 0.4s 仍在写存活心跳），
+  /// 而 `batteryExempt` 全程 false —— 系统回收进程是断连的根因。这个授权框是
+  /// 唯一能由 App 主动发起的解法；国产 ROM 还须叠加「应用启动管理」白名单。
+  static Future<bool> requestBatteryExempt() async {
+    try {
+      return await _channel.invokeMethod<bool>("requestBatteryExempt") ?? false;
+    } on Exception {
+      return false;
+    }
+  }
+
+  /// 打开厂商「应用启动管理」页（自启动 / 关联启动 / 后台活动）。
+  ///
+  /// 国产 ROM 的这层管理绕过 AOSP 进程优先级，是"前台服务在跑却照样被杀"
+  /// 的真正开关。AOSP 无统一入口，原生侧按厂商逐个尝试后回落应用详情页。
+  static Future<bool> openAppStartupSettings() async {
+    try {
+      return await _channel.invokeMethod<bool>("openAppStartupSettings") ?? false;
     } on Exception {
       return false;
     }

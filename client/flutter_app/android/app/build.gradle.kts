@@ -47,6 +47,16 @@ android {
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
 
+    // AGC 配置单一源（2026-11-22）：仓库里只保留 app/agconnect-services.json。
+    // 运行时 MobilePushPlugin 从 assets 读 app_id，所以构建期复制一份进去。
+    // 旧做法是手工维护 src/main/assets/ 里的第二份副本——换 AGC 应用时漏改就会
+    // 打出旧 app_id（本次实测：APK 内仍是上一个应用的 119341653，token 必然失败）。
+    sourceSets {
+        getByName("main") {
+            assets.srcDir(layout.buildDirectory.dir("generated/agc-assets").get().asFile)
+        }
+    }
+
     // CameraX 的 ProcessCameraProvider 暴露 ListenableFuture 类型。占位包
     // listenablefuture:1.0 与 guava 33+（自带 ListenableFuture）重复类冲突
     // （checkDebugDuplicateClasses 炸），全局排除占位包，类型统一由 guava 提供。
@@ -160,3 +170,14 @@ dependencies {
 flutter {
     source = "../.."
 }
+
+// AGC 配置构建期同步（2026-11-22）：单一源 app/agconnect-services.json →
+// build/generated/agc-assets（已注册为 assets.srcDir，见 android.sourceSets）。
+// 让 mergeAssets 与 preBuild 都依赖它，保证任何构建变体都不会漏拷。
+val syncAgcAssets = tasks.register<Copy>("syncAgcAssets") {
+    from(layout.projectDirectory.file("agconnect-services.json"))
+    into(layout.buildDirectory.dir("generated/agc-assets"))
+}
+tasks.matching { it.name.startsWith("merge") && it.name.contains("Assets") }
+    .configureEach { dependsOn(syncAgcAssets) }
+tasks.named("preBuild") { dependsOn(syncAgcAssets) }

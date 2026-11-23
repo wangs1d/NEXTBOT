@@ -3,13 +3,14 @@
 ///   设置同样不在此列：它以独立全屏界面打开，见 SettingsPage。
 ///   图库不在此列：2026-09-29 起退出一级 tab，走常用工具入口以全屏路由
 ///   打开（见 GalleryWorkbenchPage），右面板窄栏放不下 3D 照片墙。）
-enum RightPanelKind { friends, messages, devices, schedule, imagePreview, videoPreview, browser, catalog, approvals, contentSummary, agentHome }
+// friends 已整体下线（2026-11-23）：好友功能删除，其面板槽位改为 inbox（站内信）。
+enum RightPanelKind { inbox, messages, devices, schedule, imagePreview, videoPreview, browser, catalog, approvals, contentSummary, agentHome }
 
 /// 宽屏布局断点：>= 此宽度时对话页显示右侧面板。
 const double kWideLayoutBreakpoint = 820;
 
 /// 各面板类型的默认左右占比（leftRatio = 左聊天区占比）。
-/// - 消息/好友类：信息密度低，右面板小占比（左大右小）
+/// - 消息/站内信类：信息密度低，右面板小占比（左大右小）
 /// - 设备/日程类：需要更大展示空间，右面板占比略大
 extension RightPanelKindDefaults on RightPanelKind {
   /// 打开时左聊天区占可用宽度的比例（0.1~0.9）。
@@ -18,8 +19,8 @@ extension RightPanelKindDefaults on RightPanelKind {
     switch (this) {
       case RightPanelKind.messages:
         return 0.62; // 消息聚合：右面板较窄
-      case RightPanelKind.friends:
-        return 0.58; // 好友列表：右面板较窄
+      case RightPanelKind.inbox:
+        return 0.58; // 站内信收件箱：右面板较窄
       case RightPanelKind.devices:
         return 0.42; // 设备展示：需要更大空间
       case RightPanelKind.schedule:
@@ -87,8 +88,8 @@ String platformDisplayName(String platform) {
 /// 右侧面板标题。
 String rightPanelTitle(RightPanelKind kind) {
   switch (kind) {
-    case RightPanelKind.friends:
-      return "好友";
+    case RightPanelKind.inbox:
+      return "消息";
     case RightPanelKind.messages:
       return "消息聚合";
     case RightPanelKind.devices:

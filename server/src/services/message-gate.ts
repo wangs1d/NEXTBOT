@@ -33,10 +33,8 @@ const COMMERCIAL_WORDS_RE =
 /** 人际触达信号：有人找用户本人，优先放行（用户相关的强证据）。 */
 const HUMAN_URGENT_RE = /(请尽快回复|尽快回复|马上回电|速回|回个电话|回电)/;
 
-/** 白名单平台：alipay（通知监听自身已按包名筛选）、friend（站内好友消息，
- * 产品内建的人际通道，模板垃圾无法由此进入——「我中奖了哈哈」这类玩笑话
- * 绝不能被强模板特征静默吞掉）。 */
-const GATE_EXEMPT_PLATFORMS = new Set<string>(["alipay", "friend"]);
+/** 白名单平台：alipay（通知监听自身已按包名筛选）。friend 已下线（2026-11-23）。 */
+const GATE_EXEMPT_PLATFORMS = new Set<string>(["alipay"]);
 
 export function gateInboundMessage(input: MessageHubInboundInput): MessageGateVerdict {
   if (process.env.MESSAGE_HUB_GATE === "off") return { gated: false };

@@ -37,6 +37,26 @@ const double kAgentStatusOrbInset = 16;
 /// 顶栏文字字体：与侧边栏统一使用 HarmonyOS Sans SC。
 const String _kTopBarFontFamily = "HarmonyOS Sans SC";
 
+/// 连接横幅的展示态（纯函数，便于单测锁死「首连不报断开」）。
+///
+/// - `connected`：当前 WS 已连上 → 不显示横幅（`text` 为空串）；
+/// - 未连上且本进程从未连过 → 正常首连，只说「正在连接服务器…」；
+/// - 未连上但连过 → 才是真的掉线，用警示文案。
+///
+/// 回归锁：`test/connection_banner_test.dart`。
+@visibleForTesting
+({bool dropped, String text}) connectionBannerState({
+  required bool connected,
+  required bool everConnected,
+}) {
+  if (connected) return (dropped: false, text: "");
+  if (!everConnected) return (dropped: false, text: "正在连接服务器…");
+  return (
+    dropped: true,
+    text: "连接断开，正在自动重连…（期间发出的消息会在恢复后送达）"
+  );
+}
+
 /// 手机端对话主界面(白黑极简,跟随主题)。
 ///
 /// - 顶栏：居中 agent 名牌胶囊（名称来自 [AgentNameStore]，未取名时留空）
@@ -169,14 +189,28 @@ class _MobileChatPageState extends State<MobileChatPage> {
     );
   }
 
-  /// 断线横幅：WS 未连接时在消息区上方显示「连接断开 / 正在重连」。
-  /// isConnected 由 ws_connected / ws_disconnected 事件驱动（controller），
-  /// 首帧未连上时也会短暂显示「正在连接」——这是真实状态，不遮掩。
+  /// 连接横幅：未连接时在消息区上方显示一行状态。
+  ///
+  /// 两种语义必须分开（2026-11-22「老是连接断开」观感根修）：
+  ///  - 本进程还没连上过 = 正常首连，文案「正在连接服务器…」，中性色；
+  ///  - 连过之后掉线 = 真的断了，文案「连接断开，正在自动重连…」，警示色。
+  /// 旧实现只看 `isConnected`，冷启动首帧必然显示「连接断开」——把正常首发
+  /// 握手说成故障，用户每次打开 App 都以为链路在断。判据收敛在
+  /// [connectionBannerState]，由单测锁死。
   Widget _buildConnectionBanner(BuildContext context, MobilePalette p) {
-    if (_controller.isConnected) return const SizedBox.shrink();
+    final ({bool dropped, String text}) state = connectionBannerState(
+      connected: _controller.isConnected,
+      everConnected: _controller.hasConnectedOnce,
+    );
+    if (state.text.isEmpty) return const SizedBox.shrink();
     final bool dark = Theme.of(context).brightness == Brightness.dark;
-    final Color bg = dark ? const Color(0xFF3A2A12) : const Color(0xFFFDF3E1);
-    final Color fg = dark ? const Color(0xFFF5C169) : const Color(0xFF8A5A16);
+    final bool dropped = state.dropped;
+    final Color bg = dropped
+        ? (dark ? const Color(0xFF3A2A12) : const Color(0xFFFDF3E1))
+        : (dark ? const Color(0xFF1C2733) : const Color(0xFFEDF3FA));
+    final Color fg = dropped
+        ? (dark ? const Color(0xFFF5C169) : const Color(0xFF8A5A16))
+        : (dark ? const Color(0xFF9EC1E0) : const Color(0xFF3C6288));
     return Material(
       color: bg,
       child: SizedBox(
@@ -197,7 +231,7 @@ class _MobileChatPageState extends State<MobileChatPage> {
               const SizedBox(width: 10),
               Expanded(
                 child: Text(
-                  "连接断开，正在自动重连…（期间发出的消息会在恢复后送达）",
+                  state.text,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(fontSize: 12.5, color: fg),

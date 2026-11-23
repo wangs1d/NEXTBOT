@@ -180,6 +180,104 @@ class KeepAlivePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 result.success(pm.isIgnoringBatteryOptimizations(ctx.packageName))
             }
             /**
+             * 电池优化豁免授权框（2026-11-22 手机端「连接断开」根因治理）。
+             *
+             * 生产日志实证：断开的同一秒进程消失（死前 0.4s 还在写存活心跳），
+             * 2~4s 后进程重启 —— 是系统回收进程，不是网络断、也不是服务端踢。
+             * 而 batteryExempt 全程 false：应用从未申请过豁免。这里直接弹系统
+             * 授权框；已豁免时返回 true，不重复弹。
+             */
+            "requestBatteryExempt" -> {
+                val ctx = context
+                if (ctx == null) {
+                    result.success(false)
+                    return
+                }
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+                    result.success(true) // M 以下没有电池优化机制
+                    return
+                }
+                val pm = ctx.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+                if (pm.isIgnoringBatteryOptimizations(ctx.packageName)) {
+                    result.success(true)
+                    return
+                }
+                try {
+                    ctx.startActivity(
+                        Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                            .setData(android.net.Uri.parse("package:${ctx.packageName}"))
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    )
+                    result.success(true)
+                } catch (e: Exception) {
+                    // 部分 ROM 裁剪了这个系统页：回落到应用详情页，用户仍可手动改电池项
+                    android.util.Log.w("KeepAlive", "request battery exempt failed", e)
+                    try {
+                        ctx.startActivity(
+                            Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                                .setData(android.net.Uri.parse("package:${ctx.packageName}"))
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                        )
+                        result.success(true)
+                    } catch (_: Exception) {
+                        result.success(false)
+                    }
+                }
+            }
+            /**
+             * 厂商「应用启动管理」页（自启动 / 关联启动 / 后台活动）。
+             *
+             * 国产 ROM 的这层管理不受 AOSP 的进程优先级约束，是"前台服务在跑却
+             * 照样被杀"的真正开关（见 2026-11-22 断连诊断）。AOSP 没有统一入口，
+             * 按厂商逐个尝试，全部失败时回落本应用详情页。
+             */
+            "openAppStartupSettings" -> {
+                val ctx = context
+                if (ctx == null) {
+                    result.success(false)
+                    return
+                }
+                val candidates = listOf(
+                    // 华为 / 荣耀（EMUI / HarmonyOS 兼容 Android）
+                    "com.huawei.systemmanager" to
+                        "com.huawei.systemmanager.appcontrol.activity.StartupAppControlActivity",
+                    "com.huawei.systemmanager" to
+                        "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity",
+                    // 小米 / Redmi
+                    "com.miui.securitycenter" to
+                        "com.miui.permcenter.autostart.AutoStartManagementActivity",
+                    // OPPO / 一加 / realme
+                    "com.coloros.safecenter" to
+                        "com.coloros.safecenter.permission.startup.StartupAppListActivity",
+                    "com.oplus.safecenter" to
+                        "com.oplus.safecenter.permission.startup.StartupAppListActivity",
+                    // vivo / iQOO
+                    "com.vivo.permissionmanager" to
+                        "com.vivo.permissionmanager.activity.BgStartUpManagerActivity",
+                )
+                for ((pkg, cls) in candidates) {
+                    try {
+                        ctx.startActivity(
+                            Intent().setClassName(pkg, cls).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                        )
+                        result.success(true)
+                        return
+                    } catch (_: Exception) {
+                        // 该厂商页面不存在，继续试下一个
+                    }
+                }
+                try {
+                    ctx.startActivity(
+                        Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                            .setData(android.net.Uri.parse("package:${ctx.packageName}"))
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    )
+                    result.success(true)
+                } catch (_: Exception) {
+                    result.success(false)
+                }
+            }
+            /**
              * 「始终允许」定位引导页（2026-11-20）：Android 11+ 运行时弹窗没有
              * 「始终允许」选项（Google 刻意移除），最终授权只能用户在系统设置里点。
              * Android 12+ 深链直达本应用的「位置权限」单页（含「允许所有时间」，

@@ -8,8 +8,6 @@ import type { BetaWhitelistService } from "../../services/beta-whitelist-service
 import type { BetaInviteService, BetaWaitlistService } from "../../services/beta-invite-service.js";
 import type { FinanceIngestService } from "../../services/finance-ingest-service.js";
 import type { AgentRelayService } from "../../services/agent-relay-service.js";
-import type { FriendService } from "../../services/friend-service.js";
-import type { FriendMessageService } from "../../services/friend-message-service.js";
 import type { ScheduleTaskService } from "../../services/schedule-task-service.js";
 import type { ScheduleIntentService } from "../../services/schedule-intent-service.js";
 import type { InfoHubService } from "../../services/info-hub-service.js";
@@ -126,9 +124,6 @@ export type HttpRouteDeps = {
   messagePlatformGateway: MessagePlatformGateway;
   messageBridgeService: MessageBridgeService;
   browserSessionService: BrowserSessionService;
-  friendService: FriendService;
-  /** 站内好友消息统一投递内核（friend-message-service）；未装配时好友消息端点 503 */
-  friendMessageService?: FriendMessageService;
   companionService: CompanionService;
   runtime?: RuntimeFacade;
   wsConnectionRegistry?: WsConnectionRegistry;

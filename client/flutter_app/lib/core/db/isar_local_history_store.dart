@@ -5,7 +5,6 @@ import "package:crypto/crypto.dart";
 import "package:flutter/foundation.dart" show debugPrint, kIsWeb;
 import "package:path_provider/path_provider.dart";
 
-import "../models/agent_relay_models.dart";
 import "../models/chat_models.dart";
 import "../models/schedule_models.dart";
 import "../utils/assistant_text_sanitizer.dart";
@@ -19,13 +18,11 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
 
   String _userPin;
 
-  /// 当前本地加密口令（与聊天、入站中继 XOR 密钥同源）。
+  /// 当前本地加密口令（与聊天 XOR 密钥同源）。
   String get userPin => _userPin;
   final List<ChatSession> _sessions = <ChatSession>[];
   final Map<String, List<ChatMessage>> _messages = <String, List<ChatMessage>>{};
-  /// 入站中继：按本机 `sessionId`（收件人）分桶；正文与主题经与聊天相同的 XOR 混淆后写入。
-  final Map<String, List<Map<String, dynamic>>> _relayInbound =
-      <String, List<Map<String, dynamic>>>{};
+  // 入站中继（好友消息）存储已随好友功能下线移除（2026-11-23）。
   File? _storageFile;
   /// 扩展偏好（明文；不走聊天 XOR）。
   Map<String, dynamic> _preferences = <String, dynamic>{};
@@ -126,7 +123,6 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
           jsonEncode(<String, dynamic>{
             "sessions": <Map<String, dynamic>>[],
             "messages": <String, List<Map<String, dynamic>>>{},
-            "relayInbound": <String, List<Map<String, dynamic>>>{},
             "preferences": <String, dynamic>{},
             "scheduleEvents": <Map<String, dynamic>>[],
           }),
@@ -155,7 +151,6 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
           jsonEncode(<String, dynamic>{
             "sessions": <Map<String, dynamic>>[],
             "messages": <String, List<Map<String, dynamic>>>{},
-            "relayInbound": <String, List<Map<String, dynamic>>>{},
             "preferences": <String, dynamic>{},
             "scheduleEvents": <Map<String, dynamic>>[],
           }),
@@ -213,16 +208,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
         }).toList();
       }
 
-      // 解析 relay inbound
-      final Map<String, dynamic> relayRaw =
-          decoded["relayInbound"] as Map<String, dynamic>? ?? <String, dynamic>{};
-      _relayInbound.clear();
-      for (final MapEntry<String, dynamic> entry in relayRaw.entries) {
-        final List<dynamic> list = entry.value as List<dynamic>? ?? <dynamic>[];
-        _relayInbound[entry.key] = list
-            .map((dynamic m) => Map<String, dynamic>.from(m as Map))
-            .toList();
-      }
+      // relay inbound 解析已删除（好友功能下线 2026-11-23；旧文件的该键被忽略）
 
       // 解析 preferences
       _preferences = Map<String, dynamic>.from(
@@ -529,91 +515,9 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
     await _flush();
   }
 
-  /// 解密后的入站中继，按接收时间降序。
-  Future<List<AgentRelayMessage>> listRelayInbound(String ownerSessionId) async {
-    await init();
-    final List<Map<String, dynamic>> raw =
-        _relayInbound[ownerSessionId] ?? <Map<String, dynamic>>[];
-    final List<AgentRelayMessage> out = raw.map(_mapToRelayPlain).toList();
-    out.sort((AgentRelayMessage a, AgentRelayMessage b) =>
-        b.receivedAt.compareTo(a.receivedAt));
-    return out;
-  }
+  // 入站中继的存取/加解密方法已随好友功能下线删除（2026-11-23）。
 
-  Future<void> upsertRelayMessage(String ownerSessionId, AgentRelayMessage m) async {
-    await init();
-    if (m.toSessionId != ownerSessionId) return;
-    final List<Map<String, dynamic>> list =
-        _relayInbound.putIfAbsent(ownerSessionId, () => <Map<String, dynamic>>[]);
-    final Map<String, dynamic> encoded = _relayToMapEncrypted(m);
-    final int idx = list.indexWhere(
-      (Map<String, dynamic> r) => r["messageId"] == m.messageId,
-    );
-    if (idx >= 0) {
-      list[idx] = encoded;
-    } else {
-      list.add(encoded);
-    }
-    list.sort((Map<String, dynamic> a, Map<String, dynamic> b) {
-      final DateTime ta = DateTime.parse(a["receivedAt"] as String);
-      final DateTime tb = DateTime.parse(b["receivedAt"] as String);
-      return tb.compareTo(ta);
-    });
-    await _flush();
-  }
-
-  Future<void> replaceRelayInbound(
-    String ownerSessionId,
-    List<AgentRelayMessage> messages,
-  ) async {
-    await init();
-    final List<Map<String, dynamic>> next = messages
-        .where((AgentRelayMessage m) => m.toSessionId == ownerSessionId)
-        .map(_relayToMapEncrypted)
-        .toList();
-    next.sort((Map<String, dynamic> a, Map<String, dynamic> b) {
-      final DateTime ta = DateTime.parse(a["receivedAt"] as String);
-      final DateTime tb = DateTime.parse(b["receivedAt"] as String);
-      return tb.compareTo(ta);
-    });
-    _relayInbound[ownerSessionId] = next;
-    await _flush();
-  }
-
-  Map<String, dynamic> _relayToMapEncrypted(AgentRelayMessage m) {
-    return _relayToMapEncryptedFor(m, _userPin);
-  }
-
-  Map<String, dynamic> _relayToMapEncryptedFor(AgentRelayMessage m, String pin) {
-    return <String, dynamic>{
-      "messageId": m.messageId,
-      "fromSessionId": m.fromSessionId,
-      "toSessionId": m.toSessionId,
-      "text": _encryptFor(m.text, pin),
-      "subject": m.subject == null ? null : _encryptFor(m.subject!, pin),
-      "receivedAt": m.receivedAt.toIso8601String(),
-    };
-  }
-
-  AgentRelayMessage _mapToRelayPlain(Map<String, dynamic> map) {
-    return _mapToRelayPlainFor(map, _userPin);
-  }
-
-  AgentRelayMessage _mapToRelayPlainFor(Map<String, dynamic> map, String pin) {
-    final String? subCipher = map["subject"] as String?;
-    return AgentRelayMessage(
-      messageId: map["messageId"] as String,
-      fromSessionId: map["fromSessionId"] as String,
-      toSessionId: map["toSessionId"] as String,
-      text: _decryptFor(map["text"] as String, pin),
-      subject: subCipher == null || subCipher.isEmpty
-          ? null
-          : _decryptFor(subCipher, pin),
-      receivedAt: DateTime.parse(map["receivedAt"] as String),
-    );
-  }
-
-  /// 将本地数据用旧 PIN 解密后再用新 PIN 加密并落盘（聊天 + 入站中继）。
+  /// 将本地数据用旧 PIN 解密后再用新 PIN 加密并落盘（聊天）。
   Future<void> rekey(String newPin) async {
     await init();
     final String trimmed = newPin.trim();
@@ -631,14 +535,6 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
         final String enc = _encryptFor(plain, trimmed);
         // copyWith 全字段保留，只换 text 的密文（手抄清单会漏卡片载荷字段）
         list[i] = m.copyWith(text: enc);
-      }
-    }
-
-    for (final String owner in _relayInbound.keys.toList()) {
-      final List<Map<String, dynamic>> list = _relayInbound[owner]!;
-      for (int i = 0; i < list.length; i++) {
-        final AgentRelayMessage plain = _mapToRelayPlainFor(list[i], oldPin);
-        list[i] = _relayToMapEncryptedFor(plain, trimmed);
       }
     }
 
@@ -941,7 +837,6 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
               .toList(),
         ),
       ),
-      "relayInbound": _relayInbound,
       "preferences": _preferences,
       "scheduleEvents": _scheduleEvents,
     };

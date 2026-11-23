@@ -7,7 +7,6 @@ import type { AgentPairingService } from "../services/agent-pairing-service.js";
 import type { AgentRelayService } from "../services/agent-relay-service.js";
 import type { AuditService } from "../services/audit-service.js";
 import type { EmailRegistrationService } from "../services/email-registration-service.js";
-import type { FriendService } from "../services/friend-service.js";
 import type { InfoHubService } from "../services/info-hub-service.js";
 import type { RealFundsWalletService } from "../services/real-funds-wallet-service.js";
 import type { SessionService } from "../services/session-service.js";
@@ -122,7 +121,6 @@ export type AppServices = {
   /** 代码执行沙盒服务（code.run / list_files / read_file / write_file，python/node 子进程） */
   codeSandboxService: CodeSandboxService;
   virtualPhoneService: VirtualPhoneService;
-  friendService: FriendService;
   messageHubService: MessageHubService;
   messagePlatformGateway: MessagePlatformGateway;
   messageBridgeService: MessageBridgeService;

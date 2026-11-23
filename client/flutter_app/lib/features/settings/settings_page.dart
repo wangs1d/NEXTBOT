@@ -13,6 +13,7 @@ import "../../core/services/cloud_model_binding_store.dart";
 import "../../core/services/model_api_tester.dart";
 import "../../core/services/phone_bridge_service.dart";
 import "../../core/services/phone_capture_service.dart";
+import "../../core/services/keep_alive_service.dart";
 import "../../core/services/sms_access_service.dart";
 import "../../core/services/ws_chat_service.dart";
 import "../../core/theme/app_theme.dart";
@@ -23,7 +24,7 @@ import "../model_config/model_provider_catalog.dart";
 import "../../widgets/app_window_titlebar.dart";
 
 /// 设置分区（左侧侧栏一项对应右侧一块内容）。
-enum _SettingsSection { general, model, serviceAccess, pairing, phoneBridge }
+enum _SettingsSection { general, model, serviceAccess, pairing, phoneBridge, keepAlive }
 
 /// 「设置」页 —— 全屏独立页（类似扣子的设置布局）：
 /// 左侧分区侧栏 + 右侧内容区，顶部铺自绘标题栏保证窗口可拖拽/可关闭。
@@ -58,6 +59,10 @@ class _SettingsPageState extends State<SettingsPage>
   bool _captureLoading = true;
   bool _captureAll = false; // 未识别包全量捕捉兜底（默认关）
   List<CapturePackageRule> _captureRules = const []; // 自定义包名规则（回显用）
+
+  // —— 后台保活（电池优化豁免 / 厂商应用启动管理） ——
+  bool _batteryExempt = false;
+  bool _keepAliveChecking = true;
 
   // —— 短信读取权限（READ_SMS；Agent「看我的短信」工具的前置条件） ——
   bool _smsGranted = false;
@@ -94,6 +99,7 @@ class _SettingsPageState extends State<SettingsPage>
     }
     _loadLocalDeviceSettings();
     _refreshCaptureState();
+    _refreshKeepAliveState();
     _loadModelConfig();
     _loadCloudModelConfig();
     _refreshVoiceprintStatus();
@@ -113,6 +119,7 @@ class _SettingsPageState extends State<SettingsPage>
     if (state != AppLifecycleState.resumed) return;
     if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
     unawaited(_refreshCaptureState());
+    unawaited(_refreshKeepAliveState());
   }
 
   /// 加载 Windows 本机设置：开机自启（注册表）。
@@ -200,6 +207,8 @@ class _SettingsPageState extends State<SettingsPage>
         (_SettingsSection.pairing, Icons.key_outlined, "设备配对"),
       if (showPhoneBridge)
         (_SettingsSection.phoneBridge, Icons.smartphone_outlined, "手机桥接"),
+      if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android)
+        (_SettingsSection.keepAlive, Icons.battery_saver_outlined, "后台保活"),
     ];
     return ColoredBox(
       color: bg,
@@ -303,6 +312,7 @@ class _SettingsPageState extends State<SettingsPage>
       _SettingsSection.serviceAccess => "服务接入",
       _SettingsSection.pairing => "设备配对",
       _SettingsSection.phoneBridge => "手机桥接",
+      _SettingsSection.keepAlive => "后台保活",
     };
     final Widget card = switch (_section) {
       _SettingsSection.general => _buildGeneralCard(),
@@ -310,6 +320,7 @@ class _SettingsPageState extends State<SettingsPage>
       _SettingsSection.serviceAccess => _buildServiceAccessSection(),
       _SettingsSection.pairing => const AccessPairingCard(),
       _SettingsSection.phoneBridge => _buildPhoneBridgeCard(),
+      _SettingsSection.keepAlive => _buildKeepAliveCard(),
     };
     return SingleChildScrollView(
       // key 随分区变化：切换分区时滚动位置复位到顶部。
@@ -1109,5 +1120,168 @@ class _SettingsPageState extends State<SettingsPage>
         ),
       ),
     );
+  }
+
+  // ------------------------------------------------------------------ //
+  // 后台保活
+  // ------------------------------------------------------------------ //
+
+  /// 后台保活卡（仅 Android）：进程被系统回收是手机端「连接断开」的根因。
+  ///
+  /// 2026-11-22 生产日志实证：断开那一秒进程消失（死前 0.4s 仍在写存活心跳），
+  /// 2~4s 后进程重启；`batteryExempt` 全程 false。这层由系统策略控制，App 唯一
+  /// 能做的是把开关入口送到用户面前，并说清「不做会怎样」。
+  Widget _buildKeepAliveCard() {
+    final bool exempt = _batteryExempt;
+    final Color okColor = const Color(0xFF22C55E);
+    final Color warnColor = const Color(0xFFF59E0B);
+    final TextStyle? sub = Theme.of(context).textTheme.bodySmall;
+    return Card(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                const Icon(Icons.battery_saver_outlined, size: 18),
+                const SizedBox(width: 8),
+                Text("后台保活", style: Theme.of(context).textTheme.titleMedium),
+                const Spacer(),
+                if (!_keepAliveChecking)
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      Container(
+                        width: 8,
+                        height: 8,
+                        decoration: BoxDecoration(
+                          color: exempt ? okColor : warnColor,
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Text(exempt ? "已豁免" : "未豁免", style: sub),
+                    ],
+                  ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Text(
+              "系统回收 App 进程时会直接掐断连接——这是「用着用着就断开」的真正原因，"
+              "不是网络，也不是服务器。下面三项都处理好，被杀的概率会明显下降。",
+              style: sub,
+            ),
+            const Divider(height: 24),
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      const Text("① 电池优化豁免"),
+                      const SizedBox(height: 2),
+                      Text(
+                        exempt
+                            ? "已豁免：系统不会再因省电在后台回收本应用"
+                            : "未豁免：系统随时可以在后台回收本应用",
+                        style: sub,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 12),
+                if (exempt)
+                  Icon(Icons.check_circle, size: 20, color: okColor)
+                else
+                  FilledButton(
+                    onPressed: _requestBatteryExempt,
+                    child: const Text("去豁免", style: TextStyle(fontSize: 13)),
+                  ),
+              ],
+            ),
+            const Divider(height: 24),
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      const Text("② 应用启动管理"),
+                      const SizedBox(height: 2),
+                      Text(
+                        "在厂商的「应用启动管理」里关闭自动管理，允许自启动 / 关联启动 / 后台活动。"
+                        "这一层不受 Android 原生规则约束，是前台服务在跑却仍被杀的关键。",
+                        style: sub,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 12),
+                OutlinedButton(
+                  onPressed: _openAppStartupSettings,
+                  child: const Text("去设置", style: TextStyle(fontSize: 13)),
+                ),
+              ],
+            ),
+            const Divider(height: 24),
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      const Text("③ 通知使用权"),
+                      const SizedBox(height: 2),
+                      Text(
+                        _captureLoading
+                            ? "正在检查…"
+                            : (_listenerEnabled
+                                ? "已授权：系统会保持绑定，进程更不容易被回收"
+                                : "未授权：授权后系统会保持绑定，进程更不容易被回收"),
+                        style: sub,
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 12),
+                if (_listenerEnabled)
+                  Icon(Icons.check_circle, size: 20, color: okColor)
+                else
+                  OutlinedButton(
+                    onPressed: () => unawaited(
+                        PhoneCaptureService.instance.openListenerSettings()),
+                    child: const Text("去开启", style: TextStyle(fontSize: 13)),
+                  ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 弹系统「电池优化豁免」框；回来后由 resumed 回检刷新状态。
+  Future<void> _requestBatteryExempt() async {
+    await KeepAliveService.requestBatteryExempt();
+    await _refreshKeepAliveState();
+  }
+
+  Future<void> _openAppStartupSettings() async {
+    await KeepAliveService.openAppStartupSettings();
+  }
+
+  Future<void> _refreshKeepAliveState() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) {
+      if (mounted) setState(() => _keepAliveChecking = false);
+      return;
+    }
+    final bool exempt = await KeepAliveService.isBatteryExempt();
+    if (!mounted) return;
+    setState(() {
+      _batteryExempt = exempt;
+      _keepAliveChecking = false;
+    });
   }
 }

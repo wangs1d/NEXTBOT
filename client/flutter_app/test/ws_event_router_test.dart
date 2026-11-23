@@ -658,7 +658,6 @@ void main() {
         "agent.media.stop",
         "chat.assistant_speech",
         "inbox.message",
-        "agent.peer_message",
       };
       for (final Set<String> set in groups.values) {
         for (final String type in set) {
