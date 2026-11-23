@@ -59,6 +59,94 @@ export type PushTokenEntry = { provider: string; token?: string; deviceId?: stri
 const FETCH_TIMEOUT_MS = 10_000;
 const MAX_ENTRIES_PER_ACTOR = 10;
 
+/**
+ * 华为自分类权益 kind → category 映射（2026-11-23 AGC 审批通过 4 个云端类型：
+ * 出行 TRAVEL / 工作事项提醒 WORK / 音视频通话 VOIP / 即时聊天 IM）。
+ *
+ * 规则（华为《消息分类标准》，违者会被暂停/取消权益）：
+ *  - category 必须大写、且必须是**已审批通过**的类型，逐字一致；
+ *  - 「闹钟/计时器」只有本地通知类型（CATEGORY_ALARM），云端推送没有它；
+ *  - 未审批的内容类型（如财经动态、内容推荐）按规范属于资讯营销 → 传
+ *    "MARKETING"（静默通知、仅通知栏展示），而不是硬塞进服务类；
+ *  - 不认识的 kind 一律回落 MARKETING，宁可少弹不可错标。
+ */
+const KIND_CATEGORY: Record<string, string> = {
+  // 闹钟/计时器：**云端通知没有这个类型**（官方分类标准标注「不涉及」，
+  // 只有本地通知才有 CATEGORY_ALARM）→ 云端兜底推送归 WORK（日程安排）。
+  // DEVICE_REMINDER 是 IoT 设备提醒，我们不是 IoT 应用，传了会被判无效打回
+  // 营销类（2026-11-23 实测 result=256）。
+  alarm: "WORK",
+  alarm_fallback: "WORK",
+  timer: "WORK",
+  wake: "WORK",
+  // 出行 → TRAVEL（打车/机票/酒店/旅游行程/位置到达离开）
+  travel: "TRAVEL",
+  trip: "TRAVEL",
+  flight: "TRAVEL",
+  hotel: "TRAVEL",
+  ride: "TRAVEL",
+  location_arrival: "TRAVEL",
+  location_enter: "TRAVEL",
+  place_home_arrival: "TRAVEL",
+  place_home_departure: "TRAVEL",
+  place_work_arrival: "TRAVEL",
+  place_new_city: "TRAVEL",
+  // 工作事项提醒 → WORK（日程/待办/会议/DDL/各类简报）
+  reminder: "WORK",
+  schedule_reminder: "WORK",
+  intelligent_reminder: "WORK",
+  life_reminder: "WORK",
+  meeting_soon: "WORK",
+  meeting_soon_early: "WORK",
+  deadline: "WORK",
+  task: "WORK",
+  task_followup: "WORK",
+  task_progress: "WORK",
+  task_approval: "WORK",
+  task_celebration: "WORK",
+  watch_task_hit: "WORK",
+  goal_progress: "WORK",
+  goal_ready: "WORK",
+  goal_blocked: "WORK",
+  goal_confirm: "WORK",
+  morning_brief: "WORK",
+  weather_brief: "WORK",
+  daily: "WORK",
+  weekly: "WORK",
+  digest: "WORK",
+  monthly_report: "WORK",
+  mute_suggest: "WORK",
+  sleep_boundary: "WORK",
+  message_watch: "WORK",
+  push_test: "WORK",
+  // 音频、视频通话 → VOIP（来电/通话邀请）
+  voip: "VOIP",
+  phone_call: "VOIP",
+  call_invite: "VOIP",
+  // 即时聊天 → IM（Agent 主动发起的聊天内容：关怀、分享、追问等）
+  greeting: "IM",
+  followup: "IM",
+  interest_share: "IM",
+  interest_alert: "IM",
+  message: "IM",
+  chat: "IM",
+  im: "IM",
+  agent_pulse: "IM",
+  agent_task: "IM",
+  mood: "IM",
+  emotion_pause: "IM",
+  topic: "IM",
+  topic_switch: "IM",
+  dialogue: "IM",
+  first_meeting_intro: "IM",
+};
+
+/** 未登记的 kind 一律按资讯营销类（静默通知）——合规优先，不冒用服务类权益。 */
+function categoryForKind(kind?: string): string {
+  const key = String(kind ?? "").toLowerCase();
+  return KIND_CATEGORY[key] ?? "MARKETING";
+}
+
 async function postJson(url: string, headers: Record<string, string>, body: unknown): Promise<{ ok: boolean; status: number; text: string }> {
   const response = await fetch(url, {
     method: "POST",
@@ -238,12 +326,20 @@ export class HuaweiPushProvider implements PushProvider {
     if (!target.token) return { ok: false, reason: "huawei 需要 HMS push token" };
     try {
       const accessToken = await this.getAccessToken();
+      // 自分类权益（2026-11-23 AGC 审批通过：出行 TRAVEL / 工作事项提醒 WORK /
+      // 音视频通话 VOIP / 即时聊天 IM）：不带 category 的通知消息默认按资讯营销
+      // 类计频（每设备每天个位数），超限后华为仍返回 80000000 但**静默丢弃**——
+      // 回执 result=256（2026-11-23 实测 11 连丢）。取值必须与 AGC 已审批类型
+      // 逐字一致（大写）；无效值会被打回营销类。
+      // 归类：Agent 主动消息/发现推送 = 即时聊天 IM；日程/提醒/简报等 = 工作事项提醒 WORK。
+      const category = categoryForKind(input.kind);
       const payload = {
         validate_only: false,
         message: {
           android: {
             collapse_key: -1,
             urgency: "HIGH",
+            category,
             notification: {
               title: input.title,
               body: input.body,
@@ -325,7 +421,17 @@ export class MobilePushService {
   }
 
   register(actorId: string, entry: Omit<PushTokenEntry, "updatedAt"> & { updatedAt?: number }): PushTokenEntry[] {
-    const list = (this.tokens.get(actorId) ?? []).filter((e) => !(e.provider === entry.provider && e.token === entry.token));
+    let list = this.tokens.get(actorId) ?? [];
+    // 同设备动态跟随（2026-11-23）：带 deviceId 的注册按 (provider, deviceId) 做
+    // upsert——重装/清数据后 HMS 会签发新 token，旧 token 立即被替换，不再残留
+    // 失效条目（残留导致每次推送都先白发一条，回执 result=5：Token 不匹配）。
+    // deviceId 用安装标识（Android 上由 ANDROID_ID 派生，同签名卸载重装不变）。
+    const deviceId = entry.deviceId?.trim();
+    if (deviceId) {
+      list = list.filter((e) => !(e.provider === entry.provider && e.deviceId === deviceId));
+    }
+    // 同 token 去重：无论 deviceId 是否一致，同一个 token 不允许占两个坑
+    list = list.filter((e) => !(e.provider === entry.provider && e.token === entry.token));
     list.push({ ...entry, updatedAt: Date.now() });
     while (list.length > MAX_ENTRIES_PER_ACTOR) list.shift();
     this.tokens.set(actorId, list);
@@ -334,6 +440,24 @@ export class MobilePushService {
     // → 离线必达升级推送静默失效
     this.flush();
     return list;
+  }
+
+  /** 按 token 值清理失效条目（华为回执 result=1/2/5 = token 失效/被卸载/不匹配） */
+  pruneToken(token: string): number {
+    let removed = 0;
+    for (const [actorId, list] of this.tokens) {
+      const next = list.filter((e) => e.token !== token);
+      if (next.length !== list.length) {
+        removed += list.length - next.length;
+        if (next.length === 0) this.tokens.delete(actorId);
+        else this.tokens.set(actorId, next);
+      }
+    }
+    if (removed > 0) {
+      this.dirty = true;
+      this.flush();
+    }
+    return removed;
   }
 
   unregister(actorId: string, provider: string, token?: string): PushTokenEntry[] {

@@ -17,9 +17,16 @@ class AlarmLocalStore {
   AlarmLocalStore._();
 
   final Map<String, Alarm> _alarms = {};
+  /// 已消费的跳（key=alarmId|fireAtMs）：同一跳只允许补发一次，跨冷启动幂等。
+  /// 原生 AlarmManager 到点响铃不经过 Dart，本地状态可能停在 active + 过期 nextFireAt，
+  /// 台账是「这一跳已经处理过」的唯一凭据，防止每次进 App 都重排到过去时刻立即响。
+  final Set<String> _consumedJumps = <String>{};
   File? _file;
 
   Future<void> load() async {
+    // 冷启动装载 = 以磁盘为事实源，先清内存再读，避免重复 load 时残留已删闹钟/陈旧台账。
+    _alarms.clear();
+    _consumedJumps.clear();
     try {
       final dir = await getApplicationDocumentsDirectory();
       _file = File("${dir.path}${Platform.pathSeparator}alarm-clock.json");
@@ -31,6 +38,10 @@ class AlarmLocalStore {
             final a = Alarm.fromJson((item as Map).cast<String, dynamic>());
             _alarms[a.id] = a;
           } catch (_) {/* 单条脏数据不拖垮整体 */}
+        }
+        final jumps = (raw["consumedJumps"] as List?) ?? const [];
+        for (final j in jumps) {
+          if (j is String) _consumedJumps.add(j);
         }
       }
     } catch (_) {
@@ -45,8 +56,30 @@ class AlarmLocalStore {
       );
       await _file!.writeAsString(jsonEncode({
         "alarms": _alarms.values.map((a) => a.toJson()).toList(),
+        "consumedJumps": _consumedJumps.toList(),
       }));
     } catch (_) {/* 磁盘不可写时静默，内存态仍可用 */}
+  }
+
+  // ─── 已消费跳台账：同一跳只补发一次 ───
+
+  /// 跳的唯一标识：闹钟 id + 该跳的触发时刻（毫秒）。
+  static String jumpKey(String alarmId, DateTime fireAt) =>
+      "$alarmId|${fireAt.millisecondsSinceEpoch}";
+
+  bool isJumpConsumed(String alarmId, DateTime fireAt) =>
+      _consumedJumps.contains(jumpKey(alarmId, fireAt));
+
+  /// 标记该跳已消费。上限 200 条、超出砍到最近 100 条，防历史无限膨胀。
+  Future<void> markJumpConsumed(String alarmId, DateTime fireAt) async {
+    _consumedJumps.add(jumpKey(alarmId, fireAt));
+    if (_consumedJumps.length > 200) {
+      final recent = _consumedJumps.skip(_consumedJumps.length - 100).toList();
+      _consumedJumps
+        ..clear()
+        ..addAll(recent);
+    }
+    await _flush();
   }
 
   List<Alarm> listActive() =>

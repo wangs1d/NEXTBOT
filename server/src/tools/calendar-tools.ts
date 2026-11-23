@@ -313,11 +313,12 @@ export function parseScheduleRangeIntent(
 }
 
 /**
- * 睡觉叫醒（「明早7点叫我起床」）在日程任务之外补建真闹钟（kind=alarm）。
+ * 用户明确要闹钟/叫醒/响铃时在日程任务之外补建真闹钟（kind=alarm）。
  *
- * 2026-11-09 用户定调：废除正则文本匹配，是否建真闹钟的唯一判定 = 模型传入的
- * alarmIntent（calendar.create schema 字段），且只覆盖一种情形——睡觉叫醒；
- * 「定个闹钟」这类没有睡觉语境的表述不建。模型之外的保护仍是确定性代码：
+ * 判定权归模型传入的 alarmIntent（calendar.create schema 字段），废除正则文本匹配。
+ * 2026-11-23 口径放宽：从「仅睡觉叫醒」扩到「用户明确说闹钟/叫醒/响铃」（含「定个
+ * 8 点闹钟」「用闹钟提醒我」）——用户实测「明确要求用闹钟仍只弹窗」后定调；只有
+ * 没提闹钟字样的纯提醒（「提醒我开会」）不建。模型之外的保护仍是确定性代码：
  * 时间必须成立、RRULE 子集支持。
  *
  * 日程任务照常创建（今日安排/编辑/删除生态不动）；真闹钟经 alarm-clock 链路
@@ -958,7 +959,24 @@ export function registerCalendarTools(
     const action = String(input.action ?? "").trim();
     switch (action) {
       case "create": {
+        // 闹钟接线诊断（2026-11-23）：recordRetrieval 用户反馈「明确要求用闹钟仍弹窗」。
+        // 服务端没有对话/工具调用持久化，日志也不打印参数，导致无法区分
+        // 「模型没传 alarmIntent」与「传了但 buildScheduleCreateInput 丢了」。
+        // 这里在唯一创建入口打印原句 + alarmIntent + 是否补建真闹钟，供真机复测一锤定音。
+        if (process.env.ALARM_INTENT_DEBUG !== "0") {
+          console.info(
+            `[alarm-intent-debug] calendar.create text=${JSON.stringify(String(input.text ?? ""))} ` +
+              `alarmIntent=${JSON.stringify(input.alarmIntent)} ` +
+              `kind=${JSON.stringify(String(input.kind ?? ""))} runAt=${JSON.stringify(String(input.runAt ?? ""))}`,
+          );
+        }
         const r = await handleCreate(input, context);
+        if (process.env.ALARM_INTENT_DEBUG !== "0") {
+          const linked = (r as Record<string, unknown>).alarmId;
+          console.info(
+            `[alarm-intent-debug] calendar.create 结果 alarmId=${JSON.stringify(linked ?? null)} linkedAlarm=${linked ? "YES" : "NO"}`,
+          );
+        }
         return { ...r, action: "create" };
       }
       case "batch_create": {

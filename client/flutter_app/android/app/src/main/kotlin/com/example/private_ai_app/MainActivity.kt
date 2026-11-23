@@ -58,6 +58,10 @@ class MainActivity : FlutterActivity() {
         // Cookie（含 HttpOnly 的 PDDUserID）交回 Dart，再由客户端上传云端落库。
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, WebLoginCookiePlugin.CHANNEL)
             .setMethodCallHandler(WebLoginCookiePlugin())
+        // 资料库预取文件本地打开（2026-11-23）：FileProvider 把 media_cache
+        // 里已预载的产出文件转 content:// URI 交系统应用，离线秒开。
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, FileOpenPlugin.CHANNEL)
+            .setMethodCallHandler(FileOpenPlugin(this))
     }
 
     override fun onNewIntent(intent: Intent) {

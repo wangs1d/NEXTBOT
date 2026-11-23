@@ -8,6 +8,7 @@ import "package:http/http.dart" as http;
 import "nb_http.dart";
 
 import "../config/api_config.dart";
+import "install_identity.dart";
 
 /// 移动端推送通道注册（华为 HMS 直连）：
 /// 原生侧（MobilePushPlugin.kt）实现 MethodChannel "pai/mobile_push" 的 getPushToken：
@@ -27,14 +28,23 @@ class MobilePushRegistrar {
   /// 已成功上报过的 actorId（null = 从未成功）；同身份不重复注册
   static String? _registeredForActor;
 
+  /// 上次上报的 token：HMS 轮换 token 后值变化 → 触发重新上报（动态跟随）
+  static String? _registeredToken;
+
   /// 登录身份切换后允许重新注册（保留给登出/切换账号场景）
-  static void reset() => _registeredForActor = null;
+  static void reset() {
+    _registeredForActor = null;
+    _registeredToken = null;
+  }
 
   static Future<void> registerIfNeeded({int maxAttempts = 15}) async {
     if (kIsWeb) return;
     // 桌面（Windows 调试）无厂商推送：跳过
     if (!Platform.isAndroid && !Platform.isIOS) return;
     final String actorId = ApiConfig.effectiveActorId;
+    // 未登录（游客身份 inst_…）不注册推送：游客没有可投递的提醒数据，注册只会在
+    // 服务端 token 表留垃圾条目（2026-11-23 实测 inst_373d… 占坑）。
+    if (!actorId.contains("@")) return;
     if (_registeredForActor == actorId) return;
     final String diagActor = actorId.isEmpty ? "(empty)" : actorId;
 
@@ -62,6 +72,10 @@ class MobilePushRegistrar {
         final String token = raw["token"]?.toString() ?? "";
         lastErr = raw["err"]?.toString() ?? "";
         if (token.isNotEmpty) {
+          // token 动态跟随：同一身份 + 同一 token 已注册过就不再上报；
+          // HMS 轮换 token 后（PushTokenService.onNewToken 更新缓存），
+          // 下次 WS 重连走到这里会拿到新值 → 重新上报 → 服务端按 deviceId 顶掉旧 token。
+          if (_registeredForActor == actorId && _registeredToken == token) return;
           final http.Response response = await NbHttp.post(
             Uri.parse("${ApiConfig.httpBase}/api/proactivity/push/register"),
             headers: const {"Content-Type": "application/json"},
@@ -69,10 +83,14 @@ class MobilePushRegistrar {
               "actorId": actorId,
               "provider": provider,
               "token": token,
+              // 安装标识（Android=ANDROID_ID 派生，同签名卸载重装不变）：服务端按
+              // (provider, deviceId) upsert——重装/清数据后的新 token 顶掉旧 token。
+              "deviceId": InstallIdentity.instance.cachedInstallId ?? "",
             }),
           );
           if (response.statusCode == 200) {
             _registeredForActor = actorId;
+            _registeredToken = token;
             debugPrint("[mobile-push] token registered (provider=$provider)");
             return;
           }

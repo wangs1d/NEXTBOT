@@ -28,10 +28,15 @@ typedef ActorIdGetter = String Function();
 typedef NowGetter = DateTime Function();
 
 class AlarmEngine {
+  AlarmEngine._();
+
+  /// 补发宽限：跳已过期但在此窗口内（且从未消费过）才允许补响一次。
+  /// 超过窗口的陈旧跳说明设备长时间离线/被杀，静默收敛状态、不再响铃，
+  /// 避免"一进界面就补发一通老闹钟"。
+  static const Duration makeupGrace = Duration(minutes: 5);
+
   static AlarmEngine? _instance;
   static AlarmEngine get instance => _instance ??= AlarmEngine._();
-
-  AlarmEngine._();
 
   static bool _busWired = false;
 
@@ -84,6 +89,10 @@ class AlarmEngine {
     _actorId = actorId;
     _httpBase = httpBase;
     await _store.load();
+    // 冷启动先收敛过期跳（一次性）：原生 AlarmManager 到点不经过 Dart，本地库
+    // 可能停在 active + 过去 nextFireAt。若不收敛就 reschedule，会把过去时刻
+    // 重新交给 setAlarmClock → 一进界面就补响、且每次冷启动重复。
+    await settleExpiredJumps(now: _now());
     await rescheduleAll();
     // 原生通知动作（贪睡/关闭）→ 引擎动作（业务推进收口在这里：本地库 + REST 同步）
     AlarmPlatform.onNativeAction = (action, alarmId) {
@@ -187,7 +196,11 @@ class AlarmEngine {
 
     final localNext = alarm?.nextFireLocal(_now());
     final serverFired = DateTime.fromMillisecondsSinceEpoch(firedAtMs);
-    final localAlreadyHandled = alarm == null ||
+    // 台账命中 = 这一跳本地已经补发/收敛过（含冷启动收敛、watchdog、原生到点后
+    // sync 回来的状态）——服务端 trigger 只是迟到的兜底，绝不能再响第二次。
+    final alreadyConsumed = _store.isJumpConsumed(alarmId, serverFired);
+    final localAlreadyHandled = alreadyConsumed ||
+        alarm == null ||
         alarm.status != AlarmStatus.active ||
         (localNext != null && localNext.isAfter(serverFired.add(const Duration(minutes: 1))));
     if (localAlreadyHandled) {
@@ -195,13 +208,14 @@ class AlarmEngine {
       unawaited(_reportTrigger(alarmId, firedAtMs, via: "local", outcome: "acked"));
       return;
     }
-    // 本端没响（离线/调度失败）→ 立即拉起响铃并回报
+    // 本端没响（离线/调度失败）→ 立即拉起响铃并回报，同时记账防重复
     await AlarmPlatform.ringNow(
       alarmId: alarmId,
       label: label,
       ttsBase64: ttsBase64,
       voiceText: voiceText,
     );
+    await _store.markJumpConsumed(alarmId, serverFired);
     await _store.markFired(alarmId, now: _now());
     unawaited(_reportTrigger(alarmId, firedAtMs, via: "server", outcome: "ringing"));
   }
@@ -224,6 +238,45 @@ class AlarmEngine {
 
   // ─── 本地调度 ───
 
+  /// 过期跳一次性收敛（所有补发入口共用的幂等闸门）。
+  ///
+  /// 判定：对每条 active 闹钟，取它的下一跳 [next]；若 [next] 已早于 now，说明这一跳
+  /// 已经错过（原生 AlarmManager 到点响铃不经过 Dart，状态可能没被推进）。此时：
+  ///  - 台账里该跳已消费 → 只推进状态，绝不再响；
+  ///  - 未消费 且 过期落在 [makeupGrace] 窗口内 → 补响一次 + 记账；
+  ///  - 未消费 但 过期太久 → 静默推进状态，不响（避免补发陈年老钟）。
+  /// 最后无论哪种都 markFired 把该跳推进掉（单次→done / 重复→下一跳），
+  /// 并把跳写入台账，保证重启后不再重复。
+  ///
+  /// [allowRing]=false 用于"只收敛不响"的场景（如收到服务端 trigger 时本地不重复响）。
+  Future<void> settleExpiredJumps({
+    required DateTime now,
+    bool allowRing = true,
+    Set<String>? onlyAlarmIds,
+  }) async {
+    for (final alarm in _store.listActive()) {
+      if (onlyAlarmIds != null && !onlyAlarmIds.contains(alarm.id)) continue;
+      final next = alarm.nextFireLocal(now);
+      if (next == null || !next.isBefore(now)) continue; // 没到期就跳过
+      final consumed = _store.isJumpConsumed(alarm.id, next);
+      final withinGrace = now.difference(next) <= makeupGrace;
+      if (!consumed && withinGrace && allowRing) {
+        await AlarmPlatform.ringNow(
+          alarmId: alarm.id,
+          label: alarm.label,
+          ttsBase64: alarm.ttsBase64,
+          voiceText: alarm.voiceText,
+        );
+        unawaited(_reportTrigger(alarm.id, next.millisecondsSinceEpoch, via: "local", outcome: "ringing"));
+      } else if (!consumed) {
+        // 陈旧跳静默收敛：也回报 acked，让服务端撤掉兜底推送（否则白推一次）
+        unawaited(_reportTrigger(alarm.id, next.millisecondsSinceEpoch, via: "local", outcome: "acked"));
+      }
+      await _store.markJumpConsumed(alarm.id, next);
+      await _store.markFired(alarm.id, now: now);
+    }
+  }
+
   /// 全量重排：清理平台侧全部预约后逐个重挂（启动恢复 / 批量变更后调用）
   Future<void> rescheduleAll() async {
     for (final alarm in _store.listActive()) {
@@ -232,8 +285,15 @@ class AlarmEngine {
   }
 
   Future<bool> _scheduleAlarmLocal(Alarm alarm) async {
-    final next = alarm.nextFireLocal(_now());
+    final now = _now();
+    final next = alarm.nextFireLocal(now);
     if (next == null) return false;
+    // 绝不用过去时刻调 setAlarmClock——Android 会把它当成"立即到点"触发响铃，
+    // 这正是"一进界面就响、每次冷启动重复"的来源。过期跳交给收敛闸门处理。
+    if (next.isBefore(now)) {
+      await settleExpiredJumps(now: now, onlyAlarmIds: {alarm.id});
+      return false;
+    }
     final ok = await AlarmPlatform.scheduleNext(
       alarmId: alarm.id,
       at: next,
@@ -251,23 +311,10 @@ class AlarmEngine {
     return ok;
   }
 
-  /// 看门狗：扫描到点闹钟 → 本地响铃（方法桥失败的最后防线）
+  /// 看门狗：收敛到点闹钟（方法桥失败/精确闹钟被系统吞掉时的应用内兜底）。
+  /// 走统一闸门——同一跳只补响一次，已消费/陈旧跳只推进状态、不再响。
   Future<void> _watchdogTick() async {
-    final now = _now();
-    for (final alarm in _store.listActive()) {
-      final next = alarm.nextFireLocal(now);
-      if (next == null) continue;
-      if (next.isBefore(now)) {
-        await AlarmPlatform.ringNow(
-          alarmId: alarm.id,
-          label: alarm.label,
-          ttsBase64: alarm.ttsBase64,
-          voiceText: alarm.voiceText,
-        );
-        await _store.markFired(alarm.id, now: now);
-        unawaited(_reportTrigger(alarm.id, next.millisecondsSinceEpoch, via: "local", outcome: "ringing"));
-      }
-    }
+    await settleExpiredJumps(now: _now());
   }
 
   // ─── 用户动作（响铃 UI / 通知按钮回调） ───

@@ -69,11 +69,33 @@ class AlarmRingService : Service() {
             }
         }
 
+        /**
+         * 通知「关闭 / 贪睡」的物理停铃点（AlarmRingActionsReceiver 调用）。
+         *
+         * 2026-11-23 修：不再依赖静态 ringing map 是否登记了 alarmId。闹钟存在
+         * 多个触发源（本地 AlarmManager / 服务端 alarm.trigger / watchdog 补发），
+         * 一旦 map 与正在响铃的实例不同步（例如服务被系统重建但静态表未回填、
+         * 或 alarmId 被后一跳覆盖），旧实现遍历空表 → 一次 stopService 都不发 →
+         * 点「关闭」毫无反应，只能杀 app。
+         *
+         * 同一进程内该 Service 只有一个实例，无条件 stopService 一次即可停掉
+         * 当前正在响铃的实例（onDestroy → releaseResources 停播放器/振动/WakeLock）。
+         */
         fun stopAll(context: Context) {
-            for (id in ringing.keys.toList()) {
-                context.stopService(Intent(context, AlarmRingService::class.java).apply {
-                    putExtra(AlarmClockPlugin.EXTRA_ALARM_ID, id)
-                })
+            Log.i(TAG, "stopAll requested ringingIds=${ringing.keys.toList()}")
+            try {
+                context.stopService(Intent(context, AlarmRingService::class.java))
+                Log.i(TAG, "stopAll issued stopService")
+            } catch (e: Exception) {
+                Log.w(TAG, "stopService failed, try stopSelf via instance", e)
+                // 兜底：context.stopService 被 ROM 拦截时，直接停活跃实例
+                ringing.values.toList().forEach { svc ->
+                    try {
+                        svc.releaseResources()
+                        svc.stopSelf()
+                    } catch (_: Exception) {
+                    }
+                }
             }
         }
 

@@ -3216,10 +3216,18 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   }) async {
     final bool multiBubble = bubbles.length > 1;
     // 出口一次性分泡（2026-11-23）：本轮没有流式 chunk，turn_started 留下的
-    // 空占位不让位就会在首泡上方留一条空消息——先清掉。
+    // 空占位不让位就会在首泡上方留一条空消息——只清本轮占位（首泡 id 去掉
+    // -bN），避免误删其它会话/并发轮次的空占位。
+    final String firstBubbleId = bubbles.first["id"]?.toString() ?? "";
+    final String? placeholderId = firstBubbleId.isEmpty
+        ? null
+        : firstBubbleId.replaceFirst(RegExp(r"-b\d+$"), "");
     setState(() {
       _messages.removeWhere(
-        (ChatMessage m) => m.streaming && m.text.trim().isEmpty,
+        (ChatMessage m) =>
+            m.streaming &&
+            m.text.trim().isEmpty &&
+            (placeholderId == null || m.messageId == placeholderId),
       );
     });
     // 多泡时块序列只留卡片/媒体块；单泡（整轮一泡）块即全文视图，原样挂。

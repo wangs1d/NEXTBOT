@@ -320,7 +320,8 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   });
   // 华为推送「消息回执」接收端（2026-11-23）：messages:send 的 80000000 只代表
   // 受理，送达与否只有回执能证明。公开路径在 auth.ts 白名单里精确放行。
-  registerPushReceiptWebhook(app);
+  // 收到 result=1/2/5（token 失效）时经 pushService.pruneToken 动态清理。
+  registerPushReceiptWebhook(app, { pushService: deps.proactivePushService ?? null });
   registerAutonomyRoutes(app, {
     autonomySettings: deps.autonomySettings ?? null,
   });

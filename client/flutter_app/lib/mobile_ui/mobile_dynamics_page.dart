@@ -281,15 +281,27 @@ class MobileDynamicsPageState extends State<MobileDynamicsPage> {
             _Section(
               p: p,
               title: "邮件要事",
-              child: Column(
-                children: [
-                  for (final item in mail) _MailCard(p: p, item: item),
-                ],
+              // 收束卡：多封邮件叠成一张薄卡，卡面只展示最新一封；
+              // 点进去进详情页看全部（点击见 _openMailDetail）。
+              child: _MailDigestCard(
+                p: p,
+                items: mail,
+                onTap: () => _openMailDetail(context, mail),
               ),
             ),
         ],
       ],
     );
+  }
+
+  /// 邮件列表统一排序（新→旧），卡面与详情页共用同一口径。
+  static List<Map<String, dynamic>> sortMailByNewest(
+      List<Map<String, dynamic>> items) {
+    final List<Map<String, dynamic>> sorted =
+        List<Map<String, dynamic>>.from(items)
+          ..sort((a, b) =>
+              ((b["at"] as num?) ?? 0).compareTo((a["at"] as num?) ?? 0));
+    return sorted;
   }
 
   static String _fmtAmount(num v) {
@@ -314,6 +326,21 @@ class MobileDynamicsPageState extends State<MobileDynamicsPage> {
         t.day == yesterday.day;
     if (isYesterday) return "昨天 $hm";
     return "${t.month}月${t.day}日 $hm";
+  }
+
+  /// 点邮件收束卡 → 全屏详情页看全部。
+  /// 数据直接复用本页已拉取的 mail 列表，不再发第二次请求。
+  /// 按 at 降序（新→旧）传入，卡面与详情首条一致都是最新一封。
+  void _openMailDetail(BuildContext context, List<Map<String, dynamic>> items) {
+    unawaited(
+      Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (_) => MobileMailDetailPage(
+            items: MobileDynamicsPageState.sortMailByNewest(items),
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -695,9 +722,142 @@ class _ActivityCard extends StatelessWidget {
   }
 }
 
-/// 邮件要事卡（邮件流高价值件；验证码不进动态页）
-class _MailCard extends StatelessWidget {
-  const _MailCard({required this.p, required this.item});
+/// 邮件要事收束卡（卡面展示最新一封；多封叠成一张薄卡，点进去看全部）。
+///
+/// 表面三要素：图标 + 最新一封标题/摘要 + 「N 封 · 查看全部」提示；
+/// 数据来自 /api/dynamics 的 mail.recent（title/text/at），验证码已被服务端拦下。
+class _MailDigestCard extends StatelessWidget {
+  const _MailDigestCard({
+    required this.p,
+    required this.items,
+    required this.onTap,
+  });
+
+  final MobilePalette p;
+  final List<Map<String, dynamic>> items;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    // 自行按 at 取最新，不依赖上游顺序（缓存/规则调整都不影响「卡面=最新一封」）。
+    final Map<String, dynamic> item =
+        MobileDynamicsPageState.sortMailByNewest(items).first;
+    final String title = item["title"]?.toString() ?? "邮件";
+    final String text = item["text"]?.toString() ?? "";
+    final num at = (item["at"] as num?) ?? 0;
+    final int count = items.length;
+
+    return Semantics(
+      button: true,
+      label: "邮件要事，共 $count 封，最新一封：$title，点击查看全部",
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(12),
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: p.surface,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: p.divider.withValues(alpha: 0.6)),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Container(
+                  width: 36,
+                  height: 36,
+                  decoration: BoxDecoration(
+                    color: p.textPrimary.withValues(alpha: 0.06),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Icon(Icons.mail_outline, size: 19, color: p.textPrimary),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              title,
+                              style: TextStyle(
+                                color: p.textPrimary,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w600,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            MobileDynamicsPageState._fmtTime(at),
+                            style: TextStyle(color: p.textMuted, fontSize: 11),
+                          ),
+                        ],
+                      ),
+                      if (text.isNotEmpty) ...[
+                        const SizedBox(height: 3),
+                        Text(
+                          text,
+                          style: TextStyle(color: p.textSecondary, fontSize: 12),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                      const SizedBox(height: 4),
+                      Text(
+                        "共 $count 封 · 查看全部",
+                        style: TextStyle(
+                          color: p.textMuted,
+                          fontSize: 11,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Icon(Icons.chevron_right, size: 18, color: p.textMuted),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 邮件要事详情页：全屏列表展示全部高价值邮件（最新在前）。
+/// 列表项复用 [_MailDetailRow]，数据由动态页带过来，不发第二次请求。
+class MobileMailDetailPage extends StatelessWidget {
+  const MobileMailDetailPage({super.key, required this.items});
+
+  final List<Map<String, dynamic>> items;
+
+  @override
+  Widget build(BuildContext context) {
+    final MobilePalette p = MobileTheme.of(context);
+    return Scaffold(
+      backgroundColor: p.background,
+      appBar: AppBar(title: const Text("邮件要事")),
+      body: ListView.builder(
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+        itemCount: items.length,
+        itemBuilder: (BuildContext context, int index) =>
+            _MailDetailRow(p: p, item: items[index]),
+      ),
+    );
+  }
+}
+
+/// 详情页单封邮件：标题 + 摘要（完整展示，不截断）+ 时间。
+class _MailDetailRow extends StatelessWidget {
+  const _MailDetailRow({required this.p, required this.item});
 
   final MobilePalette p;
   final Map<String, dynamic> item;
@@ -710,7 +870,7 @@ class _MailCard extends StatelessWidget {
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: p.surface,
         borderRadius: BorderRadius.circular(12),
@@ -723,22 +883,18 @@ class _MailCard extends StatelessWidget {
             title,
             style: TextStyle(
               color: p.textPrimary,
-              fontSize: 14,
+              fontSize: 15,
               fontWeight: FontWeight.w600,
             ),
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
           ),
           if (text.isNotEmpty) ...[
-            const SizedBox(height: 4),
+            const SizedBox(height: 8),
             Text(
               text,
-              style: TextStyle(color: p.textSecondary, fontSize: 13),
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: p.textSecondary, fontSize: 13, height: 1.5),
             ),
           ],
-          const SizedBox(height: 2),
+          const SizedBox(height: 8),
           Text(
             MobileDynamicsPageState._fmtTime(at),
             style: TextStyle(color: p.textMuted, fontSize: 11),

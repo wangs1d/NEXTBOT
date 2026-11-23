@@ -2041,7 +2041,10 @@ class MobileChatController extends ChangeNotifier {
         : null;
     final List<NotifyAction> actions = NotifyAction.listFromIntent(intent);
     final String intentId = intent?["intentId"]?.toString() ?? "";
-    if (_appBackgrounded && text.trim().isNotEmpty) {
+    // 落流补投（2026-11-23）：重连补投的历史消息只落气泡——横幅在推送送达时
+    // 已经弹过一次，补投再弹就是同一内容打扰两次。
+    final bool isReplay = payload["replay"] == true;
+    if (_appBackgrounded && !isReplay && text.trim().isNotEmpty) {
       // 手机后台（类微信常在线）：系统通知触达，点开回前台看气泡
       unawaited(LocalNotificationService.show(
         title: title,
@@ -2652,7 +2655,7 @@ class MobileChatController extends ChangeNotifier {
       () => <ChatMessage>[],
     );
     // 真·分绿泡：分泡轮次媒体照片挂到当前流式泡上（media_ready 的 messageId
-    // 恒为 assistant-$traceId 基础 id，不能据此开占位消息，防幻影空泡）
+    // 由服务端指向当前末泡 id；流式泡缺失时回落基础 id 开占位消息）
     if (t.streamingMessageId != null && _isBubbleId(t.streamingMessageId!)) {
       final int bIdx = list.indexWhere(
         (m) => m.messageId == t.streamingMessageId,
@@ -2883,17 +2886,23 @@ class MobileChatController extends ChangeNotifier {
       threadKey,
       () => <ChatMessage>[],
     );
-    // 出口一次性分泡（2026-11-23）：本轮没有流式 chunk，turn_started 留下的
-    // 空占位不让位就会在首泡上方留一条空消息——先清掉（与塌缩分支同规则）。
-    list.removeWhere(
-      (ChatMessage m) => m.streaming && m.text.trim().isEmpty,
-    );
     final String? traceId = payload["traceId"]?.toString();
-    final String finalText =
-        stripAssistantProtocolFrames(payload["finalText"]?.toString() ?? "");
     final String traceKey = traceId != null && traceId.isNotEmpty
         ? "assistant-$traceId"
         : "assistant-final";
+    // 出口一次性分泡（2026-11-23）：本轮没有流式 chunk，turn_started 留下的
+    // 空占位不让位就会在首泡上方留一条空消息——只清本轮占位，避免误删同线程
+    // 其它轮次的空消息。
+    final String? placeholderId =
+        traceId != null && traceId.isNotEmpty ? "assistant-$traceId" : null;
+    list.removeWhere(
+      (ChatMessage m) =>
+          m.streaming &&
+          m.text.trim().isEmpty &&
+          (placeholderId == null || m.messageId == placeholderId),
+    );
+    final String finalText =
+        stripAssistantProtocolFrames(payload["finalText"]?.toString() ?? "");
     final List<Map<String, dynamic>>? mediaCards =
         _parseStructuredList(payload, "mediaCards");
     final Map<String, dynamic>? summaryCard =

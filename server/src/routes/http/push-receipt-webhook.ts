@@ -63,14 +63,35 @@ function checkBasicAuth(header: string | undefined): boolean {
   }
 }
 
-export function registerPushReceiptWebhook(app: FastifyInstance): void {
+/** 华为回执中代表「token 已失效」的状态码：1=无效 2=应用已卸载 5=与本机 token 不匹配 */
+const DEAD_TOKEN_RESULTS = new Set([1, 2, 5]);
+
+type ReceiptWebhookDeps = { pushService?: { pruneToken(token: string): number } | null };
+
+export function registerPushReceiptWebhook(app: FastifyInstance, deps?: ReceiptWebhookDeps): void {
   app.post(HUAWEI_PUSH_RECEIPT_PATH, async (request, reply) => {
     const authOk = checkBasicAuth(request.headers.authorization);
     const text = bodyToText(request.body);
+    // 送达失败 → 动态清理失效 token（2026-11-23「token 动态跟随」闭环的最后一段）：
+    // result=1/2/5 说明该 token 在设备侧已死（清数据/卸载重装/不匹配），留在
+    // 注册表里会让每次推送都白发一条。华为回执是唯一权威的死亡信号。
+    let pruned = 0;
+    try {
+      const parsed = JSON.parse(text) as { statuses?: Array<{ token?: string; deliveryStatus?: { result?: number } }> };
+      for (const s of parsed.statuses ?? []) {
+        const result = s.deliveryStatus?.result;
+        if (s.token && typeof result === "number" && DEAD_TOKEN_RESULTS.has(result) && deps?.pushService) {
+          pruned += deps.pushService.pruneToken(s.token);
+          app.log.info({ tokenPreview: s.token.slice(0, 12), result }, "[push-receipt] pruned dead token");
+        }
+      }
+    } catch {
+      /* 报文非 JSON（测试回执等）：只落盘，不做清理 */
+    }
     const line =
       `${new Date().toISOString()} ip=${request.ip} ` +
       `ct=${String(request.headers["content-type"] ?? "-")} ` +
-      `auth=${authOk ? "ok" : "bad"} body=${text.slice(0, 4000)}\n`;
+      `auth=${authOk ? "ok" : "bad"} pruned=${pruned} body=${text.slice(0, 4000)}\n`;
     try {
       const dir = join(getDataDir(), "debug");
       mkdirSync(dir, { recursive: true });

@@ -10,6 +10,7 @@ import type { ProactiveDeliveryService } from "./delivery-service.js";
 import { readJson, writeJson } from "./persist-file.js";
 import type { ArbitrationDecision, ProactiveOutcome, ProactiveProposal } from "./pipeline-types.js";
 import { OutcomeStore } from "./outcome-store.js";
+import { getProactiveReplay } from "./proactive-replay-store.js";
 import type { PresenceService } from "./presence-service.js";
 import { ProposalStore } from "./proposal-store.js";
 import { SilenceLog } from "./silence-log.js";
@@ -393,8 +394,10 @@ export class ProactivePipeline {
       void push
         .push({
           actorId: p.actorId,
-          title: p.title,
-          body: p.directText ?? p.summary,
+          // 华为通道强制 title 非空（80100003 Illegal payload）：部分 proposal 无 title，
+          // 不兜底会让待发区每 5 分钟重试、每 5 分钟失败，横幅永远出不来
+          title: p.title ?? "提醒",
+          body: p.directText ?? p.summary ?? p.title ?? "点击查看详情",
           importance: p.importance,
           kind: p.kind,
           deliveryId,
@@ -408,6 +411,25 @@ export class ProactivePipeline {
           }
           if (!this.store.take(p.dedupKey)) return; // 已被 WS 重连直投抢先
           this.store.markDelivered(p.dedupKey, clock());
+          // 落流补发登记（2026-11-23）：推送只是横幅，对话流里也要有这条记录——
+          // 其他设备/本机重连时由 ProactiveReplayStore 按稳定 messageId 幂等补投。
+          getProactiveReplay().record(p.actorId, {
+            deliveryId,
+            messageId: `proactive-${deliveryId}`,
+            title: p.title,
+            text: String(p.directText ?? p.summary),
+            importance: p.importance,
+            kind: p.kind,
+            ...(p.proposalId ? { proposalId: p.proposalId } : {}),
+            ...(p.source ? { source: p.source } : {}),
+            // 气泡按原定触发时刻落位（无则用送达时刻），补投不冒充「刚刚发的」
+            firedAt:
+              typeof p.firedAt === "number"
+                ? p.firedAt
+                : clock(),
+            ...(actionIntent ? { actionIntent } : {}),
+            ...(p.importance === "high" || p.importance === "critical" ? { display: "popup" } : {}),
+          });
           // 手机推送真的送达 → 读走的发现此刻结算成消费（否则会随预留到期释放、被再合并一遍）
           if (this.deps.discovery && p.findingFingerprints?.length) {
             this.deps.discovery.settle(p.findingFingerprints, "delivered");

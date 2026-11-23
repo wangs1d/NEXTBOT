@@ -5,14 +5,15 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 /**
- * 流式分层契约（2026-11-05 定稿，2026-11-06 按用户裁决二次修订）：
+ * 流式分层契约（2026-11-05 定稿，2026-11-23 方案 C 修订）：
  *
- *   「流式」「打字机」「分泡」三件事分开：
+ *   「流式」「文字块」「分泡」三件事分开，但共用同一条 WS 通道：
  *     模型 stream:true → delta 实时进分段器 → 语音数据帧逐句播报（流式保留）
- *     单泡轮文字只由 done.finalText 一次性落屏（打字机退役，不回头）
- *     分泡轮按「信息块」出站整块 chunk —— 一个块 = 一个绿泡（或并回当前泡），
- *     逐泡实时出现；粒度是块不是字，打字机不借此复活。
- *     工具开始执行 = 信息/操作轮 → 冻结分泡，剩余内容并回当前泡（单泡发完）。
+ *     闲聊轮：分段器切出的每个信息块 = 一个独立文字块（chat.assistant_chunk），
+ *     块 id 由 BubbleTracker 统一分配，与 done 的 bubbles 对账数组同源
+ *     （assistant-$traceId-bN，按位置一一对应）——同 block 身份原地升级。
+ *     语音轮 / 任务面轮：不发文字块，文字由 done 单条收口。
+ *     流式后转渲染/塌缩：复用既有 chat.stream_reset + finalTextReplacesStream。
  *
  * 运行期行为由 scripts/probe-speech-stream.mjs 对真实服务取证；本文件是
  * 防回归的源码契约，锁住几个「一旦改回去就前功尽弃」的关键点。
@@ -41,22 +42,29 @@ test("主链路 delta 实时进分段器，realtimeStream 默认开启", () => {
   );
 });
 
-test("文字显示帧：chunk 通道退役，分泡只在 done 裁决后按 bubbles 数组下发", () => {
-  // 2026-11-23 统一：流式阶段不再外发文字气泡，整轮结束后判一次「分泡 or 渲染」。
-  assert.doesNotMatch(
+test("文字块流式（方案 C）：chunk 携带块 id，done 用同源 bubbles 对账", () => {
+  // 2026-11-23 方案 C：闲聊轮实时外发文字块，块 id 与 done 的 bubbles
+  // 按位置一一对应（同 base + 同序号），客户端原地 patch/追加。
+  assert.match(
     handler,
     /type:\s*ServerEventType\.ChatAssistantChunk/,
-    "文字 chunk 通道必须退役（避免边流边判与整段渲染碰撞）",
+    "闲聊轮必须实时下发文字块（复用既有事件类型，不新开通道）",
+  );
+  assert.match(
+    handler,
+    /bubbleTracker\.appendStreamBlock\(/,
+    "流式块 id 必须由 BubbleTracker 统一分配",
+  );
+  assert.match(handler, /messageId: blockId/, "chunk 的 messageId 必须是块 id");
+  assert.match(
+    handler,
+    /bubbleTracker\.setFinalBubbles\(finalTexts\)/,
+    "done 必须按同源 id 重排定稿（前 N 个 id 与流式块一致）",
   );
   assert.doesNotMatch(
     editRoute,
     /type:\s*ServerEventType\.ChatAssistantChunk/,
-    "编辑重答同样不得复活 chunk 通道",
-  );
-  assert.match(
-    handler,
-    /bubbleTracker\.setFinalBubbles\(await splitReplyBubbles\(finalText\)\)/,
-    "闲聊分泡必须在 done 裁决后一次性生成",
+    "编辑重答不接流式块通道",
   );
 });
 
@@ -64,7 +72,7 @@ test("呈现裁决统一到整轮之后：工具回调不再开关气泡/拆分�
   const startIdx = handler.indexOf("onExternalToolExecuteStart");
   assert.ok(startIdx > 0, "必须存在工具开始回调");
   const section = handler.slice(startIdx, startIdx + 3000);
-  // chunk 不再外发成泡，流式阶段的开关泡逻辑必须全部退役。
+  // 呈现裁决只在整轮之后判一次：流式阶段禁止任何「工具域开泡/关泡」旁路。
   assert.doesNotMatch(section, /bubbleTracker\.freeze\(\)/, "禁止流式冻结气泡");
   assert.doesNotMatch(
     section,
@@ -84,14 +92,14 @@ test("语音数据帧：协议登记 + 主链路与编辑重答都有收口 fina
   assert.match(editRoute, /sendEditSpeechFrame\("", true, replyFinalText\)/);
 });
 
-test("final 帧恒在 done 之前，且 done 仍是唯一文字正文出口", () => {
+test("final 语音帧恒在 done 之前，done 只做终态对账", () => {
   const finalIdx = handler.indexOf('sendSpeechFrame("", "stream", true, finalText)');
   const doneIdx = handler.indexOf("type: ServerEventType.ChatAssistantDone", finalIdx);
   assert.ok(finalIdx > 0, "必须存在语音收口帧");
   assert.ok(doneIdx > finalIdx, "收口帧必须先于 done 下发");
-  // chunk 不再外发成文字气泡：分泡只发生在 done 裁决后，客户端按 bubbles 数组揭示。
-  assert.doesNotMatch(handler, /ChatAssistantChunk/, "文字 chunk 通道必须退役");
-  assert.match(handler, /bubbleTracker\.setFinalBubbles\(await splitReplyBubbles\(finalText\)\)/);
+  // 文字由流式块实时落屏，done 只按同源 bubbles id 对账定稿。
+  assert.match(handler, /ChatAssistantChunk/, "文字块流式通道必须在");
+  assert.match(handler, /messageId: bubbleTracker\.outboundDoneMessageId/);
 });
 
 test("呈现裁决唯一出口：整轮结束后只判一次，旧双阶段判断已删净", () => {
@@ -102,7 +110,12 @@ test("呈现裁决唯一出口：整轮结束后只判一次，旧双阶段判�
   assert.doesNotMatch(handler, /decideStreamPlan|decideFinalPlan/, "旧两阶段裁决必须删除");
   assert.doesNotMatch(handler, /renderedReply/, "旧 renderedReply 启发式必须删除");
   assert.doesNotMatch(handler, /shouldSplitBubbles|resolveBubbleCollapse/, "旧分泡判断必须删除");
-  assert.doesNotMatch(handler, /finalTextReplacesStream/, "旧替换信号必须删除");
+  // 流式后转渲染/塌缩轮复用既有 finalTextReplacesStream 通道（不是第二套管线）。
+  assert.match(
+    handler,
+    /collapseStreamed \? \{ finalTextReplacesStream: true \}/,
+    "仅流式后转单泡轮使用塌缩信号",
+  );
   assert.doesNotMatch(handler, /enableBubbleMode|disableBubbleMode/, "旧流式开泡/关泡必须删除");
   assert.match(handler, /const bodyRewritten = doneSceneMeta\?\.bodyRewritten === true/);
 });

@@ -5,10 +5,11 @@
  * （schedule-task → schedule.reminder_fired 应用内通知，App 杀进程就不响），
  * 真正会响铃的本地闹钟引擎（Android AlarmManager + AlarmRingService）没有创建入口。
  *
- * 2026-11-09 用户定调改版：是否建真闹钟的意图判定废除正则文本匹配，交给模型 ——
- * calendar.create schema 新增 alarmIntent 字段，唯一覆盖「睡觉叫醒」一种情形
- * （「定个闹钟」等无睡觉语境的表述不建）。本模块只保留确定性保护：
- * recurrence → RRULE 子集映射（yearly 不支持 → 回退日程提醒，不给错语义的响铃）。
+ * 意图判定废除正则文本匹配，交给模型 —— calendar.create schema 的 alarmIntent 字段。
+ * 2026-11-23 口径放宽（用户实测「明确要求用闹钟仍弹窗」后定调）：从「仅睡觉叫醒」
+ * 扩到「用户明确说闹钟/叫醒/响铃」（含「定个 8 点闹钟」「用闹钟提醒我」）；只有没提
+ * 闹钟字样的纯提醒不建。本模块只保留确定性保护：recurrence → RRULE 子集映射
+ * （yearly 不支持 → 回退日程提醒，不给错语义的响铃）。
  */
 
 export type ScheduleRecurrence = "none" | "daily" | "weekly" | "yearly";

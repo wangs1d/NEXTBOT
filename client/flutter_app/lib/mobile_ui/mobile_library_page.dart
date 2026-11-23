@@ -1,10 +1,12 @@
 import "dart:async";
 import "dart:convert";
+import "dart:io" show File;
 
 import "package:flutter/material.dart";
 import "package:http/http.dart" as http;
 
 import "../core/config/api_config.dart";
+import "../core/services/local_file_opener.dart";
 import "../core/utils/link_utils.dart";
 import "../features/chat/image_preview_panel.dart";
 import "../features/chat/media_disk_cache.dart";
@@ -12,6 +14,7 @@ import "../features/chat/travel_plan_mobile_page.dart";
 import "../features/chat/travel_plan_models.dart";
 import "mobile_page_cache.dart";
 import "mobile_theme.dart";
+import "startup_media_prefetch.dart";
 import "../core/services/nb_http.dart";
 
 /// 手机端「资料库」页。
@@ -89,7 +92,8 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
             _groups = cachedGroups;
             _loading = false;
           });
-          _warmMedia(cachedGroups);
+          // 命中磁盘缓存也照常排队预热：冷启动/离线回退后补预内容字节。
+          StartupMediaPrefetch.warmContent(cached);
           unawaited(_fetch(silent: true));
           return;
         }
@@ -122,13 +126,15 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
           _LibGroup.fromJson(g),
       ];
       MobilePageCache.instance.write(_cacheKey, body);
+      // 数据一到就把四类内容（缩略图/原图/文件字节/笔记正文/行程详情）
+      // 统一预热进本机缓存，点开详情时零等待。
+      StartupMediaPrefetch.warmContent(body);
       if (!mounted) return;
       setState(() {
         _groups = groups;
         _loading = false;
         _error = null;
       });
-      _warmMedia(groups);
     } catch (e) {
       if (!mounted) return;
       // 静默刷新失败：已有数据保持展示（不闪错误页）；无数据才落到错误态。
@@ -146,9 +152,6 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
         .toList(growable: false);
   }
 
-  /// 预加载上限：资料全部在本机服务端，量级可控；封顶防极端大库挤爆弱网。
-  static const int _warmImageCap = 120;
-
   /// 卡面缩略图解码宽度（物理像素）：卡面 36px/格，3 倍密度足够；不设的话
   /// Flutter 会按原图 1024~2048px 解码，一屏十几张就把手机内存和解码线程打满。
   static const int _cardThumbCacheWidth = 160;
@@ -156,48 +159,29 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
   /// 详情页三列网格解码宽度（物理像素）。
   static const int _gridThumbCacheWidth = 400;
 
-  /// 图片预加载（2026-11-12）：数据一到就把照片（新→旧）+ 行程封面
-  /// 预热进磁盘缓存，卡片/详情渲染即秒解，不再「进页后图慢慢浮出来」。
-  /// warm 走后台通道（2 路）+ 静默容错，不抢占屏上正在渲染的图片。
-  void _warmMedia(List<_LibGroup> groups) {
-    final List<String> urls = <String>[];
-    for (final _LibGroup g in groups) {
-      // 逐条判上限：原实现把 break 放在组循环末尾，单组超过上限仍会多塞一批。
-      for (final _LibItem i in g.photos) {
-        if (urls.length >= _warmImageCap) break;
-        // 预热缩略图而不是原图：单张约几十 KB，120 张也不过几 MB。
-        urls.add(i.thumbUrl);
-      }
-      for (final _LibItem i in g.items) {
-        if (urls.length >= _warmImageCap) break;
-        final String cover = i.coverUrl.trim();
-        if (cover.isEmpty) continue;
-        urls.add(cover.startsWith("http") ? cover : "${ApiConfig.httpBase}$cover");
-      }
-      if (urls.length >= _warmImageCap) break;
-    }
-    if (urls.isEmpty) return;
-    MediaDiskCache.instance.warm(urls);
-  }
-
-  /// 打开已完成行程：先拉完整行程（GET /travel/plans/:id），再推原生行程页。
+  /// 打开已完成行程：先读预热缓存（启动/进页已拉过详情），命中即秒开；
+  /// 同时后台静默刷新写回缓存，下一次点开就是最新。未命中才走网络并等待。
   Future<void> _openTravelPlan(_LibItem item) async {
     if (item.planId.isEmpty || _openingPlan) return;
     if (ApiConfig.isOssEdition) return;
     _openingPlan = true;
     try {
-      final Uri uri = Uri.parse(
-        "${ApiConfig.httpBase}/travel/plans/${Uri.encodeComponent(item.planId)}"
-        "?sessionId=${Uri.encodeQueryComponent(ApiConfig.effectiveActorId)}",
-      );
-      final http.Response res = await (widget.client ?? NbClient())
-          .get(uri)
-          .timeout(const Duration(seconds: 20));
-      if (res.statusCode != 200) {
-        throw Exception("服务端返回 ${res.statusCode}");
+      final String key = StartupMediaPrefetch.planCacheKey(item.planId);
+      final Map<String, dynamic>? cached =
+          await MobilePageCache.instance.read(key);
+      final Object? cachedPlan = cached?["plan"];
+      if (cachedPlan is Map<String, dynamic>) {
+        if (!mounted) return;
+        // 先用预热数据秒开，网络刷新只更新缓存，不替换已打开的页面。
+        unawaited(_refreshPlan(item.planId, key));
+        await TravelPlanMobilePage.show(
+          context,
+          plan: TravelPlanData.fromPlanJson(cachedPlan),
+        );
+        return;
       }
-      final Object? decoded = jsonDecode(res.body);
-      final Object? rawPlan = decoded is Map ? decoded["plan"] : null;
+      final Map<String, dynamic> body = await _fetchPlan(item.planId, key);
+      final Object? rawPlan = body["plan"];
       if (rawPlan is! Map<String, dynamic>) {
         throw Exception("行程数据缺失");
       }
@@ -219,6 +203,36 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
       _openingPlan = false;
     }
   }
+
+  /// 拉完整行程详情并回写缓存；[throwOnFailure]=false 用于后台静默刷新。
+  Future<Map<String, dynamic>> _fetchPlan(String planId, String cacheKey,
+      {bool throwOnFailure = true}) async {
+    try {
+      final Uri uri = Uri.parse(
+        "${ApiConfig.httpBase}/travel/plans/${Uri.encodeComponent(planId)}"
+        "?sessionId=${Uri.encodeQueryComponent(ApiConfig.effectiveActorId)}",
+      );
+      final http.Response res = await (widget.client ?? NbClient())
+          .get(uri)
+          .timeout(const Duration(seconds: 20));
+      if (res.statusCode != 200) {
+        throw Exception("服务端返回 ${res.statusCode}");
+      }
+      final Object? decoded = jsonDecode(res.body);
+      if (decoded is Map<String, dynamic> && decoded["ok"] == true) {
+        MobilePageCache.instance.write(cacheKey, decoded);
+        return decoded;
+      }
+      throw Exception("行程数据缺失");
+    } catch (e) {
+      if (throwOnFailure) rethrow;
+      debugPrint("[MobileLibrary] 行程后台刷新失败($planId): $e");
+      return <String, dynamic>{};
+    }
+  }
+
+  Future<void> _refreshPlan(String planId, String cacheKey) =>
+      _fetchPlan(planId, cacheKey, throwOnFailure: false);
 
   List<_LibGroup> get _shown {
     final String q = _search.text.trim().toLowerCase();
@@ -395,9 +409,81 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
         builder: (BuildContext context) => _GroupDetailPage(
           group: group,
           onOpenTravel: _openTravelPlan,
+          onOpenNote: _openNote,
+          onOpenFile: _openFile,
         ),
       ),
     );
+  }
+
+  /// 打开笔记正文：先读预热缓存，命中即展示 + 后台静默刷新；未命中拉网络。
+  Future<void> _openNote(_LibItem item) async {
+    if (item.noteId.isEmpty) return;
+    final String key = StartupMediaPrefetch.noteCacheKey(item.noteId);
+    Map<String, dynamic>? cached = await MobilePageCache.instance.read(key);
+    final Object? cachedNote = cached?["note"];
+    if (cachedNote is! Map<String, dynamic>) {
+      try {
+        cached = await _fetchNote(item.noteId, key);
+      } catch (e) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text("笔记加载失败：$e", style: const TextStyle(fontSize: 12)),
+            behavior: SnackBarBehavior.floating,
+            duration: const Duration(seconds: 2),
+          ),
+        );
+        return;
+      }
+    } else {
+      unawaited(_fetchNote(item.noteId, key, throwOnFailure: false));
+    }
+    final Object? note = cached?["note"];
+    if (note is! Map<String, dynamic> || !mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (BuildContext context) => _NoteDetailPage(note: note),
+      ),
+    );
+  }
+
+  Future<Map<String, dynamic>> _fetchNote(String noteId, String cacheKey,
+      {bool throwOnFailure = true}) async {
+    try {
+      final Uri uri = Uri.parse(StartupMediaPrefetch.noteUrlFor(noteId));
+      final http.Response res = await (widget.client ?? NbClient())
+          .get(uri)
+          .timeout(const Duration(seconds: 20));
+      if (res.statusCode != 200) {
+        throw Exception("服务端返回 ${res.statusCode}");
+      }
+      final Object? decoded = jsonDecode(res.body);
+      if (decoded is Map<String, dynamic> && decoded["ok"] == true) {
+        MobilePageCache.instance.write(cacheKey, decoded);
+        return decoded;
+      }
+      throw Exception("笔记正文缺失");
+    } catch (e) {
+      if (throwOnFailure) rethrow;
+      debugPrint("[MobileLibrary] 笔记后台刷新失败($noteId): $e");
+      return <String, dynamic>{};
+    }
+  }
+
+  /// 打开文件：字节已由预热落进 MediaDiskCache，先从本地读；命中即用系统
+  /// 应用打开本地文件（离线可用），未命中/原生不支持再回退在线浏览器。
+  Future<void> _openFile(_LibItem item) async {
+    final String url = item.fileUrl;
+    try {
+      final File? local = await MediaDiskCache.instance.fileFor(url);
+      if (local != null && await LocalFileOpener.open(local.path, item.fileName)) {
+        return;
+      }
+    } catch (e) {
+      debugPrint("[MobileLibrary] 本地打开文件失败，回退在线: $e");
+    }
+    await LinkUtils.launchExternal(url);
   }
 
   static String _filterLabel(_LibFilter f) {
@@ -545,6 +631,7 @@ class _LibItem {
     this.size = 0,
     this.urlOverride = "",
     this.planId = "",
+    this.noteId = "",
     this.coverUrl = "",
   });
 
@@ -586,6 +673,8 @@ class _LibItem {
       title: n["title"]?.toString() ?? "",
       time: t,
       source: n["category"]?.toString() ?? "笔记",
+      // 笔记点开查看正文：id 是取 /notes/:id 缓存的钥匙，清单里没它就没法秒开。
+      noteId: n["id"]?.toString() ?? "",
     );
   }
 
@@ -625,6 +714,9 @@ class _LibItem {
 
   /// 已完成行程 id（非空表示点按可打开原生行程页）。
   final String planId;
+
+  /// 笔记 id（非空表示点按可打开正文）。
+  final String noteId;
 
   /// 行程封面（可为 `/agent/travel-media/...` 相对地址）。
   final String coverUrl;
@@ -677,7 +769,7 @@ class _LibItem {
 
   String get fileUrl => urlOverride.isNotEmpty
       ? "${ApiConfig.httpBase}$urlOverride"
-      : "${ApiConfig.httpBase}/agent/files/${Uri.encodeQueryComponent(ApiConfig.effectiveActorId)}/${Uri.encodeQueryComponent(fileName)}";
+      : StartupMediaPrefetch.fileUrlFor(fileName);
 
   /// 卡面/网格缩略图地址（2026-11-12）：图片条目让服务端按需压成 400px 宽
   /// 的 webp。原来格子直接拉 1~3MB 的原始 PNG，一屏三十张就是几十 MB——
@@ -799,10 +891,17 @@ class _GroupCard extends StatelessWidget {
 
 /// 会话详情页：照片网格（点开全屏可左右滑）+ 文件 / 笔记 / 行程分区。
 class _GroupDetailPage extends StatelessWidget {
-  const _GroupDetailPage({required this.group, required this.onOpenTravel});
+  const _GroupDetailPage({
+    required this.group,
+    required this.onOpenTravel,
+    required this.onOpenNote,
+    required this.onOpenFile,
+  });
 
   final _LibGroup group;
   final Future<void> Function(_LibItem) onOpenTravel;
+  final Future<void> Function(_LibItem) onOpenNote;
+  final Future<void> Function(_LibItem) onOpenFile;
 
   @override
   Widget build(BuildContext context) {
@@ -902,8 +1001,10 @@ class _GroupDetailPage extends StatelessWidget {
     final VoidCallback? onTap = item.planId.isNotEmpty
         ? () => unawaited(onOpenTravel(item))
         : (item.type == _LibType.note
-            ? null
-            : () => unawaited(LinkUtils.launchExternal(item.fileUrl)));
+            ? (item.noteId.isNotEmpty
+                ? () => unawaited(onOpenNote(item))
+                : null)
+            : () => unawaited(onOpenFile(item)));
     return Padding(
       padding: const EdgeInsets.only(bottom: 8),
       child: InkWell(
@@ -994,5 +1095,74 @@ Color _typeColor(_LibType type) {
       return const Color(0xFF9B7BDE);
     case _LibType.travel:
       return const Color(0xFF2BB3A3);
+  }
+}
+
+/// 笔记正文查看页（2026-11-23）：清单里的笔记条目此前点不动，正文也从未
+/// 预载。现在正文随启动/进页预取落进 MobilePageCache，点开即从缓存秒开。
+/// content 是 markdown 纯文本，用 SelectableText 直接展示（可长按复制）。
+class _NoteDetailPage extends StatelessWidget {
+  const _NoteDetailPage({required this.note});
+
+  final Map<String, dynamic> note;
+
+  @override
+  Widget build(BuildContext context) {
+    final MobilePalette p = MobileTheme.of(context);
+    final String title = note["title"]?.toString().trim().isNotEmpty == true
+        ? note["title"]!.toString()
+        : "笔记";
+    final String content = note["content"]?.toString() ?? "";
+    final List<dynamic> tags =
+        (note["tags"] as List<dynamic>?) ?? const <dynamic>[];
+    final String category = note["category"]?.toString() ?? "";
+    final String updatedAt = note["updatedAt"]?.toString() ?? "";
+
+    return Scaffold(
+      backgroundColor: p.background,
+      appBar: AppBar(title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis)),
+      body: ListView(
+        padding: EdgeInsets.fromLTRB(
+          18,
+          16,
+          18,
+          28 + MediaQuery.paddingOf(context).bottom,
+        ),
+        children: [
+          if (category.isNotEmpty || updatedAt.isNotEmpty)
+            Text(
+              <String>[
+                if (category.isNotEmpty) category,
+                if (updatedAt.isNotEmpty)
+                  (updatedAt.length > 16 ? updatedAt.substring(0, 16) : updatedAt),
+              ].join(" · "),
+              style: TextStyle(color: p.textMuted, fontSize: 12),
+            ),
+          if (tags.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 6,
+              children: [
+                for (final dynamic tag in tags)
+                  Chip(
+                    label: Text(tag.toString(), style: const TextStyle(fontSize: 11)),
+                    visualDensity: VisualDensity.compact,
+                    materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+              ],
+            ),
+          ],
+          const SizedBox(height: 18),
+          SelectableText(
+            content.isEmpty ? "暂无正文" : content,
+            style: TextStyle(
+              color: p.textPrimary,
+              fontSize: 14,
+              height: 1.7,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }

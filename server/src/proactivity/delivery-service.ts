@@ -9,6 +9,7 @@ import type { ProactiveProposal } from "./pipeline-types.js";
 import type { OpenedBody } from "./discovery-layer.js";
 import type { ActionIntentService, ClientActionIntent } from "./action-intent-service.js";
 import { registerIntentForProposal } from "./notification-actions.js";
+import { getProactiveReplay } from "./proactive-replay-store.js";
 
 export type DeliveryResult =
   | { ok: true; deliveryId: string }
@@ -72,6 +73,9 @@ export class ProactiveDeliveryService {
       type: "agent.proactive_message",
       payload: {
         deliveryId,
+        // 稳定消息 id（2026-11-23「落流补发」）：客户端按 (sessionId, messageId)
+        // upsert 本地历史——重连补投同一条消息不会产生重复气泡。
+        messageId: `proactive-${deliveryId}`,
         title,
         text,
         importance: p.importance,
@@ -93,6 +97,9 @@ export class ProactiveDeliveryService {
     } else if (!this.deps.trySend(p.actorId, JSON.stringify(payload))) {
       return { ok: false, reason: "no_online_device" };
     }
+    // 落流补发登记（2026-11-23）：WS 直投只到达了「当时在线」的设备——其他
+    // 设备重连时由 ProactiveReplayStore 按稳定 messageId 幂等补投。
+    getProactiveReplay().record(p.actorId, payload.payload as Record<string, unknown>);
     if (p.kind.startsWith("action.")) {
       try {
         this.deps.ledger?.record(p);

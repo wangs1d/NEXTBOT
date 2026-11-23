@@ -224,6 +224,19 @@
             android:name="com.amap.api.v2.apikey"
             android:value="${amapApiKey}" />
 
+        <!-- 资料库预取文件本地打开（2026-11-23）：把应用支持目录下 media_cache/
+             里预载的产出文件转成带临时授权的 content:// URI 交系统应用打开。
+             路径声明见 res/xml/file_paths.xml；Dart 通道见 FileOpenPlugin。 -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
@@ -245,6 +258,12 @@
         <intent>
             <action android:name="android.intent.action.VIEW"/>
             <data android:scheme="alipays"/>
+        </intent>
+        <!-- 资料库产出文件本地打开：Android 11+ 包可见性需声明 VIEW intent，
+             否则 FileOpenPlugin 的 resolveActivity 对第三方阅读器恒返回 null。 -->
+        <intent>
+            <action android:name="android.intent.action.VIEW"/>
+            <data android:mimeType="*/*"/>
         </intent>
     </queries>
 </manifest>

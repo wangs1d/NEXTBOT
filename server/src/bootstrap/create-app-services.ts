@@ -29,7 +29,7 @@ import { aggregateXiaohongshuUgc } from "../recommendation/ugc-aggregator.js";
 import { pickBestProductImage } from "../services/product-image-scorer.js";
 import { buildCommitmentPrompt } from "../services/commitment-prompt-provider.js";
 import { settleScheduleCommitment, upsertScheduleCommitment } from "../services/commitment-store.js";
-import { ReminderRedeliveryService } from "../services/reminder-redelivery-service.js";
+import { ReminderRedeliveryService, reminderStableMessageId } from "../services/reminder-redelivery-service.js";
 import { getChatThreadStore } from "../external-model/chat-thread-store.js";
 import { createLlmRollingRecapSummarizer } from "../services/conversation-rolling-summarizer.js";
 import { registerHttpRoutes } from "../routes/http/index.js";
@@ -92,6 +92,7 @@ import { getAgentTaskStore } from "../services/agent-task-store.js";
 import { getAgentTaskOrchestrator } from "../services/agent-task-orchestrator.js";
 import { getTaskHub } from "../task-plane/task-hub.js";
 import { getTaskOutbox } from "../task-plane/task-outbox.js";
+import { getProactiveReplay } from "../proactivity/proactive-replay-store.js";
 import { scheduleInterruptedTaskRecovery } from "../task-plane/restart-recovery.js";
 import { AutonomySettingsStore } from "../services/autonomy-settings-store.js";
 import { registerGeofenceTools } from "../tools/geofence-tools.js";
@@ -1501,20 +1502,31 @@ export async function createAppServices(
       // importance=normal → 告知类，客户端落文字气泡不弹决策卡；
       // kind=schedule_reminder 供客户端跳过重复横幅（reminder_fired 已弹过）。
       if (preReminder !== true) {
-        wsConnectionRegistry.trySendToDeviceClasses(
+        const reminderRunAt = task.nextRunAt ?? task.runAt;
+        const reminderPayload: Record<string, unknown> = {
+          deliveryId: `d_rm${task.taskId.slice(-6)}_${Date.now().toString(36)}`,
+          // 稳定 messageId（2026-11-23）：与离线补投共用同一 id——手机此刻在线
+          // 直投落泡，其他设备/本机重连时由 ProactiveReplayStore 按 id 幂等补齐。
+          messageId: reminderStableMessageId(task.taskId, reminderRunAt, false),
+          title: task.shortTitle || task.title || "",
+          text: outboundMessage,
+          importance: "normal",
+          kind: "schedule_reminder",
+          source: "schedule",
+          ...(Number.isFinite(Date.parse(reminderRunAt))
+            ? { firedAt: Date.parse(reminderRunAt) }
+            : {}),
+        };
+        const reminderSent = wsConnectionRegistry.trySendToDeviceClasses(
           task.sessionId,
-          JSON.stringify({
-            type: "agent.proactive_message",
-            payload: {
-              deliveryId: `d_rm${task.taskId.slice(-6)}_${Date.now().toString(36)}`,
-              title: task.shortTitle || task.title || "",
-              text: outboundMessage,
-              importance: "normal",
-              kind: "schedule_reminder",
-            },
-          }),
+          JSON.stringify({ type: "agent.proactive_message", payload: reminderPayload }),
           ["mobile"],
         );
+        if (reminderSent) {
+          // 落流补发登记（2026-11-23）：直投只到达「当时在线」的手机——
+          // 桌面等其他端重连时由 ProactiveReplayStore 补齐对话流记录。
+          getProactiveReplay().record(task.sessionId, reminderPayload);
+        }
       }
     }
     // 不再根据"起床/叫醒"等关键词自动拨打电话
@@ -6977,6 +6989,8 @@ export async function createAppServices(
   // "怎么样了"答得出"重启中断"）；已入箱未投递的任务结果重连后照常补投
   getTaskHub().enablePersistence(join(getDataDir(), "task-plane", "task-hub.json"));
   getTaskOutbox().enablePersistence(join(getDataDir(), "task-plane", "task-outbox.json"));
+  // 主动消息「落流补发」缓存（2026-11-23）：重启前入箱未补投的条目照常补投。
+  getProactiveReplay().enablePersistence(join(getDataDir(), "proactivity", "proactive-replay.json"));
   // 被打断任务收口 + 自动重跑（2026-09-23）：清扫只标 failed（无连接无监听，
   // 终态送不出去），由 restart-recovery 延迟统一处理——沿原结果通道推收口
   // 通知（状态带据此收口），再把"被重启错杀"的任务自动重派（代数封顶防死循环）。

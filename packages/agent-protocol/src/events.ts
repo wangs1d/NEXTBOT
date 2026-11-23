@@ -174,19 +174,31 @@ export const ServerEventType = {
    * 无回执，任务完成后结果消息直接落进对话流）。
    */
   ChatTaskUpdate: "chat.task_update",
+  /**
+   * 文字块流式帧（2026-11-23 方案 C：同 block 身份原地升级）。
+   *
+   * 闲聊轮把分段器切出的每个信息块作为一个**独立块**实时下发，块 id 与
+   * chat.assistant_done 的 bubbles 对账数组**同源**（`assistant-$traceId-bN`，
+   * 按位置一一对应）：流式阶段建立块，done 只做终态对账（patch 文本/追加
+   * 尾部块），客户端不重建消息、不闪回。
+   *
+   * payload: { sessionId, messageId(=blockId), blockId, index, traceId, threadId,
+   *            chunk, sequence, phase, kind:"text", final:false }
+   * 语音轮/任务面轮不发此帧（文字由 done 单条收口）。
+   */
   ChatAssistantChunk: "chat.assistant_chunk",
   /**
    * 语音流式数据帧（2026-11-05 分层定稿）。
    *
    * 与 ChatAssistantChunk 的区别是**消费方**，不是数据形态：
-   * - ChatAssistantChunk 是「打字机显示帧」，已整体退役（出站 0 处）；
+   * - ChatAssistantChunk 是「文字块显示帧」，落消息列表（块 id = 气泡 id）；
    * - ChatAssistantSpeech 是「语音 TTS 数据帧」，模型 delta 经出口净化后实时
    *   下发，客户端只喂逐句合成，绝不落消息列表、不产生任何文字渲染。
    *
-   * 这样模型生成 → 服务端管道 → 语音播报全程仍是流式的，而文字回复只由
-   * ChatAssistantDone.finalText 一次性落屏（无逐字效果、无裸 JSON 闪现）。
-   * payload: { sessionId, messageId, traceId, chunk, sequence, phase, final,
-   *            finalText? }；final=true 为本轮收口帧，携带定稿全文兜底。
+   * 文字回复由流式块实时呈现 + ChatAssistantDone 终态对账（无逐字打字机、
+   * 无裸 JSON 闪现）。payload: { sessionId, messageId, traceId, chunk,
+   * sequence, phase, final, finalText? }；final=true 为本轮收口帧，携带定稿
+   * 全文兜底。
    */
   ChatAssistantSpeech: "chat.assistant_speech",
   ChatAssistantDone: "chat.assistant_done",

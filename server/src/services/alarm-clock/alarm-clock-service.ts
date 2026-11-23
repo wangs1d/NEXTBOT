@@ -6,7 +6,7 @@
  * 时序约定（docs/mobile-agent-reminder-alarm-design.md §8.3）：
  *  - tick 每 15s 扫描 nextFireAt ≤ now 的 active 闹钟 → 触发；
  *  - WS 直推成功 → 客户端应在 FALLBACK_MS 内回报 trigger-callback；
- *  - WS 失败（全离线）→ FALLBACK_OFFLINE_MS 后走 MobilePushService 系统推送；
+ *  - WS 失败（全离线）→ 立即走 MobilePushService 系统推送（0 延迟横幅）；
  *  - 回报幂等由 AlarmStore.recordTrigger 保证。
  *
  * 叫醒语音缓存「用完即删除」（2026-11-09 用户定调，事件驱动而非等 TTL）：
@@ -140,7 +140,8 @@ const VOICE_CLIP_AFTER_FIRE_TTL_MS = 30 * 60_000;
 /** 最短存活：fireAt 解析失败或已过时，也不会刚生成就被清掉 */
 const VOICE_CLIP_MIN_TTL_MS = 30 * 60_000;
 const FALLBACK_MS = 5 * 60_000; // WS 已送达但客户端未回报 → 5 分钟后推送兜底
-const FALLBACK_OFFLINE_MS = 30_000; // WS 全离线 → 30 秒后推送兜底
+// （2026-11-23 改版：WS 全离线 → 0 延迟立即推送横幅，原 30s 等待常量删除——
+//   卓易通/冻结容器场景下横幅是唯一即时触达，晚 30 秒等于没弹）
 const MAX_SNOOZE_HARD_CAP = 10; // 贪睡硬上限（防客户端死循环顺延）
 /** 提醒智能路由的"活跃窗口"：窗口内有真人活动的设备 = 用户此刻所在端，提醒只发它。
  * 可用 AGENT_REMINDER_ACTIVE_WINDOW_MS 覆盖；窗口内无活跃端（人在两端都不动/全离线）
@@ -615,8 +616,11 @@ export class AlarmClockService {
       // 单次：等 dismiss / acked 收尾删；异常路径（端侧一直没回报）由兜底 TTL 收敛
       this.refreshVoiceClipExpiry(alarm.id);
     }
-    // 兜底：客户端超时未回报 → 系统级推送
-    this.scheduleFallback(alarm, firedAtMs, sent.ok ? FALLBACK_MS : FALLBACK_OFFLINE_MS);
+    // 兜底：客户端超时未回报 → 系统级推送。
+    // WS 全离线时立即推（0 延迟）：卓易通/冻结容器场景下 AlarmManager 到点广播不派发、
+    // WS 也断着，系统级横幅推送是唯一即时触达——由鸿蒙系统层展示，不依赖容器进程；
+    // 用户点横幅 → 容器解冻 → 端侧收敛闸门补响。WS 已送达时保留 5 分钟观察窗。
+    this.scheduleFallback(alarm, firedAtMs, sent.ok ? FALLBACK_MS : 0);
     // 即时提醒（kind=reminder）补一条 reminder.deliver 供客户端按 channelPlan 升级链展示
     if (alarm.kind === "reminder") {
       this.deliverTrigger(
@@ -688,7 +692,7 @@ export class AlarmClockService {
     const result = await this.mobilePush.push({
       actorId: alarm.actorId,
       title: alarm.kind === "alarm" ? `闹钟：${alarm.label}` : `提醒：${alarm.label}`,
-      body: `手机端本地闹钟未响应（可能已离线/被杀进程），此为服务端兜底推送。`,
+      body: `到点了。手机端未响应（应用离线或被系统冻结），点按打开响铃。`,
       importance: alarm.dnd.bypass ? "high" : "normal",
       kind: "alarm_fallback",
       deliveryId: `alarmfb_${randomUUID()}`,

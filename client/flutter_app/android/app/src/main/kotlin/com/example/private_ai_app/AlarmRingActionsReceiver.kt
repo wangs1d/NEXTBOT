@@ -21,14 +21,24 @@ class AlarmRingActionsReceiver : BroadcastReceiver() {
     }
 
     override fun onReceive(context: Context, intent: Intent) {
-        val alarmId = intent.getStringExtra(AlarmClockPlugin.EXTRA_ALARM_ID) ?: return
-        val action = when (intent.action) {
+        val actionRaw = intent.action
+        // 只认贪睡/关闭两个动作；其余忽略
+        val action: String = when (actionRaw) {
             AlarmClockPlugin.ACTION_SNOOZE -> "snooze"
             AlarmClockPlugin.ACTION_STOP -> "dismiss"
             else -> return
         }
-        // 无论 Dart 是否存活，先物理停铃
+        val alarmId = intent.getStringExtra(AlarmClockPlugin.EXTRA_ALARM_ID) ?: ""
+        Log.i(TAG, "notification action=$actionRaw alarm=$alarmId")
+
+        // 第一优先：无论 alarmId 是否解析成功，先物理停铃。
+        // 「关闭按钮点了没反应」先被这一步兜住——停铃不依赖任何业务 id。
         AlarmRingService.stopAll(context)
+
+        if (alarmId.isEmpty()) {
+            Log.w(TAG, "alarmId missing, ringing stopped but business sync skipped")
+            return
+        }
         // 关闭 = 这一跳用完：立即删端侧动态音频（Dart 侧的 dismiss 也会调一次，幂等）。
         // 贪睡要再响一次，音频必须保留。
         if (action == "dismiss") {

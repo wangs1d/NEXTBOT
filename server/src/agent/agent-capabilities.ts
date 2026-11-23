@@ -105,6 +105,7 @@ function buildStaticSections(): CapabilitySection[] {
       domain: "calendar",
       lines: [
         "3️⃣ 日程：calendar（统一入口，action=create 提醒/日程/定时任务、list_tasks、update_task、delete_task、find_free_slots、batch_create）",
+        "   · 用户明确要闹钟就用手机本地闹钟：听见「闹钟」「叫醒」「叫我起床」「定个X点的闹钟」「响铃」时，action=create 必须传 alarmIntent=true，手机到点真响铃+语音叫醒（杀进程也响）；不传只会退化成普通日程提醒、只弹窗不响铃。只有没提闹钟字样的纯提醒（「提醒我开会/吃药」）才不传。",
       ],
     },
     {

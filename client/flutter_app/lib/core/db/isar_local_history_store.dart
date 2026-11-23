@@ -199,6 +199,16 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
                 const <String>[],
             playUrl: map["playUrl"] as String?,
             pendingDelivery: map["pendingDelivery"] == true,
+            // 语音条（agent.voice.message）：attachments 承载 mediaUrl / duration /
+            // transcript，是语音气泡能否渲染的唯一依据。此前读写链路漏存这三个
+            // 字段，重启后 contentType 仍是 audio 但 attachments 为空 → 气泡凭空消失。
+            // 与卡片字段同策略：内存明文、落盘加密，transcript 不裸奔。
+            attachments: _decryptAttachments(map["attachments"]) ??
+                const <MessageAttachment>[],
+            durationMs: (map["durationMs"] as num?)?.toInt(),
+            waveform: (map["waveform"] as List<dynamic>?)
+                ?.map((dynamic e) => (e as num).toDouble())
+                .toList(),
             mediaCards: _decryptMediaCards(map["mediaCards"]),
             summaryCard: _decryptSummaryCard(map["summaryCard"]),
             renderBlocks: _decryptRenderBlocks(map["renderBlocks"]),
@@ -645,6 +655,11 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
       localMediaPaths: message.localMediaPaths,
       playUrl: message.playUrl,
       pendingDelivery: message.pendingDelivery,
+      // 语音条持久化：这三字段必须跟着 message 一起进 masked，
+      // 否则下面 _flush 读到的是被丢弃后的空值（根因所在）。
+      attachments: message.attachments,
+      durationMs: message.durationMs,
+      waveform: message.waveform,
       mediaCards: message.mediaCards,
       summaryCard: message.summaryCard,
       renderBlocks: message.renderBlocks,
@@ -692,6 +707,32 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
       output.add(source[i] ^ key.bytes[i % key.bytes.length]);
     }
     return utf8.decode(output);
+  }
+
+  /// 把语音条附件列表加密为存储字符串（null/空 → null）。
+  ///
+  /// 附件里的 transcript 是语音转写文本（隐私），与正文 text 同策略加密；
+  /// mediaUrl / durationMs / waveform 一并封进同一份密文，读回时整体还原。
+  String? _encryptAttachments(List<MessageAttachment>? attachments) {
+    if (attachments == null || attachments.isEmpty) return null;
+    return _encryptFor(
+      jsonEncode(attachments.map((MessageAttachment a) => a.toJson()).toList()),
+      _userPin,
+    );
+  }
+
+  /// 解密语音条附件列表；损坏/异源 PIN 时不抛，返回 null（历史兼容）。
+  List<MessageAttachment>? _decryptAttachments(Object? stored) {
+    if (stored is! String || stored.isEmpty) return null;
+    try {
+      final Object? decoded = jsonDecode(_decryptFor(stored, _userPin));
+      if (decoded is! List) return null;
+      return decoded
+          .map((dynamic e) => MessageAttachment.fromJson(Map<String, dynamic>.from(e as Map)))
+          .toList();
+    } catch (_) {
+      return null;
+    }
   }
 
   /// 把结构化媒体卡片加密为存储字符串（null/空 → null）。
@@ -822,6 +863,12 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
                     "localMediaPaths": m.localMediaPaths,
                   if (m.playUrl != null) "playUrl": m.playUrl,
                   if (m.pendingDelivery) "pendingDelivery": true,
+                  // 语音条：attachments 含 transcript（隐私文本），与卡片同款加密；
+                  // duration / waveform 为数值，明文写盘即可。
+                  if (m.attachments.isNotEmpty)
+                    "attachments": _encryptAttachments(m.attachments),
+                  if (m.durationMs != null) "durationMs": m.durationMs,
+                  if (m.waveform != null) "waveform": m.waveform,
                   if (m.mediaCards != null)
                     "mediaCards": _encryptMediaCards(m.mediaCards),
                   if (m.summaryCard != null)

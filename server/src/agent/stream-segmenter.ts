@@ -161,7 +161,8 @@ function collapseIntraBubbleBlankLines(text: string): string {
       out.push(line);
       continue;
     }
-    if (line.trim() === "" && out.length > 0 && out[out.length - 1].trim() === "") continue;
+    // 段间空行整行丢弃（join 后即单换行）；连续空行同理。
+    if (line.trim() === "") continue;
     out.push(line);
   }
   return out.join("\n");
