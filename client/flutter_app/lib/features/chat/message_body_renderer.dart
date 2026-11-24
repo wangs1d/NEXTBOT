@@ -5,7 +5,6 @@ import "package:flutter/material.dart";
 import "../../core/theme/app_typography.dart";
 
 import "../../core/models/chat_models.dart";
-import "../../core/models/notify_action.dart";
 import "../../core/services/content_summary_launcher.dart";
 import "../../core/utils/agent_result_parser.dart";
 import "../../core/utils/content_summary_parser.dart";
@@ -42,11 +41,6 @@ Widget buildMessageBody(
   void Function(AgentResultAction action, {required AgentResultData cardData})?
       onUserAction,
 
-  /// 「需要你拍板」动作点击回调（2026-11-13「通知即界面」）。
-  /// 与通知栏按钮共用同一个 actionId 与同一枚 token——两个渲染面，一套语义。
-  /// null 时不渲染动作行（未接线方/纯展示场景）。
-  void Function(NotifyAction action)? onNotifyAction,
-
   /// travel_itinerary 卡不进 body（2026-09-25 用户定稿：卡片作为气泡外的
   /// 独立第二条消息形态渲染，见 chat_page 消息行拆分）；调用方自行在气泡外
   /// 渲染卡片。缺省 false=卡片照旧在 body 内（手机端/其他调用方行为不变）。
@@ -57,7 +51,7 @@ Widget buildMessageBody(
   /// 元素）。只影响 body 内渲染，不影响消息行拆分逻辑（拆分由调用方自读）。
   List<String> excludeCardTypes = const <String>[],
 }) {
-  final Widget body = _buildAssistantBodyInner(
+  return _buildAssistantBodyInner(
     context,
     cs,
     message,
@@ -66,20 +60,6 @@ Widget buildMessageBody(
     onUserAction: onUserAction,
     excludeTravelCard: excludeTravelCard,
     excludeCardTypes: excludeCardTypes,
-  );
-  if (isUser) return body;
-  final List<NotifyAction> notifyActions =
-      message.notifyActions ?? const <NotifyAction>[];
-  final bool hasActions = notifyActions.isNotEmpty && onNotifyAction != null;
-  if (!hasActions) return body;
-  return Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    mainAxisSize: MainAxisSize.min,
-    children: <Widget>[
-      body,
-      const SizedBox(height: AppTypography.space3),
-      _buildNotifyActionRow(context, cs, notifyActions, onNotifyAction),
-    ],
   );
 }
 
@@ -148,92 +128,6 @@ bool assistantBodyNeedsWideWidth(ChatMessage message) {
   if (hasMedia && !hasCard && !structured) return false;
   if (hasNonText) return true;
   return structured;
-}
-
-/// 「需要你拍板」动作行（2026-11-13「通知即界面」）。
-///
-/// 第一个动作是**主按钮**（实心），其余是描边——一眼能看出「推荐哪个」，
-/// 与通知栏的按钮排序同一口径。
-Widget _buildNotifyActionRow(
-  BuildContext context,
-  ColorScheme cs,
-  List<NotifyAction> actions,
-  void Function(NotifyAction action) onTap,
-) {
-  final TextStyle labelStyle =
-      (Theme.of(context).textTheme.labelMedium ?? const TextStyle()).copyWith(
-    fontSize: AppTypography.secondary,
-    height: AppTypography.uiLineHeight,
-    color: cs.onSurfaceVariant,
-  );
-  final TextStyle actionStyle =
-      (Theme.of(context).textTheme.bodyMedium ?? const TextStyle()).copyWith(
-    fontSize: AppTypography.body,
-    height: AppTypography.uiLineHeight,
-    color: cs.onSurface.withValues(alpha: 0.85),
-  );
-  return Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    mainAxisSize: MainAxisSize.min,
-    children: <Widget>[
-      Text("需要你拍板", style: labelStyle),
-      const SizedBox(height: AppTypography.space2),
-      Wrap(
-        spacing: AppTypography.space2,
-        runSpacing: AppTypography.space2,
-        children: <Widget>[
-          for (int i = 0; i < actions.length; i++)
-            _NotifyActionPill(
-              action: actions[i],
-              style: actionStyle,
-              borderColor: cs.outlineVariant,
-              primary: i == 0,
-              onTap: () => onTap(actions[i]),
-            ),
-        ],
-      ),
-    ],
-  );
-}
-
-class _NotifyActionPill extends StatelessWidget {
-  const _NotifyActionPill({
-    required this.action,
-    required this.style,
-    required this.borderColor,
-    required this.primary,
-    required this.onTap,
-  });
-
-  final NotifyAction action;
-  final TextStyle style;
-  final Color borderColor;
-  final bool primary;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final ColorScheme cs = Theme.of(context).colorScheme;
-    final TextStyle textStyle = primary
-        ? style.copyWith(color: cs.onPrimaryContainer)
-        : style;
-    return Material(
-      color: primary ? cs.primaryContainer : Colors.transparent,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(20),
-        side: BorderSide(color: primary ? cs.primaryContainer : borderColor),
-      ),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(20),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(
-              horizontal: AppTypography.space4, vertical: AppTypography.space2),
-          child: Text(action.label, style: textStyle),
-        ),
-      ),
-    );
-  }
 }
 
 Widget _buildAssistantBodyInner(

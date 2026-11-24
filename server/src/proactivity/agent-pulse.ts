@@ -36,6 +36,20 @@ export type PulseTask = {
   overdue?: boolean;
 };
 
+/**
+ * 一条日程能不能进 AgentPulse 的「可拍板」材料（2026-11-24 用户实证）。
+ *
+ * 提醒（kind=reminder）和琐事（category=trivia）是**到点一次性触达**：发过就完了，
+ * 没有「还去吗 / 办完没有 / 改天」的决策空间。把它们拼进材料，pulse 会把已经
+ * 提醒过的游泳/喝水/睡觉再问一遍，还挂上决策按钮——用户原话「这个游泳本身设置
+ * 的是提醒，为什么会进这个」。
+ *
+ * 只放真正需要用户拍板的单次日程：kind=action/agent_task 等（行程、代办、承诺）。
+ */
+export function isPulseTaskCandidate(t: { kind?: string; category?: string }): boolean {
+  return t.kind !== "reminder" && t.category !== "trivia";
+}
+
 /** 一次聚合并好的原料（给 agent 审阅用；刻意不含天气——天气归明日预告） */
 export type PulseAggregate = {
   /** 今天 00:00 起至未来 24h 的日程（含已过点未完成；课表生成的周期日程展开后也在这里） */

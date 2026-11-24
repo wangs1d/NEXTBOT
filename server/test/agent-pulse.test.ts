@@ -14,6 +14,7 @@ import {
   buildPulsePrompt,
   extractRapport,
   isPriceNews,
+  isPulseTaskCandidate,
   parsePulseOutput,
   pulseSignature,
   resolvePulseNotifyOptions,
@@ -601,4 +602,16 @@ test("画像进 prompt：闲聊素材有独立段落，且 C 类指明从画像�
   // 空画像不出空段（注意：固定指令里也提到该段名，所以断言完整标头）
   const bare = buildPulsePrompt(new Date("2026-11-19T14:00:00"), emptyAggregate({ idleMinutes: 7 * 60 }));
   assert.ok(!bare.includes("【你记得的他（闲聊时从这里找话头）】"));
+});
+
+test("pulse 可拍板材料过滤：提醒/琐事不进评审材料（游泳提醒不再被追问「还去吗」）", () => {
+  // 用户实证（2026-11-24）：游泳是 kind=reminder 的到点提醒，却被拼进材料
+  // 变成「还去吗」的决策卡。提醒发过就完了，没有拍板空间。
+  assert.equal(isPulseTaskCandidate({ kind: "reminder" }), false);
+  assert.equal(isPulseTaskCandidate({ kind: "reminder", category: "itinerary" }), false);
+  assert.equal(isPulseTaskCandidate({ kind: "action", category: "trivia" }), false);
+  assert.equal(isPulseTaskCandidate({ kind: "action" }), true);
+  assert.equal(isPulseTaskCandidate({ kind: "agent_task", category: "itinerary" }), true);
+  // 旧数据没有 kind/category：按 itinerary 兜底放行（展示兜底口径一致）
+  assert.equal(isPulseTaskCandidate({}), true);
 });

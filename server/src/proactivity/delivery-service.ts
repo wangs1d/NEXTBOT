@@ -9,7 +9,6 @@ import type { ProactiveImportance, ProactiveProposal } from "./pipeline-types.js
 import type { OpenedBody } from "./discovery-layer.js";
 import type { ActionIntentService, ClientActionIntent } from "./action-intent-service.js";
 import { registerIntentForProposal } from "./notification-actions.js";
-import { getProactiveReplay } from "./proactive-replay-store.js";
 
 export type DeliveryResult =
   | { ok: true; deliveryId: string }
@@ -111,9 +110,6 @@ export class ProactiveDeliveryService {
     } else if (!this.deps.trySend(p.actorId, JSON.stringify(payload))) {
       return { ok: false, reason: "no_online_device" };
     }
-    // 落流补发登记（2026-11-23）：WS 直投只到达了「当时在线」的设备——其他
-    // 设备重连时由 ProactiveReplayStore 按稳定 messageId 幂等补投。
-    getProactiveReplay().record(p.actorId, payload.payload as Record<string, unknown>);
     if (p.kind.startsWith("action.")) {
       try {
         this.deps.ledger?.record(p);
@@ -179,8 +175,6 @@ export class ProactiveDeliveryService {
     if (!this.deps.trySend(input.actorId, JSON.stringify(payload))) {
       return { ok: false, reason: "no_online_device" };
     }
-    // 落流补发：此刻不在线的那一端重连后照样补到这轮应答（replay 标记只落流不弹横幅）
-    getProactiveReplay().record(input.actorId, payload.payload as Record<string, unknown>);
     return { ok: true, deliveryId };
   }
 }

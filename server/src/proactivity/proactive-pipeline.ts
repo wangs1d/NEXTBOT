@@ -10,7 +10,6 @@ import type { ProactiveDeliveryService } from "./delivery-service.js";
 import { readJson, writeJson } from "./persist-file.js";
 import type { ArbitrationDecision, ProactiveImportance, ProactiveOutcome, ProactiveProposal, ProposalVerdict } from "./pipeline-types.js";
 import { normalizeSurface, OutcomeStore } from "./outcome-store.js";
-import { getProactiveReplay } from "./proactive-replay-store.js";
 import type { PresenceService } from "./presence-service.js";
 import { ProposalStore } from "./proposal-store.js";
 import { SilenceLog } from "./silence-log.js";
@@ -123,16 +122,6 @@ export type ProactivePipelineDeps = {
 /** 正反馈 outcome 集合（自适应冷却的方向判定） */
 const POSITIVE = new Set<ProactiveOutcome>(["accepted", "replied", "snoozed"]);
 
-/** 离线推送重试退避（推送失败后 5min 再试，防 provider 连打；成功即出队不会重复推） */
-const OFFLINE_PUSH_RETRY_MS = 5 * 60_000;
-
-/** 离线挂起重仲裁退避序列：首次挂起不退避（重连后下一次 flush 即达），此后逐级
- * 拉长封顶 30min——否则设备长期离线时同一提案每 30s 被重新仲裁一次（实测运行
- * 数据中同一提案被裁决 198 次全是 offline_wait_reconnect），白耗 CPU 并污染决策日志 */
-const OFFLINE_REDECIDE_BACKOFF_MS = [60_000, 5 * 60_000, 15 * 60_000, 30 * 60_000];
-/** 单提案重裁决硬上限：超过即放弃（过期作废语义，原因已留痕） */
-const MAX_REDECISIONS = 200;
-
 /** reachGate 判「时机不对」后的重判间隔（等用户从专注里出来，不急着立刻再问） */
 const REACH_GATE_RETRY_MS = 20 * 60_000;
 /** 同一提案最多被 reachGate 延后几次（防「永远等时机」把消息饿死） */
@@ -187,8 +176,6 @@ export class ProactivePipeline {
   private timer: ReturnType<typeof setInterval> | null = null;
   private readonly flushIntervalMs: number;
   private pushSeq = 0;
-  /** dedupKey → 重裁决次数（deferred 类；投递/出队即清零） */
-  private readonly redecides = new Map<string, number>();
   /** dedupKey → 被 reachGate 延后的次数（防「永远等时机」饿死消息） */
   private readonly reachDefers = new Map<string, number>();
   /** 上次未回复结算扫描时刻（UNANSWERED_SWEEP_MS 节流） */
@@ -610,21 +597,21 @@ export class ProactivePipeline {
   }
 
   /**
-   * 离线兜底（2026-11-23 定调）：两端都不在线（或 WS 投递竞态失败）时——
-   *   ① 手机推送可用 → 所有 tier 的提案一律走手机系统推送（App 被杀也能收到）；
-   *   ② 无推送通道 → 维持挂起语义（重连后直推；重裁决退避防 CPU 空转）。
-   * 站内信不再承载聊天式提醒（2026-11-23 用户定调，第二次删除此类链路）：
-   * 站内信职责是后台/运营 → 用户的平台消息/更新通知。提醒文字只走「上下文
-   * （重连直推）+ 手机系统推送」，桌面端离线由灵动岛/系统通知负责，不落信箱。
+   * 离线送达（2026-11-24 定稿）：两端都不在线（或 WS 投递竞态失败）时，
+   * 手机系统推送是**唯一**出口——推送前先把提案从待发区 take 掉（消费），
+   * 成功即记 delivered，失败即记 dropped 丢弃，**不再回待发区重试**。
+   *
+   * 为什么不再重试（用户拍板）：推送失败后 reschedule 回待发区会让同一条消息
+   * 每隔几分钟再推一次、每次都失败，日志刷屏且永不收敛；系统推送通道既然已
+   * 接入，就把送达责任完全交给它，失败就如实丢弃，不制造"看起来还在补"的假象。
    */
   private attemptOfflinePush(p: ProactiveProposal): void {
     const clock = () => this.deps.nowFn?.() ?? Date.now();
     const push = this.deps.mobilePush;
 
-    // ① 手机系统推送（所有 tier；2026-11-23 从 must/critical 放宽）：
-    //    离线时提醒的唯一必达出口，通道可用即走，不再有第二选择。
+    // 手机系统推送（所有 tier）：离线时唯一出口。先出队消费，失败也不回流。
     if (push && push.hasChannel(p.actorId)) {
-      this.store.reschedule(p.dedupKey, clock() + OFFLINE_PUSH_RETRY_MS);
+      this.store.take(p.dedupKey);
       const deliveryId = `dp_${clock().toString(36)}_${(this.pushSeq++).toString(36)}`;
       // 「通知即界面」：离线推送同样签发动作意图。厂商通道渲染不出按钮（系统模板），
       // 但通知里带上 intentId → 点开进 App 能直接处理这个决策（降级路径同一套语义）。
@@ -652,8 +639,7 @@ export class ProactivePipeline {
       void push
         .push({
           actorId: p.actorId,
-          // 华为通道强制 title 非空（80100003 Illegal payload）：部分 proposal 无 title，
-          // 不兜底会让待发区每 5 分钟重试、每 5 分钟失败，横幅永远出不来
+          // 华为通道强制 title 非空（80100003 Illegal payload）
           title: p.title ?? "提醒",
           body: p.directText ?? p.summary ?? p.title ?? "点击查看详情",
           importance: p.importance,
@@ -664,33 +650,22 @@ export class ProactivePipeline {
         })
         .then((result) => {
           if (!result.ok) {
-            console.log(`[ProactivePipeline] 离线推送失败（保留待发区重试）kind=${p.kind} provider=${result.provider} reason=${result.reason}`);
+            // 失败即丢弃：不回待发区、不重试（2026-11-24 用户拍板）
+            this.deps.outcomes.record({
+              deliveryId,
+              actorId: p.actorId,
+              kind: p.kind,
+              channel: "mobile_push",
+              outcome: "ignored",
+              at: clock(),
+              createdAt: clock(),
+              tier: p.tier,
+              ...(topicKeyOfProposal(p) ? { topic: topicKeyOfProposal(p) } : {}),
+            });
+            console.log(`[ProactivePipeline] 离线推送失败（丢弃，不重试）kind=${p.kind} provider=${result.provider} reason=${result.reason}`);
             return;
           }
-          if (!this.store.take(p.dedupKey)) return; // 已被 WS 重连直投抢先
           this.store.markDelivered(p.dedupKey, clock());
-          // 落流补发登记（2026-11-23）：推送只是横幅，对话流里也要有这条记录——
-          // 其他设备/本机重连时由 ProactiveReplayStore 按稳定 messageId 幂等补投。
-          getProactiveReplay().record(p.actorId, {
-            deliveryId,
-            messageId: `proactive-${deliveryId}`,
-            title: p.title,
-            text: String(p.directText ?? p.summary),
-            importance: p.importance,
-            kind: p.kind,
-            ...(p.proposalId ? { proposalId: p.proposalId } : {}),
-            ...(p.source ? { source: p.source } : {}),
-            // 这条是**厂商推送**弹出去的（2026-11-30 §4.4）：通知上没有按钮，
-            // 客户端收到补投时要把决策端给半屏页（而不是只落一个气泡让人自己找）。
-            pushed: true,
-            // 气泡按原定触发时刻落位（无则用送达时刻），补投不冒充「刚刚发的」
-            firedAt:
-              typeof p.firedAt === "number"
-                ? p.firedAt
-                : clock(),
-            ...(actionIntent ? { actionIntent } : {}),
-            ...(p.importance === "high" || p.importance === "critical" ? { display: "popup" } : {}),
-          });
           // 手机推送真的送达 → 读走的发现此刻结算成消费（否则会随预留到期释放、被再合并一遍）
           if (this.deps.discovery && p.findingFingerprints?.length) {
             this.deps.discovery.settle(p.findingFingerprints, "delivered");
@@ -714,9 +689,12 @@ export class ProactivePipeline {
       return;
     }
 
-    // ② 无推送通道：维持挂起语义——保留待发区等重连直推（进对话流）。
-    //    站内信兜底已删除（2026-11-23，第二次）：站内信只承载平台/运营消息，
-    //    提醒不落信箱；无通道就挂起等重连，绝不退化成站内信。
+    // 无推送通道：同样出队丢弃，不留待发区等重连（2026-11-24 三条兜底全删）。
+    // 站内信不承载聊天式提醒（只做平台/运营消息），无通道即如实放弃这一次开口。
+    this.store.take(p.dedupKey);
+    console.log(
+      `[ProactivePipeline] 离线且无推送通道（丢弃，不重试）kind=${p.kind} actor=${p.actorId}`,
+    );
   }
 
   /**
@@ -851,7 +829,6 @@ export class ProactivePipeline {
       at,
     );
     this.store.logDecision(decision);
-    if (decision.verdict !== "deferred") this.redecides.delete(p.dedupKey);
     // 提案最终去向 → 共享发现层预留结算：delivered=消费 / pending=维持预留（等真投递）/ dropped=释放
     let disposition: "delivered" | "pending" | "dropped" = "dropped";
     switch (decision.verdict) {
@@ -873,28 +850,19 @@ export class ProactivePipeline {
       }
       case "deferred": {
         const now = this.deps.nowFn?.() ?? Date.now();
-        disposition = "pending";
         if (decision.reasonChain.includes("offline_wait_reconnect")) {
-          const n = (this.redecides.get(p.dedupKey) ?? 0) + 1;
-          this.redecides.set(p.dedupKey, n);
-          if (n > MAX_REDECISIONS) {
-            // 挂起超限：设备长期离线且提案无保质期——放弃（信息已过时，留痕即可）
-            // 读走的发现释放回总线（这次开口等于没说，不能吞掉别人的发现）
-            this.store.take(p.dedupKey);
-            this.redecides.delete(p.dedupKey);
-            disposition = "dropped";
-            console.log(`[ProactivePipeline] 挂起重裁决超限（${MAX_REDECISIONS} 次）放弃 kind=${p.kind} dedupKey=${p.dedupKey}`);
-            break;
-          }
-          // 首次离线挂起不退避（重连后下一次 flush 立即直推）；仍离线才逐级拉长
-          if (n >= 2) {
-            const step = OFFLINE_REDECIDE_BACKOFF_MS[Math.min(n - 2, OFFLINE_REDECIDE_BACKOFF_MS.length - 1)];
-            this.store.reschedule(p.dedupKey, now + step);
-          }
+          // 时效信息不靠「等手机上线再补」兜底（2026-11-24 用户拍板）：
+          // 离线这一刻就是唯一送达机会——有系统推送就推一次，失败即丢，
+          // 绝不再 reschedule 回待发区等重连。重连 flushDue 会重裁决旧提案、
+          // 把几小时前的睡觉/闹钟话术补进对话流，正是用户看到的「上线推旧内容」。
+          this.attemptOfflinePush(p); // 内部 take 出队（推送或丢弃都不回流）
+          disposition = "dropped";
         } else if (decision.deliverAfter !== undefined) {
+          // 非离线原因的延迟（通话中 / 勿扰 / 排槽窗口）仍按点重裁决——
+          // 这是「挑合适时机说」的正常调度，不是「等人上线补旧账」的兜底。
+          disposition = "pending";
           this.store.reschedule(p.dedupKey, decision.deliverAfter);
         }
-        if (decision.reasonChain.includes("offline_wait_reconnect")) this.attemptOfflinePush(p);
         break;
       }
       case "silenced":
@@ -929,7 +897,7 @@ export class ProactivePipeline {
    *
    * 放在 reachGate 之后：前面的闸都放行了，最后看一眼「人此刻是不是在打电话 / 开了勿扰」。
    * must 层与 critical 不受影响（日程到点、闹钟类必须到）；系统勿扰本身对这些也有自己的放行规则。
-   * 不设次数上限：通话/勿扰结束即放行，长时间勿扰由提案自身 expiresAt 与 MAX_REDECISIONS 兜底。
+   * 不设次数上限：通话/勿扰结束即放行，长时间勿扰由提案自身 expiresAt 兜底。
    */
   private applyPhoneQuiet(
     p: ProactiveProposal,

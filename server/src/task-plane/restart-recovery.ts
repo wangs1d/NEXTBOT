@@ -14,14 +14,13 @@
  *   2. 收口：沿该任务原本的结果通道（messageId 仍用 assistant-task-<原 taskId>）
  *      推 chat.assistant_done——客户端凭它落一条说明消息，同时把状态带上的
  *      该任务收口（_dismissTaskReceiptForMessage 按同一 messageId 规则移除）。
- *      在线直推；离线入 TaskOutbox，重连重放（FIFO 保证通知先于重跑结果）。
+ *      在线直推；离线即丢弃，不重连补投（2026-11-24 用户拍板）。
  *
- * 分层：只依赖 TaskHub/TaskOutbox 单例与注入的派发/推送端口，不持有 socket。
+ * 分层：只依赖 TaskHub 单例与注入的派发/推送端口，不持有 socket。
  */
 
 import { ServerEventType } from "../protocol.js";
 import { getTaskHub, type TaskPlaneRecord } from "./task-hub.js";
-import { getTaskOutbox } from "./task-outbox.js";
 
 /** 自动重跑代数上限：被打断后最多自动重跑 2 次，之后只收口不再重派。 */
 export const MAX_TASK_AUTO_RESTARTS = 2;
@@ -76,11 +75,12 @@ function pushClosureNotice(
     },
   });
   try {
-    if (registry?.trySend(sessionId, frame)) return true;
+    // 离线未送达即丢弃这一路（2026-11-24：重连不补投旧内容）。
+    // 收口任务本身已标 failed/重派，结果不依赖这条通知的送达。
+    registry?.trySend(sessionId, frame);
   } catch {
-    /* 直推失败落入箱兜底 */
+    /* 直推失败不补投 */
   }
-  getTaskOutbox().enqueue(sessionId, { messageId, finalText });
   return true;
 }
 

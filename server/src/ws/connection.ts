@@ -45,13 +45,6 @@ import {
   looksLikeAccountId,
   resolveSessionIdentity,
 } from "./session-identity.js";
-import { getTaskOutbox } from "../task-plane/task-outbox.js";
-import { getProactiveReplay } from "../proactivity/proactive-replay-store.js";
-import { getTaskHub } from "../task-plane/task-hub.js";
-import {
-  buildTaskUpdateEnvelope,
-  isTaskPlaneWsEventsEnabled,
-} from "../task-plane/task-events.js";
 import type { PhoneBridgeCoordinator, PhoneBridgeResult } from "../services/phone-bridge-coordinator.js";
 import type { PhoneCallCoordinator } from "../services/phone-call-coordinator.js";
 import type {
@@ -1085,27 +1078,9 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
                 console.log(`[WS] 首启引导开场失败（忽略）: ${err}`);
               });
             }
-            // 离线结果重放（2026-09-08 outbox）：用户离线期间完成的任务面结果
-            // 暂存于 TaskOutbox，重连时按 FIFO 原样重推，闭合「离线=结果丢失」缺口。
-            getTaskOutbox().replayFor(actorId, socket);
-            // 主动消息补投（2026-11-23「落流补发」）：提醒/主动消息离线期间只弹了
-            // 厂商推送横幅，对话流里没有记录。重连时补投近 24h 条目——payload
-            // 带 replay:true（客户端只落气泡不再弹通知）+ 稳定 messageId
-            // （客户端按 (sessionId, messageId) upsert，天然幂等不重复）。
-            getProactiveReplay().replayFor(actorId, socket);
-            // 活跃任务快照重播（2026-09-08 任务回执）：断线重连/换设备后，
-            // 客户端凭 running/awaiting_input 任务的幂等快照重建对话流内回执。
-            // quiet 任务（原地同步执行的轻任务）不补发（2026-09-09）。
-            if (isTaskPlaneWsEventsEnabled()) {
-              for (const record of getTaskHub().activeRecords(actorId)) {
-                if (record.quiet) continue;
-                try {
-                  socket.send(buildTaskUpdateEnvelope(record));
-                } catch {
-                  /* 单条失败不影响其余快照 */
-                }
-              }
-            }
+            // 重连不补投历史内容（2026-11-24 用户拍板）：任务结果已 appendTaskRecord
+            // 落盘到对话 thread，重开 App 拉历史即可见；活跃任务快照也不再在重连时
+            // 重播——系统推送负责送达提醒，重连只更新在场状态，不复活旧消息。
             // 早间简报：WS 连接建立时把 session 加入调度器，按用户偏好定时推送
             morningBriefingScheduler?.subscribe(actorId, getUserPreferences(actorId));
             // 晚间 digest（Task 15 生活节律）：连接建立时订阅，到点推送今日回顾+明日预告

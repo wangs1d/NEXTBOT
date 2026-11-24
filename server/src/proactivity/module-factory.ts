@@ -57,6 +57,7 @@ import type { ScheduleAssertionStore } from "./branches/schedule-assertion-store
 import type { WatchTaskStore } from "./branches/watch-tasks.js";
 import type { MutableExternalChatProvider } from "../external-model/index.js";
 import type { ProactiveProposal } from "./pipeline-types.js";
+import { isPulseTaskCandidate } from "./agent-pulse.js";
 
 // ── 依赖契约 ──────────────────────────────────────────────────────────────
 
@@ -142,9 +143,11 @@ function buildRuleServices(deps: RulesLayerDeps): RuleServices {
         .slice(0, 6);
     },
     // AgentPulse 材料（2026-11-23）：带 taskId 的今日安排，**含已过点/已完成的
-    // 单次任务**——「11 点的游泳还去吗」问的是已经发生的那件事，而单次提醒执行后
+    // 单次任务**——「周会材料过了吗」问的是已经发生的那件事，而单次任务执行后
     // 状态会被自动置 completed（提醒发过了 ≠ 人去了），只查未来任务永远问不到它。
     // 可拍板 = 单次且未取消：completeTask 幂等、snoozeTask 能把 completed 重新激活。
+    // 2026-11-24 过滤：提醒（kind=reminder）/琐事（trivia）不进材料——它们只是
+    // 到点触达，不是承诺；否则游泳/喝水/睡觉会被 pulse 再问一遍「还去吗」。
     listPulseTasks: (actorId: string) => {
       if (!actorId) return [];
       const now = Date.now();
@@ -159,6 +162,7 @@ function buildRuleServices(deps: RulesLayerDeps): RuleServices {
           to: new Date(horizon).toISOString(),
         })
         .filter((t) => t.status !== "cancelled")
+        .filter((t) => isPulseTaskCandidate(t))
         .map((t) => {
           const single = t.recurrence === "none" && !t.cronExpression;
           // 单次任务用原始计划时刻（runAt 不随完成变化）；周期用下一次实例

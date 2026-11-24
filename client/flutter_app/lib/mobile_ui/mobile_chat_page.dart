@@ -7,9 +7,7 @@ import "package:flutter/material.dart";
 import "../core/config/api_config.dart";
 import "../core/config/media_url.dart";
 import "../core/models/chat_models.dart";
-import "../core/models/notify_action.dart";
 import "../core/services/agent_name_store.dart";
-import "../core/services/local_notification_actions.dart";
 import "../core/services/side_chat_api.dart";
 import "../core/theme/app_typography.dart";
 import "../core/utils/agent_result_parser.dart";
@@ -61,22 +59,11 @@ const String _kTopBarFontFamily = "HarmonyOS Sans SC";
 }
 
 /// 输入框此刻的提示语（纯函数，回归锁：`test/notification_reply_roundtrip_test.dart`）。
-///
-/// 2026-11-24 补上收字态那一格：气泡上那枚 `chat.reply`（`kind:"input"`）按下去
-/// 之后，输入框发出去的是**对那条主动消息的回一句**，不是新话题，提示语必须改口
-/// ——沿用服务端签的 `inputLabel`（通知栏 RemoteInput 的 label 同一个来源），
-/// 没有就退到「回一句」。其余三档文案与改动前逐字一致。
 @visibleForTesting
 String mobileComposerHint({
-  required NotifyAction? replyAction,
   required bool planFlowActive,
   required bool sideChatActive,
 }) {
-  final NotifyAction? reply = replyAction;
-  if (reply != null) {
-    final String label = (reply.inputLabel ?? "").trim();
-    return "${label.isEmpty ? "回一句" : label}给管家…";
-  }
   if (planFlowActive) return "继续说，可补充或调整规划…";
   if (sideChatActive) return "在这个旁聊里继续说…";
   return "发消息…";
@@ -95,7 +82,6 @@ class MobileChatPage extends StatefulWidget {
     this.controller,
     this.agentName,
     this.onOpenSidebar,
-    this.onReplyExecute,
   });
 
   final MobileChatController? controller;
@@ -108,15 +94,6 @@ class MobileChatPage extends StatefulWidget {
 
   /// 左上角玻璃按钮：打开左侧边栏（旁聊列表）。
   final VoidCallback? onOpenSidebar;
-
-  /// 输入型动作（服务端 `chat.reply`，kind=input）的提交口。
-  ///
-  /// 缺省走既有的 action-intent 链路 [executeNotifyAction]（`POST
-  /// /api/action-intents/execute` 携 `input`）——与通知栏 RemoteInput、
-  /// 决策半屏页**同一个 actionId + 同一枚一次性 token**，两个面一套语义，
-  /// 不新增 WS 事件、不新增服务。测试注入桩。
-  final Future<ActionReceipt> Function(NotifyAction action, String input)?
-      onReplyExecute;
 
   @override
   State<MobileChatPage> createState() => _MobileChatPageState();
@@ -137,28 +114,6 @@ class _MobileChatPageState extends State<MobileChatPage> {
   /// 已发消息的气泡缩略图字节（messageId → 原图字节，仅内存态供展示）。
   final Map<String, List<Uint8List>> _sentImageBytes =
       <String, List<Uint8List>>{};
-
-  // ===== 卡片动作条的「就地回一句」（PRD §4.3 对话面，2026-11-24）=====
-
-  /// 正在回的那枚**输入型**动作（服务端 `chat.reply`，`kind:"input"`）。
-  ///
-  /// 非 null = 输入框切到「回这一句」模式：此刻按发送键发出去的不是新消息，
-  /// 而是这条动作的 `input`。收字复用页面自己的输入框（与「选完图聚焦输入框」
-  /// 同一套交互语言），不造第三种弹层。
-  NotifyAction? _replyAction;
-
-  /// 已 POST 出去、在等回执：这期间再点发送/再按按钮一律忽略（服务端本来也幂等，
-  /// 但不该让用户对着一个已经交出去的回合连点）。
-  bool _replyBusy = false;
-
-  /// 提交结果那句话（成功=服务端回执，失败=原因）；失败时 `_replyAction` 留着，
-  /// 输入框里的字也留着——改一个字就能重发（§4.2「不吞失败」）。
-  String? _replyNote;
-  Timer? _replyNoteTimer;
-
-  /// 已提交成功过的动作 token。按 **token** 记账而不是按 actionId：`chat.reply`
-  /// 这个 actionId 在一条回复线程的每一轮都复用，token 才是一枚按钮的身份。
-  final Set<String> _replySent = <String>{};
 
   @override
   void initState() {
@@ -186,11 +141,6 @@ class _MobileChatPageState extends State<MobileChatPage> {
       _controller.dispose();
       _controller = widget.controller!;
       _lastMessageCount = 0;
-      // 换了线程就不是刚才那条决策了：模式与那句回执一起清掉，别把「回一句」
-      // 提交到另一条会话的按钮上。
-      _replyNoteTimer?.cancel();
-      _replyAction = null;
-      _replyNote = null;
     }
     // 外部档案晚到（登录后才拉到名字）：补灌进 store，顶栏胶囊随之出现。
     if (widget.agentName != oldWidget.agentName) _seedAgentName();
@@ -198,7 +148,6 @@ class _MobileChatPageState extends State<MobileChatPage> {
 
   @override
   void dispose() {
-    _replyNoteTimer?.cancel();
     _input.dispose();
     _composerFocus.dispose();
     _scroll.dispose();
@@ -379,116 +328,7 @@ class _MobileChatPageState extends State<MobileChatPage> {
     });
   }
 
-  /// 动作条的点击总线（2026-11-24 补上 §4.3 的最后一格）。
-  ///
-  /// **非输入型动作**：原封不动交给控制器（`runNotifyAction`，与改动前逐字节
-  /// 一致——拍板、撤按钮、落回执气泡都在那条老路上）。
-  ///
-  /// **输入型动作**（`chat.reply`）：不再「空手提交」（老路上它等于按了个没填
-  /// 句子的回复框），改成把用户领到本页输入框里把这句写下：按钮按下去 = 输入框
-  /// 聚焦 + 提示语换成「回一句给管家」。句子的出口在 [_send]，走
-  /// [executeNotifyAction] 携 `input` ——通知栏 RemoteInput、半屏页、对话卡三个面
-  /// 共用同一个 actionId + 同一枚一次性 token，服务端只认一次。
-  void _onNotifyActionPill(NotifyAction action) {
-    if (!action.needsInput) {
-      unawaited(_controller.runNotifyAction(action));
-      return;
-    }
-    if (_replyBusy || _replySent.contains(action.token)) return;
-    _replyNoteTimer?.cancel();
-    setState(() {
-      _replyAction = action;
-      _replyNote = null;
-    });
-    FocusScope.of(context).requestFocus(_composerFocus);
-  }
-
-  /// 把输入框这一句作为「回一句」交出去（§4.3 对话面的收字出口）。
-  ///
-  /// 端侧**只收字，不插气泡**：服务端把这句话落成主会话的一个 user turn，并随
-  /// 应答事件用 `payload.userText` 回推（控制器的 `_handleProactiveMessageEvent`
-  /// 已按 `notification-reply-<root>-<round>` 归并成一条用户泡），这里再插一条
-  /// 就是重复。
-  Future<void> _submitReply(NotifyAction action) async {
-    if (_replyBusy || _replySent.contains(action.token)) return;
-    final String text = _input.text.trim();
-    // 与半屏页同一道闸（proactive_decision.dart 的 submit）：空句不发，
-    // 但要说清楚为什么没发出去——静默返回就是「点了没反应」。
-    if (text.isEmpty) {
-      setState(() => _replyNote = "先写一句，再按「${action.label}」。");
-      _armReplyNoteClear();
-      return;
-    }
-    setState(() => _replyBusy = true);
-    final Future<ActionReceipt> Function(NotifyAction, String) execute =
-        widget.onReplyExecute ??
-            (NotifyAction a, String input) =>
-                executeNotifyAction(a, input: input);
-    final ActionReceipt receipt = await execute(action, text);
-    if (!mounted) return;
-    if (!receipt.ok) {
-      // 失败 ≠ 已回复：模式与字都留着，按钮还在，用户改一句就能重试。
-      setState(() {
-        _replyBusy = false;
-        _replyNote = receipt.message;
-      });
-      _armReplyNoteClear();
-      return;
-    }
-    _replySent.add(action.token);
-    _dropSettledAction(action);
-    setState(() {
-      _replyAction = null;
-      _replyBusy = false;
-      _replyNote = receipt.message.isEmpty ? "已回复" : receipt.message;
-    });
-    _input.clear();
-    _armReplyNoteClear();
-    _maybeScrollToBottom();
-  }
-
-  /// 提交成功后撤掉这条卡上的拍板按钮——与 `runNotifyAction` 成功后的处理同一
-  /// 口径（一条决策只拍一次板，拍完不再留可点的按钮），差别只在**不插回执气泡**。
-  /// 只按 token 命中那一条消息；进程内生效、不回写本地历史（与老路一致），
-  /// 真正确「这条已经答过了」的是服务端那枚一次性 token。
-  void _dropSettledAction(NotifyAction action) {
-    final List<ChatMessage> messages = _controller.messages;
-    for (int i = messages.length - 1; i >= 0; i--) {
-      final List<NotifyAction>? acts = messages[i].notifyActions;
-      if (acts == null) continue;
-      if (!acts.any((NotifyAction a) => a.token == action.token)) continue;
-      messages[i] = messages[i].copyWith(notifyActions: const <NotifyAction>[]);
-      return;
-    }
-  }
-
-  /// 退出「回一句」模式：不想在这儿回了就回普通发消息，不留半截状态。
-  void _cancelReply() {
-    _replyNoteTimer?.cancel();
-    setState(() {
-      _replyAction = null;
-      _replyNote = null;
-    });
-  }
-
-  /// 回执那句话停留 6s 后自己消失（与控制器 `_armErrorHintAutoClear` 同一节奏）：
-  /// 它是「这条交出去了」的一次性确认，不该常驻在输入框上方。
-  void _armReplyNoteClear() {
-    _replyNoteTimer?.cancel();
-    _replyNoteTimer = Timer(const Duration(seconds: 6), () {
-      if (!mounted) return;
-      setState(() => _replyNote = null);
-    });
-  }
-
   Future<void> _send() async {
-    // 「回一句」模式（卡片动作条按下来的那枚输入型动作）：这一句不是新消息，
-    // 是对那条主动消息的应答——走 action-intent 链路，不走 chat.user_message。
-    final NotifyAction? reply = _replyAction;
-    if (reply != null) {
-      await _submitReply(reply);
-      return;
-    }
     final String text = _input.text;
     final List<VisionWireFrame>? frames = _pendingFrames.isEmpty
         ? null
@@ -1838,10 +1678,6 @@ class _MobileChatPageState extends State<MobileChatPage> {
                   cardData: cardData,
                   messageId: m.messageId,
                 ),
-                // 「需要你拍板」动作（2026-11-13「通知即界面」）：与通知栏按钮
-                // 共用同一个 actionId + 同一枚 token——两个渲染面，一套语义。
-                // 输入型动作在这儿转到输入框就地收字（见 [_onNotifyActionPill]）。
-                onNotifyAction: _onNotifyActionPill,
                 excludeCardTypes: excludeCardTypes,
               ),
       ),
@@ -1883,11 +1719,6 @@ class _MobileChatPageState extends State<MobileChatPage> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: <Widget>[
-          // 「回一句」模式条（§4.3 对话面）：按了卡上那枚输入型按钮之后，输入框
-          // 发出去的就是这句应答，不再是新话题——必须在胶囊上方说清楚此刻在干什么，
-          // 并留一条退出（不想回了就点「取消」，回到普通发消息）。
-          if (_replyAction != null) _buildReplyModeBar(p),
-          _buildReplyNote(p),
           // 动作失败要当场可见（2026-11-06）：卡内按钮的报错（例如「这个平台
           // 需要登录才能下单」）原来只写进 controller，手机端从没渲染过，
           // 用户看到的就是「点了没反应」。这里补一条贴输入框的提示。
@@ -1961,7 +1792,6 @@ class _MobileChatPageState extends State<MobileChatPage> {
                       border: InputBorder.none,
                       isCollapsed: true,
                       hintText: mobileComposerHint(
-                        replyAction: _replyAction,
                         planFlowActive: _controller.isPlanFlowActive,
                         sideChatActive: _controller.isSideChatActive,
                       ),
@@ -2062,71 +1892,8 @@ class _MobileChatPageState extends State<MobileChatPage> {
     );
   }
 
-  /// 输入框上方那条「正在回哪一句」（与半屏页的标题/正文同一口径：说清对象）。
-  Widget _buildReplyModeBar(MobilePalette p) {
-    final NotifyAction action = _replyAction!;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(8, 0, 4, 6),
-      child: Row(
-        children: <Widget>[
-          Icon(Icons.reply_rounded, size: 13, color: p.textMuted),
-          const SizedBox(width: 6),
-          Expanded(
-            child: Text(
-              "回「${action.label}」· 这句直接发给管家",
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(fontSize: 12, color: p.textSecondary),
-            ),
-          ),
-          if (_replyBusy)
-            const Padding(
-              padding: EdgeInsets.only(right: 8),
-              child: SizedBox(
-                width: 12,
-                height: 12,
-                child: CircularProgressIndicator(strokeWidth: 2),
-              ),
-            )
-          else
-            GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: _cancelReply,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-                child: Text("取消",
-                    style: TextStyle(fontSize: 12, color: p.textMuted)),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  /// 提交结果那一句话：成功=服务端回执（随后的应答气泡由服务端回推，端侧不插泡），
-  /// 失败=原因 + 留在模式里等用户改一句重发。
-  Widget _buildReplyNote(MobilePalette p) {
-    final String note = (_replyNote ?? "").trim();
-    if (note.isEmpty) return const SizedBox.shrink();
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.fromLTRB(6, 0, 6, 8),
-      padding: const EdgeInsets.fromLTRB(11, 8, 11, 8),
-      decoration: BoxDecoration(
-        color: p.innerFieldBackground,
-        borderRadius: BorderRadius.circular(9),
-      ),
-      child: Text(
-        note,
-        maxLines: 3,
-        overflow: TextOverflow.ellipsis,
-        style: TextStyle(fontSize: 12, height: 1.45, color: p.textSecondary),
-      ),
-    );
-  }
-
   Widget _buildSendButton(MobilePalette p) {
-    final bool enabled = _canSend && !_replyBusy;
+    final bool enabled = _canSend;
     final bool dark = Theme.of(context).brightness == Brightness.dark;
     // 参考图 02：深色下发送键恒定「白底黑箭头」（空输入时也保持白钮，
     // 仅点击不生效），不再退成灰色块，保证输入胶囊的视觉重心一致。
@@ -2382,7 +2149,6 @@ class _AssistantBody extends StatelessWidget {
     required this.message,
     required this.cs,
     this.onUserAction,
-    this.onNotifyAction,
     this.excludeCardTypes = const <String>[],
   });
 
@@ -2398,9 +2164,6 @@ class _AssistantBody extends StatelessWidget {
   final void Function(AgentResultAction action,
       {required AgentResultData cardData})? onUserAction;
 
-  /// 「需要你拍板」动作点击回调（2026-11-13「通知即界面」，null 不渲染动作行）。
-  final void Function(NotifyAction action)? onNotifyAction;
-
   @override
   Widget build(BuildContext context) {
     final ChatMessage m = message;
@@ -2415,7 +2178,6 @@ class _AssistantBody extends StatelessWidget {
           isUser: false,
           // 卡片动作（选择型卡/chips）：与桌面端同协议回传 chat.user_action。
           onUserAction: onUserAction,
-          onNotifyAction: onNotifyAction,
           // 行程卡等外移卡由消息行在气泡外全宽渲染，body 内不再重复。
           excludeTravelCard: true,
           // 外移卡型动态注入：reminder_confirm + 本轮所有外移卡（全量外移机制）。

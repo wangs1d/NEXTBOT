@@ -530,7 +530,7 @@ export function isFollowUpFeatureEnabled(): boolean {
 }
 
 /**
- * 装配层句柄（同 getProactiveReplay / getAgenticMemoryRuntime 的惯例）：
+ * 装配层句柄（同 getAgenticMemoryRuntime 的惯例）：
  * 通知按钮执行器与 HTTP 路由从这里取实例，不必让 bootstrap 把参数一路透传下去。
  */
 let followUpServiceInstance: FollowUpService | null = null;

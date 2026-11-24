@@ -198,6 +198,13 @@ abstract final class MobileTheme {
         centerTitle: true,
         titleTextStyle: TextStyle(
           color: p.textPrimary,
+          fontFamily: "MiSans",
+          fontFamilyFallback: const [
+            "PingFang SC",
+            "Noto Sans CJK SC",
+            "Source Han Sans SC",
+            "sans-serif",
+          ],
           fontSize: 17,
           fontWeight: FontWeight.w600,
           letterSpacing: 0.2,

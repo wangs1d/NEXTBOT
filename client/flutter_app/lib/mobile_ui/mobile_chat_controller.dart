@@ -190,6 +190,15 @@ class MobileChatController extends ChangeNotifier {
   /// 都会重放一遍——不去重就会变成「点一次通知，之后每重连弹一次同一个决定」。
   final Set<String> _decisionSheetShown = <String>{};
 
+  /// 本地历史是否已加载完（2026-11-24「每次进 App 同一张卡重复弹」根修）。
+  ///
+  /// WS 在构造函数里就 connect，补投事件常常**先于**本地历史加载到达；此前
+  /// 直接按「内存里没有这条」判定，于是每次冷启动都把同一批补投消息再落一遍、
+  /// 按钮再多挂一次（旧按钮还带着旧文案）。先压住 replay，等历史合完再按
+  /// messageId 判重，才谈得上「补投只补缺」。
+  bool _historyReady = false;
+  final List<Map<String, dynamic>> _pendingReplays = <Map<String, dynamic>>[];
+
   /// 是否已连上过一次（区分首连与重连：重连要做漏消息对账，见 ws_connected）。
   bool _everConnected = false;
 
@@ -748,7 +757,52 @@ class MobileChatController extends ChangeNotifier {
     } catch (e) {
       debugPrint("[MobileChatController] 本地历史加载失败(降级内存态): $e");
     }
+    // 历史已就绪（含加载失败→内存态）：放行之前压住的补投，逐条按 messageId
+    // 判重后才落屏——已存在的消息直接跳过，按钮不再复活。
+    _historyReady = true;
+    _flushPendingReplays();
     unawaited(_pullServerHistory());
+  }
+
+  /// 放行本地历史加载期间压住的补投事件（见 [_pendingReplays]）。
+  void _flushPendingReplays() {
+    if (_pendingReplays.isEmpty) return;
+    final List<Map<String, dynamic>> pending = List<Map<String, dynamic>>.of(_pendingReplays);
+    _pendingReplays.clear();
+    for (final Map<String, dynamic> payload in pending) {
+      _handleProactiveMessageEvent(payload);
+    }
+    notifyListeners();
+  }
+
+  /// 补投命中已有气泡时，把仍未过期的按钮挂回去（2026-11-24）。
+  ///
+  /// 本地历史不持久化 notifyActions，冷启动后旧卡片只剩正文；如果此时决策
+  /// 还没拍板、意图也没过期，整条跳过补投会让它**再也点不动**。这里只回挂
+  /// 按钮、**不弹半屏页**——用户在进 App 时已经见过这条卡，重复弹就是打扰。
+  /// 返回是否命中并更新了某条消息。
+  bool _reattachReplayActions(String messageId, Map<String, dynamic> payload) {
+    if (payload["replay"] != true || messageId.isEmpty) return false;
+    final Object? rawIntent = payload["actionIntent"];
+    if (rawIntent is! Map<String, dynamic>) return false;
+    final Object? rawExpires = rawIntent["expiresAt"];
+    final int? expires =
+        rawExpires is num ? rawExpires.toInt() : int.tryParse(rawExpires?.toString() ?? "");
+    if (expires != null && expires <= DateTime.now().millisecondsSinceEpoch) return false;
+    final List<NotifyAction> actions = NotifyAction.listFromIntent(rawIntent);
+    if (actions.isEmpty) return false;
+    final String intentId = rawIntent["intentId"]?.toString() ?? "";
+    if (intentId.isNotEmpty) _decisionSheetShown.add(intentId);
+    final List<ChatMessage> thread = _mainThreadMessages;
+    for (int i = 0; i < thread.length; i++) {
+      final ChatMessage m = thread[i];
+      if (m.messageId != messageId) continue;
+      if (m.notifyActions != null && m.notifyActions!.isNotEmpty) return true;
+      thread[i] = m.copyWith(notifyActions: actions);
+      notifyListeners();
+      return true;
+    }
+    return false;
   }
 
   /// 当前会话历史加载（本地 store → 服务端线程回填）；已加载过的线程直接跳过。
@@ -1398,6 +1452,10 @@ class MobileChatController extends ChangeNotifier {
   /// 测试入口：直接驱动 WS 事件（生产路径走 [_subscription] → 本方法）。
   @visibleForTesting
   void debugHandleWsEvent(Map<String, dynamic> event) => _onWsEvent(event);
+
+  /// 测试观测点：本地历史是否已加载完（补投放行闸，见 [_historyReady]）。
+  @visibleForTesting
+  bool get debugHistoryReady => _historyReady;
 
   /// 测试入口：跳过揭示间隔，把缓冲/队列里的分泡立即整泡落屏（同步断言用）。
   @visibleForTesting
@@ -2070,6 +2128,24 @@ class MobileChatController extends ChangeNotifier {
   }
 
   void _handleProactiveMessageEvent(Map<String, dynamic> payload) {
+    final String serverMessageId = payload["messageId"]?.toString() ?? "";
+    // 落流补投（2026-11-23）：重连补投的历史消息只落气泡——横幅在推送送达时
+    // 已经弹过一次，补投再弹就是同一内容打扰两次。
+    final bool isReplay = payload["replay"] == true;
+    // 本地历史还没加载完就先压住补投：此刻内存是空的，按它判重必然误判成
+    // 「新消息」，每次冷启动都把同一张卡（连同旧按钮、半屏页）再演一遍。
+    if (isReplay && !_historyReady) {
+      _pendingReplays.add(payload);
+      return;
+    }
+    // 「补投只补缺」（2026-11-24）：同一条 messageId 已在本机（历史合入或本进程
+    // 已落屏）就整条忽略——不重复落泡、不再触发决策半屏页；只把仍未过期的
+    // 按钮回挂到已有气泡上（历史不持久化按钮，否则待拍板决策会静默失效）。
+    if (serverMessageId.isNotEmpty &&
+        _mainThreadMessages.any((ChatMessage m) => m.messageId == serverMessageId)) {
+      _reattachReplayActions(serverMessageId, payload);
+      return;
+    }
     final String title = payload["title"]?.toString() ?? "Agent 主动联系";
     final String text = payload["text"]?.toString() ?? "";
     final String deliveryId = payload["deliveryId"]?.toString() ?? "";
@@ -2089,9 +2165,6 @@ class MobileChatController extends ChangeNotifier {
         : null;
     final List<NotifyAction> actions = NotifyAction.listFromIntent(intent);
     final String intentId = intent?["intentId"]?.toString() ?? "";
-    // 落流补投（2026-11-23）：重连补投的历史消息只落气泡——横幅在推送送达时
-    // 已经弹过一次，补投再弹就是同一内容打扰两次。
-    final bool isReplay = payload["replay"] == true;
     // §4.4 行 2「进程被杀、厂商通道可用」：厂商通知渲染不出按钮，点开只是把 App
     // 冷启动起来。当初推进去的那条待拍板事项走补投通道回到这条事件里
     // （pushed:true + actionIntent），这里认出它就端上决策半屏页——而不是把用户
@@ -2155,7 +2228,6 @@ class MobileChatController extends ChangeNotifier {
     // 横幅/系统通知；离开时长等缘由由服务端写进正文。
     // 服务端带 messageId 时沿用（首启引导取名卡要挂到该泡下，两端必须同 id）；
     // 其余主动性消息仍由客户端本地生成 id。
-    final String serverMessageId = payload["messageId"]?.toString() ?? "";
     // 主动性消息只落主会话线程（2026-11-12 用户定调）：提醒/主动触达与旁聊
     // 无关，此刻即使停在旁聊里也不允许把气泡带进旁聊线程。
     // 离线补推的到点提醒带 firedAt（原定触发时刻，epoch ms）：气泡按原时间

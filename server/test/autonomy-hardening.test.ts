@@ -4,7 +4,7 @@
  * 覆盖：
  *  1. 传感→状态板桥接（bridgeSensorKernelToBoard）+ bootstrap 接线守卫
  *  2. MobilePushService token 写穿持久化
- *  3. TaskHub / TaskOutbox 落盘与重启恢复（非终态如实标记 failed）
+ *  3. TaskHub 落盘与重启恢复（非终态如实标记 failed）
  *  4. 定时任务失败重试：指数退避 + 连续失败死信停摆 + 一次性死信通知
  *  5. ToolCallGuard：敏感工具持久幂等回放 + 审计落盘 + 参数脱敏
  *  6. 工具风险分级（classifyToolRisk）口径
@@ -29,7 +29,6 @@ import { FrequencyGovernor } from "../src/proactivity/frequency-governor.js";
 import { ProactivityHub } from "../src/proactivity/proactivity-hub.js";
 import { OutcomeStore } from "../src/proactivity/outcome-store.js";
 import { TaskHub } from "../src/task-plane/task-hub.js";
-import { TaskOutbox } from "../src/task-plane/task-outbox.js";
 import { ScheduleTaskService } from "../src/services/schedule-task-service.js";
 import { ToolCallGuard } from "../src/services/tool-call-guard.js";
 import { classifyToolRisk, isSensitiveTool } from "../src/services/tool-risk.js";
@@ -164,23 +163,6 @@ test("TaskHub 落盘恢复：终态保留，非终态如实标记 failed", () =>
     assert.equal(done?.state, "done");
     assert.equal(interrupted?.state, "failed", "重启时运行中的任务应如实标记 failed");
     assert.match(interrupted?.progressLine ?? "", /中断/);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test("TaskOutbox 落盘恢复：重启后离线结果照常补投", () => {
-  const dir = tmpDir();
-  try {
-    const path = join(dir, "task-outbox.json");
-    const out1 = new TaskOutbox();
-    out1.enablePersistence(path);
-    out1.enqueue("s1", { messageId: "m1", finalText: "任务结果：已订好牛奶" });
-    const out2 = new TaskOutbox();
-    out2.enablePersistence(path);
-    const drained = out2.drain("s1");
-    assert.equal(drained.length, 1);
-    assert.equal(drained[0].finalText, "任务结果：已订好牛奶");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

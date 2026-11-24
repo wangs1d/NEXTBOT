@@ -29,7 +29,11 @@ import { aggregateXiaohongshuUgc } from "../recommendation/ugc-aggregator.js";
 import { pickBestProductImage } from "../services/product-image-scorer.js";
 import { buildCommitmentPrompt } from "../services/commitment-prompt-provider.js";
 import { settleScheduleCommitment, upsertScheduleCommitment } from "../services/commitment-store.js";
-import { ReminderRedeliveryService, reminderStableMessageId } from "../services/reminder-redelivery-service.js";
+import { pushReminderDirectly, reminderStableMessageId } from "../services/reminder-redelivery-service.js";
+import {
+  createTaskCompletionPush,
+  type TaskCompletionPushPort,
+} from "../services/task-completion-push.js";
 import { getChatThreadStore } from "../external-model/chat-thread-store.js";
 import { createLlmRollingRecapSummarizer } from "../services/conversation-rolling-summarizer.js";
 import { registerHttpRoutes } from "../routes/http/index.js";
@@ -92,8 +96,6 @@ import { registerTaskPlaneTools } from "../tools/task-plane-tools.js";
 import { getAgentTaskStore } from "../services/agent-task-store.js";
 import { getAgentTaskOrchestrator } from "../services/agent-task-orchestrator.js";
 import { getTaskHub } from "../task-plane/task-hub.js";
-import { getTaskOutbox } from "../task-plane/task-outbox.js";
-import { getProactiveReplay } from "../proactivity/proactive-replay-store.js";
 import { scheduleInterruptedTaskRecovery } from "../task-plane/restart-recovery.js";
 import { AutonomySettingsStore } from "../services/autonomy-settings-store.js";
 import { registerGeofenceTools } from "../tools/geofence-tools.js";
@@ -1422,10 +1424,9 @@ export async function createAppServices(
     }
   });
 
-  // 到点提醒的离线补投晚绑定回调（2026-11-12 起走专用 ReminderRedeliveryService，
-  // 不再借道主动消息管线；服务在下方装配段创建后注入）。在线时 ScheduleReminderFired
-  // 原生弹窗 + 手机端对话气泡（agent.proactive_message 定向手机，见下方 handler）
-  // 双触达（不再叠加 LLM 话术第二条消息——省一次 LLM 调用且不重复打扰）。
+  // 到点提醒手机不在场时的晚绑定回调（2026-11-24 起直接走手机系统推送，
+  // 不再入队补投）。在线时 ScheduleReminderFired 原生弹窗 + 手机端对话气泡
+  // （agent.proactive_message 定向手机，见下方 handler）双触达。
   let onReminderOfflineRedeliver:
     | ((
         taskId: string,
@@ -1536,8 +1537,7 @@ export async function createAppServices(
         const reminderDeliveryId = `d_rm${task.taskId.slice(-6)}_${Date.now().toString(36)}`;
         const reminderPayload: Record<string, unknown> = {
           deliveryId: reminderDeliveryId,
-          // 稳定 messageId（2026-11-23）：与离线补投共用同一 id——手机此刻在线
-          // 直投落泡，其他设备/本机重连时由 ProactiveReplayStore 按 id 幂等补齐。
+          // 稳定 messageId：与触发身份绑定，客户端按 (sessionId, messageId) upsert 去重。
           messageId: reminderStableMessageId(task.taskId, reminderRunAt, false),
           title: task.shortTitle || task.title || "",
           text: outboundMessage,
@@ -1579,11 +1579,6 @@ export async function createAppServices(
           JSON.stringify({ type: "agent.proactive_message", payload: reminderPayload }),
           ["mobile"],
         );
-        if (reminderSent) {
-          // 落流补发登记（2026-11-23）：直投只到达「当时在线」的手机——
-          // 桌面等其他端重连时由 ProactiveReplayStore 补齐对话流记录。
-          getProactiveReplay().record(task.sessionId, reminderPayload);
-        }
       }
     }
     // 不再根据"起床/叫醒"等关键词自动拨打电话
@@ -3283,6 +3278,9 @@ export async function createAppServices(
     scheduleTaskService,
     shortTermMemoryGateway,
   });
+  // 任务完成系统推送：proactivePushService 在装配下段才创建，先晚绑定空实现，
+  // 待推送服务就绪后替换 fn（任务触发推送时必然已装配完毕）。
+  const taskCompletionPushRef: { fn: TaskCompletionPushPort } = { fn: () => {} };
   const agentCore = createAgentCore({
     toolRegistry,
     externalChat,
@@ -3301,6 +3299,7 @@ export async function createAppServices(
   agentCore.setLifeSignalHubService(lifeSignalHubService);
   agentCore.setWsRegistry(wsConnectionRegistry);
   agentCore.setActorModelBindings(actorModelBindings);
+  agentCore.setTaskCompletionPush((input) => taskCompletionPushRef.fn(input));
 
   // task.dispatch launch 晚绑定（2026-09-05 前后台架构）：派发端接到 agentCore
   taskDispatchLauncherRef.fn = (input) =>
@@ -3387,9 +3386,8 @@ export async function createAppServices(
       toolName: reply.toolName,
       toolResult: toolRun.result,
     };
-    // 完成事件投递失败（用户离线：app 没开/断连）→ TaskOutbox 暂存，session.init 重连时
-    // 重放——补发/定时任务的结果不再依赖"执行那一刻用户恰好在线"。与 task_plane 的
-    // pushDone 同一兜底语义；在线时正常走流式，不入箱不重复。
+    // 完成事件离线投递失败即丢弃这一路（2026-11-24 用户拍板：重连不补投旧内容）。
+    // 结果正文已随 ScheduleAgentTaskFired / appendTaskRecord 落盘，重开 App 拉历史可见。
     const completionDelivered = wsConnectionRegistry.trySend(
       task.sessionId,
       JSON.stringify({
@@ -3419,12 +3417,14 @@ export async function createAppServices(
         }),
       );
     }
-    if (!completionDelivered && displayText.trim()) {
-      getTaskOutbox().enqueue(task.sessionId, {
-        messageId: task.taskId,
-        finalText: displayText,
-      });
-    }
+    // 任务跑完→系统推送（2026-11-24 用户拍板）：在线已有终态事件不重复弹；
+    // 离线推一次标题+摘要，失败即丢。结果正文已落盘，重开 App 拉历史可见。
+    taskCompletionPushRef.fn({
+      actorId: task.sessionId,
+      text: displayText,
+      ok: toolRun.ok,
+      onlineDelivered: completionDelivered,
+    });
     return result;
   });
 
@@ -6882,6 +6882,26 @@ export async function createAppServices(
   const proactivePushService = new MobilePushService({
     registryPath: join(getDataDir(), "proactivity", "push-tokens.json"),
   });
+  // 推送 token 死亡 → 闭环自愈（2026-11-24 实际事故：token 被回执清掉后，
+  // 客户端不知道要重新上报，离线推送从此 no_registered_token 静默瘫痪）。
+  // 清 token 的瞬间向该 actor 的在线设备下发 push.re_register，客户端清掉
+  // 本地注册状态并重新申请/上报 token。
+  proactivePushService.onTokenPruned = (actorId, provider) => {
+    try {
+      wsConnectionRegistry.trySend(
+        actorId,
+        JSON.stringify({
+          type: ServerEventType.PushReRegister,
+          payload: { provider, reason: "dead_token_pruned" },
+        }),
+      );
+      console.log(`[MobilePushService] token 被清，已通知 ${actorId} 重注册 provider=${provider}`);
+    } catch (err) {
+      console.warn(`[MobilePushService] push.re_register 下发失败 actor=${actorId}: ${err}`);
+    }
+  };
+  // 任务完成系统推送端口就绪（agentCore / 定时任务共用同一晚绑定句柄）
+  taskCompletionPushRef.fn = createTaskCompletionPush(() => proactivePushService);
   // ─── 动作意图服务（2026-11-13「通知即界面」）───
   // 通知栏按钮的唯一真相源：签发一次性 HMAC token、验签、幂等执行、落审计。
   // 聊天卡按钮与通知栏按钮共用**同一个 intent**——两个渲染面，同一套语义与审计。
@@ -6912,18 +6932,6 @@ export async function createAppServices(
       }),
     );
   });
-  // 错过提醒专用补投通道（2026-11-12 架构定稿，用户拍板「提醒不走主动消息管线」）：
-  // 到点手机不在线 → 记账（missed-reminders.json，taskId+runAt 幂等、封顶、全带 firedAt）；
-  // 手机 WS 重连（onConnectionChange 钩子）→ 立即直投 agent.proactive_message（原时间落屏）。
-  // 零频控零退避零仲裁；管线从此只承载 AI 主动提案。系统推送通道可用时直接升级推送。
-  const reminderRedelivery = new ReminderRedeliveryService({
-    storePath: join(getDataDir(), "schedule", "missed-reminders.json"),
-    isMobileOnline: (actorId) => wsConnectionRegistry.hasDeviceClass(actorId, "mobile"),
-    trySendToDeviceClasses: (actorId, json, classes) =>
-      wsConnectionRegistry.trySendToDeviceClasses(actorId, json, classes as never),
-    mobilePush: proactivePushService,
-  });
-  reminderRedelivery.flush();
   // 助手动态台账：action.* 代办提案投递成功后落一条记录，右侧面板「助手动态」卡读取
   const agentActivityStore = new AgentActivityStore(
     join(getDataDir(), "proactivity", "activities.json"),
@@ -7180,9 +7188,6 @@ export async function createAppServices(
   // 任务面台账/离线结果落盘：重启后台账恢复（非终态如实标记 failed，
   // "怎么样了"答得出"重启中断"）；已入箱未投递的任务结果重连后照常补投
   getTaskHub().enablePersistence(join(getDataDir(), "task-plane", "task-hub.json"));
-  getTaskOutbox().enablePersistence(join(getDataDir(), "task-plane", "task-outbox.json"));
-  // 主动消息「落流补发」缓存（2026-11-23）：重启前入箱未补投的条目照常补投。
-  getProactiveReplay().enablePersistence(join(getDataDir(), "proactivity", "proactive-replay.json"));
   // 被打断任务收口 + 自动重跑（2026-09-23）：清扫只标 failed（无连接无监听，
   // 终态送不出去），由 restart-recovery 延迟统一处理——沿原结果通道推收口
   // 通知（状态带据此收口），再把"被重启错杀"的任务自动重派（代数封顶防死循环）。
@@ -7656,11 +7661,12 @@ export async function createAppServices(
   // 在场感知接线：任一设备连上即刷新在场并立即直推挂起的提醒（电脑不在线→手机一连就弹窗）；
   // 全部设备断开才判离线（提案挂起待重连，不落离线信箱）
   wsConnectionRegistry.onConnectionChange = (actorId, connected) => {
+    // 上线只更新在场状态，不再触发 flushDue 补投（2026-11-24 用户拍板）：
+    // 提醒是时效性信息，不靠「手机一上线就把待发区旧提案重裁决补进对话流」兜底。
+    // 离线提案在 decide 时已走系统推送一次、失败即丢；定时 flushDue（30s）只推进
+    // 到点的正常调度（延迟/排槽），与连接事件解耦——重连不再复活几小时前的话术。
     if (connected) {
       proactivityPresence.markConnected(actorId);
-      proactivePipeline.flushDue();
-      // 错过提醒专用补投：手机一连上立即直投滞留的提醒（零退避，不走管线仲裁）
-      void reminderRedelivery.flushForActor(actorId);
     } else {
       proactivityPresence.markDisconnected(actorId);
     }
@@ -7735,21 +7741,24 @@ export async function createAppServices(
       );
     }
   });
-  // 到点提醒手机端不在场 → 定向手机端的管道提案（directText 零 LLM）：手机重连
-  // 即直推（targetDeviceClass 定向，桌面不吃重复），或升级手机系统推送（proactivePushService 已配置时）。
-  // 补推语义（2026-11-12 定稿，用户拍板）：不设保质期——用户打开 App 就要立即收到
-  // 错过的提醒（这条不是可丢的打扰，是没送达的承诺）；但提案必须带 firedAt=原定
-  // 触发时刻，客户端气泡按原时间落屏，补推不冒充"刚刚发的"。
-  // 到点提醒手机端不在场 → 专用补投通道（2026-11-12 架构定稿：不再借道主动消息
-  // 管线）。手机 WS 重连即直投（零退避）；系统推送通道可用时直接升级系统推送
-  // （proactivePushService）。补投事件带 firedAt=原定触发时刻，客户端气泡按原时间
-  // 落屏，不冒充"刚刚发的"。记账幂等（taskId+runAt）、队列封顶，误发结构性不可能。
+  // 到点提醒手机端不在场 → 直接走手机系统推送（2026-11-24 三条兜底全删）。
+  // 推送受理即完成，失败即丢弃：不入队、不重连补投、不重试。
   onReminderOfflineRedeliver = (taskId, sessionId, title, message, runAt, preReminder) => {
-    void reminderRedelivery
-      .enqueue({ actorId: sessionId, taskId, runAt, title, message, preReminder })
-      .catch((err) =>
-        console.warn(`[ReminderRedelivery] 记账失败（提醒主链路不受影响）taskId=${taskId}: ${err}`),
-      );
+    void pushReminderDirectly(
+      {
+        push: (input) => proactivePushService.push(input),
+      },
+      {
+        actorId: sessionId,
+        taskId,
+        runAt,
+        title,
+        message,
+        preReminder,
+      },
+    ).catch((err) =>
+      console.warn(`[ReminderPush] 推送失败（已丢弃）taskId=${taskId}: ${err}`),
+    );
   };
   console.log(
     "[Bootstrap] 统一主动性管道已装配（提案→仲裁→投递→反馈 + known actor 持久化；临会提醒由 meeting_soon 评估器统一承担）",

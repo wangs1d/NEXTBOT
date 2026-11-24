@@ -78,6 +78,26 @@ test("push registry: 注册/注销 + 落盘重启恢复", () => {
   }
 });
 
+test("push registry: pruneToken 死亡清理触发 onTokenPruned 钩子（push.re_register 闭环）", () => {
+  const dir = mkdtempSync(join(tmpdir(), "mobile-push-prune-"));
+  try {
+    const service = new MobilePushService({ registryPath: join(dir, "t.json"), providers: [new JPushProvider("ak", "sk")] });
+    service.register("user-a", { provider: "jpush", token: "dead-tok" });
+    service.register("user-b", { provider: "jpush", token: "alive-tok" });
+    const notified: Array<[string, string, string]> = [];
+    service.onTokenPruned = (actorId, provider, token) => notified.push([actorId, provider, token]);
+
+    assert.equal(service.pruneToken("dead-tok"), 1, "死亡 token 清除");
+    assert.equal(service.pruneToken("unknown-tok"), 0, "未知 token 零清理");
+    assert.equal(service.listByActor("user-a").length, 0, "条目已清");
+    assert.equal(service.listByActor("user-b").length, 1, "其他 actor 不受影响");
+    assert.equal(notified.length, 1, "只通知被清的 actor");
+    assert.deepEqual(notified[0], ["user-a", "jpush", "dead-tok"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ─── provider HTTP 契约 ───
 
 test("jpush provider: REST v3 请求契约（Basic 鉴权 + registration_id + 双端通知体）", async () => {
@@ -257,29 +277,27 @@ test("pipeline: social 层离线也走厂商推送（§4.2 目标态：被杀时
   }
 });
 
-test("pipeline: 推送失败保留待发区并退避重试", async () => {
+test("pipeline: 推送失败即丢弃，不保留待发区、不重试", async () => {
   const h = makeHarness({ pushOk: false });
   try {
     h.pipeline.submitProposal(proposal());
     await new Promise((r) => setImmediate(r));
     await new Promise((r) => setImmediate(r));
-    assert.equal(h.pushes.length, 1);
-    assert.equal(h.pipeline.diagnostics().pending.length, 1, "推送失败不出队");
-    const pending = h.pipeline.diagnostics().pending[0]!;
-    assert.ok(pending.deliverAfter !== undefined && pending.deliverAfter > NOON, "退避重排");
-    // 退避到期 → 重试
+    assert.equal(h.pushes.length, 1, "只推一次");
+    assert.equal(h.pipeline.diagnostics().pending.length, 0, "推送失败即出队丢弃");
+    // 即便时间推进也不再重试（时效信息不靠兜底复活）
     h.flags.pushOk = true;
     h.pipeline.flushDue(NOON + 5 * 60_000 + 1);
     await new Promise((r) => setImmediate(r));
     await new Promise((r) => setImmediate(r));
-    assert.equal(h.pushes.length, 2, "重试触发");
-    assert.equal(h.pipeline.diagnostics().pending.length, 0, "重试成功出队");
+    assert.equal(h.pushes.length, 1, "失败不重试");
+    assert.equal(h.pipeline.diagnostics().pending.length, 0);
   } finally {
     rmSync(h.dir, { recursive: true, force: true });
   }
 });
 
-test("pipeline: 未注入推送通道时离线一律挂起（原行为不变）", async () => {
+test("pipeline: 未注入推送通道时离线也丢弃（不挂起等重连）", async () => {
   const dir = mkdtempSync(join(tmpdir(), "proactive-nopush-"));
   try {
     const pipeline = new ProactivePipeline({
@@ -294,7 +312,7 @@ test("pipeline: 未注入推送通道时离线一律挂起（原行为不变）"
     const d = pipeline.submitProposal(proposal({ dedupKey: "k-x" }));
     assert.equal(d.verdict, "deferred");
     await new Promise((r) => setImmediate(r));
-    assert.equal(pipeline.diagnostics().pending.length, 1);
+    assert.equal(pipeline.diagnostics().pending.length, 0, "无通道即丢弃，不挂起等重连");
     assert.equal(pipeline.diagnostics().offlinePush.enabled, false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -324,12 +342,10 @@ test("pipeline: WS 竞态失败也触发离线推送升级", async () => {
     });
     presence.markConnected("user-a", NOON - 5 * 60_000);
     pipeline.submitProposal(proposal({ dedupKey: "k-race" }));
-    assert.equal(pipeline.diagnostics().pending.length, 1, "竞态失败保留待发区");
     await new Promise((r) => setImmediate(r));
     await new Promise((r) => setImmediate(r));
-    assert.equal(pushes.length, 1, "竞态失败升级推送");
-    // 竞态退避（DELIVERY_RETRY_MS）到期重试时已出队 → 不重复投递
-    assert.equal(pipeline.diagnostics().pending.length, 0);
+    assert.equal(pushes.length, 1, "竞态失败升级推送一次");
+    assert.equal(pipeline.diagnostics().pending.length, 0, "竞态失败也出队，不留待发区");
     void DELIVERY_RETRY_MS;
   } finally {
     rmSync(dir, { recursive: true, force: true });

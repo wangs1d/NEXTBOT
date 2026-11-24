@@ -1646,6 +1646,16 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                   <String, dynamic>{};
           unawaited(_handleUpdateAvailablePush(mf));
         }
+        // 推送 token 重注册指令（2026-11-24 闭环自愈）：服务端收到厂商回执
+        // 确认本机 token 已死亡并清出注册表——立刻清本地注册状态、重新向
+        // 厂商 SDK 申请 token 并上报，否则离线推送从此静默瘫痪。
+        if (type == "push.re_register") {
+          debugPrint("[mobile-push] 收到 push.re_register，强制重报 token");
+          MobilePushRegistrar.reset();
+          if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
+            unawaited(MobilePushRegistrar.registerIfNeeded());
+          }
+        }
         if (type == "connection_error") {
           SphereEmbodimentMotionBridge.instance.setMainAgentLinked(false);
           final bool hadPendingTurn =
@@ -4065,6 +4075,41 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       // 推送 token 重注册：登录后 effectiveActorId 才是真实身份，连接成功
       // 时补一次（内部按 actorId 去重，同身份不重复上报）。
       unawaited(MobilePushRegistrar.registerIfNeeded());
+      // 推送 token 在册自检（2026-11-24 闭环自愈第二条线）：服务端可能已把
+      // 死亡 token 清出注册表（厂商回执 result=5），而本进程还活着、内存
+      // 去重挡住了重报——每次连接都查一次服务端注册表，自己不在册就强制
+      // 重报。离线推送瘫痪（所有弹窗静默消失）由此自我收敛。
+      unawaited(_selfHealPushRegistration());
+    }
+  }
+
+  /// 推送 token 在册自检（2026-11-24）：GET 服务端注册表概览，确认自己的
+  /// actorId 还有可用 token 条目；不在册（被回执 prune / 从未成功上报）时
+  /// 清掉本地注册状态并立即重新申请上报。与 `push.re_register` 事件互补：
+  /// 事件覆盖「token 死时恰好在线」，本自检覆盖「死的时候不在、之后每次
+  /// 上线」。
+  Future<void> _selfHealPushRegistration() async {
+    if (kIsWeb || !Platform.isAndroid && !Platform.isIOS) return;
+    final String actorId = ApiConfig.effectiveActorId;
+    if (!actorId.contains("@")) return;
+    try {
+      final Uri uri = Uri.parse("${ApiConfig.httpBase}/api/proactivity/push/status");
+      final http.Response res = await NbHttp
+          .get(uri)
+          .timeout(const Duration(seconds: 12));
+      if (res.statusCode != 200) return;
+      final Map<String, dynamic> body =
+          jsonDecode(res.body) as Map<String, dynamic>;
+      final List<dynamic> tokens = body["tokens"] as List<dynamic>? ?? const [];
+      final bool registered = tokens.any(
+        (dynamic e) => e is Map && e["actorId"]?.toString() == actorId,
+      );
+      if (registered) return;
+      debugPrint("[mobile-push] 服务端注册表无本机 token，强制重报 actorId=$actorId");
+      MobilePushRegistrar.reset();
+      await MobilePushRegistrar.registerIfNeeded();
+    } catch (e) {
+      debugPrint("[mobile-push] 在册自检失败（下轮连接再试）: $e");
     }
   }
 

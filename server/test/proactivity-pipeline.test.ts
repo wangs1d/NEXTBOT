@@ -327,7 +327,7 @@ test("pipeline: 无 directText 提案走 speak 闭环（唯一 LLM 点）", () =
   }
 });
 
-test("pipeline: 同 dedupKey 二次提交合并（待发区内 + 已投递窗口内都防重）", () => {
+test("pipeline: 同 dedupKey 已投递窗口内二次提交防重", () => {
   const h = makeHarness();
   try {
     h.presence.markConnected("user-a", NOON - 5 * 60_000);
@@ -336,85 +336,80 @@ test("pipeline: 同 dedupKey 二次提交合并（待发区内 + 已投递窗口
     const again = h.pipeline.submitProposal(proposal({ title: "重复" }));
     assert.equal(again.verdict, "merged");
     assert.equal(h.delivered.length, 1);
-    // 挂起中的提案同键重提交 → 合并
+    // 离线提案不再挂起待发区（时效信息不靠重连补投）：重连后重扫同键属于新的一次开口
     h.presence.markDisconnected("user-a");
-    h.pipeline.submitProposal(proposal({ dedupKey: "k-pending", tier: "social", importance: "medium" }));
-    const dupPending = h.pipeline.submitProposal(proposal({ dedupKey: "k-pending", tier: "social", importance: "medium" }));
-    assert.equal(dupPending.verdict, "merged");
-    assert.equal(h.pipeline.diagnostics().pending.length, 1);
+    const offline = h.pipeline.submitProposal(proposal({ dedupKey: "k-offline", tier: "social", importance: "medium" }));
+    assert.equal(offline.verdict, "deferred");
+    assert.equal(h.pipeline.diagnostics().pending.length, 0, "离线即丢弃，不留存待发区等重连");
   } finally {
     rmSync(h.dir, { recursive: true, force: true });
   }
 });
 
-test("pipeline: 两端离线提案挂起 → 任一设备重连后直推（弹窗保证）", async () => {
+test("pipeline: 两端离线提案即丢弃，重连不复活旧内容", async () => {
   const h = makeHarness();
   try {
     const d1 = h.pipeline.submitProposal(proposal({ tier: "social", importance: "medium" }));
     assert.equal(d1.verdict, "deferred");
-    assert.equal(h.pipeline.diagnostics().pending.length, 1);
+    assert.equal(h.pipeline.diagnostics().pending.length, 0, "离线即丢弃，不留存待发区");
     assert.equal(h.delivered.length, 0, "离线不投递");
-    // 手机端重连（idle：11 分钟前标记，非对话中）→ flush 重仲裁 → 直推
+    // 手机端重连后 flush：待发区已空 → 不会把几小时前的旧话术补进对话流
     h.presence.markConnected("user-a", NOON - 11 * 60_000);
     h.pipeline.flushDue(NOON);
-    assert.equal(h.delivered.length, 1, "重连后立即直推");
+    assert.equal(h.delivered.length, 0, "重连不复活已丢弃的旧提案");
     assert.equal(h.pipeline.diagnostics().pending.length, 0);
-    await new Promise((r) => setImmediate(r));
-    assert.equal(h.pipeline.diagnostics().recentOutcomes.at(-1)?.outcome, "delivered");
   } finally {
     rmSync(h.dir, { recursive: true, force: true });
   }
 });
 
-// ─── 离线语义（2026-11-23 再定调）：站内信兜底彻底移除，离线一律挂起待重连 ───
+// ─── 离线语义（2026-11-24 定调）：提醒是时效信息，系统推送唯一出口，失败即丢、绝不挂起等重连 ───
 
-test("pipeline: 两端离线 social+medium → 挂起待重连（绝不落站内信，站内信只承载平台消息）", async () => {
+test("pipeline: 两端离线 social+medium → 丢弃（系统推送是唯一出口，不落站内信也不挂起）", async () => {
   const h = makeHarness();
   try {
-    // 离线：无设备连接
+    // 离线：无设备连接、无推送通道 → 如实丢弃
     const d = h.pipeline.submitProposal(proposal({ tier: "social", importance: "medium", dedupKey: "k-inbox" }));
     assert.equal(d.verdict, "deferred");
     assert.equal(h.delivered.length, 0, "离线不直推");
     await new Promise((r) => setImmediate(r));
-    // 保留待发区：重连后直推，消息不丢也不污染站内信
-    assert.equal(h.pipeline.diagnostics().pending.length, 1, "离线挂起语义");
+    assert.equal(h.pipeline.diagnostics().pending.length, 0, "离线即丢弃，不挂起");
     assert.equal(h.pipeline.diagnostics().recentOutcomes.length, 0, "未投递不记 outcome");
-    // 重连 → 直推
+    // 重连也不复活
     h.presence.markConnected("user-a", NOON - 11 * 60_000);
     h.pipeline.flushDue(NOON);
-    assert.equal(h.delivered.length, 1, "重连后立即直推");
+    assert.equal(h.delivered.length, 0, "重连不补投旧内容");
     assert.equal(h.pipeline.diagnostics().pending.length, 0);
   } finally {
     rmSync(h.dir, { recursive: true, force: true });
   }
 });
 
-test("pipeline: 离线 low social 维持挂起语义", async () => {
+test("pipeline: 离线 low social 也丢弃，不挂起等重连", async () => {
   const h = makeHarness();
   try {
     const d = h.pipeline.submitProposal(proposal({ tier: "social", importance: "low", dedupKey: "k-low" }));
     assert.equal(d.verdict, "deferred");
     await new Promise((r) => setImmediate(r));
-    assert.equal(h.pipeline.diagnostics().pending.length, 1, "仍保留待发区等重连");
+    assert.equal(h.pipeline.diagnostics().pending.length, 0, "离线即丢弃，不留存待发区");
   } finally {
     rmSync(h.dir, { recursive: true, force: true });
   }
 });
 
-test("pipeline: WS 发送失败 → 保留待发区重试不丢失", async () => {
+test("pipeline: WS 发送失败 → 走离线出口即丢，不保留待发区重试", async () => {
   const h = makeHarness({ failSend: true });
   try {
     h.presence.markConnected("user-a", NOON - 5 * 60_000);
     const d = h.pipeline.submitProposal(proposal());
     assert.equal(d.verdict, "delivered");
     assert.equal(h.delivered.length, 0, "发送失败不产出投递");
-    assert.equal(h.pipeline.diagnostics().pending.length, 1, "提案保留待发区等待重试");
     await new Promise((r) => setImmediate(r));
-    assert.equal(h.pipeline.diagnostics().recentOutcomes.length, 0, "未送达不记 outcome");
-    // 设备恢复 → 重试成功
+    assert.equal(h.pipeline.diagnostics().pending.length, 0, "竞态失败也出队，不保留待发区");
+    // 设备恢复后 flush：不重试已丢弃的旧提案
     h.flags.failSend = false;
     h.pipeline.flushDue(NOON + DELIVERY_RETRY_MS + 1);
-    assert.equal(h.delivered.length, 1, "重试投递成功");
+    assert.equal(h.delivered.length, 0, "不重试");
   } finally {
     rmSync(h.dir, { recursive: true, force: true });
   }

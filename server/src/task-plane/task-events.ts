@@ -9,9 +9,9 @@
  * 客户端收不到事件即不渲染回执，行为与旧版完全一致（任务结果仍经
  * chat.assistant_done 落进对话流）。开关逐次广播时读取，改 env + 重启即回退。
  *
- * 分层：本模块只依赖 ClientPushPort 抽象端口（runtime 侧不持有 socket）；
- * 连接建立/重连场景由 ws/connection.ts 直接用 buildTaskUpdateEnvelope
- * 向新 socket 补发活跃任务快照。
+ * 分层：本模块只依赖 ClientPushPort 抽象端口（runtime 侧不持有 socket）。
+ * 任务状态变更只做实时广播；重连不再补发活跃任务快照（2026-11-24 用户拍板：
+ * 重连不复活旧内容），buildTaskUpdateEnvelope 仅供本模块内部广播使用。
  */
 
 import { ServerEventType } from "@nextbot/agent-protocol";

@@ -1,24 +1,20 @@
 import "dart:async";
 import "dart:convert";
+import "dart:io";
 
 import "package:flutter/material.dart";
 import "package:http/http.dart" as http;
+import "package:path_provider/path_provider.dart";
 
 import "../core/config/api_config.dart";
 import "mobile_page_cache.dart";
 import "mobile_theme.dart";
 import "../core/services/nb_http.dart";
 
-/// 手机端「动态」页（Agent 主动性聚合，2026-11-13 替换原「目标」tab）。
+/// 手机端「动态」页：账单、快递、邮件要事的统一入口。
 ///
-/// 本质：Agent 替你盯着的一切动静的翻看入口——
-///   · 主动记账：短信/邮件里的账单自动识别入账（账单合计 + 明细）
-///   · 快递聚合：待取件排前，取件码/运单号/承运商直接可读
-///   · 提醒：Agent 的未决提醒（attention pending）+ 主动动作足迹
-///   · 邮件要事：邮件流里的高价值件（验证码等低价值件不进这里）
-///
-/// 数据源：GET /api/dynamics（服务端一次聚合，见 server/src/routes/http/dynamics.ts）。
-/// 各区块独立空态——某个数据源没产出不影响其他区块展示。
+/// 顶部两个固定槽位按当前待处理优先级动态填充，用户也可以拖拽任意卡片
+/// 替换槽位内容；信息流顺序与置顶选择保存在本机。
 class MobileDynamicsPage extends StatefulWidget {
   const MobileDynamicsPage({super.key, this.client});
 
@@ -33,10 +29,21 @@ class MobileDynamicsPageState extends State<MobileDynamicsPage> {
   bool _loading = true;
   String? _error;
   Map<String, dynamic> _data = const <String, dynamic>{};
+  List<String> _order = <String>[];
+  List<String?> _pins = <String?>[null, null];
+  Set<String> _autoExcluded = <String>{};
+  int? _hoverSlot;
+  String? _hoverFeedId;
+  final List<GlobalKey> _slotKeys = <GlobalKey>[GlobalKey(), GlobalKey()];
+  String? _pointerCardId;
+  String? _draggingFeedId;
+  Offset? _pointerDown;
+  bool _pointerMoved = false;
 
   @override
   void initState() {
     super.initState();
+    unawaited(_loadLayout());
     unawaited(_load());
   }
 
@@ -60,6 +67,7 @@ class MobileDynamicsPageState extends State<MobileDynamicsPage> {
           setState(() {
             _data = cached;
             _loading = false;
+            _reconcileLayout();
           });
           unawaited(_fetch(silent: true));
           return;
@@ -94,6 +102,7 @@ class MobileDynamicsPageState extends State<MobileDynamicsPage> {
         _data = body;
         _loading = false;
         _error = null;
+        _reconcileLayout();
       });
     } catch (e) {
       if (!mounted) return;
@@ -115,14 +124,8 @@ class MobileDynamicsPageState extends State<MobileDynamicsPage> {
     return raw.whereType<Map<String, dynamic>>().toList(growable: false);
   }
 
-  num _numOf(String section, String key) {
-    final Map<String, dynamic> sec =
-        (_data[section] as Map<String, dynamic>?) ?? const <String, dynamic>{};
-    final num? v = sec[key] as num?;
-    return v ?? 0;
-  }
-
-  /// 「{月份}小结」原始数据（服务端 monthly 字段；null = 台账未启用，整卡不渲染）
+  /// 顶部汇总卡里的月结数据（服务端 monthly 字段，自然月口径）。
+  /// null = 台账未启用：汇总卡退回 30 天窗口合计，月报明细不可进。
   Map<String, dynamic>? get _monthly {
     final Object? raw = _data["monthly"];
     return raw is Map<String, dynamic> && raw.isNotEmpty ? raw : null;
@@ -135,23 +138,315 @@ class MobileDynamicsPageState extends State<MobileDynamicsPage> {
     return raw.whereType<String>().toList(growable: false);
   }
 
+  Future<void> _loadLayout() async {
+    final _DynamicsLayout layout = await _DynamicsLayoutStore.load(
+      ApiConfig.effectiveActorId,
+    );
+    if (!mounted) return;
+    setState(() {
+      _order = layout.order;
+      _pins = <String?>[
+        layout.pins.isNotEmpty ? layout.pins[0] : null,
+        layout.pins.length > 1 ? layout.pins[1] : null,
+      ];
+      _autoExcluded = layout.excluded.toSet();
+      _reconcileLayout();
+    });
+  }
+
+  void _reconcileLayout() {
+    final List<_DynamicsCard> cards = _cards;
+    final Set<String> validIds =
+        cards.map((_DynamicsCard card) => card.id).toSet();
+    final Set<String> seen = <String>{};
+    final List<String> nextOrder = <String>[];
+    for (final String id in _order) {
+      if (validIds.contains(id) && seen.add(id)) nextOrder.add(id);
+    }
+    for (final _DynamicsCard card in cards) {
+      if (seen.add(card.id)) nextOrder.add(card.id);
+    }
+    _order = nextOrder;
+
+    final Set<String> usedPins = <String>{};
+    _pins = <String?>[
+      for (int i = 0; i < 2; i++)
+        if (i < _pins.length &&
+            _pins[i] != null &&
+            validIds.contains(_pins[i]) &&
+            usedPins.add(_pins[i]!))
+          _pins[i]
+        else
+          null,
+    ];
+    _autoExcluded = _autoExcluded.intersection(validIds);
+  }
+
+  List<_DynamicsCard> get _cards {
+    final int now = DateTime.now().millisecondsSinceEpoch;
+    final List<_DynamicsCard> cards = <_DynamicsCard>[];
+
+    final List<Map<String, dynamic>> parcels = _listOf("parcels", "recent");
+    for (int i = 0; i < parcels.length; i++) {
+      final Map<String, dynamic> item = parcels[i];
+      final int at = ((item["occurredAt"] as num?) ?? 0).toInt();
+      cards.add(_DynamicsCard(
+        id: _stableItemId("parcel", item, i),
+        kind: _DynamicsKind.parcel,
+        items: <Map<String, dynamic>>[item],
+        timestamp: at,
+        priority: _cardPriority(_DynamicsKind.parcel, item, now),
+      ));
+    }
+
+    final List<Map<String, dynamic>> bills = _listOf("bills", "recent");
+    for (int i = 0; i < bills.length; i++) {
+      final Map<String, dynamic> item = bills[i];
+      final int at = ((item["occurredAt"] as num?) ?? 0).toInt();
+      cards.add(_DynamicsCard(
+        id: _stableItemId("bill", item, i),
+        kind: _DynamicsKind.bill,
+        items: <Map<String, dynamic>>[item],
+        timestamp: at,
+        priority: _cardPriority(_DynamicsKind.bill, item, now),
+      ));
+    }
+
+    final List<Map<String, dynamic>> mail = sortMailByNewest(
+      _listOf("mail", "recent"),
+    );
+    if (mail.isNotEmpty) {
+      cards.add(_DynamicsCard(
+        id: "mail",
+        kind: _DynamicsKind.mail,
+        items: mail,
+        timestamp: ((mail.first["at"] as num?) ?? 0).toInt(),
+        priority: _cardPriority(_DynamicsKind.mail, mail.first, now),
+      ));
+    }
+    return cards;
+  }
+
+  static String _stableItemId(
+    String kind,
+    Map<String, dynamic> item,
+    int index,
+  ) {
+    final String rawId = item["id"]?.toString() ?? "";
+    if (rawId.isNotEmpty) return "$kind:$rawId";
+    final num at = (item["occurredAt"] as num?) ?? 0;
+    final String identity = <String>[
+      item["title"]?.toString() ?? "",
+      item["trackingNo"]?.toString() ?? "",
+      item["pickupCode"]?.toString() ?? "",
+      item["amount"]?.toString() ?? "",
+    ].join("|");
+    return "$kind:$at:$identity:$index";
+  }
+
+  static int _cardPriority(
+    _DynamicsKind kind,
+    Map<String, dynamic> item,
+    int now,
+  ) {
+    final int at = kind == _DynamicsKind.mail
+        ? ((item["at"] as num?) ?? 0).toInt()
+        : ((item["occurredAt"] as num?) ?? 0).toInt();
+    final int age = at <= 0 ? 365 : (now - at).clamp(0, 365 * 86400000);
+    final int recency = age <= 86400000
+        ? 180
+        : age <= 3 * 86400000
+            ? 90
+            : 0;
+    return switch (kind) {
+          _DynamicsKind.parcel =>
+            (item["pickupCode"]?.toString().isNotEmpty ?? false) ? 1000 : 280,
+          _DynamicsKind.bill => 560,
+          _DynamicsKind.mail =>
+            item["salience"]?.toString() == "high" ? 860 : 680,
+        } +
+        recency;
+  }
+
+  List<_DynamicsCard> get _orderedCards {
+    final Map<String, _DynamicsCard> byId = <String, _DynamicsCard>{
+      for (final _DynamicsCard card in _cards) card.id: card,
+    };
+    return <_DynamicsCard>[
+      for (final String id in _order)
+        if (byId[id] case final _DynamicsCard card) card,
+    ];
+  }
+
+  List<String?> get _slotIds {
+    final Set<String> validIds =
+        _cards.map((_DynamicsCard card) => card.id).toSet();
+    final List<String?> slots = <String?>[null, null];
+    final Set<String> used = <String>{};
+    for (int i = 0; i < 2; i++) {
+      final String? id = i < _pins.length ? _pins[i] : null;
+      if (id != null && validIds.contains(id) && used.add(id)) slots[i] = id;
+    }
+    final List<_DynamicsCard> candidates = _orderedCards
+        .where((_DynamicsCard card) =>
+            !used.contains(card.id) && !_autoExcluded.contains(card.id))
+        .toList()
+      ..sort((_DynamicsCard a, _DynamicsCard b) {
+        final int byPriority = b.priority.compareTo(a.priority);
+        return byPriority != 0
+            ? byPriority
+            : b.timestamp.compareTo(a.timestamp);
+      });
+    for (final _DynamicsCard card in candidates) {
+      final int emptyIndex = slots.indexOf(null);
+      if (emptyIndex < 0) break;
+      slots[emptyIndex] = card.id;
+      used.add(card.id);
+    }
+    return slots;
+  }
+
+  List<_DynamicsCard> get _feedCards => _orderedCards;
+
+  List<_FeedEntry> get _feedEntries {
+    final List<_DynamicsCard> feed = _feedCards;
+    final List<_FeedEntry> entries = <_FeedEntry>[];
+    for (final _DynamicsSection section in _DynamicsSection.values) {
+      final List<_DynamicsCard> group = feed
+          .where((_DynamicsCard card) => card.section == section)
+          .toList(growable: false);
+      final bool showMonthly =
+          section == _DynamicsSection.bills && _monthly != null;
+      if (group.isEmpty && !showMonthly) continue;
+      entries.add(_FeedHeaderEntry(section.label));
+      if (showMonthly) entries.add(const _FeedMonthlyEntry());
+      entries.addAll(group);
+    }
+    return entries;
+  }
+
+  void _saveLayout() {
+    unawaited(_DynamicsLayoutStore.save(
+      ApiConfig.effectiveActorId,
+      _DynamicsLayout(
+        order: List<String>.of(_order),
+        pins: List<String?>.of(_pins),
+        excluded: _autoExcluded.toList(),
+      ),
+    ));
+  }
+
+  int? _slotAt(Offset globalPosition) {
+    for (int i = 0; i < _slotKeys.length; i++) {
+      final BuildContext? context = _slotKeys[i].currentContext;
+      if (context == null) continue;
+      final RenderBox? box = context.findRenderObject() as RenderBox?;
+      if (box == null || !box.hasSize) continue;
+      final Rect rect = box.localToGlobal(Offset.zero) & box.size;
+      if (rect.contains(globalPosition)) return i;
+    }
+    return null;
+  }
+
+  void _onFeedPointerDown(PointerDownEvent event, String id) {
+    _pointerCardId = id;
+    _pointerDown = event.position;
+    _pointerMoved = false;
+  }
+
+  void _onFeedPointerMove(PointerMoveEvent event) {
+    final Offset? down = _pointerDown;
+    if (down != null && (event.position - down).distance > 18) {
+      _pointerMoved = true;
+    }
+    final int? slot = _slotAt(event.position);
+    if (slot != _hoverSlot) setState(() => _hoverSlot = slot);
+  }
+
+  void _onFeedPointerUp(PointerUpEvent event) {
+    final String? id = _pointerCardId;
+    final int? slot = _slotAt(event.position);
+    if (id != null && slot != null && _pointerMoved && _draggingFeedId == id) {
+      final int targetSlot = slot;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _pinCard(id, targetSlot);
+      });
+    }
+    _clearPointer();
+  }
+
+  void _onFeedPointerCancel(PointerCancelEvent event) => _clearPointer();
+
+  void _clearPointer() {
+    _pointerCardId = null;
+    _draggingFeedId = null;
+    _pointerDown = null;
+    _pointerMoved = false;
+    if (_hoverSlot != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) setState(() => _hoverSlot = null);
+      });
+    }
+  }
+
+  void _moveOrderBefore(String id, String targetId) {
+    if (id == targetId) return;
+    final List<String> next = List<String>.of(_order)..remove(id);
+    final int target = next.indexOf(targetId);
+    next.insert(target < 0 ? next.length : target, id);
+    _order = next;
+  }
+
+  void _pinCard(String id, int slot) {
+    if (slot < 0 || slot > 1 || _slotIds[slot] == id) return;
+    final String? displaced = _slotIds[slot];
+    setState(() {
+      final List<String?> nextPins = List<String?>.of(_pins);
+      final int existing = nextPins.indexOf(id);
+      final bool displacedMoved = existing >= 0 && existing != slot;
+      if (displacedMoved) nextPins[existing] = displaced;
+      nextPins[slot] = id;
+      _pins = nextPins;
+      _autoExcluded.remove(id);
+      if (displaced != null && !displacedMoved) _autoExcluded.add(displaced);
+      _hoverSlot = null;
+    });
+    _saveLayout();
+  }
+
+  void _moveTopCardToSlot(String id, int targetSlot) {
+    final int sourceSlot = _slotIds.indexOf(id);
+    if (sourceSlot < 0 || sourceSlot == targetSlot) return;
+    final String? displaced = _slotIds[targetSlot];
+    setState(() {
+      final List<String?> nextPins = List<String?>.of(_pins);
+      nextPins[sourceSlot] = displaced;
+      nextPins[targetSlot] = id;
+      _pins = nextPins;
+      _autoExcluded.remove(id);
+      _hoverSlot = null;
+    });
+    _saveLayout();
+  }
+
+  void _moveTopCardToFeed(String id, String targetId) {
+    setState(() {
+      _pins = <String?>[
+        for (final String? pin in _pins) pin == id ? null : pin,
+      ];
+      _autoExcluded.add(id);
+      _moveOrderBefore(id, targetId);
+      _hoverFeedId = null;
+    });
+    _saveLayout();
+  }
+
   @override
   Widget build(BuildContext context) {
     final MobilePalette p = MobileTheme.of(context);
     return Scaffold(
       backgroundColor: p.background,
-      appBar: AppBar(
-        title: const Text("动态"),
-        actions: [
-          IconButton(
-            tooltip: "刷新",
-            icon: const Icon(Icons.refresh, size: 22),
-            onPressed: _loading
-                ? null
-                : () => unawaited(_load(silent: _data.isNotEmpty)),
-          ),
-        ],
-      ),
+      appBar: AppBar(title: const Text("动态")),
       body: _loading
           ? const Center(child: CircularProgressIndicator(strokeWidth: 2))
           : _error != null
@@ -187,142 +482,316 @@ class MobileDynamicsPageState extends State<MobileDynamicsPage> {
   }
 
   Widget _buildBody(MobilePalette p) {
-    final bills = _listOf("bills", "recent");
-    final parcels = _listOf("parcels", "recent");
-    final pending = _listOf("alerts", "pending");
-    final activity = _listOf("alerts", "activity");
-    final mail = _listOf("mail", "recent");
-    final num billTotal = _numOf("bills", "totalAmount");
-    final num billCount = _numOf("bills", "count");
-    final num awaiting = _numOf("parcels", "awaitingPickup");
-    final Map<String, dynamic>? monthly = _monthly;
-    final bool allEmpty = bills.isEmpty &&
-        parcels.isEmpty &&
-        pending.isEmpty &&
-        activity.isEmpty &&
-        mail.isEmpty &&
-        monthly == null;
+    final List<_FeedEntry> entries = _feedEntries;
+    return LayoutBuilder(
+      builder: (BuildContext context, BoxConstraints constraints) {
+        final double feedWidth = constraints.maxWidth - 32;
+        final double slotWidth = (feedWidth - 10) / 2;
+        return Listener(
+          behavior: HitTestBehavior.opaque,
+          onPointerMove: _onFeedPointerMove,
+          onPointerUp: _onFeedPointerUp,
+          onPointerCancel: _onFeedPointerCancel,
+          child: ReorderableListView.builder(
+            padding: const EdgeInsets.only(bottom: 24),
+            physics: const AlwaysScrollableScrollPhysics(),
+            buildDefaultDragHandles: false,
+            itemCount: entries.length + 1,
+            onReorderStart: (int index) {
+              if (index <= 0 || index > entries.length) return;
+              final _FeedEntry entry = entries[index - 1];
+              if (entry is _DynamicsCard) _draggingFeedId = entry.id;
+            },
+            onReorderItem: _onReorder,
+            proxyDecorator:
+                (Widget child, int index, Animation<double> animation) {
+              return AnimatedBuilder(
+                animation: animation,
+                builder: (BuildContext context, Widget? proxy) => Material(
+                  type: MaterialType.transparency,
+                  child: Transform.scale(
+                    scale: 1 + 0.025 * animation.value,
+                    child: Container(
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(14),
+                        boxShadow: <BoxShadow>[
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.2),
+                            blurRadius: 28,
+                            offset: const Offset(0, 16),
+                          ),
+                        ],
+                      ),
+                      child: proxy,
+                    ),
+                  ),
+                ),
+                child: child,
+              );
+            },
+            itemBuilder: (BuildContext context, int index) {
+              if (index == 0) {
+                return Container(
+                  key: const ValueKey<String>("__dynamics_header__"),
+                  child: _buildTopArea(p, slotWidth),
+                );
+              }
+              final _FeedEntry entry = entries[index - 1];
+              if (entry is _FeedHeaderEntry) {
+                return _FeedHeader(
+                  key: ValueKey<String>("__section_${entry.title}"),
+                  p: p,
+                  title: entry.title,
+                );
+              }
+              if (entry is _FeedMonthlyEntry) {
+                return _MonthlySummaryCard(
+                  key: const ValueKey<String>("__dynamics_monthly__"),
+                  p: p,
+                  monthly: _monthly!,
+                  onTap: () => _openMonthlyDetail(
+                    context,
+                    _monthly!,
+                    _listOf("bills", "recent"),
+                  ),
+                );
+              }
+              final _DynamicsCard card = entry as _DynamicsCard;
+              return _buildFeedCard(p, card, index, feedWidth);
+            },
+          ),
+        );
+      },
+    );
+  }
 
-    return ListView(
-      padding: const EdgeInsets.only(bottom: 24),
-      children: [
-        // —— 汇总卡：账单合计 / 待取快递 ——
+  Widget _buildTopArea(MobilePalette p, double slotWidth) {
+    final List<_DynamicsCard> cards = _cards;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        const SizedBox(height: 14),
         Padding(
-          padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
-          child: Row(
-            children: [
-              Expanded(
-                child: _SummaryCard(
-                  p: p,
-                  label: "本月账单",
-                  value: billCount == 0
-                      ? "—"
-                      : "¥${_fmtAmount(billTotal)}",
-                  hint: billCount == 0 ? "暂无识别到的账单" : "$billCount 笔",
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: _SummaryCard(
-                  p: p,
-                  label: "待取快递",
-                  value: awaiting == 0 ? "—" : "$awaiting",
-                  hint: awaiting == 0 ? "暂无待取件" : "件，取件码见下方",
-                ),
-              ),
-            ],
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          child: SizedBox(
+            height: 132,
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: <Widget>[
+                Expanded(child: _buildTopSlot(p, 0, slotWidth)),
+                const SizedBox(width: 10),
+                Expanded(child: _buildTopSlot(p, 1, slotWidth)),
+              ],
+            ),
           ),
         ),
-        if (allEmpty)
+        if (cards.isEmpty)
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 48),
+            padding: const EdgeInsets.fromLTRB(20, 54, 20, 24),
             child: Column(
-              children: [
+              children: <Widget>[
                 Icon(Icons.graphic_eq, size: 44, color: p.textMuted),
                 const SizedBox(height: 12),
                 Text(
-                  "还没有动静\nAgent 识别到账单、快递或日程变动时会出现在这里",
+                  "还没有动静\n识别到账单、快递或重要邮件时会出现在这里",
                   textAlign: TextAlign.center,
                   style: TextStyle(color: p.textSecondary, fontSize: 14),
                 ),
               ],
             ),
-          )
-        else ...[
-          if (pending.isNotEmpty)
-            _Section(
-              p: p,
-              title: "提醒",
-              child: Column(
-                children: [
-                  for (final item in pending)
-                    _AlertCard(p: p, item: item),
-                ],
-              ),
-            ),
-          if (parcels.isNotEmpty)
-            _Section(
-              p: p,
-              title: "快递",
-              child: Column(
-                children: [
-                  for (final item in parcels)
-                    _ParcelCard(p: p, item: item),
-                ],
-              ),
-            ),
-          if (bills.isNotEmpty || monthly != null)
-            _Section(
-              p: p,
-              title: "账单",
-              child: Column(
-                children: [
-                  // §9 钱的月报：区块顶部的「{月份}小结」卡，点开看明细 + 改类目
-                  if (monthly != null)
-                    _MonthlySummaryCard(
-                      p: p,
-                      monthly: monthly,
-                      onTap: () => _openMonthlyDetail(context, monthly, bills),
-                    ),
-                  for (final item in bills) _BillCard(p: p, item: item),
-                ],
-              ),
-            ),
-          if (activity.isNotEmpty)
-            _Section(
-              p: p,
-              title: "Agent 足迹",
-              child: Column(
-                children: [
-                  for (final item in activity.take(6))
-                    _ActivityCard(p: p, item: item),
-                ],
-              ),
-            ),
-          if (mail.isNotEmpty)
-            _Section(
-              p: p,
-              title: "邮件要事",
-              // 收束卡：多封邮件叠成一张薄卡，卡面只展示最新一封；
-              // 点进去进详情页看全部（点击见 _openMailDetail）。
-              child: _MailDigestCard(
-                p: p,
-                items: mail,
-                onTap: () => _openMailDetail(context, mail),
-              ),
-            ),
-        ],
+          ),
       ],
     );
+  }
+
+  Widget _buildTopSlot(MobilePalette p, int slot, double width) {
+    final String? id = _slotIds[slot];
+    final _DynamicsCard? card = id == null
+        ? null
+        : _cards.firstWhere((_DynamicsCard card) => card.id == id);
+    return DragTarget<_TopDragData>(
+      key: ValueKey<String>("dynamics-slot-$slot"),
+      onWillAcceptWithDetails: (DragTargetDetails<_TopDragData> details) =>
+          details.data.id != id,
+      onAcceptWithDetails: (DragTargetDetails<_TopDragData> details) =>
+          _moveTopCardToSlot(details.data.id, slot),
+      builder: (BuildContext context, List<_TopDragData?> candidateData,
+          List<dynamic> rejectedData) {
+        final bool highlighted = _hoverSlot == slot || candidateData.isNotEmpty;
+        return AnimatedContainer(
+          key: _slotKeys[slot],
+          duration: const Duration(milliseconds: 180),
+          padding: const EdgeInsets.all(3),
+          decoration: BoxDecoration(
+            color: highlighted ? p.innerFieldBackground : Colors.transparent,
+            borderRadius: BorderRadius.circular(17),
+            border: Border.all(
+              color: highlighted ? p.textPrimary : Colors.transparent,
+              width: 1.5,
+            ),
+          ),
+          child: card == null
+              ? Container(
+                  decoration: BoxDecoration(
+                    color: p.surface,
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: p.divider),
+                  ),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: <Widget>[
+                      Icon(Icons.add, size: 22, color: p.textMuted),
+                      const SizedBox(height: 6),
+                      Text(
+                        "暂无优先事项",
+                        style: TextStyle(color: p.textMuted, fontSize: 11),
+                      ),
+                    ],
+                  ),
+                )
+              : _buildTopDraggable(p, card, slot, width - 6),
+        );
+      },
+    );
+  }
+
+  Widget _buildTopDraggable(
+    MobilePalette p,
+    _DynamicsCard card,
+    int slot,
+    double width,
+  ) {
+    final Widget child = _TopCard(
+      p: p,
+      card: card,
+      onTap: card.kind == _DynamicsKind.mail
+          ? () => _openMailDetail(context, card.items)
+          : null,
+    );
+    final Widget feedback = Material(
+      type: MaterialType.transparency,
+      child: Container(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(14),
+          boxShadow: <BoxShadow>[
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.2),
+              blurRadius: 30,
+              offset: const Offset(0, 18),
+            ),
+          ],
+        ),
+        child: SizedBox(
+          width: width,
+          height: 126,
+          child: _TopCard(p: p, card: card),
+        ),
+      ),
+    );
+    final Widget placeholder = Opacity(opacity: 0.2, child: child);
+    return LongPressDraggable<_TopDragData>(
+      data: _TopDragData(card.id, slot),
+      feedback: feedback,
+      childWhenDragging: placeholder,
+      delay: const Duration(milliseconds: 220),
+      onDragStarted: () => setState(() => _hoverSlot = slot),
+      onDragEnd: (_) {
+        if (mounted && _hoverSlot != null) {
+          setState(() => _hoverSlot = null);
+        }
+      },
+      child: child,
+    );
+  }
+
+  Widget _buildFeedCard(
+    MobilePalette p,
+    _DynamicsCard card,
+    int listIndex,
+    double width,
+  ) {
+    final Widget content = switch (card.kind) {
+      _DynamicsKind.parcel => _ParcelCard(
+          p: p,
+          item: card.items.first,
+        ),
+      _DynamicsKind.bill => _BillCard(
+          p: p,
+          item: card.items.first,
+        ),
+      _DynamicsKind.mail => _MailDigestCard(
+          p: p,
+          items: card.items,
+          onTap: () => _openMailDetail(context, card.items),
+        ),
+    };
+    final Widget target = DragTarget<_TopDragData>(
+      onWillAcceptWithDetails: (DragTargetDetails<_TopDragData> details) =>
+          details.data.id != card.id,
+      onMove: (_) {
+        if (_hoverFeedId != card.id) setState(() => _hoverFeedId = card.id);
+      },
+      onLeave: (_) {
+        if (_hoverFeedId == card.id) setState(() => _hoverFeedId = null);
+      },
+      onAcceptWithDetails: (DragTargetDetails<_TopDragData> details) =>
+          _moveTopCardToFeed(details.data.id, card.id),
+      builder: (BuildContext context, List<_TopDragData?> candidateData,
+          List<dynamic> rejectedData) {
+        final bool highlighted =
+            _hoverFeedId == card.id || candidateData.isNotEmpty;
+        return AnimatedScale(
+          duration: const Duration(milliseconds: 160),
+          scale: highlighted ? 1.015 : 1,
+          child: SizedBox(width: width, child: content),
+        );
+      },
+    );
+    final Widget draggable =
+        ReorderableDelayedDragStartListener(index: listIndex, child: target);
+    return Listener(
+      key: ValueKey<String>(card.id),
+      behavior: HitTestBehavior.opaque,
+      onPointerDown: (PointerDownEvent event) =>
+          _onFeedPointerDown(event, card.id),
+      child: draggable,
+    );
+  }
+
+  void _onReorder(int oldIndex, int newIndex) {
+    if (oldIndex <= 0 || newIndex < 0) return;
+    final List<_FeedEntry> entries = _feedEntries;
+    final int oldEntryIndex = oldIndex - 1;
+    if (oldEntryIndex >= entries.length) return;
+    final _FeedEntry moved = entries[oldEntryIndex];
+    if (moved is! _DynamicsCard) return;
+    setState(() {
+      final List<_FeedEntry> nextEntries = List<_FeedEntry>.from(entries)
+        ..removeAt(oldEntryIndex);
+      final int insertAt =
+          newIndex <= 0 ? 0 : (newIndex - 1).clamp(0, nextEntries.length);
+      nextEntries.insert(insertAt, moved);
+      final List<String> visible = <String>[
+        for (final _FeedEntry entry in nextEntries)
+          if (entry is _DynamicsCard) entry.id,
+      ];
+      final Set<String> visibleIds = visible.toSet();
+      int cursor = 0;
+      _order = <String>[
+        for (final String id in _order)
+          if (visibleIds.contains(id)) visible[cursor++] else id,
+      ];
+    });
+    _saveLayout();
   }
 
   /// 邮件列表统一排序（新→旧），卡面与详情页共用同一口径。
   static List<Map<String, dynamic>> sortMailByNewest(
       List<Map<String, dynamic>> items) {
-    final List<Map<String, dynamic>> sorted =
-        List<Map<String, dynamic>>.from(items)
-          ..sort((a, b) =>
-              ((b["at"] as num?) ?? 0).compareTo((a["at"] as num?) ?? 0));
+    final List<Map<String, dynamic>> sorted = List<Map<String, dynamic>>.from(
+        items)
+      ..sort(
+          (a, b) => ((b["at"] as num?) ?? 0).compareTo((a["at"] as num?) ?? 0));
     return sorted;
   }
 
@@ -365,7 +834,7 @@ class MobileDynamicsPageState extends State<MobileDynamicsPage> {
     );
   }
 
-  /// 点「{月份}小结」卡 → 月报明细页（§9 交互：点开看明细，类目可改）。
+  /// 点顶部「账单月结」卡 → 月报明细页（§9 交互：点开看明细，类目可改）。
   /// 账单条目复用本页已拉取的 bills.recent，改类目后由详情页自己回写本地状态。
   void _openMonthlyDetail(
     BuildContext context,
@@ -388,40 +857,28 @@ class MobileDynamicsPageState extends State<MobileDynamicsPage> {
 
 // —— 通用小组件 ——
 
-/// 区块标题 + 卡片组
-class _Section extends StatelessWidget {
-  const _Section({required this.p, required this.title, required this.child});
+class _FeedHeader extends StatelessWidget {
+  const _FeedHeader({super.key, required this.p, required this.title});
 
   final MobilePalette p;
   final String title;
-  final Widget child;
 
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.only(left: 4, bottom: 8),
-            child: Text(
-              title,
-              style: TextStyle(
-                color: p.textSecondary,
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-          child,
-        ],
+      padding: const EdgeInsets.fromLTRB(20, 18, 16, 8),
+      child: Text(
+        title,
+        style: TextStyle(
+          color: p.textSecondary,
+          fontSize: 13,
+          fontWeight: FontWeight.w600,
+        ),
       ),
     );
   }
 }
 
-/// 顶部汇总数字卡
 class _SummaryCard extends StatelessWidget {
   const _SummaryCard({
     required this.p,
@@ -447,8 +904,7 @@ class _SummaryCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(label,
-              style: TextStyle(color: p.textSecondary, fontSize: 12)),
+          Text(label, style: TextStyle(color: p.textSecondary, fontSize: 12)),
           const SizedBox(height: 6),
           Text(
             value,
@@ -460,78 +916,258 @@ class _SummaryCard extends StatelessWidget {
           ),
           const SizedBox(height: 2),
           Text(hint,
-              style: TextStyle(color: p.textMuted, fontSize: 11)),
+              style: TextStyle(color: p.textMuted, fontSize: 11),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis),
         ],
       ),
     );
   }
 }
 
-/// 提醒卡（attention pending：Agent 的未决提醒）
-class _AlertCard extends StatelessWidget {
-  const _AlertCard({required this.p, required this.item});
+enum _DynamicsKind { parcel, bill, mail }
+
+enum _DynamicsSection {
+  parcels("快递"),
+  bills("账单"),
+  mail("邮件要事");
+
+  const _DynamicsSection(this.label);
+  final String label;
+}
+
+class _DynamicsCard extends _FeedEntry {
+  const _DynamicsCard({
+    required this.id,
+    required this.kind,
+    required this.items,
+    required this.timestamp,
+    required this.priority,
+  });
+
+  final String id;
+  final _DynamicsKind kind;
+  final List<Map<String, dynamic>> items;
+  final int timestamp;
+  final int priority;
+
+  _DynamicsSection get section => switch (kind) {
+        _DynamicsKind.parcel => _DynamicsSection.parcels,
+        _DynamicsKind.bill => _DynamicsSection.bills,
+        _DynamicsKind.mail => _DynamicsSection.mail,
+      };
+}
+
+abstract class _FeedEntry {
+  const _FeedEntry();
+}
+
+class _FeedHeaderEntry extends _FeedEntry {
+  const _FeedHeaderEntry(this.title);
+  final String title;
+}
+
+class _FeedMonthlyEntry extends _FeedEntry {
+  const _FeedMonthlyEntry();
+}
+
+class _TopDragData {
+  const _TopDragData(this.id, this.slot);
+  final String id;
+  final int slot;
+}
+
+class _DynamicsLayout {
+  const _DynamicsLayout({
+    this.order = const <String>[],
+    this.pins = const <String?>[null, null],
+    this.excluded = const <String>[],
+  });
+
+  final List<String> order;
+  final List<String?> pins;
+  final List<String> excluded;
+}
+
+class _DynamicsLayoutStore {
+  static const String _fileName = "mobile_dynamics_layout";
+
+  static Future<_DynamicsLayout> load(String actorId) async {
+    try {
+      final File file =
+          await _file(actorId).timeout(const Duration(seconds: 1));
+      if (!await file.exists()) return const _DynamicsLayout();
+      final Map<String, dynamic> json =
+          jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+      final List<dynamic> rawPins =
+          json["pins"] as List<dynamic>? ?? const <dynamic>[];
+      return _DynamicsLayout(
+        order: (json["order"] as List<dynamic>? ?? const <dynamic>[])
+            .whereType<String>()
+            .toList(),
+        pins: <String?>[
+          for (int i = 0; i < 2; i++)
+            i < rawPins.length && rawPins[i] is String
+                ? rawPins[i] as String
+                : null,
+        ],
+        excluded: (json["excluded"] as List<dynamic>? ?? const <dynamic>[])
+            .whereType<String>()
+            .toList(),
+      );
+    } catch (_) {
+      return const _DynamicsLayout();
+    }
+  }
+
+  static Future<void> save(String actorId, _DynamicsLayout layout) async {
+    try {
+      final File file =
+          await _file(actorId).timeout(const Duration(seconds: 1));
+      await file.parent.create(recursive: true);
+      final File temp = File("${file.path}.tmp");
+      await temp.writeAsString(
+        const JsonEncoder.withIndent("  ").convert(<String, dynamic>{
+          "order": layout.order,
+          "pins": layout.pins,
+          "excluded": layout.excluded,
+          "updatedAt": DateTime.now().toIso8601String(),
+        }),
+        flush: true,
+      );
+      await temp.rename(file.path);
+    } catch (_) {}
+  }
+
+  static Future<File> _file(String actorId) async {
+    final Directory directory = await getApplicationSupportDirectory();
+    final String safeActor = actorId.replaceAll(
+      RegExp(r"[^A-Za-z0-9_.-]"),
+      "_",
+    );
+    return File(
+      "${directory.path}${Platform.pathSeparator}nextbot"
+      "${Platform.pathSeparator}${_fileName}_$safeActor.json",
+    );
+  }
+}
+
+class _TopCard extends StatelessWidget {
+  const _TopCard({
+    required this.p,
+    required this.card,
+    this.onTap,
+  });
 
   final MobilePalette p;
-  final Map<String, dynamic> item;
+  final _DynamicsCard card;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
-    final String title = item["title"]?.toString() ?? "提醒";
-    final String summary = item["summary"]?.toString() ?? "";
-    final String urgency = item["urgency"]?.toString() ?? "normal";
-    final bool urgent = urgency == "interrupt" || urgency == "alert";
-    return Container(
+    final Map<String, dynamic> item = card.items.first;
+    final String label = card.section.label;
+    final String value = switch (card.kind) {
+      _DynamicsKind.parcel =>
+        (item["pickupCode"]?.toString().isNotEmpty ?? false)
+            ? item["pickupCode"].toString()
+            : item["title"]?.toString() ?? "包裹动态",
+      _DynamicsKind.bill => item["amount"] is num
+          ? "¥${MobileDynamicsPageState._fmtAmount(item["amount"] as num)}"
+          : item["title"]?.toString() ?? "账单",
+      _DynamicsKind.mail => item["title"]?.toString() ?? "邮件",
+    };
+    final String hint = switch (card.kind) {
+      _DynamicsKind.parcel => <String>[
+          if ((item["carrier"]?.toString() ?? "").isNotEmpty)
+            item["carrier"].toString(),
+          MobileDynamicsPageState._fmtTime(
+            (item["occurredAt"] as num?) ?? 0,
+          ),
+        ].where((String part) => part.isNotEmpty).join(" · "),
+      _DynamicsKind.bill => <String>[
+          if ((item["billType"]?.toString() ?? "").isNotEmpty)
+            item["billType"].toString(),
+          switch (item["source"]?.toString()) {
+            "email" => "邮件识别",
+            "sms" => "短信识别",
+            _ => "通知识别",
+          },
+          MobileDynamicsPageState._fmtTime(
+            (item["occurredAt"] as num?) ?? 0,
+          ),
+        ].where((String part) => part.isNotEmpty).join(" · "),
+      _DynamicsKind.mail => "共 ${card.items.length} 封",
+    };
+    final IconData icon = switch (card.kind) {
+      _DynamicsKind.parcel => Icons.local_shipping_outlined,
+      _DynamicsKind.bill => Icons.receipt_outlined,
+      _DynamicsKind.mail => Icons.mail_outline,
+    };
+
+    final Widget content = Container(
       width: double.infinity,
-      margin: const EdgeInsets.only(bottom: 8),
+      height: double.infinity,
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
         color: p.surface,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: urgent
-              ? const Color(0xFFE5484D).withValues(alpha: 0.45)
-              : p.divider.withValues(alpha: 0.6),
-        ),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: p.divider),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
+        children: <Widget>[
           Row(
-            children: [
-              if (urgent)
-                Padding(
-                  padding: const EdgeInsets.only(right: 6),
-                  child: Container(
-                    width: 6,
-                    height: 6,
-                    decoration: const BoxDecoration(
-                      color: Color(0xFFE5484D),
-                      shape: BoxShape.circle,
-                    ),
-                  ),
+            children: <Widget>[
+              Container(
+                width: 24,
+                height: 24,
+                decoration: BoxDecoration(
+                  color: p.innerFieldBackground,
+                  borderRadius: BorderRadius.circular(7),
                 ),
+                child: Icon(icon, size: 14, color: p.textPrimary),
+              ),
+              const SizedBox(width: 7),
               Expanded(
                 child: Text(
-                  title,
-                  style: TextStyle(
-                    color: p.textPrimary,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                  ),
+                  label,
+                  style: TextStyle(color: p.textSecondary, fontSize: 11),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
               ),
             ],
           ),
-          if (summary.isNotEmpty) ...[
-            const SizedBox(height: 4),
-            Text(
-              summary,
-              style: TextStyle(color: p.textSecondary, fontSize: 13),
-              maxLines: 3,
-              overflow: TextOverflow.ellipsis,
+          const SizedBox(height: 8),
+          Text(
+            value,
+            style: TextStyle(
+              color: p.textPrimary,
+              fontSize: value.length > 9 ? 15 : 21,
+              fontWeight: FontWeight.w600,
+              letterSpacing: -0.3,
             ),
-          ],
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          const SizedBox(height: 4),
+          Text(
+            hint,
+            style: TextStyle(color: p.textMuted, fontSize: 10, height: 1.35),
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+          ),
         ],
+      ),
+    );
+    if (onTap == null) return content;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(14),
+        child: content,
       ),
     );
   }
@@ -539,7 +1175,10 @@ class _AlertCard extends StatelessWidget {
 
 /// 快递卡：待取件取件码大字；其余显示运单号/承运商
 class _ParcelCard extends StatelessWidget {
-  const _ParcelCard({required this.p, required this.item});
+  const _ParcelCard({
+    required this.p,
+    required this.item,
+  });
 
   final MobilePalette p;
   final Map<String, dynamic> item;
@@ -629,7 +1268,10 @@ class _ParcelCard extends StatelessWidget {
 
 /// 账单卡：类型/金额/来源/时间
 class _BillCard extends StatelessWidget {
-  const _BillCard({required this.p, required this.item});
+  const _BillCard({
+    required this.p,
+    required this.item,
+  });
 
   final MobilePalette p;
   final Map<String, dynamic> item;
@@ -700,70 +1342,6 @@ class _BillCard extends StatelessWidget {
   }
 }
 
-/// Agent 足迹卡（主动动作台账）
-class _ActivityCard extends StatelessWidget {
-  const _ActivityCard({required this.p, required this.item});
-
-  final MobilePalette p;
-  final Map<String, dynamic> item;
-
-  @override
-  Widget build(BuildContext context) {
-    final String title = item["title"]?.toString() ?? "";
-    final String summary = item["summary"]?.toString() ?? "";
-    final String statusLabel = item["statusLabel"]?.toString() ?? "";
-    final num occurredAt = (item["createdAt"] as num?) ?? 0;
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: p.surface,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: p.divider.withValues(alpha: 0.6)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  title,
-                  style: TextStyle(
-                    color: p.textPrimary,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-              if (statusLabel.isNotEmpty)
-                Text(statusLabel,
-                    style: TextStyle(color: p.textMuted, fontSize: 11)),
-            ],
-          ),
-          if (summary.isNotEmpty) ...[
-            const SizedBox(height: 4),
-            Text(
-              summary,
-              style: TextStyle(color: p.textSecondary, fontSize: 13),
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ],
-          const SizedBox(height: 2),
-          Text(
-            MobileDynamicsPageState._fmtTime(occurredAt),
-            style: TextStyle(color: p.textMuted, fontSize: 11),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 /// 邮件要事收束卡（卡面展示最新一封；多封叠成一张薄卡，点进去看全部）。
 ///
 /// 表面三要素：图标 + 最新一封标题/摘要 + 「N 封 · 查看全部」提示；
@@ -815,7 +1393,8 @@ class _MailDigestCard extends StatelessWidget {
                     color: p.textPrimary.withValues(alpha: 0.06),
                     borderRadius: BorderRadius.circular(10),
                   ),
-                  child: Icon(Icons.mail_outline, size: 19, color: p.textPrimary),
+                  child:
+                      Icon(Icons.mail_outline, size: 19, color: p.textPrimary),
                 ),
                 const SizedBox(width: 12),
                 Expanded(
@@ -847,7 +1426,8 @@ class _MailDigestCard extends StatelessWidget {
                         const SizedBox(height: 3),
                         Text(
                           text,
-                          style: TextStyle(color: p.textSecondary, fontSize: 12),
+                          style:
+                              TextStyle(color: p.textSecondary, fontSize: 12),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
@@ -933,7 +1513,8 @@ class _MailDetailRow extends StatelessWidget {
             const SizedBox(height: 8),
             Text(
               text,
-              style: TextStyle(color: p.textSecondary, fontSize: 13, height: 1.5),
+              style:
+                  TextStyle(color: p.textSecondary, fontSize: 13, height: 1.5),
             ),
           ],
           const SizedBox(height: 8),
@@ -950,6 +1531,174 @@ class _MailDetailRow extends StatelessWidget {
 // ---------------------------------------------------------------------- //
 // §9 钱的月报（PRD 需求七）：「{月份}小结」卡 + 明细页
 // ---------------------------------------------------------------------- //
+
+/// 账单区块顶部的「{月份}小结」卡：合计 + 环比 + Top3 类目 + 最大单笔。
+/// 整卡可点，点开进明细页（类目在那里改）。
+class _MonthlySummaryCard extends StatelessWidget {
+  const _MonthlySummaryCard({
+    super.key,
+    required this.p,
+    required this.monthly,
+    required this.onTap,
+  });
+
+  final MobilePalette p;
+  final Map<String, dynamic> monthly;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final _MonthlyView m = _MonthlyView(monthly);
+    final Map<String, dynamic>? largest = m.largest;
+    final String subLine = m.subscriptionLine;
+    final bool noData = m.count == 0;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          width: double.infinity,
+          margin: const EdgeInsets.only(bottom: 8),
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: p.surface,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: p.divider.withValues(alpha: 0.6)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Text(
+                    m.title,
+                    style: TextStyle(
+                      color: p.textPrimary,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  _PhaseChip(p: p, label: m.phaseLabel),
+                  const Spacer(),
+                  Icon(Icons.chevron_right, size: 18, color: p.textMuted),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.baseline,
+                textBaseline: TextBaseline.alphabetic,
+                children: [
+                  Text(
+                    noData
+                        ? "—"
+                        : "¥${MobileDynamicsPageState._fmtAmount(m.totalAmount)}",
+                    style: TextStyle(
+                      color: p.textPrimary,
+                      fontSize: 24,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      noData ? "这个月还没有识别到账单" : "${m.count} 笔 · ${m.momLine}",
+                      style: TextStyle(color: p.textSecondary, fontSize: 12),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+              if (m.topCategories.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                for (final Map<String, dynamic> c in m.topCategories)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 4),
+                    child: Row(
+                      children: [
+                        SizedBox(
+                          width: 96,
+                          child: Text(
+                            c["type"]?.toString() ?? "其他",
+                            style:
+                                TextStyle(color: p.textSecondary, fontSize: 13),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        Text(
+                          "¥${MobileDynamicsPageState._fmtAmount(_MonthlyView._n(c, "amount"))}",
+                          style: TextStyle(
+                            color: p.textPrimary,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          "${(_MonthlyView._n(c, "ratio") * 100).round()}%",
+                          style: TextStyle(color: p.textMuted, fontSize: 11),
+                        ),
+                      ],
+                    ),
+                  ),
+              ],
+              if (largest != null) ...[
+                const SizedBox(height: 2),
+                Text(
+                  "最大单笔：${largest["title"]?.toString() ?? ""} ¥${MobileDynamicsPageState._fmtAmount(_MonthlyView._n(largest, "amount"))}",
+                  style: TextStyle(color: p.textMuted, fontSize: 12),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+              if (subLine.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Text(
+                  subLine,
+                  style: TextStyle(color: p.textSecondary, fontSize: 12),
+                ),
+              ],
+              if (m.missingAmount > 0) ...[
+                const SizedBox(height: 6),
+                Text(
+                  m.coverageHint,
+                  style:
+                      const TextStyle(color: Color(0xFFB45309), fontSize: 12),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 卡片角标：区分「本月进行中」与「上月完整版」。
+class _PhaseChip extends StatelessWidget {
+  const _PhaseChip({required this.p, required this.label});
+
+  final MobilePalette p;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: p.innerFieldBackground,
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(color: p.textMuted, fontSize: 10),
+      ),
+    );
+  }
+}
 
 /// `/api/dynamics` 的 `monthly` 字段的类型化读法。
 ///
@@ -999,7 +1748,6 @@ class _MonthlyView {
         : const <Map<String, dynamic>>[];
   }
 
-  String get month => raw["month"]?.toString() ?? "";
   String get monthLabel => raw["monthLabel"]?.toString() ?? "本月";
   bool get complete => raw["complete"] == true;
   String get coverageHint => raw["coverageHint"]?.toString() ?? "";
@@ -1009,13 +1757,14 @@ class _MonthlyView {
   num get amountCount => _n(totals, "amountCount");
   num get missingAmount => _n(totals, "missingAmount");
 
-  /// 标题：「11月小结」（1 日推出的是上月完整版，卡片自己标出来）
+  /// 标题：「11月小结」，明细页 AppBar 用
   String get title => "$monthLabel小结";
   String get phaseLabel => complete ? "上月完整版" : "本月进行中";
 
   /// 环比一句话。上月为 0 时服务端不给 ratio，此时只说绝对差额。
   String get momLine {
-    final String delta = "¥${MobileDynamicsPageState._fmtAmount(_n(mom, "deltaAmount"))}";
+    final String delta =
+        "¥${MobileDynamicsPageState._fmtAmount(_n(mom, "deltaAmount"))}";
     switch (mom["direction"]?.toString()) {
       case "up":
         return "比${_shortMonth()}多花 $delta${_momPct()}";
@@ -1028,7 +1777,8 @@ class _MonthlyView {
 
   String _shortMonth() {
     // previous.month = "2026-10" → "10月"
-    final List<String> parts = previous["month"]?.toString().split("-") ?? const [];
+    final List<String> parts =
+        previous["month"]?.toString().split("-") ?? const [];
     if (parts.length == 2) {
       final int? n = int.tryParse(parts[1]);
       if (n != null) return "$n月";
@@ -1058,164 +1808,6 @@ class _MonthlyView {
   }
 }
 
-/// 「{月份}小结」卡：合计 + 环比 + Top3 类目 + 最大单笔 + 续费 + 覆盖率提示。
-/// 整卡可点，点开进明细页（类目在那里改）。
-class _MonthlySummaryCard extends StatelessWidget {
-  const _MonthlySummaryCard({
-    required this.p,
-    required this.monthly,
-    required this.onTap,
-  });
-
-  final MobilePalette p;
-  final Map<String, dynamic> monthly;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final _MonthlyView m = _MonthlyView(monthly);
-    final Map<String, dynamic>? largest = m.largest;
-    final String subLine = m.subscriptionLine;
-    final bool noData = m.count == 0;
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(12),
-      child: Container(
-        width: double.infinity,
-        margin: const EdgeInsets.only(bottom: 8),
-        padding: const EdgeInsets.all(14),
-        decoration: BoxDecoration(
-          color: p.surface,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: p.divider.withValues(alpha: 0.6)),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Text(
-                  m.title,
-                  style: TextStyle(
-                    color: p.textPrimary,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(width: 6),
-                _PhaseChip(p: p, label: m.phaseLabel),
-                const Spacer(),
-                Icon(Icons.chevron_right, size: 18, color: p.textMuted),
-              ],
-            ),
-            const SizedBox(height: 10),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.baseline,
-              textBaseline: TextBaseline.alphabetic,
-              children: [
-                Text(
-                  noData ? "—" : "¥${MobileDynamicsPageState._fmtAmount(m.totalAmount)}",
-                  style: TextStyle(
-                    color: p.textPrimary,
-                    fontSize: 24,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Text(
-                  noData ? "这个月还没有识别到账单" : "${m.count} 笔 · ${m.momLine}",
-                  style: TextStyle(color: p.textSecondary, fontSize: 12),
-                ),
-              ],
-            ),
-            if (m.topCategories.isNotEmpty) ...[
-              const SizedBox(height: 10),
-              for (final Map<String, dynamic> c in m.topCategories)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 4),
-                  child: Row(
-                    children: [
-                      SizedBox(
-                        width: 96,
-                        child: Text(
-                          c["type"]?.toString() ?? "其他",
-                          style: TextStyle(color: p.textSecondary, fontSize: 13),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-                      Text(
-                        "¥${MobileDynamicsPageState._fmtAmount(_MonthlyView._n(c, "amount"))}",
-                        style: TextStyle(
-                          color: p.textPrimary,
-                          fontSize: 13,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                      const SizedBox(width: 6),
-                      Text(
-                        "${(_MonthlyView._n(c, "ratio") * 100).round()}%",
-                        style: TextStyle(color: p.textMuted, fontSize: 11),
-                      ),
-                    ],
-                  ),
-                ),
-            ],
-            if (largest != null) ...[
-              const SizedBox(height: 2),
-              Text(
-                "最大单笔：${largest["title"]?.toString() ?? ""} ¥${MobileDynamicsPageState._fmtAmount(_MonthlyView._n(largest, "amount"))}",
-                style: TextStyle(color: p.textMuted, fontSize: 12),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ],
-            if (subLine.isNotEmpty) ...[
-              const SizedBox(height: 6),
-              Text(
-                subLine,
-                style: TextStyle(color: p.textSecondary, fontSize: 12),
-              ),
-            ],
-            if (m.missingAmount > 0) ...[
-              const SizedBox(height: 6),
-              Text(
-                m.coverageHint,
-                // 覆盖率提示是"要补一下"的信号，用暖色但不用报错红——
-                //  MobilePalette 没有 warning 档，这里与紧急快递的红点区分开。
-                style: const TextStyle(color: Color(0xFFB45309), fontSize: 12),
-              ),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-/// 卡片角标：区分「本月进行中」与「上月完整版」（1 日切换的可见证据）
-class _PhaseChip extends StatelessWidget {
-  const _PhaseChip({required this.p, required this.label});
-
-  final MobilePalette p;
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: p.innerFieldBackground,
-        borderRadius: BorderRadius.circular(6),
-      ),
-      child: Text(
-        label,
-        style: TextStyle(color: p.textMuted, fontSize: 10),
-      ),
-    );
-  }
-}
-
 /// 月报明细页：小结全量数字 + 本月账单明细，类目在这里改。
 ///
 /// 改类目 → POST /api/dynamics/bills/category → 服务端回写台账并打纠正标记，
@@ -1234,7 +1826,8 @@ class MobileMonthlyDetailPage extends StatefulWidget {
   final List<String> billTypes;
 
   @override
-  State<MobileMonthlyDetailPage> createState() => _MobileMonthlyDetailPageState();
+  State<MobileMonthlyDetailPage> createState() =>
+      _MobileMonthlyDetailPageState();
 }
 
 class _MobileMonthlyDetailPageState extends State<MobileMonthlyDetailPage> {
@@ -1311,10 +1904,9 @@ class _MobileMonthlyDetailPageState extends State<MobileMonthlyDetailPage> {
       } else {
         _bills = _bills
             .map(
-              (Map<String, dynamic> e) =>
-                  e["id"]?.toString() == id
-                      ? <String, dynamic>{...e, "billType": picked}
-                      : e,
+              (Map<String, dynamic> e) => e["id"]?.toString() == id
+                  ? <String, dynamic>{...e, "billType": picked}
+                  : e,
             )
             .toList(growable: false);
       }
@@ -1345,7 +1937,9 @@ class _MobileMonthlyDetailPageState extends State<MobileMonthlyDetailPage> {
           _SummaryCard(
             p: p,
             label: "${m.monthLabel}合计",
-            value: m.count == 0 ? "—" : "¥${MobileDynamicsPageState._fmtAmount(m.totalAmount)}",
+            value: m.count == 0
+                ? "—"
+                : "¥${MobileDynamicsPageState._fmtAmount(m.totalAmount)}",
             hint: m.count == 0 ? "暂无识别到的账单" : "${m.count} 笔 · ${m.momLine}",
           ),
           const SizedBox(height: 10),

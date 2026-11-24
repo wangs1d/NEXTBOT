@@ -346,25 +346,21 @@ export class HuaweiPushProvider implements PushProvider {
               // 顶部横幅弹窗（heads-up）：channel_id 指向客户端 init 时创建的
               // HIGH 重要性渠道（LocalNotificationService："proactive"）
               channel_id: "proactive",
-              // 点击行为（2026-11-30 §4.4 行 2 修复）：官方取值 0=打开应用首页 /
-              // 1=打开应用自定义页面 / 2=打开指定网页 / 3=清除通知。
-              // 这里此前写的是 **3 = 清除通知**——用户点一下厂商通知，横幅就地消失、
-              // App 根本不启动，§4.4「点开 → 决策半屏页」这条路在源头就断了
-              // （而且完全无日志：华为侧这属于「用户已处理」，回执不会报错）。
-              // 改成 0：点开即拉起 App。
-              // 为什么不用 1（自定义页面 + intent 带 intentId）：那要求原生注册一个
-              // 能收 data URI 的 Activity/IntentFilter（本期不动 android/**），且
-              // Dart 侧没有深链接监听器。intentId 的实际落地走「拉起 → 主 WS 连上
-              // → session.init 补投带 actionIntent 的那条（pushed:true）→ 半屏页」，
-              // 见 proactive-pipeline.attemptOfflinePush 与客户端
-              // mobile_chat_controller._maybeRequestDecisionSheet。
-              click_action: { type: 0 },
+              // 点击行为：华为 Push API v1 的 ClickAction.type 合法取值为
+              // 1=自定义动作（必填 intent）/ 2=打开 HTTPS 网页（必填 url）/
+              // 3=启动本地应用 / 4=富媒体（必填 rich_resource）。**没有 0**——
+              // 0 是 HarmonyOS NEXT 的 clickAction.actionType 取值，不是这个字段。
+              // 此前写 0 导致华为一律回 80100003「no valid click type」，全部推送
+              // 失败（2026-11-24 实测：改为 3 后返回 80000000 Success）。
+              // 选 3：点开通知即拉起 App，不需要原生深链；deviceId/intentId 随 data
+              // 下发但 type=3 不透传，决策仍走「拉起 → 半屏页」链路。
+              click_action: { type: 3 },
               // 通知 id 统一口径（2026-11-13）：与 App 自建通知、华为推送、Webhook
               // 三处同源——此前这里用 title+body 哈希、App 侧用 deliveryId.hashCode，
               // 后果是同一条决策跨层投递变成两条通知（其中一条的按钮是死的）。
               notify_id: notificationIdFor(pushNotificationKey(input)),
-              // 标识符随通知一起下去（2026-11-30 §4.4）：click_action.type=0 时
-              // 华为不会把它透传给应用（透传需要 type=1 的自定义 intent，见上），
+              // 标识符随通知一起下去：click_action.type=3 时
+              // 华为不会把它透传给应用（透传需要 type=1 的自定义 intent），
               // 所以这一份是给「以后接原生深链」留的口子；当前客户端拿 intentId 的
               // 真实路径是重连补投（replay 带 pushed:true + actionIntent）。
               // 字段名与客户端 LocalNotificationService 的通知载荷**逐字一致**
@@ -459,6 +455,14 @@ export class MobilePushService {
     return list;
   }
 
+  /**
+   * token 被清除后的通知钩子（2026-11-24 闭环自愈）：厂商回执确认 token 死亡
+   * → 清出注册表时触发。装配层把它接到 WS 控制事件 push.re_register 上，
+   * 让在线设备立即重新申请/上报 token——否则表里没 token 后所有系统推送
+   * no_registered_token 静默丢弃，客户端毫无感知（2026-11-24 实际事故）。
+   */
+  onTokenPruned?: (actorId: string, provider: string, token: string) => void;
+
   /** 按 token 值清理失效条目（华为回执 result=1/2/5 = token 失效/被卸载/不匹配） */
   pruneToken(token: string): number {
     let removed = 0;
@@ -468,6 +472,13 @@ export class MobilePushService {
         removed += list.length - next.length;
         if (next.length === 0) this.tokens.delete(actorId);
         else this.tokens.set(actorId, next);
+        // 通知钩子：按 provider 派发（同 token 只属一个 provider，取被删条目）
+        const prunedProvider = list.find((e) => e.token === token)?.provider ?? "";
+        try {
+          this.onTokenPruned?.(actorId, prunedProvider, token);
+        } catch {
+          /* 钩子失败不影响清理 */
+        }
       }
     }
     if (removed > 0) {

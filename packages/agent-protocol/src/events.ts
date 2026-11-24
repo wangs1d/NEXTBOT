@@ -445,6 +445,15 @@ export const ServerEventType = {
    */
   LocationTrackingConfig: "agent.location_tracking_config",
   /**
+   * 推送 token 重注册指令（2026-11-24 token 闭环自愈）：服务端收到厂商回执
+   * （result=1/2/5）确认某 actor 的推送 token 已死亡并清出注册表后，向该
+   * actor 的在线设备下发此事件。客户端收到后必须清掉本地注册状态并重新向
+   * 厂商 SDK 申请 token、重新上报——否则离线推送从此静默瘫痪（表里没有
+   * 可用 token，所有系统推送 no_registered_token 丢弃），而客户端毫无感知。
+   * payload: { provider: string, reason: "dead_token_pruned" }
+   */
+  PushReRegister: "push.re_register",
+  /**
    * 地理围栏同步（2026-11-05 持续感知重构）。
    *
    * 服务端把用户的家/公司/自定义围栏下发，客户端注册为**系统级围栏**

@@ -22,6 +22,7 @@ import type { LocationCoordinator } from "./location-coordinator.js";
 import type { ActorContextService } from "./actor-context-service.js";
 import type { LocationHistoryService } from "./location-history-service.js";
 import type { PlaceSemanticsService } from "./place-semantics-service.js";
+import type { TaskCompletionPushPort } from "./task-completion-push.js";
 import type { TurnLocationHook } from "./turn-location-hook.js";
 import { selectPromptLocation } from "./turn-location-hook.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
@@ -260,7 +261,6 @@ import type { AgentTaskOrchestratorDeps, RunTaskOptions } from "./agent-task-orc
 import { getAgentTaskStore } from "./agent-task-store.js";
 import { getRuntimeKernel } from "../agent/runtime-kernel.js";
 import { getTaskHub } from "../task-plane/task-hub.js";
-import { getTaskOutbox } from "../task-plane/task-outbox.js";
 import { broadcastTaskUpdate } from "../task-plane/task-events.js";
 import { acquireBgTaskSlots } from "./actor-quota.js";
 import { ToolContextFactory } from "../agent/execution/tool-context-factory.js";
@@ -378,6 +378,8 @@ export class AgentCore {
   private turnLocationHook: TurnLocationHook | null = null;
   private moodInferenceService: MoodInferenceService | null = null;
   private wsRegistry: ClientPushPort | null = null;
+  /** 任务完成系统推送端口（bootstrap 晚绑定：主动推送服务在装配下段创建） */
+  private taskCompletionPush: TaskCompletionPushPort | null = null;
   private lifeSignalHubService: LifeSignalHubService | null = null;
   /** BrainCenter 引用：可用时走 cognize() 端到端认知入口替代认知层切片 */
   private brainCenter: BrainCenter | null = null;
@@ -522,6 +524,11 @@ export class AgentCore {
         ? (record) => broadcastTaskUpdate(registry, record)
         : null,
     );
+  }
+
+  /** 任务完成系统推送：晚绑定注入；未注入时任务完成只走 WS 直投。 */
+  setTaskCompletionPush(port: TaskCompletionPushPort | null): void {
+    this.taskCompletionPush = port;
   }
 
   /** 在 bootstrap 注册 LifeSignalHub 后注入，用于在情绪推理后发布 mood 信号。 */
@@ -3018,12 +3025,14 @@ if (route.plane === "task") {
       finalText: string,
       mediaCards: MediaCardItem[] = [],
       followups: string[] = [],
+      ok = true,
     ): void => {
       // 定稿前放行流式 guard 扣留的普通残段（未闭合的标记块直接丢弃）。
       flushStream();
       try {
-        // 投递失败（用户离线：trySend false / registry 缺失）→ TaskOutbox 暂存，
-        // 客户端重连（session.init）时重放——离线完成的任务结果不再静默丢失。
+        // 投递失败（用户离线：trySend false / registry 缺失）即丢弃这一路 WS 直投。
+        // 任务结果已由 appendTaskRecord 落盘到对话 thread，重开 App 拉历史可见；
+        // 不再入 TaskOutbox 等重连重放（2026-11-24 用户拍板：重连不补投旧内容）。
         // 回复信封 blocks（v2 统一序列）：与 WS 对话路径同构——媒体段按交错锚定
         // 编入 blocks，卡片与照片同一条序列下发。原先 blocks 只装 text/card，
         // 客户端优先 blocks 即丢任务结果照片；renderBlocks 一并下发，旧客户端
@@ -3055,36 +3064,31 @@ if (route.plane === "task") {
           followups,
           legacyBlocks: buildReplyBlocks(finalText, renderBlocks),
         });
-        const delivered = registry?.trySend(
-          sessionId,
-          JSON.stringify({
-            type: ServerEventType.ChatAssistantDone,
-            payload: {
-              sessionId,
-              messageId,
-              toolCalls: [],
-              source: "task_plane",
-              ...expandEnvelopeToDoneFields(taskEnvelope),
-              renderEnvelope: compactEnvelopeForWire(taskEnvelope),
-            },
-          }),
-        );
-        if (!delivered) {
-          getTaskOutbox().enqueue(sessionId, {
-            messageId,
-            finalText,
-            mediaCards,
-            ...(summaryCard ? { summaryCard } : {}),
-            ...(followups.length > 0 ? { followups } : {}),
-          });
-        }
-      } catch {
-        getTaskOutbox().enqueue(sessionId, {
-          messageId,
-          finalText,
-          mediaCards,
-          ...(followups.length > 0 ? { followups } : {}),
+        const delivered =
+          registry?.trySend(
+            sessionId,
+            JSON.stringify({
+              type: ServerEventType.ChatAssistantDone,
+              payload: {
+                sessionId,
+                messageId,
+                toolCalls: [],
+                source: "task_plane",
+                ...expandEnvelopeToDoneFields(taskEnvelope),
+                renderEnvelope: compactEnvelopeForWire(taskEnvelope),
+              },
+            }),
+          ) ?? false;
+        // 任务跑完→系统推送（2026-11-24 用户拍板）：在线已 WS 送达就不重复弹；
+        // 离线推一次标题+摘要，失败即丢。结果本身已在 thread 落盘，重开 App 可见。
+        this.taskCompletionPush?.({
+          actorId: sessionId,
+          text: finalText,
+          ok,
+          onlineDelivered: delivered,
         });
+      } catch {
+        /* 信封构造异常：结果同样已在 thread 落盘，不补投 */
       }
     };
 
@@ -3350,7 +3354,7 @@ if (route.plane === "task") {
           } catch {
             /* thread 并入失败不影响结果投递 */
           }
-          pushDone(notice);
+          pushDone(notice, [], [], false);
         }
       } catch (err) {
         // 取消后的异常（含短路退出触发的竞态）不覆盖 cancelled 终态、不投递兜底文案
@@ -3371,7 +3375,7 @@ if (route.plane === "task") {
           } catch {
             /* thread 并入失败不影响结果投递 */
           }
-          pushDone(notice);
+          pushDone(notice, [], [], false);
         }
       } finally {
         releaseTaskSlot();

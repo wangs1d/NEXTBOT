@@ -4,7 +4,7 @@
 //
 // 一次请求聚合 Agent 主动性产出，客户端免多次往返：
 //   bills   账单汇总 + 最近条目（bill-parcel-ledger；主动记账）
-//   monthly 「{月份}小结」卡（PRD §9 钱的月报；账单区块顶部）
+//   monthly 「{月份}小结」月报（PRD §9 钱的月报；客户端顶部账单汇总卡 + 明细页）
 //   parcels 快递汇总 + 待取件列表（同台账；快递聚合，待取件排前）
 //   alerts  未决提醒 + 主动动作足迹（attentionStore + activityStore）
 //   mail    邮件流最近要事（跨源采集库 mail 流；low 信号不进动态页）
@@ -121,8 +121,8 @@ export function registerDynamicsRoutes(app: FastifyInstance, deps: DynamicsRoute
             recent: summary.recent.filter((e) => e.category === "bill").slice(0, limit),
           }
         : { count: 0, totalAmount: 0, amountCount: 0, byType: [], largest: null, recent: [] },
-      // §9 钱的月报：账单区块顶部的「{月份}小结」卡。
-      // 台账缺失时给 null 而不是零值卡——客户端据此整块不渲染，比显示一排 0 诚实。
+      // §9 钱的月报：客户端顶部「账单月结」汇总卡 + 月报明细页的数据源。
+      // 台账缺失时给 null 而不是零值——客户端据此退回窗口合计口径，不显示一排 0。
       monthly: ledger
         ? await buildMonthlyBillSummary(
             { ledger, subscriptionAudit: deps.subscriptionAudit ?? null },
