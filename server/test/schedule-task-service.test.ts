@@ -128,7 +128,8 @@ test("emits task change events for create update and delete", async () => {
   });
 });
 
-/** 2026-10-21 文案契约闸：模型直填的回声文案（原句/半截原句）落库前重推导。 */
+/** 2026-10-21 文案契约闸：模型直填的回声文案（原句/半截原句）落库前置空。
+ * 2026-11-25 定调：文案只由模型写，闸口不再用模板重新包装（「该吃饭啦」类）。 */
 test("normalizes echoed reminder copy at the write gate", async () => {
   await withTempScheduleFile(async (service) => {
     const task = await service.createTask({
@@ -142,7 +143,8 @@ test("normalizes echoed reminder copy at the write gate", async () => {
       reminderMessage: "的11点03分提醒我吃饭",
     });
     assert.equal(task.shortTitle, "吃饭");
-    assert.equal(task.reminderMessage, "该吃饭啦");
+    // 回声置空：到点展示端落 description/shortTitle 中性字段，不造口吻
+    assert.equal(task.reminderMessage, undefined);
 
     // 干净的裸事项词不是回声：原样放行（闸口只拦回声，不做风格改写）
     const bare = await service.createTask({

@@ -25,6 +25,8 @@ object ShareIntakeStore {
     private const val KEY_QUEUE = "queue"
     private const val KEY_ENTRY = "entry"
     private const val KEY_ROUTE = "route"
+    private const val KEY_PUSH_INTENT = "push_intent"
+    private const val KEY_PUSH_DELIVERY = "push_delivery"
 
     /** 队列上限：一次分享最多 8 张图，攒 8 条已经远超正常使用 */
     private const val MAX_RECORDS = 8
@@ -100,6 +102,18 @@ object ShareIntakeStore {
     }
 
     /**
+     * 厂商推送点击带下来的意图与投递 id（2026-11-25「点通知直达」）。
+     * 与 route 同一条队列：点开通知 → 冷启动/热启动都写在这里 → Dart 取件后
+     * 拉取意图（GET /api/action-intents/:id）端出决策半屏页。
+     */
+    fun setPushTarget(ctx: Context, intentId: String?, deliveryId: String?) {
+        val edit = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+        if (!intentId.isNullOrEmpty()) edit.putString(KEY_PUSH_INTENT, intentId)
+        if (!deliveryId.isNullOrEmpty()) edit.putString(KEY_PUSH_DELIVERY, deliveryId)
+        edit.apply()
+    }
+
+    /**
      * 一次取走全部待发内容：`{"shares": [...], "entry": String?, "route": String?}`。
      * 取走即清空——Dart 拿到之后负责删掉缓存图片（[cleanFiles]），
      * 半途而废（App 崩了）时内容还在原生，下次启动补投。
@@ -124,8 +138,19 @@ object ShareIntakeStore {
         }
         val entry = p.getString(KEY_ENTRY, null)
         val route = p.getString(KEY_ROUTE, null)
-        p.edit().remove(KEY_QUEUE).remove(KEY_ENTRY).remove(KEY_ROUTE).apply()
-        return mapOf("shares" to shares, "entry" to entry, "route" to route)
+        val pushIntent = p.getString(KEY_PUSH_INTENT, null)
+        val pushDelivery = p.getString(KEY_PUSH_DELIVERY, null)
+        p.edit()
+            .remove(KEY_QUEUE).remove(KEY_ENTRY).remove(KEY_ROUTE)
+            .remove(KEY_PUSH_INTENT).remove(KEY_PUSH_DELIVERY)
+            .apply()
+        return mapOf(
+            "shares" to shares,
+            "entry" to entry,
+            "route" to route,
+            "pushIntent" to pushIntent,
+            "pushDelivery" to pushDelivery,
+        )
     }
 
     /** 已交给 Dart 的中转图片就地删掉：缓存目录不该长期留着别人的截图 */

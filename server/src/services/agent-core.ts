@@ -164,8 +164,6 @@ import {
 import { getPromotedToolNames } from "../tools/tool-search/tool-promotion.js";
 import { toolsInDomain } from "../tools/tool-search/tool-category.js";
 import { getBuiltinAgentChatTools } from "../external-model/openai-compatible-tool-loop.js";
-import { receiptProducesCard } from "./receipt-card-projection.js";
-import { isVoiceMode } from "../proactivity/voice-mode-state.js";
 import { describeMemoryAge, semanticFingerprint } from "./memory-record-utils.js";
 
 /** 记忆 domain → 注入 prompt 时的中文类型标签（分类显性化，P4）。 */
@@ -1965,14 +1963,6 @@ if (route.plane === "task") {
     let evidenceInjected = false;
 
     /**
-     * 答案留存记账（2026-10-13 根修：工具轮的答案不进流式通道）：
-     * holdAnswer 置位后，工具循环对「执行过实质工具的轮次」不再直推正文，
-     * 答案随返回值交 done。本标记把「循环确实留存了」如实带给 WS 层——
-     * done 裁据此区分「留存答案（整段替换呈现）」与「出口重写分歧（说话算话
-     * 丢弃）」，不再靠残差比例猜。语音轮不置位 holdAnswer，本标记恒 false。
-     */
-    let answerStreamHeld = false;
-    /**
      * 本轮实际发起过的工具调用摘要（A2 升级段轨迹延续）：onToolExecuteStart 在
      * 工具真正执行前触发，含工具名 + 模型填写的参数；截断参数防长输入刷屏。
      */
@@ -2030,17 +2020,6 @@ if (route.plane === "task") {
         // media/行程回执的数据源——二者职责不同，不能互相短路。
         onToolExecuted: (info: ToolExecutedInfo) => {
           if (toolTraces.length < 16) toolTraces.push(info);
-          // 答案留存记账（2026-10-13 根修；2026-11-10 判据收窄为「回执出卡」）：
-          // holdAnswer="after_tool_use" 时，回执会确定性出卡 = 工具循环已对
-          // 本轮答案关闸（与循环内 answerHeld() 同一判定函数 receiptProducesCard，
-          // 口径恒一致）。不出卡的回执（查记忆/记账/失败回执）不扣流。
-          if (
-            holdAnswer === "after_tool_use" &&
-            info.ok &&
-            receiptProducesCard(info.effectiveTool ?? info.toolName, info.result)
-          ) {
-            answerStreamHeld = true;
-          }
           ctx.orchestrateToolCtx?.onToolExecuted?.(info);
           ctx.backgroundOnToolExecuted?.(info);
         },
@@ -2375,18 +2354,10 @@ if (route.plane === "task") {
     // 取代旧"mode=complex 一律 reasoner"的粗粒度路由（省 token）。
     const resolvedTier: TaskTier =
       mode === "chat" || ctx.turnPlan?.tier === "flash" ? TaskTier.FLASH : TaskTier.PRO;
-    // ── 答案留存（2026-10-13 根修：工具轮的答案不进流式通道）──
-    // 决策点在 agent-core（知道「检索发生在循环外」这一事实）+ 工具循环
-    // （知道「本轮是否执行过工具」），两层合成完整契约：
-    //   - 网页证据轮（前置检索已完成）→ "always"：答案从第一波就留存；
-    //   - 其余轮 → "after_tool_use"：循环内执行过实质工具即留存；
-    //   - 语音轮豁免（TTS 消费流式分句）。
-    // 双车道统一（2026-10-13 真链实证）：天气问句被路由层判 realtime_lookup
-    // → plane=task，答案同样在任务面工具循环产出并流式到对话面——只留 chat
-    // 车道=漏掉用户实际命中的天气路径（真链探针 242 字全量流式反例）。任务面
-    // 的过程反馈走 chat.agent_status/execution_event 结构化事件，不靠打字机。
-    const holdAnswer: "after_tool_use" | undefined =
-      !isVoiceMode(actorId) ? "after_tool_use" : undefined;
+    // ── 答案留存闸已退役（2026-11-25 统一管道）──
+    // 正文恒流式：所有轮次（含任务面/证据轮）的答案一律波内直推，done 只做
+    // 封口附加。任务面的过程反馈走 chat.agent_status/execution_event 结构化
+    // 事件，与正文流式互不挤占。
     const streamOpts: AgentStreamOptions = {
       ...baseStreamOpts,
       ...(effectiveMemory ? { promptContext: { memory: effectiveMemory } } : { promptContext: undefined }),
@@ -2423,9 +2394,6 @@ if (route.plane === "task") {
       // 工具循环内拿不到那个值——这里显式下发，保证「写 / 注入 / 软提示 / 工具面收缩 /
       // 执行守卫」五处同一把钥匙（此前各拼各的，导致计划写了不显示、软提示一直催）。
       ...(ctx.sessionId ? { planSessionKey: ctx.sessionId } : {}),
-      // 答案留存（2026-10-13 根修）：透传进工具循环，provider 白名单转发，
-      // 漏传 = 留存静默失效（见 AgentStreamOptions.holdAnswer 注释）。
-      ...(holdAnswer ? { holdAnswer } : {}),
       // 语感治理 A（2026-10-06）：chat 车道主生成显式置位采样放开（temp 0.85 +
       // frequency_penalty 0.4，env 可调）；任务面不置位保持默认采样。
       ...(this.isChatLane(mode) ? { chatLaneSampling: true } : {}),
@@ -2772,11 +2740,6 @@ if (route.plane === "task") {
     });
     if (attemptedToolCalls.length > 0) {
       reply.attemptedToolCalls = attemptedToolCalls;
-    }
-    // 答案留存（2026-10-13 根修）：如实告知 WS 层「答案没走流式通道」，
-    // done 裁据此走整段替换（卡片+正文同帧）而非说话算话丢弃裁决。
-    if (answerStreamHeld) {
-      reply.answerStreamHeld = true;
     }
     return reply;
   }

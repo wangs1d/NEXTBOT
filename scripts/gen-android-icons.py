@@ -36,6 +36,21 @@ def mark_alpha(img: Image.Image) -> Image.Image:
     return a.point(lambda v: 0 if v < 32 else v)
 
 
+def full_mark_art() -> Image.Image:
+    """256 原尺寸上的白色字标（遮罩已按原图亮度精确抠好）。
+
+    必须先抠再缩放：若先缩到目标尺寸再抠，像 xxhdpi(259px，接近 1:1 放大)
+    会因 LANCZOS 在盘边产生亮度过冲，>32 的杂点把 bbox 撑满整块盘，
+    前景在桌面上表现为一大块白（2026-11-26 实证）。
+    """
+    art = Image.new("RGBA", src.size, (255, 255, 255, 0))
+    art.putalpha(mark_alpha(src))
+    return art
+
+
+_MARK_ART = full_mark_art()
+
+
 def optical_offset() -> tuple[float, float]:
     """量出 N 主干（去掉细斜线）的中心相对原图中心的偏移，用于把字标摆到正中间。"""
     a = mark_alpha(src)
@@ -59,13 +74,13 @@ for name, k in DENS.items():
     # 2) adaptive 前景：只留字标，位置/比例与原图一致，画布 108dp
     canvas = round(CANVAS_DP * k)
     art_px = round(canvas * ART_SCALE)
-    art = src.resize((art_px, art_px), Image.LANCZOS)
-    alpha = mark_alpha(art)
+    art = _MARK_ART.resize((art_px, art_px), Image.LANCZOS)
+    alpha = art.getchannel("A")
 
     fg = Image.new("RGBA", (canvas, canvas), (255, 255, 255, 0))
     off_x = round((canvas - art_px) / 2 + SHIFT_X * art_px / src.width)
     off_y = round((canvas - art_px) / 2 + SHIFT_Y * art_px / src.height)
-    fg.paste(Image.new("RGBA", (art_px, art_px), (255, 255, 255, 255)), (off_x, off_y), alpha)
+    fg.paste(art, (off_x, off_y), art)
     fg.save(f"{RES}/mipmap-{name}/ic_launcher_foreground.png")
 
     # 自检：合成后的可见字标占画布比例

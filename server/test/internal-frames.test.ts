@@ -267,3 +267,24 @@ test("流式：正文里出现裸 <system> 前缀（不是帧）时不误吞", (
   const out = feedChunks(["<system>", "\n王哥，这趟行程我按你的节奏排好了。"]);
   assert.ok(out.includes("王哥"));
 });
+
+test("流式净化器 flush：末尾待定正文放出，半截标签/系统帧不漏", () => {
+  // 直通后 flush 不得重发（否则定稿比用户看到的多一份）
+  const s1 = createStreamControlTagSanitizer();
+  assert.equal(s1("查到了，兴义今天小雨"), "查到了，兴义今天小雨", "正常正文即时放行");
+  assert.equal(s1.flush(), "", "直通后 flush 输出为空");
+
+  // 流尾只剩半截 system opener：flush 不得把它放出来
+  const s2 = createStreamControlTagSanitizer();
+  assert.equal(s2("<system-"), "", "半截 system opener 扣住");
+  assert.equal(s2.flush(), "", "半截 opener 不因 flush 漏出");
+
+  const s3 = createStreamControlTagSanitizer();
+  assert.equal(s3("[Topic"), "", "控制标签前缀滞留");
+  assert.equal(s3.flush(), "", "半截控制标签不漏");
+  assert.equal(s3.flush(), "", "缓冲只放一次");
+
+  const s4 = createStreamControlTagSanitizer();
+  s4("<system>\n内部帧体");
+  assert.equal(s4.flush(), "", "未终结系统帧体不因 flush 漏出");
+});

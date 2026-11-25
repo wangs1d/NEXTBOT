@@ -14,6 +14,7 @@ import type {
   IntelJudgeResult,
 } from "./intel-types.js";
 import { formatDistance, formatRelativeClock } from "./intel-time.js";
+import { sharedContextPromptLines } from "../context-snapshot.js";
 
 export type IntelJudgeDeps = {
   /** 主聊天模型（晚绑定：运行期取；null/未启用 = 判断不可用） */
@@ -75,6 +76,14 @@ export function buildJudgeUserPrompt(input: IntelJudgeInput): string {
   lines.push(`现在：${localIso(input.now)}（${input.timezone}）`);
   lines.push(`用户在场：${input.presence}；正在对话：${input.inConversation ? "是" : "否"}`);
   if (input.styleBrief?.trim()) lines.push(`用户画像：${input.styleBrief.trim()}`);
+  // 共享上下文（与 AgentPulse 同一份事实）：他此刻在哪/在干什么/什么还没聊完。
+  // 只作为「这条消息对他是否真的重要」的判断依据，不改变取舍口径。
+  const shared = input.shared ? sharedContextPromptLines(input.shared) : [];
+  if (shared.length) {
+    lines.push("");
+    lines.push("共享上下文（与另一个主动性入口同一份事实）：");
+    lines.push(...shared);
+  }
   const spoken = input.feedback.recentSpoken;
   lines.push(
     spoken.length

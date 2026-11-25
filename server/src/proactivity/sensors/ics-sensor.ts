@@ -3,6 +3,7 @@
 // 日历订阅（.ics）此前自行轮询 + 自行落成日程，产出不进统一采集层，
 // 导致「邮件里的航班 + 日历里的行程」无法跨源拼图。本适配器只做形状转换。
 import type { ProactiveSensor, Signal } from "./types.js";
+import { orderEventKey, transportEventKey } from "./event-key.js";
 
 /** IcsSubscriptionService 的只读取数口 */
 export interface IcsReadPort {
@@ -35,6 +36,11 @@ export class IcsSensor implements ProactiveSensor {
       // 事件键天然唯一（feed + occurrence key）→ 稳定指纹；带上归属，
       // 两个账号订同一个公开日历时不会互相把对方的信号去重掉
       fingerprint: `ics:${e.actorId}:${e.feed}:${e.key}`,
+      // 事件键（2026-11-25）：与邮件共用航班/车次/订单锚点，跨源同一件事只存一条。
+      eventKey:
+        transportEventKey(`${e.summary} ${e.location ?? ""}`, e.startMs) ??
+        orderEventKey(e.summary) ??
+        `ics:${e.actorId}:${e.feed}:${e.key}`,
       salience: e.startMs - Date.now() <= 60 * 60_000 ? "high" : "low",
       delta: `日历事件：${e.summary}${e.location ? `（${e.location}）` : ""}`,
       payload: {

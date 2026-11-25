@@ -32,6 +32,8 @@ export type ReminderPushDeps = {
     importance: string;
     kind: string;
     deliveryId: string;
+    /** 透传写穿本地对话的稳定 id（同一条提醒多次尝试只落一条） */
+    stableKey?: string;
   }) => Promise<{ ok: boolean; provider?: string; reason?: string }>;
   now?: () => number;
 };
@@ -58,6 +60,8 @@ export async function pushReminderDirectly(
     importance: input.preReminder ? "medium" : "high",
     kind: "schedule_reminder",
     deliveryId,
+    // 透传写穿本地对话的稳定 id：同一条提醒只落一条（与落流那条消息同一口径）
+    stableKey: reminderStableMessageId(input.taskId, input.runAt, input.preReminder),
   });
   if (!result.ok) {
     console.log(

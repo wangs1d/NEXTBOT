@@ -110,7 +110,6 @@ export const digestRoundupScene: RenderScene = {
   phase: "pre",
   produces: {
     forms: ["structured"],
-    singleBubble: true,
     promptBoundary: DIGEST_ROUNDUP_BOUNDARY,
   },
   contract:

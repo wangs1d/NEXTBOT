@@ -32,6 +32,7 @@ import type {
   AttentionDecision,
 } from "./attention-store.js";
 import { URGENCY_RANK } from "./attention-store.js";
+import { buildAssistantTurnFrames } from "../agent/assistant-turn-publisher.js";
 
 export type ReachInput = {
   actorId: string;
@@ -217,17 +218,23 @@ export class ReachRouter {
     try {
       switch (channel) {
         case "chat": {
-          const sent =
-            (await this.channels.sendChat?.(actorId, {
-              type: "agent.proactive_message",
-              payload: {
-                title: record.title,
-                text: record.summary,
-                channel: "websocket",
-                reason: `attention:${record.kind}`,
-                attentionId: record.id,
-              },
-            })) ?? false;
+          // 与对话回复同一套出口（2026-11-25）：done + bubbles，不再发单泡。
+          const built = buildAssistantTurnFrames({
+            sessionId: actorId,
+            traceId: `attention-${record.id}`,
+            finalText: record.summary,
+            proactive: {
+              deliveryId: `attention_${record.id}`,
+              title: record.title,
+              kind: `attention:${record.kind}`,
+              why: `attention:${record.kind}`,
+              importance: record.urgency === "interrupt" ? "high" : "medium",
+            },
+          });
+          let sent = false;
+          for (const frame of built.frames) {
+            sent = (await this.channels.sendChat?.(actorId, JSON.parse(frame))) ?? false;
+          }
           if (!sent) {
             // 用户不在线：离线推送兜底
             await this.sendPushFor(record, "high");

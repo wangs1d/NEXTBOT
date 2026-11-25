@@ -189,7 +189,9 @@ test("旁路生产者（直接 submitProposal）也走共享层：读走预留�
 
     assert.equal(decision.verdict, "delivered");
     const payload = JSON.parse(delivered[0].json);
-    assert.equal(payload.payload.text, "搬家这事有新动静", "投递正文保持原样（不拼「（另：…）」）");
+    assert.equal(payload.type, "chat.assistant_done");
+    assert.equal(payload.payload.finalText, "搬家这事有新动静", "投递正文保持原样（不拼「（另：…）」）");
+    assert.equal(payload.payload.proactive?.deliveryId != null, true);
     assert.equal(store.stats().findings.pending, 0, "说出口后未消费发现被消费（不会在别处再各说一遍）");
   } finally {
     rmSync(dir, { recursive: true, force: true });

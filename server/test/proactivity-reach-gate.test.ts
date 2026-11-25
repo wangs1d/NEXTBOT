@@ -86,6 +86,7 @@ function makeHarness(opts: {
               return { ok: true, provider: "test" };
             },
           },
+          transcriptAppend: () => {},
         }
       : {}),
     ...(opts.lastConversationAt ? { lastConversationAt: opts.lastConversationAt } : {}),
@@ -198,14 +199,15 @@ test("离线 social → 走手机系统推送（不落站内信），并标记�
   }
 });
 
-test("离线 social 无推送通道 → 维持挂起（绝不落站内信）", async () => {
+test("离线 social 无推送通道 → 丢弃（不挂起、不落站内信）", async () => {
   const h = makeHarness(); // 不注入 mobilePush
   try {
     h.pipeline.submitProposal(proposal({ dedupKey: "k_social_no_push" }));
     await new Promise((r) => setImmediate(r));
     assert.equal(h.pushed.length, 0, "无通道不推送");
     assert.equal(h.delivered.length, 0, "离线不直推");
-    assert.equal(h.pipeline.diagnostics().pending.length, 1, "挂起待重连直推，不退化成站内信");
+    // 2026-11-24 定调：系统推送是离线唯一出口，无通道即丢弃——不挂起等重连补旧内容
+    assert.equal(h.pipeline.diagnostics().pending.length, 0, "无通道即丢弃，不挂起重连补投");
   } finally {
     rmSync(h.dir, { recursive: true, force: true });
   }

@@ -38,6 +38,15 @@ import { listFollowUps } from "../src/services/followup-store.js";
 const DAY = 24 * 60 * 60_000;
 const MIN = 60_000;
 
+/** 投递帧正文（对话契约：done 的 finalText / bubbles） */
+const textOf = (json: string): string => {
+  const p = (JSON.parse(json) as { payload?: Record<string, unknown> }).payload ?? {};
+  const bubbles = Array.isArray(p.bubbles) ? (p.bubbles as Array<{ text?: string }>) : [];
+  return bubbles.length
+    ? bubbles.map((b) => String(b.text ?? "")).join("")
+    : String(p.finalText ?? "");
+};
+
 const tmpDirs: string[] = [];
 function tmp(prefix: string): string {
   const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -551,7 +560,7 @@ test("管道：跟进不当场弹，到点随下班触点说一次，再 flush �
   now.value = THU_LEAVE_WORK + MIN;
   pipeline.flushDue(now.value);
   assert.equal(delivered.length, 1);
-  const text = String(JSON.parse(delivered[0]!.json).payload?.text ?? "");
+  const text = textOf(delivered[0]!.json);
   // 锚点按「开口那一天」说：面试是今天下午，晚上收尾时说的是「今天」，不是抽取那天的「明天」
   assert.match(text, /今天面试辛苦了/);
   assert.ok(!text.includes("明天"), `话术还带着抽取时的措辞：${text}`);
@@ -588,7 +597,7 @@ test("管道：跟进不当场弹，到点随下班触点说一次，再 flush �
         .map((d) => [d.proposal?.dedupKey, d.verdict, d.reasonChain, d.deliverAfter]),
     )}`,
   );
-  assert.match(String(JSON.parse(delivered[1]!.json).payload?.text), /今天面试辛苦了/);
+  assert.match(textOf(delivered[1]!.json), /今天面试辛苦了/);
 
   // §3.5「限制」拦的是**同一件事说第二遍**（「同一事件最多跟进 1 次；用户点了『别跟进这个』，
   // 同类事件 30 天内不再跟进；计入社交日预算」，docs line 298-299），没有「同类话一天只说
@@ -625,7 +634,7 @@ test("管道：跟进不当场弹，到点随下班触点说一次，再 flush �
         .map((d) => [d.proposal?.dedupKey?.slice(0, 24), d.verdict, d.reasonChain]),
     )}`,
   );
-  const thirdText = String(JSON.parse(delivered[2]!.json).payload?.text ?? "");
+  const thirdText = textOf(delivered[2]!.json);
   assert.match(thirdText, /聚得开心就好/);
   assert.ok(!thirdText.includes("面试"), `说的是聚会这件事，不是把上一条重复一遍：${thirdText}`);
 });
@@ -674,7 +683,7 @@ test("管道：private 跟进投递出去的正文同样只有那一句提示", 
   now.value = new Date(2026, 10, 26, 19, 0, 0).getTime();
   pipeline.flushDue(now.value);
   assert.equal(delivered.length, 1);
-  const body = String(JSON.parse(delivered[0]!.json).payload?.text ?? "");
+  const body = textOf(delivered[0]!.json);
   assert.equal(body, `小管：${PRIVATE_LOCK_SCREEN_HINT}`, "落到客户端/推送的那一段就是遮罩后的正文");
   assert.ok(!/胃镜|复查|医院/.test(body), `锁屏正文泄露了内容：${body}`);
 });

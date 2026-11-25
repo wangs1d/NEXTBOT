@@ -13,13 +13,12 @@ import {
   sanitizeVisionFramesFromWire,
   type VisionWireInput,
 } from "../../vision/sanitize-vision-frames.js";
-import { formatStatusForDisplay, normalizeDashTypos, stripSentencesAlreadySaid } from "../../utils/text.js";
-import { createStreamMarkerGuard, stripDisplayProtocol } from "../../utils/stream-marker-guard.js";
+import { formatStatusForDisplay, normalizeDashTypos } from "../../utils/text.js";
+import { createStreamMarkerGuard } from "../../utils/stream-marker-guard.js";
 import { wireToolExecuted, wireToolExecuteStart } from "../chat-tool-wire.js";
 import { subscribeTravelProgress } from "../../skills/travel-planning/travel-progress-bus.js";
 import { getTurnWalService } from "../../services/turn-wal-service.js";
-import { resolvePreviewPayloads, wantsTomorrowPreview } from "../../services/tomorrow-preview-bridge.js";
-import { isRoundupQuestion } from "../../render/scenes/digest-roundup.scene.js";
+import { resolvePreviewPayloads } from "../../services/tomorrow-preview-bridge.js";
 import { updateEventAnswerSafely } from "../../agentic-memory/event-store.js";
 import { parseAgentAccessMode } from "../../agent/agent-access-mode.js";
 import {
@@ -48,10 +47,6 @@ import {
 } from "../../agent/master-chat-session.js";
 import { shouldUsePhasedAsyncConversation } from "../../agent/interim-ack.js";
 import { StreamSegmenter, type StreamSegmentEmitMeta } from "../../agent/stream-segmenter.js";
-import {
-  decideTextLane,
-  type TextLanePlan,
-} from "../../agent/bubble-policy.js";
 import { BubbleTracker } from "../../agent/bubble-tracker.js";
 import {
   UtteranceAssembler,
@@ -88,11 +83,8 @@ import {
   extractNextUpSuggestions,
   normalizeReplyCardLayout,
 } from "../../services/reply-envelope.js";
-import {
-  buildRenderEnvelope,
-  expandEnvelopeToDoneFields,
-  compactEnvelopeForWire,
-} from "../../render/protocol.js";
+import { buildRenderEnvelope } from "../../render/protocol.js";
+import { buildChunkFrame, buildDoneFrame } from "../../agent/assistant-turn-publisher.js";
 import {
   buildReminderCardUpdate,
   rememberReminderCards,
@@ -687,23 +679,11 @@ async function processBatchedMessage(
   // done 载荷带 bubbles 对账数组。非拆分轮所有字段与原协议完全一致。
   // 分配/记账逻辑见 BubbleTracker（bubble-tracker.ts，含独立单测）。
   const bubbleTracker = new BubbleTracker(assistantMessageId);
-  // 气泡车道（唯一出口，bubble-policy.decideTextLane，2026-11-25 分泡管道
-  // 架构收敛）：**首个文字块外发之前定死，整轮不变**。
-  // - 气泡车道（bubbles）：分段器切出的信息块经 chat.assistant_chunk 实时
-  //   落屏成独立气泡块（id 由 BubbleTracker 统一分配，assistant-$traceId-bN）。
-  //   流式块就是最终呈现——done 只做对账定稿，绝不重建/替换/塌缩。
-  // - 单条车道（single）：不发文字块，整段正文由 assistant_done 一次交付
-  //   （卡 / 结构化 / 整块交付场景：语音轮、任务面轮、明日速览、盘点清单）。
-  // 语音数据帧（chat.assistant_speech）两种车道照常流式——车道闸只关
-  // 文字块出口，不关语音。
-  // 初值只含路由前可判的信号；路由决策就绪后在下方 .then 里精化（首个主
-  // 回复 delta 必然晚于路由，无半轮切档竞态）。
-  let textLane: TextLanePlan = decideTextLane({
-    voiceMode: isVoiceMode(msgActor),
-    segmentable: !batched.planContinuation,
-    sceneSingleBubble: wantsTomorrowPreview(batched.text),
-  });
-  let textStreamEnabled = textLane.lane === "bubbles";
+  // 统一管道（2026-11-25）：正文=流式泡（恒流式），结构化产物=done 封口附件。
+  // 只要有文字 delta 就经分段器实时落屏（chat.assistant_chunk），不存在任何
+  // 「关文字出口」的车道闸；done 阶段做三件事——残差回填（已说过的句子不再
+  // 重复）、剥协议标记、把卡片/媒体/renderBlocks 附加到最后一个气泡上。
+  // 语音数据帧（chat.assistant_speech）同样恒流式，不设闸。
 
   // 发言模型（2026-10-09 重复回复根源修复）：一轮 = 一条发言（utteranceId =
   // 本轮 traceId，客户端据此把多泡归组成同一条消息）。气泡是发言的**视图分段**，
@@ -712,17 +692,17 @@ async function processBatchedMessage(
   // 设计说明见 agent/utterance-assembler.ts；不变量 I1-I5 有单测。
   const utterance = new UtteranceAssembler({ utteranceId: batched.originalMessageId });
 
-  // 流式出口静默 + 撤回（2026-10-13 根修后收窄）：工具卡片轮的「不流式」
-  // 已由工具循环 holdAnswer 在通道上根除（见 agent-core / tool-loop），本层
-  // 机制只剩一个出口防御职责——流中出现的模型自产结构化标记 / 垃圾回显
-  // （recap echo）。触发时撤回已流文本（chat.stream_reset）、清空气泡账本，
-  // 最终内容由 assistant_done 结构化一次性下发（卡片 + renderBlocks + 正文
-  // 同帧呈现）——撤回轮回到单条车道语义，不存在「泡在、done 翻案」。
+  // 撤回 = 垃圾回收（2026-11-25 统一管道收敛）：本层机制只剩一个出口防御
+  // 职责——流中出现的垃圾回显（recap echo，历史轮结论被模型复述回来）。触发
+  // 时撤回已流文本（chat.stream_reset）、清空气泡账本，该轮由 assistant_done
+  // 的残差回填按普通文本轮收口。模型自产结构化标记不再触发撤回——统一管道
+  // 下正文恒流式，标记在 chunk 出口被 streamMarkerGuard 剥除，卡片照常 done 附加，
+  // 不存在「泡在、done 翻案」。
   // 识图轮降级为普通文本轮（2026-11-10 根修）：用户发照片的回复直接以正文
   // 流式送达（照片经 visionFrames 进模型上下文，视觉模型照常作答）。不再
   // done 阶段确定性附「识图照片卡」——那会把真正的回复正文整段吞进卡片形态
   // （客户端 image_result 只渲染 caption），且照片 URL 手机端加载不出，只剩
-  // 空占位 + 一句描述。流中若出现模型自产结构化标记，仍由下方 guard 撤回静默。
+  // 空占位 + 一句描述。
   let suppressStreamForCards = false;
   // 流式文字块已外发后命中防御闸时，用既有 chat.stream_reset 撤回已落屏的
   // 文字（不新增事件类型）；气泡账本清零后 done 以单条收口。
@@ -808,10 +788,10 @@ async function processBatchedMessage(
     meta?: StreamSegmentEmitMeta,
   ): void => {
     // 分段器回调 = 流式数据出口。全部净化照旧（时间戳帧 / 内部上下文帧 /
-    // recap 回显 / 展示标记 guard / 卡片轮静默），净化后消费两路：
+    // recap 回显），净化后消费两路：
     // - 语音数据帧（chat.assistant_speech，逐句合成 TTS）；
-    // - 文字块（chat.assistant_chunk）：闲聊轮实时落屏，块 id 与 done 的
-    //   bubbles 同源（方案 C：同一 block 身份原地升级，不重建）。
+    // - 文字块（chat.assistant_chunk）：恒流式落屏（统一管道 I1），块 id 与
+    //   done 的 bubbles 同源（方案 C：同一 block 身份原地升级，不重建）。
     if (isStale()) return;
     chunkSeq += 1;
     let cleanedChunk = stripLeadingTimestampFrames(chunk);
@@ -822,38 +802,30 @@ async function processBatchedMessage(
       retractAndSuppressStream();
     }
     cleanedChunk = streamMarkerGuard.feed(cleanedChunk);
-    // 结构化标记 / 卡片轮：语音帧与文字块一并静默，避免把 JSON / 卡片标记
-    // 读出来或渲染出来。正文不会丢——done 的定稿文本会完整下发。
-    if (!suppressStreamForCards && streamMarkerGuard.sawStructuredBlock) {
-      retractAndSuppressStream();
-    }
     if (suppressStreamForCards || !cleanedChunk) return;
     // 语音链路仍按信息块实时合成。
     sendSpeechFrame(cleanedChunk, phase, false);
-    // 文字块：仅闲聊轮外发。块边界由分段器决定（bubble:"new" 开新泡，
-    // "continue" 并回当前泡），id 由 BubbleTracker 统一分配。
-    if (!textStreamEnabled) return;
+    // 文字块：恒流式外发（统一管道：闲聊与结构化内容并存于同一轮，泡不回撤）。
+    // 块边界由分段器决定（bubble:"new" 开新泡，"continue" 并回当前泡），id 由
+    // BubbleTracker 统一分配。
     const blockId = bubbleTracker.appendStreamBlock(
       cleanedChunk,
       meta?.bubble !== "continue",
     );
     ctx.socket.send(
-      JSON.stringify({
-        type: ServerEventType.ChatAssistantChunk,
-        payload: {
-          sessionId: msgActor,
-          // messageId 即块 id：客户端按它新建/续写同一条消息。
-          messageId: blockId,
-          blockId,
-          index: bubbleTracker.snapshot.length - 1,
-          traceId: batched.originalMessageId,
-          threadId,
-          chunk: cleanedChunk,
-          sequence: chunkSeq,
-          phase,
-          kind: "text",
-          final: false,
-        },
+      buildChunkFrame({
+        sessionId: msgActor,
+        // messageId 即块 id：客户端按它新建/续写同一条消息。
+        messageId: blockId,
+        blockId,
+        index: bubbleTracker.snapshot.length - 1,
+        traceId: batched.originalMessageId,
+        threadId,
+        chunk: cleanedChunk,
+        sequence: chunkSeq,
+        phase,
+        kind: "text",
+        final: false,
       }),
     );
   };
@@ -1025,28 +997,9 @@ async function processBatchedMessage(
           }),
         );
       }
-      // 车道精化（首个主回复 delta 必然晚于此，无半轮切档竞态）：路由不可
-      // 分段（任务面）→ 单条；盘点类意图只有本轮真带前置检索（searchQuery）
-      // 才收单条车道——纯闲聊的「最近怎么样」留在气泡车道，不吃整块交付
-      // 的延迟。车道在此定死后整轮不再改写，done 不再是第二个裁决者。
-      textLane = decideTextLane({
-        voiceMode: isVoiceMode(msgActor),
-        segmentable: decision.segmentable,
-        sceneSingleBubble:
-          wantsTomorrowPreview(batched.text) ||
-          (isRoundupQuestion(batched.text) && Boolean(decision.searchQuery)),
-      });
-      textStreamEnabled = textLane.lane === "bubbles";
-      if (process.env.CHAT_PRESENTATION_DEBUG === "1") {
-        console.info(
-          `[presentation] trace=${batched.originalMessageId} lane=${textLane.lane} reason=${textLane.reason} (T0)`,
-        );
-      }
       realtimeStream = process.env.AGENT_REALTIME_STREAM !== "0";
-      // 「打字机只在闲聊」（2026-10-13 根修定稿）：卡片轮不流式的决策点不在
-      // WS 层——工具循环对执行过实质工具的轮次关闸（holdAnswer），前置检索
-      // 证据轮由 agent-core 置 "always"，reply.answerStreamHeld 如实带回。
-      // 车道在 T0 已定死（见上方 decideTextLane），路由结论只精化车道本身。
+      // 统一管道下路由决策不再改写呈现出口：正文恒流式、done 恒为封口，
+      // 路由结论只影响工具编排与检索缓冲，不存在「路由关文字出口」的通道。
     })
     .catch(() => {
       /* 路由决策永不 reject（内部降级）；防御性忽略 */
@@ -1078,13 +1031,15 @@ async function processBatchedMessage(
   // 2026-11-05 二轮定稿：流式恒开（delta 实时进分段器 → 语音数据帧）。
   // 退役的只是「把 chunk 落进消息列表逐字渲染」这一显示行为。
   let realtimeStream = true;
+  // 语音轮保持零人工停顿档（2026-09-28 定稿）：TTS 链路不吃泡间停顿，
+  // done 不被 sleep 拖慢；气泡边界照常（句子级分块对 TTS 更友好）。
+  const voiceModeRound = isVoiceMode(msgActor);
   const streamSegmenter = new StreamSegmenter(
     (segment, phase, meta) => sendAssistantChunk(segment, phase, meta),
     {
-      // 块边界即气泡边界（2026-11-25 车道架构）：气泡车道每个信息块推成一个
-      // 独立块 id（流式块即最终呈现）；单条车道（textStreamEnabled=false）走
-      // 普通信息块，仅供语音数据帧消费。
-      bubbleMode: textStreamEnabled,
+      // 恒气泡分段（2026-11-25 统一管道）：每个信息块推成独立块 id（流式块
+      // 即最终呈现），不再按轮次切换分段策略——闲聊与结构化内容并存于同一轮。
+      bubbleMode: true,
       // 2026-09-28 去人工节奏：块间 400ms / 首句后 800ms 停顿与首句按住全部
       // 归零（文字与语音同档）。节奏交给前端打字机逐字渲染；服务端分段器只
       // 负责信息块切分与句级去重，不再引入任何 sleep。
@@ -1106,8 +1061,9 @@ async function processBatchedMessage(
       // 泡间停顿动态化（2026-11-06 用户定稿）：按即将发出的泡的可见字数
       // 计算停顿（22ms/字 + 抖动，0.4~1.5s 夹逼），字多的泡前停久点，
       // 像真人连发几条消息；分泡 chunk 出站即用户看到的节奏，done 不再背延迟。
-      bubbleGapMinMs: 400,
-      bubbleGapMaxMs: 1500,
+      // 语音轮归零（见上方 voiceModeRound）：TTS 节奏由真人语音播放时长保证。
+      bubbleGapMinMs: voiceModeRound ? 0 : 400,
+      bubbleGapMaxMs: voiceModeRound ? 0 : 1500,
       bubbleGapPerCharMs: 22,
     },
   );
@@ -1469,8 +1425,8 @@ async function processBatchedMessage(
             toolName: effectiveTool,
             result: info.result as Record<string, unknown>,
           });
-          // 卡片轮不流式由工具循环 holdAnswer 承担（2026-10-13 根修），
-          // 回执只负责捕获，不再反写流式状态（反应式扣流闸已退役）。
+          // 卡片轮正文照常流式（2026-11-25 统一管道），回执只负责捕获
+          // 供 done 附加卡片，不再反写流式状态（反应式扣流闸已退役）。
         }
         // 捕获天气工具的真实结果，供 done 阶段确定性附 weather 卡（L1，与搜索同理）
         if (info.ok && info.result && effectiveTool === "weather.get_local") {
@@ -1738,7 +1694,7 @@ async function processBatchedMessage(
     // 发言结算（2026-10-09 重复回复根源修复）：本轮唯一发言在此定稿。
     // - 检索轮两段保留：它们是同一条发言的两个分段，客户端按 utteranceId
     //   归组渲染（头像/名字只出现一次），"先应一句、停顿、再细说"的节奏不受损。
-    // - 过程话吸收（collapse）已随 done 塌缩通道退役（2026-11-25 车道架构）：
+    // - 过程话吸收（collapse）已随 done 塌缩通道退役（2026-11-25 统一管道）：
     //   已流式即定稿，呈现层不再删除已落屏内容；结算结果只做观测（done.utterance
     //   遥测字段），不再改写呈现。记账轮的双短泡是「先应一句、再办一句」的真实
     //   节奏，由 utteranceId 归组成同一条发言。
@@ -1848,7 +1804,7 @@ async function processBatchedMessage(
       }
     }
     // 空轮收尾投影（2026-11-09，配「零兜底」铁律）：LLM 整轮未产出正文（主要形态：
-    // holdAnswer 轮末波以 tool_calls 收尾或空 content，tool-loop 波次耗尽 return ""）
+    // 轮末波以 tool_calls 收尾或空 content，tool-loop 波次耗尽 return ""）
     // 时，不再交付空文本——从本轮**成功的**工具回执做确定性投影
     // （formatToolResultAsReply 拼现成数据，零 LLM、不产生第二稿，不违反
     // 「已流式即定稿」），保证终态必含 assistant(content)。没有任何成功回执
@@ -1878,8 +1834,8 @@ async function processBatchedMessage(
     // 明日预览数据面：复用生成前发起的那份取数（已 settle，await 零等待），
     // 不再二次调用 resolvePreviewPayloads——两处各取一次会让 digest 双份/漂移。
     const previewPayloads = await previewPayloadsPromise.catch(() => undefined);
-    // 出口信封的场景 meta 回传（2026-11-09）：singleBubble 禁分泡的判据在
-    // meta.sceneId 上，不回传则 done 帧从 finalText 重拼信封时场景信息丢失。
+    // 出口信封的场景 meta 回传（2026-11-09）：场景信息在 meta.sceneId 上，
+    // 不回传则 done 帧从 finalText 重拼信封时场景信息丢失。
     let doneSceneMeta:
       | {
           sceneId: string;
@@ -1890,9 +1846,10 @@ async function processBatchedMessage(
       | undefined;
     finalText = processor.processAssistantText(finalText, {
       userText: batched.text,
-      // 车道传达（2026-11-25）：气泡车道走 cards-only 渲染（不接管正文形态，
-      // 折叠/引用/结构化重排会让已流式正文翻案）；撤回轮与单条车道走 full。
-      textLane: textStreamEnabled && !suppressStreamForCards ? "bubble" : "single",
+      // 统一管道（2026-11-25）：WS 流式轮恒走 cards-only 渲染——正文形态
+      // 已在流式阶段定稿（不接管正文，折叠/引用/结构化重排会让已流式正文
+      // 翻案）；done 只做封口附加。full 模式仅供非流式调用方使用。
+      textLane: "bubble",
       toolName: reply.toolName,
       toolResult:
         toolResult?.ok && toolResult.result
@@ -1991,7 +1948,7 @@ async function processBatchedMessage(
           toolName: "travel.plan-itinerary",
           result: forcedPlan.result as Record<string, unknown>,
         };
-        // 补卡后 done 信封必然带 card 块：卡是独立块下发，正文按车道定稿，
+        // 补卡后 done 信封必然带 card 块：卡是独立块下发，正文已流式定稿，
         // 不存在「补卡触发整段替换」的路径。
       }
     }
@@ -2279,7 +2236,7 @@ async function processBatchedMessage(
     // 回写 WAL 定稿文本（2026-10-24）：WAL 在 turn-finalizer 落的是模型原文，
     // 这里的卡片附加与协议标记剥离都发生在它之后——不覆盖的话，聊天记录回放
     // 既没有行程卡，又会把 [RENDER_HINT]/[NEXT_UP_*] 当正文漏给用户。
-    // （回写调用在下方气泡车道 seal 判定之后执行——2026-11-13 分泡对账
+    // （回写调用在下方气泡 seal 判定之后执行——2026-11-13 分泡对账
     // 数组随行落盘，需要等 bubbleLaneLive 就绪。）
     updateEventAnswerSafely(msgActor, batched.originalMessageId, finalText);
 
@@ -2334,8 +2291,8 @@ async function processBatchedMessage(
       // 中途推过的结构化卡（购物登录/支付扫码）编成信封 card 块：客户端独立卡
       // 渲染只认 blocks，不进就等于「流式闪一下、定稿消失」。
       ...(pushedCards.length > 0 ? { pushedCards } : {}),
-      // 出口真实命中的场景信息（2026-11-09）：meta.sceneId 是 singleBubble
-      // 禁分泡的唯一判据，preSceneIds 供观测；出口未进渲染决策时缺省。
+      // 出口真实命中的场景信息（2026-11-09）：sceneId 供观测与回溯，
+      // preSceneIds 同为观测；出口未进渲染决策时缺省。
       ...(doneSceneMeta
         ? {
             sceneId: doneSceneMeta.sceneId,
@@ -2346,7 +2303,6 @@ async function processBatchedMessage(
           }
         : {}),
     });
-    const doneEnvelopeFields = expandEnvelopeToDoneFields(renderEnvelope);
 
     // 结构化卡通道：与信封的 card 块同源，客户端可优先按结构化字段渲染，
     // 旧客户端照旧解析文本标记——两条通道不会分叉。
@@ -2358,43 +2314,26 @@ async function processBatchedMessage(
     //   一次整段合成，等价流式退役前的行为，不会「有回复没声音」。
     sendSpeechFrame("", "stream", true, finalText);
 
-    // ── done = 定稿（seal，2026-11-25 车道架构收敛）──────────────────────────
-    // 呈现已在 T0 车道门（decideTextLane）定死：气泡车道的流式块就是最终呈现，
-    // 这里不再重判「分泡 or 渲染」——没有整段替换信号、没有塌缩判定、
-    // 没有按全文重建气泡的路径。收口只做两件事：
-    //   1. 兜底补漏：已流文本之外的「持有残段」（生成器尾包晚到等极端路径；
-    //      正常轮恒为空集）按句去重后并回末泡。补漏源先经展示协议剥离
-    //      （卡片块 / NEXT_UP / 标记 token / 帧线），气泡永不携带标记。
-    //   2. 对账数组照实下发（id + 定稿文本），客户端按 id 原地定稿；缺失块
-    //      （断线补投）由客户端按快照揭示，与流式同一条路径。
-    const bubbleLaneLive =
-      textStreamEnabled && !suppressStreamForCards && bubbleTracker.hasBubbles;
-    if (bubbleLaneLive) {
-      const residualSource = stripDisplayProtocol(
-        stripDsmlToolCallMarkup(stripAllTimestampFrameLines(finalText)),
-      );
-      const residual = stripSentencesAlreadySaid(
-        bubbleTracker.streamedText,
-        residualSource,
-      ).trim();
-      if (residual) {
-        console.log(
-          `[presentation] seal backfill trace=${batched.originalMessageId} +${residual.length} chars`,
-        );
-        bubbleTracker.appendStreamBlock(residual, false);
-      }
-    }
+    // ── done = 定稿（seal，2026-11-25 统一管道）──────────────────────────────
+    // 正文在流式阶段已定稿（统一管道 I1），这里不再重判「分泡 or 渲染」——
+    // 没有整段替换信号、没有塌缩判定、没有按全文重建气泡的路径。收口只做一件事：
+    // 对账数组照实下发（id + 定稿文本），客户端按 id 原地定稿；缺失块（断线补投）
+    // 由客户端按快照揭示，与流式同一条路径。
+    // 不做「已流文本 vs finalText」的比对补推：provider 侧正文单一出口，定稿文本
+    // 就是放出的文本；在这里比对两份文本去补差，只会把已上屏的内容再追加一遍。
+    // 撤回轮（垃圾回收后账本清零）hasBubbles=false，done 回到普通单条收口。
+    const bubbleLaneLive = bubbleTracker.hasBubbles;
 
     // 回写 WAL 定稿文本（2026-10-24）：WAL 在 turn-finalizer 落的是模型原文，
     // 出口的卡片附加与协议标记剥离都发生在它之后——不覆盖的话，聊天记录回放
     // 既没有行程卡，又会把 [RENDER_HINT]/[NEXT_UP_*] 当正文漏给用户。
     // 2026-11-09：本轮最终 mediaCards 一并补写——媒体卡是 done 帧的 side-channel，
     // 正文文本通道不携带，WAL 里不落的话重装/换设备后历史回填永远没有照片。
-    // 2026-11-13：真实气泡车道轮把 BubbleTracker.snapshot（id+定稿文本）一并
+    // 2026-11-13：流式轮把 BubbleTracker.snapshot（id+定稿文本）一并
     // 落进 WAL 行，跨端历史回填才能按泡重建（此前分泡结构只活在当轮内存 +
     // 客户端本地 Isar，重装后 /api/chat-data/history?full=1 只能回一条合并
-    // 正文 → 「原本分绿泡、重装后单泡内分段」的根因）。撤回（账本已清零）/
-    // 单条车道轮不带 bubbles：历史与当轮最终呈现（单泡 finalText）保持一致。
+    // 正文 → 「原本分绿泡、重装后单泡内分段」的根因）。撤回（账本已清零）
+    // 轮不带 bubbles：历史与当轮最终呈现（单泡 finalText）保持一致。
     void getTurnWalService()
       .replaceAssistantText({
         actorId: msgActor,
@@ -2409,26 +2348,15 @@ async function processBatchedMessage(
       .catch(() => {});
 
     ctx.socket.send(
-      JSON.stringify({
-        type: ServerEventType.ChatAssistantDone,
-        payload: {
-          sessionId: msgActor,
-          // P1 统一信封投影：finalText / cards / blocks / renderBlocks /
-          // mediaCards / summaryCard / followups 全部由同一个 envelope 展开，
-          // 不再各自从 finalText 二次派生（杜绝「新形态忘接一个字段」）。
-          ...doneEnvelopeFields,
-          // v2 单一入口：新 dispatcher 只读这一份；旧客户端忽略、走原解析链
-          renderEnvelope: compactEnvelopeForWire(renderEnvelope),
-          // 气泡拆分轮指向末泡 id（客户端按泡对账）；普通轮保持 assistant-$traceId
-          messageId: bubbleTracker.outboundDoneMessageId,
-          traceId: batched.originalMessageId,
-          threadId,
-          // 气泡车道对账数组（id+定稿文本）：流式块即最终呈现，客户端按 id
-          // 原地定稿、按快照揭示缺失块。单条车道轮不带此字段（done 单条收口）。
-          ...(bubbleTracker.hasBubbles ? { bubbles: bubbleTracker.snapshot } : {}),
+      buildDoneFrame({
+        sessionId: msgActor,
+        traceId: batched.originalMessageId,
+        threadId,
+        envelope: renderEnvelope,
+        messageId: bubbleTracker.outboundDoneMessageId,
+        ...(bubbleTracker.hasBubbles ? { bubbles: bubbleTracker.snapshot } : {}),
+        extra: {
           // 发言模型观测字段（2026-10-09）：本轮唯一发言的 id 与结算结果。
-          // 客户端已可用 traceId 归组（utteranceId === traceId），此字段供
-          // 端到端断言与线上取证（重复回复回归时看 collapse/reason 即可定位）。
           utterance: {
             id: utteranceSettlement.utteranceId,
             segments: utteranceSettlement.segments.length,
@@ -2438,13 +2366,7 @@ async function processBatchedMessage(
             bookkeepingOnly: utteranceSettlement.bookkeepingOnly,
           },
           toolCalls: reply.toolName ? [reply.toolName] : [],
-          // 任务面异步收尾：本轮已把任务派发到后台（无正文），客户端按
-          // source=task_plane + traceId 结清前台处理状态、不落正文气泡——
-          // 任务回执与结果由任务面事件（chat.task_update / 结果 done）独立承载。
           ...(reply.taskDispatched ? { source: "task_plane" } : {}),
-          // 以上 6 个旧字段（mediaCards/summaryCard/renderBlocks/cards/
-          // blocks/followups）已由 doneEnvelopeFields 同源展开，不再逐字段手写。
-          // 顺序不变：结构化字段仍排在 toolCalls 之后、bubbles/utterance 之外。
         },
       }),
     );

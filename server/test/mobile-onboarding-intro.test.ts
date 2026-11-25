@@ -148,9 +148,9 @@ test("flow: 开场白两泡+取名卡随第二泡下发，注册称呼进事实�
   assert.equal(bubbleFrames.length, 2);
   const first = JSON.parse(bubbleFrames[0]!).payload;
   const second = JSON.parse(bubbleFrames[1]!).payload;
-  assert.match(first.text, /嗨，小明，/);
-  assert.ok(first.text.includes("😊"));
-  assert.equal(second.text, "你想叫我什么呢，之后你也可以修改。");
+  assert.match(first.finalText, /嗨，小明，/);
+  assert.ok(first.finalText.includes("😊"));
+  assert.equal(second.finalText, "你想叫我什么呢，之后你也可以修改。");
   // 第二泡带服务端 messageId，取名卡挂同一个 id
   assert.ok(second.messageId, "第二泡带 messageId");
   const cardFrame = d.pushes.find((p) => p.includes("onboarding.name_choices"));
@@ -257,7 +257,7 @@ test("e2e: 真实 KV+账号+prefs+事实库下，新用户手机端首连触发�
   const introFrames = phoneFrames.filter((f) => f.includes("first_meeting_intro"));
   assert.equal(introFrames.length, 2, "问候 + 问名两泡都送达手机端");
   const firstBubble = JSON.parse(introFrames[0]!).payload;
-  assert.match(firstBubble.text, /嗨，小明，/, "问候带注册称呼");
+  assert.match(firstBubble.finalText, /嗨，小明，/, "问候带注册称呼");
   assert.ok(
     phoneFrames.some((f) => f.includes("onboarding.name_choices")),
     "取名卡帧已推送",

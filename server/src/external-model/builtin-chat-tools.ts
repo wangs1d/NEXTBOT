@@ -454,15 +454,15 @@ export const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
       // 可见工具面按函数名占槽位，6 个名字占 6 个槽位，收敛成 1 个只占 1 个；
       // 每个 action 的语义、参数与回执保持不变。
       description:
-        "【内置 Calendar】日程/提醒/定时任务的统一入口（用 action 分流）。\n" +
-        "action=create：创建提醒/日程/定时任务。优先把用户原句放进 text（含时间与事项，如「明天 9:00 提醒我开会」），服务端确定性解析时间与事项；只有时间/类型已结构化时才用下方字段。常见触发：「明天早上九点提醒我开会」「十分钟后提醒我」「到点叫我吃药」「提醒我交周报」。用户明确说要闹钟/叫醒/响铃（「明早七点叫我起床」「定个8点闹钟」「用闹钟提醒我」「六点半叫醒我」）必须传 alarmIntent=true 建手机本地闹钟（到点响铃+语音叫醒），别漏传——漏传就只是普通日程提醒、手机到点只弹窗不响铃；纯提醒（「提醒我开会/吃药」）不传。带明确时间点时直接调用，不要追问；**用户只说了要做什么、没给任何时间（如「设置一个闹钟」「提醒我交周报」）时，先问清几点并停止本轮，不要调用本工具，也不要把自己猜的时间写进 text/runAt**。重复方式由你自己判断、用 recurrence 参数表达：用户没提重复就按单次建（不要为「一次还是每天」中断一轮）；说了每天/每周/工作日才传对应值，「每天除周一」「周一到周五」这类用 cronExpression（如「0 11 * * 2-7」「0 9 * * 1,2,3,4,5」）。kind=reminder 时返回 whenSpoken（口语时间，如「明天上午十一点」；**仅在时间不是用户说的、或与他说的不同时才用它交代一句，用户刚说过就别重复**，也别把钟点念成 11:00、别念 11/6 这种日期）；advanceReminderKinds 只说明提前提醒的性质（departure=出发前、evening_before=前一晚），是事实不是台词：要不要提起、怎么提起你自己判断，别提字段名、别说几级、别报时点；hasAdvanceReminder 为 true 时说明另有提前提醒，别让用户以为只响一次，但不要解释提醒是怎么排的，也不要罗列提醒时间点。提醒方式默认弹窗；仅用户明确要求电话/语音才升级。\n" +
-        "action=batch_create：批量创建日程（一次最多 60 条）。用于用户一次性导入多件日程的场景（课表/排班表/会议日程/行程单），先从图/文提取每条的 description 与 runAt（ISO 时间），再一次创建；逐条转述结果，冲突/失败条目如实说明。单条日程不要用本 action。\n" +
-        "action=list_tasks：查询当前用户已创建的定时日程/提醒（含下次执行时间）。**服务端会从用户原话自动判定查询范围（今天/昨天/前天/本周/上周/下周/最近N天/未来N天），from/to 一般不用传**；没说时间范围时默认只查未来 120 天。返回项里 status=completed 与 lastRunAt 表示已经执行过，属于过去事件；回执 rangeLabel 说明服务端按哪个时间范围查询，据此如实转述。仅当用户**明确**要查看/确认日程或定时任务时调用；禁止用于「你确定？」「真的吗？」等短句追问。\n" +
-        "action=delete_task：删除用户已创建的定时日程/提醒。仅当用户明确要求删除/取消某个日程或提醒时调用；可先用 action=list_tasks 找到 taskId。\n" +
-        "action=update_task：改期/编辑单个日程：改时间、改时长、改提前量、暂停或恢复。taskId 来自 list_tasks。\n" +
-        "action=find_free_slots：查询未来空闲时段（自动扣除已有安排占用）。用于「什么时候有空」「帮我约时间」，或改期遇 conflict=true 后给用户改期建议。返回 slots[]（startLocal/endLocal 展示），由用户选定。\n" +
-        "action=skip_occurrence：跳过重复提醒里的某一次（「这周三不去游泳」「明天那次不提醒」），其余天数照旧。传 taskId + occurrenceAt（该次时刻，取 list_tasks 的 nextRunAt/occurrences）。\n" +
-        "action=reschedule_occurrence：只把重复提醒里的某一次挪到别的时刻（「明天那次改到下午三点」），其余不变。传 taskId + occurrenceAt + at。",
+        "【内置 Calendar】日程/提醒/定时任务统一入口，用 action 分流。\n" +
+        "create：创建提醒/日程/定时任务。优先把用户原句（含时间+事项）放进 text，服务端确定性解析；仅时间/类型已结构化时才用字段。用户明确要闹钟/叫醒/响铃（「定个8点闹钟」「叫我起床」「用闹钟提醒我」）必须传 alarmIntent=true，别漏传——漏传只弹窗不响铃；纯提醒（「提醒我开会/吃药」）不传。带明确时间点直接调用不追问；用户没说任何时间（如「设置一个闹钟」「提醒我交周报」）→ 先问清几点并停止本轮，不调用、不把自己猜的时间写进 text/runAt。重复方式你自判：没提就按单次建（别为单次还是每天中断一轮）；明确每天/每周才传对应值；「每天除周一」「周一到周五」用 cronExpression（如「0 11 * * 2-7」「0 9 * * 1,2,3,4,5」）。返回里的 whenSpoken（口语时间，如「明天上午十一点」）仅在时间与你理解的不同时才交代一句，用户刚说过就别复读，别把钟点念成 11:00、别念 11/6 这种日期；advanceReminderKinds（departure=出发前/evening_before=前一晚）与 hasAdvanceReminder 是事实不是台词：让用户知道另有提前提醒即可，别提字段名、别说几级、别报时点、不罗列提醒时间点。提醒方式默认弹窗；仅用户明确要求电话/语音才升级。\n" +
+        "batch_create：一次导入多条日程（课表/排班/会议行程，≤60 条）：先从图/文提取各条 description 与 runAt（ISO），一次建完；逐条转述结果，冲突/失败条目如实说明。单条日程别用本 action。\n" +
+        "list_tasks：查用户已建的定时日程/提醒（含下次执行时间）。查询范围由服务端从用户原话判定（今天/昨天/本周/上周/未来N天…），from/to 一般不用传；没说范围默认未来 120 天。status=completed 或有 lastRunAt = 已执行的过去事件；回执 rangeLabel 说明实际查询范围，据此如实转述。仅用户明确要查看/确认日程时调用；禁止用于「你确定？」「真的吗？」等短句追问。\n" +
+        "delete_task：删除用户的定时日程/提醒，仅用户明确要求删除/取消时调用；可先用 list_tasks 找 taskId。\n" +
+        "update_task：改期/改时长/改提前量/暂停/恢复单个日程；taskId 来自 list_tasks。\n" +
+        "find_free_slots：查未来空闲时段（自动扣已有安排）。用于「什么时候有空」「帮我约时间」，或改期遇 conflict=true 后给用户改期建议；返回 slots[]（startLocal/endLocal）由用户选定。\n" +
+        "skip_occurrence：跳过重复提醒的某一次（「这周三不去游泳」「明天那次不提醒」），其余天数照旧；传 taskId + occurrenceAt（取 list_tasks 的 nextRunAt/occurrences）。\n" +
+        "reschedule_occurrence：只把重复提醒的某一次挪到别的时刻（「明天那次改到下午三点」），其余不变；传 taskId + occurrenceAt + at。",
       parameters: {
         type: "object",
         properties: {
@@ -481,38 +481,39 @@ export const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
             description: "要执行的日历动作。",
           },
           // ── action=create ──
-          text: { type: "string", description: "action=create：用户原句，须含时间与提醒事项；优先使用本字段。用户没说时间时不要调用，也不要替用户补时间" },
+          text: { type: "string", description: "action=create 优先字段：用户原句，须含时间与事项。用户没说时间不要调用" },
           kind: {
             type: "string",
             enum: ["reminder", "action", "weather_brief", "agent_task"],
-            description: "action=create 无 text 时必填；缺省 reminder。weather_brief 需用户已保存定位；agent_task 到点让 Agent 执行 prompt",
+            description: "action=create 无 text 时必填；缺省 reminder。weather_brief 需已保存定位；agent_task 到点让 Agent 执行 prompt",
           },
           description: { type: "string", description: "action=create 无 text 时必填：事项/日程内容" },
           runAt: { type: "string", description: "action=create 无 text 时必填：ISO-8601" },
           title: { type: "string", description: "完整标题（日程页用；reminder 可选，由 reminderMessage 兜底；非提醒类型必填）" },
-          shortTitle: { type: "string", description: "简洁展示标题（「今日安排」紧凑列表用）：去掉指令词与时间词只留核心事项，如「明天9点提醒我吃药」→\"吃药\"；必须是干净事项词，禁止复述原句、禁止含时间词/「提醒我」/悬空的「的」开头；缺省时服务端自动生成。" },
-          category: { type: "string", enum: ["itinerary", "trivia"], description: "trivia=喝水/睡觉/锻炼等生活琐事(照常提醒,不进「今日安排」)；行程正事填 itinerary；缺省 itinerary。" },
+          shortTitle: { type: "string", description: "「今日安排」紧凑短标题：只留核心事项（如「吃药」）；禁复述原句、禁时间词/「提醒我」/悬空「的」开头；缺省服务端生成" },
+          category: { type: "string", enum: ["itinerary", "trivia"], description: "trivia=喝水/睡觉等琐事（照常提醒，不进「今日安排」）；正事填 itinerary；缺省 itinerary" },
           recurrence: {
             type: "string",
             enum: ["none", "daily", "weekly", "yearly"],
             description: "默认 none；仅用户明确要每天/每周/每年重复时才填",
           },
           timezone: { type: "string", description: "IANA 时区，默认 Asia/Shanghai" },
-          durationMinutes: { type: "number", description: "事件时长（分钟）。会议/就诊/课程等有时长的安排必填；纯时间点提醒不填。" },
-          location: { type: "string", description: "事件地点（可选）。说了具体地点就填：据此估算路程并安排提前提醒。" },
+          durationMinutes: { type: "number", description: "事件时长（分钟）。会议/就诊/课程等有时长的安排必填；纯时间点提醒不填" },
+          location: { type: "string", description: "事件地点（可选）。说了具体地点就填：据此估算路程并安排提前提醒" },
           remindBeforeMinutes: {
             type: "array",
             items: { type: "number" },
-            description: "提前量提醒（分钟数组）。仅当用户明确说出提前量时填；没说就省略——提前量由服务端决定，不要向用户解释规则。",
+            description: "提前量提醒（分钟数组）。仅用户明确说了提前量才填；缺省服务端定，不向用户解释",
           },
-          reminderMessage: { type: "string", description: "仅 kind=reminder。到点展示文案，如「该睡觉啦！」；禁止复述原句、禁止带时间表述、不要写称呼。" },
+          reminderMessage: { type: "string", description: "仅 kind=reminder：用你自己的口吻写一句到点推送文案（你的人格怎么说话就怎么写）；禁复述原句、禁时间词、禁称呼" },
           forceCreate: { type: "boolean", description: "用户明知时间冲突仍坚持创建时传 true（跳过冲突拦截）" },
           alarmIntent: {
             type: "boolean",
             description:
               "用户明确要用闹钟/叫醒/响铃时传 true——听见「闹钟」「叫醒」「叫我起床」「叫早」「响铃」「定个X点的闹钟」就传，" +
-              "让手机本地闹钟到点真响铃+语音叫醒（杀进程也响）；不传会退化成普通日程提醒、只弹窗不会响铃。" +
-              "只有纯提醒不传：用户没提闹钟字样、只说「提醒我开会/吃药/交周报」「加个日程」这类。判断依据是用户有没有明确说要闹钟/叫醒，不是他要不要在睡觉后起床。",
+              "建手机本地闹钟：到点真响铃+语音叫醒（杀进程也响）；不传会退化成普通日程提醒、只弹窗不响铃。" +
+              "只有纯提醒不传：用户没提闹钟字样、只说「提醒我开会/吃药/交周报」「加个日程」这类。" +
+              "判断依据是用户有没有明确说要闹钟/叫醒，不是他要不要在睡觉后起床。",
           },
           httpAction: {
             type: "object",
@@ -537,38 +538,38 @@ export const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
                 runAt: { type: "string", description: "开始时间（ISO-8601，必填）；周期项填首次时间" },
                 title: { type: "string", description: "完整标题，可选" },
                 shortTitle: { type: "string", description: "紧凑短标题（≤12字，今日安排展示用）" },
-                category: { type: "string", enum: ["itinerary", "trivia"], description: "缺省 itinerary（正事）" },
+                category: { type: "string", enum: ["itinerary", "trivia"], description: "缺省 itinerary" },
                 recurrence: { type: "string", enum: ["none", "daily", "weekly", "yearly"], description: "缺省 none" },
                 durationMinutes: { type: "number", description: "时长（分钟），可选" },
                 location: { type: "string", description: "地点（可选），说了具体地点就填" },
-                remindBeforeMinutes: { type: "array", items: { type: "number" }, description: "提前量提醒（分钟）；仅用户明确说了提前量才填，缺省由系统按事项类型自动分级" },
-                reminderMessage: { type: "string", description: "到点提醒文案，可选（缺省用 description）" },
+                remindBeforeMinutes: { type: "array", items: { type: "number" }, description: "提前量（分钟）；仅用户明确说了才填，缺省服务端自动分级" },
+                reminderMessage: { type: "string", description: "到点文案，可选（缺省用 description）" },
               },
               required: ["description", "runAt"],
             },
           },
           // ── action=list_tasks ──
-          from: { type: "string", description: "action=list_tasks/find_free_slots：范围起点 ISO，可选兜底。list_tasks 一般不用传——服务端已从用户原话判定（昨天/上周/今天等）；仅原话无时间词时用它" },
-          to: { type: "string", description: "action=list_tasks/find_free_slots：范围终点 ISO，可选兜底，服务端已从用户原话判定" },
+          from: { type: "string", description: "list_tasks/find_free_slots：范围起点 ISO，可选兜底。一般不用传——服务端已从原话判定；仅原话无时间词时用" },
+          to: { type: "string", description: "list_tasks/find_free_slots：范围终点 ISO，可选兜底，服务端已从原话判定" },
           // ── action=delete_task / update_task ──
           taskId: {
             type: "string",
-            description: "action=delete_task/update_task/skip_occurrence/reschedule_occurrence：日程 taskId（list_tasks 返回）",
+            description: "delete_task/update_task/skip_occurrence/reschedule_occurrence：日程 taskId（list_tasks 返回）",
           },
           occurrenceAt: {
             type: "string",
             description:
-              "action=skip_occurrence/reschedule_occurrence：要处理的那一次实例时刻（ISO-8601），取 list_tasks 返回的 nextRunAt 或 occurrences 里的值",
+              "skip_occurrence/reschedule_occurrence：要处理的那一次实例时刻（ISO-8601），取 list_tasks 返回的 nextRunAt 或 occurrences 里的值",
           },
           at: {
             type: "string",
-            description: "action=reschedule_occurrence：改到的新时刻（ISO-8601，须在未来）",
+            description: "reschedule_occurrence：改到的新时刻（ISO-8601，须在未来）",
           },
           // ── action=update_task 补充 ──
           status: {
             type: "string",
             enum: ["active", "paused", "cancelled"],
-            description: "action=update_task：paused=暂停提醒；cancelled=取消（软删）；active=恢复",
+            description: "update_task：paused=暂停提醒；cancelled=取消（软删）；active=恢复",
           },
           // ── action=find_free_slots 补充 ──
           dailyWindow: {

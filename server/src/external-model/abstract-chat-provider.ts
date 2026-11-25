@@ -502,9 +502,6 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
             turnRouteConfidence: effectiveStreamOpts.turnRouteConfidence,
             // 确定性媒体预执行（2026-10-10）：白名单透传，漏掉 = 预执行静默失效
             deterministicToolCalls: effectiveStreamOpts.deterministicToolCalls,
-            // 答案留存（2026-10-13 根修）：白名单透传，漏掉 = 工具轮照旧流式，
-            // 「先流式输出正文 → done 弹卡」的通道级根修失效
-            holdAnswer: effectiveStreamOpts.holdAnswer,
             extraBody,
             promptCache: promptPlan.promptCache,
             requestSystemMessages: promptPlan.requestSystemMessages,
@@ -550,10 +547,11 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
           const hasFinalAssistant = msgs
             .slice(turnStartLen)
             .some((m) => m.role === "assistant" && !hasToolCallPayload(m));
-          // 兜底第二梯队（2026-10-22 根修·重复回复事故）：holdAnswer 轮正文不进
-          // 流式通道（streamedVisible 恒空），但本轮最终答案就在返回值 full 里——
-          // 用户亲眼看到的回复必须落 thread（2026-09-08 契约），否则线程停在
-          // tool 链上被 fold 成「未生成可见回复」台账，下一轮模型重复调工具。
+          // 兜底第二梯队（2026-10-22 根修·重复回复事故）：最终 assistant 正文
+          // 因极端路径（末轮流被中断、循环内部吞掉流异常）没进 messages 时，
+          // 从返回值 full 补一条——用户亲眼看到的回复必须落 thread（2026-09-08
+          // 契约），否则线程停在 tool 链上被 fold 成「未生成可见回复」台账，
+          // 下一轮模型重复调工具。
           // 正常路径（最终波 / schema-less 汇总落 messages）hasFinalAssistant
           // 已为 true，不会走到这里，无双重落库。
           if (!hasFinalAssistant) {
@@ -685,14 +683,22 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
         }
       }
       toolIntentCalls = result.toolCalls;
-      // 2026-10-11：整串路径补一道 stripMetaSentences（含「元决策自述句」判据，
-      // 与流式 metaFilter 同一套词面），防止净化后文本仍把「根据规范必须调用…」
-      // 这类自述带进最终回复。
-      visible = normalizeTraditionalToSimplified(
-        stripMetaSentences(
-          stripInternalControlTags(pickVisibleText(result.content, result.reasoning)),
-        ),
-      ).text;
+      // 正文单一出口（2026-11-25 统一管道根修）：定稿 = 经 onDelta 放出的文本。
+      // 流末 flush 把净化器缓冲（无句末标点的末句、待判半截标签）交还同一出口；
+      // 整串净化链只服务没有任何流式产出的情况。
+      for (const tail of [metaFilter(sanitizer.flush()), metaFilter.flush()]) {
+        if (!tail) continue;
+        const normalized = normalizeTraditionalToSimplified(tail).text;
+        streamedVisible += normalized;
+        onDelta(normalized);
+      }
+      visible = streamedVisible.trim()
+        ? streamedVisible.trim()
+        : normalizeTraditionalToSimplified(
+            stripMetaSentences(
+              stripInternalControlTags(pickVisibleText(result.content, result.reasoning)),
+            ),
+          ).text;
     } catch (e) {
       // 流式空闲超时：如果有 partial content，用它作为兜底回复而非直接失败。
       if (e instanceof StreamIdleTimeoutError && e.partialContent.trim()) {

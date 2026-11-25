@@ -3,12 +3,12 @@
  *
  * 病根：schema-less 汇总（runSchemaLessSummary 的探测收尾 + 预算耗尽兜底）只
  * return 文本、从不 push 进循环 messages → 回写后线程停在 assistant(tool_calls)
- * → tool*；holdAnswer="after_tool_use" 又把汇总文本流式关掉（streamedVisible 空）
- * → provider 兜底失效 → foldCompletedToolChains 折成「[动作台账]…本轮未生成可见
- * 回复」→ 下一轮模型看到「问了但没回复」把工具重新调一遍。
+ * → tool* → provider 兜底失效 → foldCompletedToolChains 折成「[动作台账]…本轮
+ * 未生成可见回复」→ 下一轮模型看到「问了但没回复」把工具重新调一遍。
  *
  * 契约：任何收尾路径结束时，messages 终态必须含 assistant(content)=最终答案，
  * fold 后线程是干净的「问 → 答」对，绝不出现「未生成可见回复」台账。
+ * （holdAnswer 答案留存已随 2026-11-25 统一管道退役，本测试只锁落库契约。）
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -133,7 +133,7 @@ test("探测汇总收尾（工具全成功捷径）：最终答案必须进 mess
     view as never,
     () => {},
     OK_CTX,
-    { tools: TOOLS, maxRounds: 4, holdAnswer: "after_tool_use", audit: { sessionId: "persist-probe" } },
+    { tools: TOOLS, maxRounds: 4, audit: { sessionId: "persist-probe" } },
   );
 
   assert.ok(out.includes("15-20"), `返回值应含答案本体，实际: ${out.slice(0, 80)}`);
@@ -161,7 +161,7 @@ test("探测汇总收尾 + fold：线程是干净问→答对，无「未生成�
     view as never,
     () => {},
     OK_CTX,
-    { tools: TOOLS, maxRounds: 4, holdAnswer: "after_tool_use", audit: { sessionId: "persist-fold" } },
+    { tools: TOOLS, maxRounds: 4, audit: { sessionId: "persist-fold" } },
   );
 
   const thread = writebackLikeProvider(view);
@@ -198,7 +198,7 @@ test("预算耗尽：收尾叙述保底波一次——如实交付，不把编�
     view as never,
     () => {},
     OK_CTX,
-    { tools: TOOLS, maxRounds: 1, holdAnswer: "after_tool_use", audit: { sessionId: "persist-exhaust" } },
+    { tools: TOOLS, maxRounds: 1, audit: { sessionId: "persist-exhaust" } },
   );
 
   assert.equal(calls.length, 2, "预算波 1 次 + 收尾叙述保底波 1 次（有界，不失控）");

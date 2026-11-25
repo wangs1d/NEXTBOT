@@ -200,6 +200,24 @@ test("排槽：关怀类只进明日预览（需要一段时间静下来看）",
   assert.ok(at.kind === "slot" && at.slot.kind === "tomorrow_preview");
 });
 
+test("排槽：评估器晨报（greeting / evaluator:morning_brief）只进早安槽", () => {
+  const p = makePlanner();
+  // 2026-11-25 实证：真实提案的 kind 是话术分类 greeting，规则名只在 source 的
+  // evaluator: 前缀里。只按点号取叶子会漏成 default，早报被排到午间/下班/明日预览。
+  const at = p.assign(
+    "u1",
+    candidate({
+      kind: "greeting",
+      source: "evaluator:morning_brief",
+      dedupKey: "mb1",
+      title: "晨间简报",
+      directText: "今天两场会，下午那场要带笔记本。",
+    }),
+    WED_0700,
+  );
+  assert.ok(at.kind === "slot" && at.slot.kind === "morning", `实得 ${JSON.stringify(at)}`);
+});
+
 test("排槽：保质期赶不上任何槽 → no_slot 并留原因，不静默丢", () => {
   const p = makePlanner();
   // 13:00 提交，午间窗已过、最近落点是 18:10 下班，而这条 13:01 就过期
@@ -311,9 +329,15 @@ function makePipelineHarness(opts: { planner: TouchpointPlanner | null; now: () 
   return { pipeline, presence, delivered };
 }
 
-/** 投递出去的正文（envelope: {type, payload:{text}}） */
+/** 投递出去的正文（对话契约：done 的 finalText / bubbles） */
 const said = (delivered: Array<{ json: string }>) =>
-  delivered.map((d) => String(JSON.parse(d.json).payload?.text ?? ""));
+  delivered.map((d) => {
+    const p = JSON.parse(d.json).payload ?? {};
+    const bubbles = Array.isArray(p.bubbles) ? p.bubbles : [];
+    return bubbles.length
+      ? bubbles.map((b: { text?: string }) => String(b.text ?? "")).join("\n")
+      : String(p.finalText ?? "");
+  });
 
 test("管道：非紧急候选不当场弹，同触点的几条到点合成一次开口", () => {
   const now = { value: WED_0700 };

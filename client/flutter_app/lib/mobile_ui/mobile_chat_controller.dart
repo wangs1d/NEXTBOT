@@ -141,6 +141,15 @@ class MobileChatController extends ChangeNotifier {
     _subscription = _ownsConnection
         ? _service.events.listen(_onWsEvent)
         : WsEventRouter.instance.chatEvents.listen(_onWsEvent);
+    // 连接态镜像（2026-11-25「一直正在连接服务器」根修）：连接态必须当
+    // **状态**读，不能只信路由器那一次 `ws_connected` 事件——手机端首帧就
+    // 建本控制器并 `_service.connect()`，而根组件 `_bootstrap()` 要跑完十几个
+    // await 才 bindPlatform/attach 路由器，窗口期内发出的 `ws_connected` 在
+    // chat 通道直接丢失（平台标志还是桌面，甚至路由器还没接上连接层）。
+    // 直连连接层原始流只镜像状态，业务副作用仍由 [_onWsEvent] 走一次。
+    if (!_ownsConnection) {
+      _connStateSub = _service.events.listen(_mirrorConnectionState);
+    }
     // 【订阅后同步连接状态】（2026-11-10「连接一直断开」误报根修）
     // shared 连接在 app 启动早期就建立（main.dart _bootstrap），`ws_connected`
     // 是一次性事件——发出时 chat 通道往往还没有监听者，被路由器的
@@ -167,6 +176,9 @@ class MobileChatController extends ChangeNotifier {
   final bool _ownsConnection;
   late final WsChatService _service;
   StreamSubscription? _subscription;
+
+  /// 共享连接上的连接态镜像订阅（见 [_mirrorConnectionState]）。
+  StreamSubscription<Map<String, dynamic>>? _connStateSub;
 
   /// 本地历史存储（聊天气泡落盘，重启后恢复；测试可注入内存实现）。
   late final LocalHistoryStore _store;
@@ -201,6 +213,12 @@ class MobileChatController extends ChangeNotifier {
 
   /// 是否已连上过一次（区分首连与重连：重连要做漏消息对账，见 ws_connected）。
   bool _everConnected = false;
+
+  /// 路由通道是否处理过至少一条 `ws_connected`（重连对账判据）。
+  ///
+  /// 不能直接用 [_everConnected]：镜像侧可能先把状态补上（事件被路由丢掉
+  /// 的场景），那会把本次首连误判成重连、启动时白拉一次历史。
+  bool _routerSawWsConnected = false;
 
   /// 对话历史(含正在流式生成的助手消息)。
   ///
@@ -1658,6 +1676,30 @@ class MobileChatController extends ChangeNotifier {
     return ClientLocationService.getCurrentLocationForTurn();
   }
 
+  /// 连接态镜像（仅共享连接）：把「连上/断开」当状态读，而不是当一次性事件读。
+  ///
+  /// 事故形态（2026-11-25）：手机端首帧就 new 出本控制器并 `_service.connect()`，
+  /// 而根组件 `_bootstrap()` 要跑完十几个 await 才 `bindPlatform/attach` 路由器
+  /// ——窗口期内发出的 `ws_connected` 在 chat 通道根本没人接，`isConnected`
+  /// 永久停在 false：聊天页顶部「正在连接服务器…」再也不消失（消息其实发得
+  /// 出去，发送判据走的是连接层真值）。
+  ///
+  /// 这里只镜像三个布尔量；`ws_connected` 分支的业务副作用（启动定位、围栏、
+  /// 离线补发、重连对账）仍只在 [_onWsEvent] 里执行一次。
+  void _mirrorConnectionState(Map<String, dynamic> event) {
+    final ({bool connected, bool everConnected}) next = mirroredConnectionState(
+      type: event["type"]?.toString() ?? "",
+      connected: isConnected,
+      everConnected: _everConnected,
+    );
+    final bool changed = next.connected != isConnected;
+    _everConnected = next.everConnected;
+    if (!changed) return;
+    isConnected = next.connected;
+    connection.value = next.connected;
+    notifyListeners();
+  }
+
   void _onWsEvent(Map<String, dynamic> event) {
     final String type = event["type"]?.toString() ?? "";
     final Map<String, dynamic> payload = event["payload"] is Map
@@ -1694,7 +1736,10 @@ class MobileChatController extends ChangeNotifier {
         // 服务端 WAL，但本机 WS 收不到——重连后清一次历史拉取闸并补拉主
         // 线程，漏掉的轮次按 turn 级锚定去重回填对话流；旁聊线程在下次
         // 打开时经同一闸补拉。后台时按最后一条漏收消息补横幅触达。
-        final bool isReconnect = _everConnected;
+        // 重连对账判据只认路由通道真正处理过的连接：镜像可能已先把状态
+        // 补上（[_mirrorConnectionState]），不能把首连误判成重连。
+        final bool isReconnect = _routerSawWsConnected;
+        _routerSawWsConnected = true;
         _everConnected = true;
         if (isReconnect && !_ownsConnection) {
           _serverHistoryPulled.clear();
@@ -1883,9 +1928,31 @@ class MobileChatController extends ChangeNotifier {
 
   /// chat.assistant_done 入口：按 threadId 收口对应线程。
   void _handleDoneEvent(Map<String, dynamic> payload) {
+    // 主动回合在对话契约上的附加语义（2026-11-25 表达层收口）：done.proactive
+    // 携带 deliveryId/why/actionIntent/title。摊到顶层后，落泡/通知/长按详情
+    // 与普通对话共用同一套字段，不再走 agent.proactive_message 的另一条旁路。
+    final Object? proactive = payload["proactive"];
+    if (proactive is Map) {
+      payload["why"] = proactive["why"];
+      payload["actionIntent"] = proactive["actionIntent"];
+      payload["deliveryId"] = proactive["deliveryId"];
+      payload["proactiveTitle"] = proactive["title"];
+      final String id = proactive["deliveryId"]?.toString() ?? "";
+      if (id.isNotEmpty) {
+        AmbientFeedsController.instance.sendProactiveOutcome(id, "viewed");
+      }
+    }
     final String threadKey = _threadKeyOf(payload);
     _finalizeReply(payload, threadKey);
     _maybeAutoOpenTravelCard(payload);
+  }
+
+  /// 主动回合的动作视图（与通知栏同一个 intent；对话轮无此字段 → null）
+  List<NotifyAction>? _proactiveActionsOf(Map<String, dynamic> payload) {
+    final Object? intent = payload["actionIntent"];
+    if (intent is! Map<String, dynamic>) return null;
+    final List<NotifyAction> actions = NotifyAction.listFromIntent(intent);
+    return actions.isEmpty ? null : actions;
   }
 
   /// 已知服务端错误码 → 用户可读文案：原始报错（错误码 + 字节数）不该
@@ -2111,6 +2178,60 @@ class MobileChatController extends ChangeNotifier {
     _mainThreadMessages.add(digest);
     _persist(digest);
     notifyListeners();
+  }
+
+  /// 透传写穿（2026-11-25）：HMS 透传消息在 App 被杀/后台时由原生落队列，
+  /// 启动/回前台取件后写进本地对话。不点通知也能看到内容。
+  ///
+  /// 去重两条口径：① 稳定 id（服务端 stableKey，推送重试不重复落泡）；
+  /// ② 正文包含（WS 直投的卡 / 历史回填的留底已经在对话里时不再插第二条）。
+  void ingestPushedMessages(List<Map<String, dynamic>> items) {
+    if (items.isEmpty) return;
+    final List<ChatMessage> list = _mainThreadMessages;
+    bool changed = false;
+    for (final Map<String, dynamic> item in items) {
+      final String text =
+          (item["text"] ?? item["body"] ?? "").toString().trim();
+      if (text.isEmpty) continue;
+      final String stableKey =
+          (item["stableKey"] ?? "").toString().trim();
+      final String messageId = stableKey.isNotEmpty
+          ? "push-$stableKey"
+          : "push-${item["deliveryId"] ?? DateTime.now().microsecondsSinceEpoch}";
+      if (list.any((ChatMessage m) => m.messageId == messageId)) continue;
+      final int tsMs =
+          (item["ts"] as num?)?.toInt() ??
+              DateTime.now().millisecondsSinceEpoch;
+      // 只跟「同一时刻附近」的助手消息做正文包含去重：WS 直投的卡 / 服务端留底
+      // 与这条透传是同一事件（时间戳相差几秒）；而每天同一句提醒（如「该睡觉啦」）
+      // 相隔一整天，不能被当成重复吞掉。
+      final bool alreadyThere = list.any((ChatMessage m) {
+        if (m.role != "assistant") return false;
+        if ((m.timestamp.millisecondsSinceEpoch - tsMs).abs() > 15 * 60 * 1000) {
+          return false;
+        }
+        final String lt = m.text.trim();
+        if (lt.isEmpty) return false;
+        if (lt.length >= 8 && text.contains(lt)) return true;
+        if (text.length >= 8 && lt.contains(text)) return true;
+        return false;
+      });
+      if (alreadyThere) continue;
+      final ChatMessage msg = ChatMessage(
+        messageId: messageId,
+        sessionId: _mainSessionKey,
+        role: "assistant",
+        text: text,
+        timestamp: DateTime.fromMillisecondsSinceEpoch(tsMs),
+      );
+      // 按时间戳落位：透传可能比 App 启动早（TTL 内补来），不能一律追加到末尾
+      int idx = list.indexWhere((ChatMessage m) => m.timestamp.isAfter(msg.timestamp));
+      if (idx < 0) idx = list.length;
+      list.insert(idx, msg);
+      _persist(msg);
+      changed = true;
+    }
+    if (changed) notifyListeners();
   }
 
   /// 主动性消息（agent.proactive_message）→ 一律落对话流文本气泡。
@@ -2726,6 +2847,8 @@ class MobileChatController extends ChangeNotifier {
       replyBlocks: att["replyBlocks"] as List<Map<String, dynamic>>?,
       envelopeBlocks: att["envelopeBlocks"] as List<Map<String, dynamic>>?,
       followUpPrompts: att["followUps"] as List<String>?,
+      notifyActions: att["notifyActions"] as List<NotifyAction>?,
+      why: att["why"]?.toString(),
     ));
     _persist(list.last);
     // 不动 isProcessing：done 收口后揭示队列仍在排水（末泡延迟落屏），
@@ -2929,7 +3052,13 @@ class MobileChatController extends ChangeNotifier {
         final String trimmed = notifyText.length > 120
             ? "${notifyText.substring(0, 120)}…"
             : notifyText;
-        unawaited(LocalNotificationService.show(title: "Agent", body: trimmed));
+        unawaited(LocalNotificationService.show(
+          title: payload["proactiveTitle"]?.toString() ?? "Agent",
+          body: trimmed,
+          deliveryId: payload["deliveryId"]?.toString(),
+          actions: _proactiveActionsOf(payload) ?? const <NotifyAction>[],
+          why: payload["why"]?.toString(),
+        ));
       }
     }
     // 真·分绿泡：带 bubbles 对账数组的轮次按泡收口（不走单泡 finalText 替换）
@@ -3019,6 +3148,8 @@ class MobileChatController extends ChangeNotifier {
         replyBlocks: replyBlocks,
         envelopeBlocks: envelopeBlocks,
         followUpPrompts: followUps,
+        notifyActions: _proactiveActionsOf(payload),
+        why: payload["why"]?.toString(),
       ));
       _persist(list.last);
     } else {
@@ -3055,6 +3186,8 @@ class MobileChatController extends ChangeNotifier {
         replyBlocks: replyBlocks ?? prev.replyBlocks,
         envelopeBlocks: envelopeBlocks ?? prev.envelopeBlocks,
         followUpPrompts: followUps,
+        notifyActions: _proactiveActionsOf(payload) ?? prev.notifyActions,
+        why: payload["why"]?.toString() ?? prev.why,
       );
       _persist(list[idx]);
     }
@@ -3178,6 +3311,7 @@ class MobileChatController extends ChangeNotifier {
                 followUps != null);
         if (text.trim().isEmpty && !hasAttachments) continue;
         if (isLast) {
+          final List<NotifyAction>? proactiveActions = _proactiveActionsOf(payload);
           _revealAttachments[id] = <String, dynamic>{
             if (mediaCards != null) "mediaCards": mediaCards,
             if (summaryCard != null) "summaryCard": summaryCard,
@@ -3186,6 +3320,8 @@ class MobileChatController extends ChangeNotifier {
             if (envelopeBlocksForLast != null)
               "envelopeBlocks": envelopeBlocksForLast,
             if (followUps != null) "followUps": followUps,
+            if (proactiveActions != null) "notifyActions": proactiveActions,
+            if (payload["why"] != null) "why": payload["why"],
           };
         }
         _revealFinalText[id] = text;
@@ -3231,6 +3367,8 @@ class MobileChatController extends ChangeNotifier {
               : prev.envelopeBlocks,
           followUpPrompts: isLast ? followUps : null,
           pendingMediaCards: isLast ? null : prev.pendingMediaCards,
+          notifyActions: isLast ? (_proactiveActionsOf(payload) ?? prev.notifyActions) : prev.notifyActions,
+          why: isLast ? (payload["why"]?.toString() ?? prev.why) : prev.why,
           // streaming 不带 → false：定稿
         );
         _persist(list[idx]);
@@ -3279,6 +3417,8 @@ class MobileChatController extends ChangeNotifier {
       t.deliveryStallTimer = null;
     }
     unawaited(_subscription?.cancel());
+    unawaited(_connStateSub?.cancel());
+    _connStateSub = null;
     _planFlow?.removeListener(_onPlanFlowChanged);
     _planFlow?.dispose();
     _planFlow = null;
@@ -3311,4 +3451,28 @@ bool looksLikeTravelPlanningIntent(String raw) {
     r"[\u4e00-\u9fa5]{1,10}玩[一二三四五六七两八九十字\d]+天|"
     r"[\u4e00-\u9fa5]{1,10}[一二三四五六七两八九十字\d]+天",
   ).hasMatch(s);
+}
+
+/// 连接态镜像的状态迁移（纯函数，回归锁：`test/mobile_connection_state_mirror_test.dart`）。
+///
+/// 语义与 [MobileChatController.hasConnectedOnce] 一致：
+/// - `ws_connected` → 已连上、且本进程连过；`everConnected` 记真后不再回落，
+///   掉线时横幅才能说「断开」而不是「正在连接」；
+/// - `ws_disconnected` / `connection_error` → 只清 `connected`；
+/// - 其余事件 → 原样返回。
+@visibleForTesting
+({bool connected, bool everConnected}) mirroredConnectionState({
+  required String type,
+  required bool connected,
+  required bool everConnected,
+}) {
+  switch (type) {
+    case "ws_connected":
+      return (connected: true, everConnected: true);
+    case "ws_disconnected":
+    case "connection_error":
+      return (connected: false, everConnected: everConnected);
+    default:
+      return (connected: connected, everConnected: everConnected);
+  }
 }

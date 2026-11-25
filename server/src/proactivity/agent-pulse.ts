@@ -105,6 +105,15 @@ export type PulseAggregate = {
   activity?: "still" | "walking" | "vehicle" | "unknown" | null;
   /** 最近情绪（只在非 neutral 时给）：情绪低时闲聊要收着，别自顾自唠 */
   mood?: "positive" | "negative" | "stressed" | null;
+  /**
+   * 共享上下文版号（2026-11-25）：与情报判断同一份事实的版本号。
+   * 进提案 evidence，事后可回答「这句话是基于哪一版上下文说的」。
+   */
+  contextVersion?: string;
+  /** 人格正文（SOUL.md）：每次主动评审都带同一副嗓子，不是一套独立的推送 prompt */
+  persona?: string | null;
+  /** 长期记忆召回（按当前材料检索）：主动消息也要「记得你」，不是只看今天发生了什么 */
+  memories?: string[];
 };
 
 /** 测试端点的替代材料：tasks 兼容旧协议的「HH:mm 事项」字符串 */
@@ -235,6 +244,8 @@ export function pulseSignature(a: PulseAggregate): string {
     a.findings ?? [],
     // 没聊完的事变了 = 值得带着新语境重审一次
     a.openLoops ?? [],
+    // 记忆召回变了 = 出现了值得接的新旧联系（persona 稳定，不进指纹）
+    a.memories ?? [],
     // 此刻状态也在指纹里：状态变了（如用户回到电脑前）值得带着新语境重审一次
     a.presence ?? null,
     a.screenFocus ?? null,
@@ -444,6 +455,10 @@ export function buildPulsePrompt(
   const weekday = ["日", "一", "二", "三", "四", "五", "六"][now.getDay()];
   const hhmm = (d: Date) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
   const material: string[] = [`现在时间：${now.getFullYear()}-${now.getMonth() + 1}-${now.getDate()} ${hhmm(now)}（周${weekday}）`];
+  if (a.persona?.trim()) material.push(`【你是谁（人格正文，说话按这个来）】\n${a.persona.trim()}`);
+  if (a.memories?.length) {
+    material.push(`【长期记忆里跟今天有关的（不是让你复述，是让你记得）】\n${a.memories.map((t) => `- ${t}`).join("\n")}`);
+  }
   if (a.presence || a.screenFocus) {
     const state: string[] = [];
     if (a.presence) state.push(`在线：${a.presence}`);
@@ -659,6 +674,9 @@ export class AgentPulseService {
           place: fixture.place ?? null,
           activity: fixture.activity ?? null,
           mood: fixture.mood ?? null,
+          contextVersion: fixture.contextVersion,
+          persona: fixture.persona ?? null,
+          memories: fixture.memories,
         }
       : await this.deps.aggregate(actorId);
     const hasMaterial =
@@ -773,6 +791,7 @@ export class AgentPulseService {
       evidence: [
         "agent_pulse",
         `sig=${signature}`,
+        ...(aggregate.contextVersion ? [`ctx=${aggregate.contextVersion}`] : []),
         ...(socialPath ? ["social_clock", `idle=${aggregate.idleMinutes ?? "?"}m`] : []),
         ...(notifyOptions.length ? [`notify_options=${notifyOptions.length}`] : []),
         ...(fixture ? ["fixture"] : []),

@@ -69,24 +69,13 @@ function stripLeadingTimeExpression(text: string): string {
   }
 }
 
-/** 将提醒事项转为到点时展示的友好文案。 */
-export function formatReminderMessage(subject: string): string {
-  const s = subject.trim();
-  if (!s || s === "到点提醒") return "到点提醒";
-  if (s === "起床") return "该起床啦！";
-  if (s === "吃药" || s === "用药") return "该吃药啦";
-  if (/[啦啊哦哟！!]$/.test(s)) return s;
-  if (s.length <= 8) return `该${s}啦`;
-  return s;
-}
-
 // ───────────────────── 回声判定（模型输出契约） ─────────────────────
 
 /** 回声特征一：文案里还带着时间表述（时刻会单独展示，进文案即原句回声）。 */
 const ECHO_CLOCK_RE =
   /\d{1,2}[:：]\d{2}|\d{1,2}\s*点(?:\d{1,2}\s*分?)?|[零一二两三四五六七八九十]{1,4}\s*点|今天|明天|后天|今晚|明晚|今早|明早|昨晚|前天|大后天|每天|每周|每年/;
-/** 回声特征二：还带着「提醒我」类指令词（事项里不会出现的话）。 */
-const ECHO_INSTRUCTION_RE = /提醒我|提醒一下|叫我|喊我/;
+/** 回声特征二：还带着「提醒我」类指令词（事项里不会出现的话；含叫醒变体）。 */
+const ECHO_INSTRUCTION_RE = /提醒我|提醒一下|叫我|喊我|喊醒我|叫醒我/;
 /** 回声特征三：以悬空助词/标点开头（「一分钟后的…」被模型掐头的典型残迹）。 */
 const ECHO_DANGLING_PREFIX_RE = /^[的了吗呢吧呀啊哦哈，,。．、；;：:！!？?]/;
 /** 回声特征四：「到点提醒」是无事项词时的兜底标记，它的任何包装（「该到点提醒啦」）
@@ -94,8 +83,8 @@ const ECHO_DANGLING_PREFIX_RE = /^[的了吗呢吧呀啊哦哈，,。．、；;�
 const ECHO_FALLBACK_RE = /到点提醒/;
 
 /**
- * 是否为「原句回声」型坏文案。命中任一特征即视为解析污染，调用方应从
- * 原句重推导（extractReminderSubject + formatReminderMessage）。
+ * 是否为「原句回声」型坏文案。命中任一特征即视为解析污染，调用方应放弃该文案
+ * （reminderMessage 留空，由模型转写重写；模型缺位时展示端落到中性字段）。
  * 注意「记得/别忘了」是合法的文案用语（如「该吃药啦！记得按时服药」），不判回声。
  */
 export function isEchoLikeReminderCopy(text: string): boolean {

@@ -4,6 +4,7 @@
 // 高重要度消息 payload 带 display:"popup"，客户端保证以弹窗形式展示（桌面原生弹窗 /
 // 移动端应用内弹窗卡片）。每条投递带 deliveryId，客户端回传 outcome 反馈。
 import type { ProactiveImportance, ProactiveProposal } from "./pipeline-types.js";
+import { publishAssistantTurn } from "../agent/assistant-turn-publisher.js";
 // 类型约束：投递正文必须是"已过开口闸"的 OpenedBody（见 DiscoveryLayer.openMouth）。
 // 拿一句裸 string 调 deliver 会编译不过——主动内容无法绕开共享发现层说给用户。
 import type { OpenedBody } from "./discovery-layer.js";
@@ -78,37 +79,36 @@ export class ProactiveDeliveryService {
     // 定向投递（targetDeviceClass）本来就只到一个端，那个端就是归属端，不再指定；
     // 全端 fan-out 时才需要「弹在哪一端」这个额外信息。
     const notifyOn = p.targetDeviceClass ? null : (this.deps.bannerSurface?.(p.actorId) ?? null);
-    const payload = {
-      type: "agent.proactive_message",
-      payload: {
+    // 统一出口（2026-11-25）：主动消息与对话回复同一套事件契约——分泡 chunk +
+    // 结构化 done。不再发 agent.proactive_message 单泡，也不存在另一条降级路径。
+    let sent = false;
+    const send = (json: string): boolean => {
+      const ok = p.targetDeviceClass
+        ? (this.deps.trySendToDeviceClasses?.(p.actorId, json, [p.targetDeviceClass]) ?? false)
+        : this.deps.trySend(p.actorId, json);
+      if (ok) sent = true;
+      return ok;
+    };
+    publishAssistantTurn(send, {
+      sessionId: p.actorId,
+      traceId: `proactive-${deliveryId}`,
+      finalText: String(text),
+      proactive: {
         deliveryId,
-        // 稳定消息 id（2026-11-23「落流补发」）：客户端按 (sessionId, messageId)
-        // upsert 本地历史——重连补投同一条消息不会产生重复气泡。
-        messageId: `proactive-${deliveryId}`,
         title,
-        text,
         importance: p.importance,
         kind: p.kind,
         proposalId: p.proposalId,
         source: p.source,
-        // 离线补推的到点提醒带原定触发时刻：客户端气泡按原时间落屏（2026-11-12）
         ...(typeof p.firedAt === "number" ? { firedAt: p.firedAt } : {}),
-        ...(popup ? { display: "popup" } : {}),
-        // 带按钮的动作视图（2026-11-13）：通知栏与聊天卡共用同一个 intent
+        ...(popup ? { display: "popup" as const } : {}),
         ...(actionIntent ? { actionIntent } : {}),
-        // 多端归属（2026-11-23 §3.7）：只有这一端弹系统横幅，其余端静默落流
         ...(notifyOn ? { notifyOn } : {}),
-        // 「为什么现在告诉我」（§3.10）：长按详情用，缺省不下发
         ...(p.why ? { why: p.why } : {}),
       },
-    };
-    if (p.targetDeviceClass && this.deps.trySendToDeviceClasses) {
-      // 定向投递：只面向声明设备类别的在线端；不在线返回失败由管道挂起重投/推送兜底
-      if (!this.deps.trySendToDeviceClasses(p.actorId, JSON.stringify(payload), [p.targetDeviceClass])) {
-        return { ok: false, reason: `no_online_${p.targetDeviceClass}` };
-      }
-    } else if (!this.deps.trySend(p.actorId, JSON.stringify(payload))) {
-      return { ok: false, reason: "no_online_device" };
+    });
+    if (!sent) {
+      return { ok: false, reason: p.targetDeviceClass ? `no_online_${p.targetDeviceClass}` : "no_online_device" };
     }
     if (p.kind.startsWith("action.")) {
       try {

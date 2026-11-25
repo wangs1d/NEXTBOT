@@ -3,7 +3,6 @@ import test from "node:test";
 
 import {
   extractReminderSubject,
-  formatReminderMessage,
 } from "../src/services/schedule-intent-service.js";
 import { isEchoLikeReminderCopy } from "../src/services/reminder-copy.js";
 
@@ -35,9 +34,9 @@ test("extractReminderSubject keeps vocative that is a sentence object (no separa
 });
 
 test("reminder copy for vocative-suffixed request stays clean", () => {
+  // 2026-11-25 定调：文案只由模型写，规则路径只出中性事项词（不再套「该X啦」模板）
   const subject = extractReminderSubject("五分钟后提醒我睡觉 小弟");
   assert.equal(subject, "睡觉");
-  assert.equal(formatReminderMessage(subject), "该睡觉啦");
 });
 
 test("extractReminderSubject still handles plain reminders without vocatives", () => {
@@ -58,10 +57,11 @@ test("extractReminderSubject cleans punctuation after instruction words", () => 
   assert.equal(extractReminderSubject("今晚8点提醒我，闹钟"), "闹钟");
 });
 
-test("formatReminderMessage keeps friendly convention and stops wrapping fallback subject", () => {
-  assert.equal(formatReminderMessage("吃饭"), "该吃饭啦");
-  // 「到点提醒」是无事项词的兜底值：不能再包成「该到点提醒啦」（存量脏文案根源之一）
-  assert.equal(formatReminderMessage("到点提醒"), "到点提醒");
+test("isEchoLikeReminderCopy catches wake-up instruction variants", () => {
+  // 2026-11-25 回归：「定个闹钟喊醒我」的回声「闹钟喊醒我」曾漏判、到点被模板
+  // 包成「该闹钟喊醒我啦」。叫醒类指令词一并判回声。
+  assert.equal(isEchoLikeReminderCopy("闹钟喊醒我"), true);
+  assert.equal(isEchoLikeReminderCopy("闹钟叫醒我"), true);
 });
 
 /** 回声判定：模型把原句/半截原句塞进展示文案字段时必须能识别。 */

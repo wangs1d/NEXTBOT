@@ -23,15 +23,21 @@ interface EmittedSegment {
 function buildTurn(trace: string) {
   const utterance = new UtteranceAssembler({ utteranceId: trace });
   const emitted: EmittedSegment[] = [];
-  // 停顿档位清零：只验证身份与结算，不睡真实节奏
+  // 停顿档位清零：只验证身份与结算，不睡真实节奏。
+  // bubbleMode: true 与 handler 同款（统一管道：所有轮次恒气泡分段）。
   const segmenter = new StreamSegmenter(
     (segment) => {
       utterance.noteEmitted(segment);
       emitted.push({ text: segment });
     },
-    { pauseMs: 0, bubbleGapMinMs: 0, bubbleGapMaxMs: 0, interimReplyGapMs: 0 },
+    {
+      pauseMs: 0,
+      bubbleGapMinMs: 0,
+      bubbleGapMaxMs: 0,
+      interimReplyGapMs: 0,
+      bubbleMode: true,
+    },
   );
-  segmenter.enableBubbleMode();
 
   return {
     utterance,

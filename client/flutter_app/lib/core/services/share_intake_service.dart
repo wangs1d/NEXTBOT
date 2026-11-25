@@ -46,6 +46,11 @@ class ShareIntakeService {
   /// Dart 只多一个消费者，不为此新建第二套原生↔Dart 通道。
   void Function(String route)? onRouteRequest;
 
+  /// 厂商推送点开（2026-11-25「点通知直达」）：华为通知的 click_action 深链把
+  /// intentId/deliveryId 带进同一条原生队列。intentId 非空 = 这是一条要点开
+  /// 处理的决策（拉取意图端半屏页）；为空 = 只把用户带到对话页看那条内容。
+  void Function(String intentId, String deliveryId)? onPushOpen;
+
   /// bootstrap 调用（仅 Android，幂等）。装上原生推送的回调并试取一次存量。
   Future<void> start() async {
     if (_started || kIsWeb || !Platform.isAndroid) return;
@@ -89,6 +94,13 @@ class ShareIntakeService {
       // 要看到的是「落到了那一屏 + 卡弹出来」，而不是「卡弹在旧屏上」。
       final String? route = raw["route"] as String?;
       if (route != null && route.isNotEmpty) onRouteRequest?.call(route);
+      // 厂商推送点开：深链带的 intentId/deliveryId 与 route 同批取出。
+      // 先切页后的先后不重要——决策半屏页挂在主壳导航器上，切 tab 不影响它。
+      final String pushIntent = (raw["pushIntent"] as String?) ?? "";
+      final String pushDelivery = (raw["pushDelivery"] as String?) ?? "";
+      if (pushIntent.isNotEmpty || pushDelivery.isNotEmpty) {
+        onPushOpen?.call(pushIntent, pushDelivery);
+      }
       for (final Object? item in shares) {
         if (item is! Map) continue;
         final Map<Object?, Object?> s = item;

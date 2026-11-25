@@ -1,19 +1,22 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 /**
- * 流式分层契约（2026-11-05 定稿 → 2026-11-25 车道架构修订）：
+ * 统一管道契约（2026-11-25 定稿，替代车道架构）：
  *
- *   「流式」「文字块」「分泡」三件事分开，但共用同一条 WS 通道：
- *     模型 stream:true → delta 实时进分段器 → 语音数据帧逐句播报（流式保留）
- *     气泡车道（闲聊轮）：分段器切出的每个信息块 = 一个独立文字块
- *     （chat.assistant_chunk），块 id 由 BubbleTracker 统一分配；**流式块就是
- *     最终呈现**，done 只做对账定稿（bubbles 照实快照），绝不重建/替换/塌缩。
- *     单条车道（语音轮 / 任务面轮 / 整块交付场景）：不发文字块，文字由 done
- *     一次交付；语音数据帧两种车道照常流式。
+ * 两不变量：
+ *   I1 正文 = 流式泡（恒流式）：只要有文字 delta 就经分段器实时落屏成独立
+ *      气泡块（chat.assistant_chunk），闲聊与结构化内容并存于同一轮、互不吞；
+ *      唯一例外是 debug 开关 AGENT_REALTIME_STREAM=0。
+ *   I2 结构化产物 = done 封口附件：卡片/媒体/renderBlocks/followups 在 done
+ *      阶段附加到最后一个气泡上，绝不改写/撤回已落屏正文。
+ *
+ * done = seal：只做残差回填（已说过的不重发）+ 对账快照下发。
+ * 撤回 = 垃圾回收：只针对 recap echo（历史结论被复述回来）。
  *
  * 运行期行为由 scripts/probe-speech-stream.mjs 对真实服务取证；本文件是
  * 防回归的源码契约，锁住几个「一旦改回去就前功尽弃」的关键点。
@@ -25,10 +28,18 @@ const repoFile = (p: string) => readFileSync(join(here, "../../", p), "utf8");
 const handler = serverSrc("ws/handlers/chat-user-message.ts");
 const editRoute = serverSrc("routes/http/chat.ts");
 const toolLoop = serverSrc("external-model/openai-compatible-tool-loop.ts");
+const agentCore = serverSrc("services/agent-core.ts");
+const provider = serverSrc("external-model/abstract-chat-provider.ts");
+const streamTypes = serverSrc("external-model/types.ts");
+const replyTypes = serverSrc("agent/types.ts");
 const protocol = repoFile("packages/agent-protocol/src/events.ts");
-const bubblePolicy = serverSrc("agent/bubble-policy.ts");
 const bubbleTrackerSrc = serverSrc("agent/bubble-tracker.ts");
+// chunk/done 帧构造抽到 assistant-turn-publisher（并行工作流 2026-11-25）：事件
+// 类型字面量住在这里，handler 只经 buildChunkFrame/buildDoneFrame 外发。
+const publisher = serverSrc("agent/assistant-turn-publisher.ts");
 const voiceDart = repoFile("client/flutter_app/lib/core/services/pure_voice_mode.dart");
+
+// ── I1 正文 = 流式泡（恒流式） ──────────────────────────────────────────────
 
 test("模型上游仍是流式生成（stream:true 未被关成非流式）", () => {
   assert.match(toolLoop, /stream:\s*true/, "主 LLM 请求必须保持流式");
@@ -43,22 +54,73 @@ test("主链路 delta 实时进分段器，realtimeStream 默认开启", () => {
   );
 });
 
-test("车道门在 T0：decideTextLane 定死车道，done 不再是第二个裁决者", () => {
-  assert.match(bubblePolicy, /export function decideTextLane/, "车道裁决唯一出口");
-  assert.match(bubblePolicy, /lane: TextLane/, "车道只有 bubbles | single 两种");
-  assert.match(handler, /decideTextLane\(\{/, "车道必须在首个文字块外发前定死");
-  // 旧 done 裁决退役：不存在整轮结束后的呈现权翻转（按代码形态匹配，不误伤注释）。
-  assert.doesNotMatch(bubblePolicy, /export (async )?function (decidePresentation|splitReplyBubbles)/);
-  assert.doesNotMatch(handler, /\bdecidePresentation\(|\bsplitReplyBubbles\(/, "done 阶段禁止重判呈现");
-  assert.doesNotMatch(handler, /decideStreamPlan|decideFinalPlan/, "旧两阶段裁决必须删除");
-  assert.doesNotMatch(handler, /renderedReply/, "旧 renderedReply 启发式必须删除");
-  assert.doesNotMatch(handler, /shouldSplitBubbles|resolveBubbleCollapse/, "旧分泡判断必须删除");
-  assert.doesNotMatch(handler, /enableBubbleMode|disableBubbleMode/, "旧流式开泡/关泡必须删除");
-  // 车道只允许两处出现：初始声明 + 路由 .then 精化（首个主回复 delta 之前）。
-  // 文字块出口（sendAssistantChunk）等任何流式路径不得改写车道。
-  assert.match(handler, /let textStreamEnabled = textLane\.lane === "bubbles";/);
-  const laneAssignments = handler.match(/textStreamEnabled =/g) ?? [];
-  assert.equal(laneAssignments.length, 2, "车道只允许「初始声明 + 路由精化」两处赋值（T0 定死）");
+test("文字出口恒开：不存在按轮次关闸的车道判定", () => {
+  assert.doesNotMatch(handler, /decideTextLane|TextLanePlan/, "车道裁决已整体退役");
+  assert.doesNotMatch(handler, /textStreamEnabled/, "文字出口闸已退役：chunk 恒外发");
+  assert.doesNotMatch(
+    handler,
+    /if \(!textStreamEnabled\) return;/,
+    "sendAssistantChunk 不得在语音帧之后对文字块关闸",
+  );
+  assert.doesNotMatch(
+    toolLoop,
+    /answerHeld|holdSummary/,
+    "答案留存闸（holdAnswer）已退役：所有波次恒直推",
+  );
+  assert.doesNotMatch(toolLoop, /holdAnswer\?/, "AgentStreamOptions 上的 holdAnswer 选项已删除");
+  assert.doesNotMatch(agentCore, /holdAnswer|answerStreamHeld/, "agent-core 留存记账已删除");
+  assert.doesNotMatch(streamTypes, /holdAnswer/, "协议类型的 holdAnswer 字段已删除");
+  assert.doesNotMatch(replyTypes, /answerStreamHeld/, "reply 类型的 answerStreamHeld 字段已删除");
+  assert.doesNotMatch(provider, /holdAnswer/, "provider 白名单透传的 holdAnswer 已删除");
+  assert.equal(
+    existsSync(join(here, "../src/agent/bubble-policy.ts")),
+    false,
+    "bubble-policy（车道裁决模块）已删除",
+  );
+  assert.equal(
+    existsSync(join(here, "../src/services/receipt-card-projection.ts")),
+    false,
+    "receiptProducesCard（出卡扣流判据）随留存闸一并退役",
+  );
+});
+
+test("分段器恒气泡分段：块边界即气泡边界，不按轮次切换", () => {
+  assert.match(
+    handler,
+    /bubbleMode: true,/,
+    "统一管道下所有轮次走气泡分段（含语音轮：句子级分块对 TTS 更友好）",
+  );
+  assert.match(
+    handler,
+    /bubbleGapMinMs: voiceModeRound \? 0 : 400/,
+    "语音轮保持零人工停顿档（2026-09-28 定稿：TTS 不吃 sleep）",
+  );
+});
+
+test("结构化标记不再触发撤回：模型自产标记只在出口剥除", () => {
+  assert.doesNotMatch(
+    handler,
+    /streamMarkerGuard\.sawStructuredBlock\)\s*\{\s*retractAndSuppressStream/,
+    "sawStructuredBlock 撤回闸已退役：标记轮正文照常流式，done 附加卡片",
+  );
+});
+
+// ── I2 结构化产物 = done 封口附件 ───────────────────────────────────────────
+
+test("结构化恒附加：WS 主链路恒 cards-only 渲染（正文形态不被接管）", () => {
+  const turn = serverSrc("render/turn.ts");
+  const processor = serverSrc("services/tool-result-processor.ts");
+  assert.match(
+    handler,
+    /textLane: "bubble",/,
+    "主链路无条件传 bubble → cards-only：done 只附加，不重排已流式正文",
+  );
+  assert.match(
+    processor,
+    /opts\?\.textLane === "bubble" \? "cards-only" : "full"/,
+    "cards-only 与 full 的分派映射保留（full 供非流式调用方）",
+  );
+  assert.match(turn, /bodyRewritten: mode === "full" && decision\.body\.form !== "plain"/);
 });
 
 test("done = 定稿（seal）：无塌缩通道、无整段替换信号", () => {
@@ -75,20 +137,52 @@ test("done = 定稿（seal）：无塌缩通道、无整段替换信号", () => 
   assert.match(handler, /bubbleTracker\.hasBubbles \? \{ bubbles: bubbleTracker\.snapshot \}/);
 });
 
-test("撤回路径：stream_reset 后清账，done 回单条（不存在泡在 + 翻案并存）", () => {
+test("正文单一出口：定稿 = 已放出，收尾 flush 流式净化器，done 不比对补推", () => {
+  const guard = serverSrc("utils/stream-marker-guard.ts");
+  assert.match(guard, /export function stripDisplayProtocol/);
+  assert.match(handler, /streamMarkerGuard\.feed\(/, "出口必须剥离卡片块/NEXT_UP/标记 token");
+  assert.match(handler, /streamMarkerGuard\.flush\(\)/, "出口净化器缓冲流末必须放出");
+  // done 不再拿「已流文本 vs finalText」互相比对去补差——那会把已上屏内容再追加一遍。
+  assert.doesNotMatch(handler, /unstreamedSuffix|stripSentencesAlreadySaid|seal backfill/, "done 收口不得比对补推");
+  // provider 侧：流式净化器带缓冲，流结束必须 flush，缓冲经同一出口放出。
+  assert.match(toolLoop, /waveMetaFilter\(waveTagSanitizer\.flush\(\)\)/, "tool-loop 收尾必须冲刷净化器缓冲");
+  assert.match(toolLoop, /waveMetaFilter\.flush\(\)/);
+  assert.match(provider, /metaFilter\(sanitizer\.flush\(\)\)/, "纯文本分支收尾必须冲刷净化器缓冲");
+  assert.match(provider, /metaFilter\.flush\(\)/);
+  // 定稿文本取已放出文本（waveStreamedText / streamedVisible），整串净化链只在
+  // 没有任何流式产出时使用。
+  assert.match(toolLoop, /sanitizedFinalText = stripRequestCardTags\(\s*stripAllTimestampFrameLines\(waveStreamedText\)\.trim\(\)/);
+  assert.match(provider, /visible = streamedVisible\.trim\(\)\s*\?\s*streamedVisible\.trim\(\)/);
+});
+
+// ── 撤回 = 垃圾回收（recap echo 专用） ─────────────────────────────────────
+
+test("撤回路径：recap echo 触发 stream_reset 并清账，done 回单条", () => {
   const resetFnIdx = handler.indexOf("const retractAndSuppressStream");
   assert.ok(resetFnIdx > 0, "撤回闸必须存在");
   const section = handler.slice(resetFnIdx, resetFnIdx + 1600);
   assert.match(section, /bubbleTracker\.reset\(\)/, "撤回后必须清空气泡账本");
   assert.match(section, /ChatStreamReset/, "撤回复用既有 stream_reset 事件");
+  // 唯一触发点：recap echo。整份 handler 里 retractAndSuppressStream 的调用处
+  // 只允许 isRecapEchoText 分支一处。
+  const callSites = handler.match(/retractAndSuppressStream\(\);/g) ?? [];
+  assert.equal(callSites.length, 1, "撤回只服务垃圾回收语义，不得再挂其他触发条件");
+  const echoIdx = handler.indexOf("isRecapEchoText(cleanedChunk)");
+  assert.ok(
+    echoIdx > 0 && echoIdx > resetFnIdx,
+    "recap echo 判定在撤回函数定义之后的主链路里触发撤回",
+  );
 });
+
+// ── 通道与语音契约（不变量保持） ───────────────────────────────────────────
 
 test("文字块流式：chunk 携带块 id，done 用同源 bubbles 对账", () => {
   assert.match(
-    handler,
+    publisher,
     /type:\s*ServerEventType\.ChatAssistantChunk/,
-    "气泡车道必须实时下发文字块（复用既有事件类型，不新开通道）",
+    "正文必须实时下发文字块（复用既有事件类型，不新开通道）",
   );
+  assert.match(handler, /buildChunkFrame\(\s*\{/, "handler 的文字块必须经统一帧构造外发");
   assert.match(
     handler,
     /bubbleTracker\.appendStreamBlock\(/,
@@ -102,24 +196,9 @@ test("文字块流式：chunk 携带块 id，done 用同源 bubbles 对账", () 
   );
   assert.doesNotMatch(
     editRoute,
-    /type:\s*ServerEventType\.ChatAssistantChunk/,
+    /ChatAssistantChunk|buildChunkFrame\(/,
     "编辑重答不接流式块通道",
   );
-});
-
-test("工具回调不再开关气泡/拆分通道（车道在 T0 已定死）", () => {
-  const startIdx = handler.indexOf("onExternalToolExecuteStart");
-  assert.ok(startIdx > 0, "必须存在工具开始回调");
-  const section = handler.slice(startIdx, startIdx + 3000);
-  assert.doesNotMatch(section, /bubbleTracker\.freeze\(\)/, "禁止流式冻结气泡");
-  assert.doesNotMatch(
-    section,
-    /SINGLE_BUBBLE_TOOL_DOMAINS|disableBubbleMode/,
-    "工具域白名单/关泡逻辑必须删除（车道只在 T0 判一次）",
-  );
-  // 发言模型的过程话截止语义保留：awaitPending + noteToolStart 必须还在
-  assert.match(section, /awaitPending\(\)/, "工具边界的过程话屏障保留");
-  assert.match(section, /noteToolStart/, "发言模型工具边界登记保留");
 });
 
 test("语音数据帧：协议登记 + 主链路与编辑重答都有收口 final 帧", () => {
@@ -132,33 +211,10 @@ test("语音数据帧：协议登记 + 主链路与编辑重答都有收口 fina
 
 test("final 语音帧恒在 done 之前，done 只做终态对账", () => {
   const finalIdx = handler.indexOf('sendSpeechFrame("", "stream", true, finalText)');
-  const doneIdx = handler.indexOf("type: ServerEventType.ChatAssistantDone", finalIdx);
+  const doneIdx = handler.indexOf("buildDoneFrame({", finalIdx);
   assert.ok(finalIdx > 0, "必须存在语音收口帧");
   assert.ok(doneIdx > finalIdx, "收口帧必须先于 done 下发");
-  assert.match(handler, /ChatAssistantChunk/, "文字块流式通道必须在");
-});
-
-test("正文重排信号由渲染层产出；气泡车道禁用形态接管", () => {
-  const turn = serverSrc("render/turn.ts");
-  const processor = serverSrc("services/tool-result-processor.ts");
-  assert.match(turn, /bodyRewritten: mode === "full" && decision\.body\.form !== "plain"/);
-  assert.match(
-    processor,
-    /opts\?\.textLane === "bubble" \? "cards-only" : "full"/,
-    "气泡车道必须走 cards-only（形态接管 = done 翻案）",
-  );
-  assert.match(
-    handler,
-    /textLane: textStreamEnabled && !suppressStreamForCards \? "bubble" : "single"/,
-    "主链路必须把车道传给渲染出口",
-  );
-});
-
-test("兜底补漏剥离展示协议：气泡永不携带标记", () => {
-  const guard = serverSrc("utils/stream-marker-guard.ts");
-  assert.match(guard, /export function stripDisplayProtocol/, "补漏源必须过展示协议剥离");
-  assert.match(handler, /stripDisplayProtocol\(/, "seal 补漏必须剥离卡片块/NEXT_UP/标记 token");
-  assert.match(handler, /stripSentencesAlreadySaid\(/, "补漏按句去重，已流式内容不重发");
+  assert.match(publisher, /type:\s*ServerEventType\.ChatAssistantDone/, "文字块流式通道必须在");
 });
 
 test("客户端语音帧只进 TTS，绝不落消息列表", () => {

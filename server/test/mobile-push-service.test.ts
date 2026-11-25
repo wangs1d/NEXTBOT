@@ -7,6 +7,7 @@ import { test } from "node:test";
 
 import {
   BarkProvider,
+  HuaweiPushProvider,
   JPushProvider,
   MobilePushService,
   WebhookPushProvider,
@@ -57,6 +58,66 @@ function stubFetch(handler: (url: string, init: RequestInit) => { status: number
 }
 
 // ─── token 注册表 ───
+
+test("huawei provider: click_action 用 type=1 深链（点通知直达对话/决策页）", async () => {
+  const { calls, restore } = stubFetch((url) => {
+    if (url.includes("oauth-login")) {
+      return { status: 200, body: JSON.stringify({ access_token: "tok", expires_in: 3600 }) };
+    }
+    return { status: 200, body: JSON.stringify({ code: "80000000", msg: "Success" }) };
+  });
+  try {
+    const provider = new HuaweiPushProvider("app-id", "secret");
+    const r = await provider.push(
+      { provider: "huawei", token: "hms-token" },
+      {
+        actorId: "a@x.com",
+        title: "该睡觉啦",
+        body: "该睡觉啦",
+        importance: "high",
+        kind: "greeting",
+        deliveryId: "d1",
+        intentId: "i1",
+      },
+    );
+    assert.equal(r.ok, true);
+    const pushCall = calls.find((c) => c.url.includes("messages:send"));
+    assert.ok(pushCall, "应调用华为推送接口");
+    const payload = JSON.parse(String(pushCall.init.body)) as {
+      message: {
+        android: { notification: { click_action: { type: number; intent: string } } };
+      };
+    };
+    const click = payload.message.android.notification.click_action;
+    assert.equal(click.type, 1, "type=1 才能带参数（type=3 只能拉起 App）");
+    assert.match(click.intent, /^intent:\/\/push#Intent;/);
+    assert.match(click.intent, /scheme=nextbot/);
+    assert.match(click.intent, /package=com\.nextbot\.app/);
+    assert.match(click.intent, /S\.nb_widget_route=chat/);
+    assert.match(click.intent, /S\.nb_push_intent=i1/);
+    assert.match(click.intent, /S\.nb_push_delivery=d1/);
+    assert.match(click.intent, /end$/);
+
+    // 2026-11-25 透传写穿：通知消息之后再补一条 data-only（无 notification），
+    // HMS 会拉起被杀进程投递到 onMessageReceived，客户端据此落本地对话。
+    const pushes = calls.filter((c) => c.url.includes("messages:send"));
+    assert.equal(pushes.length, 2, "通知 + 透传各一条");
+    const dataPayload = JSON.parse(String(pushes[1]!.init.body)) as {
+      message: { android: { notification?: unknown; data: string } };
+    };
+    assert.equal(dataPayload.message.android.notification, undefined, "透传消息不带 notification");
+    const data = JSON.parse(dataPayload.message.android.data) as {
+      body: string;
+      stableKey: string;
+      intentId: string;
+    };
+    assert.equal(data.body, "该睡觉啦");
+    assert.equal(data.intentId, "i1");
+    assert.equal(data.stableKey, "d1", "未显式给 stableKey 时退回 deliveryId");
+  } finally {
+    restore();
+  }
+});
 
 test("push registry: 注册/注销 + 落盘重启恢复", () => {
   const dir = mkdtempSync(join(tmpdir(), "mobile-push-"));
@@ -208,16 +269,24 @@ type Harness = {
   presence: PresenceService;
   delivered: Array<{ actorId: string; json: string }>;
   pushes: Array<{ actorId: string; title: string }>;
-  flags: { pushEnabled: boolean; pushOk: boolean };
+  transcripts: Array<{ actorId: string; userText: string; assistantText: string }>;
+  flags: { pushEnabled: boolean; pushOk: boolean; pushReason: string };
+  clock: { t: number };
   dir: string;
 };
 
-function makeHarness(opts: { pushOk?: boolean } = {}): Harness {
+function makeHarness(opts: { pushOk?: boolean; pushReason?: string } = {}): Harness {
   const dir = mkdtempSync(join(tmpdir(), "proactive-push-"));
   const presence = new PresenceService();
   const delivered: Array<{ actorId: string; json: string }> = [];
   const pushes: Array<{ actorId: string; title: string }> = [];
-  const flags = { pushEnabled: true, pushOk: opts.pushOk ?? true };
+  const transcripts: Harness["transcripts"] = [];
+  const clock = { t: NOON };
+  const flags = {
+    pushEnabled: true,
+    pushOk: opts.pushOk ?? true,
+    pushReason: opts.pushReason ?? "stub_down",
+  };
   const pipeline = new ProactivePipeline({
     dataPath: dir,
     governor: new FrequencyGovernor({ ignoreEnv: true, }),
@@ -230,18 +299,25 @@ function makeHarness(opts: { pushOk?: boolean } = {}): Harness {
       },
     }),
     outcomes: new OutcomeStore(join(dir, "outcomes.json")),
-    nowFn: () => NOON,
+    nowFn: () => clock.t,
+    transcriptAppend: (entry) => {
+      transcripts.push({
+        actorId: entry.actorId,
+        userText: entry.userText,
+        assistantText: entry.assistantText,
+      });
+    },
     mobilePush: {
       hasChannel: () => flags.pushEnabled,
       push: async (input) => {
         pushes.push({ actorId: input.actorId, title: input.title });
         return flags.pushOk
           ? { ok: true, provider: "stub" }
-          : { ok: false, provider: "stub", reason: "stub_down" };
+          : { ok: false, provider: "stub", reason: flags.pushReason };
       },
     },
   });
-  return { pipeline, presence, delivered, pushes, flags, dir };
+  return { pipeline, presence, delivered, pushes, transcripts, flags, clock, dir };
 }
 
 test("pipeline: 两端离线 + 推送通道 → must 提案自动升级系统推送并出队", async () => {
@@ -253,6 +329,10 @@ test("pipeline: 两端离线 + 推送通道 → must 提案自动升级系统推
     await new Promise((r) => setImmediate(r));
     assert.equal(h.pushes.length, 1, "推送通道触发一次");
     assert.equal(h.pipeline.diagnostics().pending.length, 0, "推送成功即出队（重连后不重复投递）");
+    // 对话留底（2026-11-25 用户拍板）：推完对话里也要有同一条，打开 App 才找得到
+    assert.equal(h.transcripts.length, 1, "推送成功写一条主会话轮次");
+    assert.equal(h.transcripts[0]!.userText, "", "留底是助手轮，不伪造用户原话");
+    assert.equal(h.transcripts[0]!.assistantText, "15分钟后评审", "正文与推送一致");
     await new Promise((r) => setImmediate(r));
     const outcome = h.pipeline.diagnostics().recentOutcomes.at(-1);
     assert.equal(outcome?.channel, "mobile_push");
@@ -277,21 +357,46 @@ test("pipeline: social 层离线也走厂商推送（§4.2 目标态：被杀时
   }
 });
 
-test("pipeline: 推送失败即丢弃，不保留待发区、不重试", async () => {
+test("pipeline: 推送失败 → 留待发区退避重试，超出内容时效才丢弃", async () => {
   const h = makeHarness({ pushOk: false });
   try {
-    h.pipeline.submitProposal(proposal());
+    h.pipeline.submitProposal(proposal({ dedupKey: "k-retry" }));
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.equal(h.pushes.length, 1, "第一次推送");
+    assert.equal(h.pipeline.diagnostics().pending.length, 1, "失败不丢，留在待发区重试");
+
+    // 退避 1 分钟：到点自动重试（仍失败 → 继续留）
+    h.clock.t += 61_000;
+    h.pipeline.flushDue(h.clock.t);
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.equal(h.pushes.length, 2, "退避到点自动重试");
+    assert.equal(h.pipeline.diagnostics().pending.length, 1, "仍在待发区");
+
+    // 超过 must 类 6h 内容时效 → 如实丢弃（不无限重试）
+    h.clock.t = NOON + 7 * 60 * 60_000;
+    h.pipeline.flushDue(h.clock.t);
+    await new Promise((r) => setImmediate(r));
+    await new Promise((r) => setImmediate(r));
+    assert.equal(h.pipeline.diagnostics().pending.length, 0, "超出时效丢弃");
+  } finally {
+    rmSync(h.dir, { recursive: true, force: true });
+  }
+});
+
+test("pipeline: push token 失效（80300002）→ 不重试，直接丢弃等重注册", async () => {
+  const h = makeHarness({ pushOk: false, pushReason: "huawei code=80300002: token 无效" });
+  try {
+    h.pipeline.submitProposal(proposal({ dedupKey: "k-token-dead" }));
     await new Promise((r) => setImmediate(r));
     await new Promise((r) => setImmediate(r));
     assert.equal(h.pushes.length, 1, "只推一次");
-    assert.equal(h.pipeline.diagnostics().pending.length, 0, "推送失败即出队丢弃");
-    // 即便时间推进也不再重试（时效信息不靠兜底复活）
-    h.flags.pushOk = true;
-    h.pipeline.flushDue(NOON + 5 * 60_000 + 1);
+    assert.equal(h.pipeline.diagnostics().pending.length, 0, "死 token 不重试");
+    h.clock.t += 60 * 60_000;
+    h.pipeline.flushDue(h.clock.t);
     await new Promise((r) => setImmediate(r));
-    await new Promise((r) => setImmediate(r));
-    assert.equal(h.pushes.length, 1, "失败不重试");
-    assert.equal(h.pipeline.diagnostics().pending.length, 0);
+    assert.equal(h.pushes.length, 1, "时间推进也不重试");
   } finally {
     rmSync(h.dir, { recursive: true, force: true });
   }
@@ -339,6 +444,7 @@ test("pipeline: WS 竞态失败也触发离线推送升级", async () => {
           return { ok: true, provider: "stub" };
         },
       },
+      transcriptAppend: () => {},
     });
     presence.markConnected("user-a", NOON - 5 * 60_000);
     pipeline.submitProposal(proposal({ dedupKey: "k-race" }));

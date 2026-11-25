@@ -37,6 +37,23 @@ class MobilePushRegistrar {
     _registeredToken = null;
   }
 
+  /// 取走原生侧攒下的透传消息（HMS onMessageReceived 落队列），取走即清空。
+  /// App 被杀/后台期间收到的内容靠这条路补进本地对话（不用点通知）。
+  static Future<List<Map<String, dynamic>>> takePushedInbox() async {
+    if (kIsWeb || !Platform.isAndroid) return const <Map<String, dynamic>>[];
+    try {
+      final Object? raw = await _channel.invokeMethod<Object>("takePushed");
+      if (raw is! List) return const <Map<String, dynamic>>[];
+      return raw
+          .whereType<Map<Object?, Object?>>()
+          .map((Map<Object?, Object?> m) => Map<String, dynamic>.from(m))
+          .toList(growable: false);
+    } catch (e) {
+      debugPrint("[mobile-push] takePushed failed: $e");
+      return const <Map<String, dynamic>>[];
+    }
+  }
+
   static Future<void> registerIfNeeded({int maxAttempts = 15}) async {
     if (kIsWeb) return;
     // 桌面（Windows 调试）无厂商推送：跳过

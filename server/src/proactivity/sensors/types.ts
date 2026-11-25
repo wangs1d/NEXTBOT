@@ -59,6 +59,16 @@ export type Signal = {
   at: number;
   /** 流内去重指纹（同一指纹在窗口期内不重复分发） */
   fingerprint: string;
+  /**
+   * 事件键（2026-11-25 跨源汇聚）：**同一件现实世界的事**在不同信源里共用同一个键，
+   * 由 SourceStore 合并成一条（refs 记录所有来源），而不是各存一条。
+   *
+   * 与 fingerprint 的分工：fingerprint 是"这条信号有没有重复到达"（传输层去重），
+   * eventKey 是"两封信/两个日历项是不是同一件事"（语义层合并）。
+   * 缺省不填 → 行为与旧版完全一致。跨源键由适配器按可核验的锚点派生
+   * （如航班号 CA1234 在邮件主题与日历摘要里同时出现），不猜。
+   */
+  eventKey?: string;
   salience: SignalSalience;
   /** 状态变化的自然语言描述（零 LLM 模板拼接，评估器/观察流直接可读） */
   delta?: string;

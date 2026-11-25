@@ -831,10 +831,10 @@ export class ToolResultProcessor {
     opts?: {
       plainTextMode?: boolean;
       /**
-       * 文字车道（2026-11-25 车道架构）：气泡车道传 "bubble" → renderTurn 走
-       * cards-only 模式（卡照出、正文形态不被接管）——折叠/引用/结构化重排
-       * 会改写已流式落屏的正文，等价 done 翻案，气泡车道绝不发生；
-       * 单条车道/缺省走 "full"（原有全部出口形态）。
+       * 出口渲染模式（2026-11-25 统一管道）：WS 流式轮恒传 "bubble" →
+       * renderTurn 走 cards-only 模式（卡照出、正文形态不被接管）——正文
+       * 已在流式阶段定稿，折叠/引用/结构化重排等价 done 翻案；缺省走 "full"
+       * （原有全部出口形态，非流式调用方专用）。
        */
       textLane?: "bubble" | "single";
       userText?: string;
@@ -851,8 +851,7 @@ export class ToolResultProcessor {
       renderPayloads?: Record<string, unknown>;
       /**
        * 出口信封回传：done 装配要拿 meta.sceneId/preSceneIds 拼 wire 信封——
-       * singleBubble（禁分泡）的判据就在 sceneId 上。不回传的话 done 帧从
-       * finalText 重拼信封，场景信息丢失。
+       * 不回传的话 done 帧从 finalText 重拼信封，场景信息丢失。
        */
       onRenderEnvelope?: (envelope: {
         meta: {

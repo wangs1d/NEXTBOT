@@ -68,6 +68,16 @@ class MobilePushPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
+            // 透传写穿（2026-11-25）：取走 App 被杀/后台期间 HMS 投递到
+            // PushTokenService 的消息队列，由 Dart 写进本地对话。
+            "takePushed" -> {
+                val context = appContext
+                if (context == null) {
+                    result.success(emptyList<Map<String, Any?>>())
+                    return
+                }
+                result.success(PushTokenService.takeAll(context))
+            }
             "getPushToken" -> {
                 val context = appContext
                 val id = appId

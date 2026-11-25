@@ -25,6 +25,11 @@ type Presence = { state: string; since: number };
 /** 日程板值 */
 type NextEvent = { title: string; runAt: number; updatedAt: number };
 
+/** 本地当天的某个整点（毫秒）：给「只在上午有意义」的晨报做保质期 */
+function localHourToday(now: Date, hour: number): number {
+  return new Date(now.getFullYear(), now.getMonth(), now.getDate(), hour, 0, 0, 0).getTime();
+}
+
 /**
  * 构建全部映射规则。services 全部可选——缺哪个数据源就自动跳过对应段，
  * 系统在最小依赖下也能运行（真实使用的鲁棒性要求）。
@@ -207,6 +212,10 @@ export function buildBoardRules(services: RuleServices): BoardRule[] {
             body,
             dedupKey: `morning_brief:${dayKey}`,
             salience: "medium",
+            // 晨报只在上午有意义（2026-11-25 实证）：保质期到当天中午。排槽若把它
+            // 排到下午/夜里，或首次解锁拖到晚上，仲裁层按 expired 丢弃——绝不把
+            // 「今天两场会」当晚安推。
+            expiresAt: localHourToday(ctx.now, 12),
             ...(notifyOptions.length ? { notifyOptions } : {}),
           },
         ];

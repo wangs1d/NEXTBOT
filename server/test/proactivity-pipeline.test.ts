@@ -305,9 +305,10 @@ test("pipeline: 在线 directText 零 LLM 直投 + outcome 记录", async () => 
     assert.equal(h.delivered.length, 1);
     assert.equal(h.spoken.length, 0, "directText 提案不调 LLM");
     const payload = JSON.parse(h.delivered[0].json);
-    assert.equal(payload.type, "agent.proactive_message");
-    assert.ok(payload.payload.deliveryId);
-    assert.equal(payload.payload.importance, "high");
+    assert.equal(payload.type, "chat.assistant_done");
+    assert.ok(payload.payload.proactive?.deliveryId);
+    assert.equal(payload.payload.proactive?.importance, "high");
+    assert.equal(payload.payload.proactive?.kind, "schedule_upcoming");
     await new Promise((r) => setImmediate(r));
     assert.equal(h.pipeline.diagnostics().recentOutcomes.at(-1)?.outcome, "delivered");
   } finally {

@@ -11,6 +11,7 @@
 import { createHash } from "node:crypto";
 
 import type { PresenceState } from "../pipeline-types.js";
+import type { SharedContextSnapshot } from "../context-snapshot.js";
 import { IntelGate, createIntelGate } from "./intel-gate.js";
 import { checkJudgeDraft } from "./intel-draft.js";
 import { extractBrief, extractDetail } from "./intel-refine.js";
@@ -43,6 +44,11 @@ export type IntelServiceDeps = {
   /** 最近投递回执（用户接受/忽略/静音），喂给判断 */
   feedback?: () => IntelJudgeFeedback["recentOutcomes"];
   styleBrief?: (actorId: string) => Promise<string | null> | string | null;
+  /**
+   * 共享上下文（2026-11-25）：与 AgentPulse 同一份「他此刻在哪/在干什么/什么还没聊完」。
+   * 缺省不注入 → 判断行为与旧版一致。
+   */
+  context?: (actorId: string) => SharedContextSnapshot | null;
   gate?: IntelGate;
   vipSenders?: readonly string[];
   /** 说出后模型认为日后仍需记得的事（承诺/待办），交给记忆模块自行遗忘 */
@@ -449,6 +455,12 @@ export class IntelService {
     now: number,
     styleBrief: string | null,
   ): Omit<IntelJudgeInput, "lines"> {
+    let shared: SharedContextSnapshot | null = null;
+    try {
+      shared = this.deps.context?.(actorId) ?? null;
+    } catch {
+      shared = null;
+    }
     return {
       now,
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
@@ -456,6 +468,7 @@ export class IntelService {
       inConversation: this.deps.inConversation(actorId),
       feedback: this.feedback(actorId),
       styleBrief,
+      ...(shared ? { shared } : {}),
     };
   }
 

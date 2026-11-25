@@ -1581,11 +1581,11 @@ function isMetaOnlySentence(sentence: string): boolean {
  * 元机制」（如「上一轮转入规划任务，执行脑已接手处理中」），而非方括
  * 号控制标签。
  */
-export function createStreamMetaSentenceFilter(maxPendingChars = 1024) {
+export function createStreamMetaSentenceFilter(maxPendingChars = 1024): StreamTextTransform {
   let pending = "";
   const state: OrphanCloserState = { orphan: 0 };
 
-  return function feed(delta: string): string {
+  function feed(delta: string): string {
     pending += delta;
     // 保险丝：缓冲过长直接切到直通，避免长段落被无限拦截。
     if (pending.length > maxPendingChars) {
@@ -1607,7 +1607,15 @@ export function createStreamMetaSentenceFilter(maxPendingChars = 1024) {
     const complete = pending.slice(0, lastEnd + 1);
     pending = pending.slice(lastEnd + 1);
     return filterMetaSentences(complete, state);
+  }
+
+  feed.flush = (): string => {
+    if (!pending) return "";
+    const out = filterMetaSentences(pending, state);
+    pending = "";
+    return out;
   };
+  return feed;
 }
 
 /** 整串剥离内部控制标签前缀（可匹配多个连续标签）。 */
@@ -1626,6 +1634,16 @@ export function stripInternalControlTags(text: string): string {
 }
 
 /**
+ * 带缓冲的流式文本变换：逐 delta 喂入、返回可放出的增量。
+ * 流结束必须调 `flush()` 交还缓冲——否则留在缓冲里的末句永远不出站，
+ * 定稿文本就会比用户看到的多一截。
+ */
+export interface StreamTextTransform {
+  (delta: string): string;
+  flush(): string;
+}
+
+/**
  * 流式内部控制标签净化器。
  *
  * 用法：把 provider 推流的原始增量喂给 `feed(delta)`，返回值是**可以推给前端**
@@ -1637,7 +1655,7 @@ export function stripInternalControlTags(text: string): string {
  * 就切到直通模式，把已累积内容一次性吐给前端。`maxPendingChars` 是保险丝，
  * 避免 tag 永不闭合导致无限缓冲。
  */
-export function createStreamControlTagSanitizer(maxPendingChars = 512) {
+export function createStreamControlTagSanitizer(maxPendingChars = 512): StreamTextTransform {
   let pending = "";
   let passthrough = false;
   /**
@@ -1652,7 +1670,7 @@ export function createStreamControlTagSanitizer(maxPendingChars = 512) {
   /** 吞帧体时的缓冲上限（超过则只留尾部判界，避免内存无界）。 */
   const swallowCap = Math.max(4096, maxPendingChars * 8);
 
-  return function feed(delta: string): string {
+  function feed(delta: string): string {
     if (swallowSystemFrame) {
       pending += delta;
       const terminated = /<\/system>/i.test(pending) || /\n[ \t]*\n/.test(pending);
@@ -1736,7 +1754,31 @@ export function createStreamControlTagSanitizer(maxPendingChars = 512) {
     // 全部被剥掉（只剩标签/空白）：可能还有更多标签进来，继续吞。
     pending = stripped;
     return "";
+  }
+
+  feed.flush = (): string => {
+    const rest = pending;
+    pending = "";
+    // 未闭合的 <system> 帧：剥到 EOF，全程不吐给用户。
+    if (swallowSystemFrame) {
+      swallowSystemFrame = false;
+      return "";
+    }
+    if (passthrough || !rest) return rest;
+    const stripped = stripInternalControlTags(rest);
+    if (!stripped) return "";
+    // 流已结束仍是半截标签/帧开头：残缺的内部控制标记，不是正文。
+    if (
+      INTERNAL_CONTROL_TAG_PREFIX_RE.test(stripped) ||
+      INTERNAL_FRAME_STEM_PREFIX_RE.test(stripped) ||
+      systemReminderPartialTailLen(stripped) > 0 ||
+      systemFramePartialTailLen(stripped) > 0
+    ) {
+      return "";
+    }
+    return stripped;
   };
+  return feed;
 }
 
 /* ------------------------------------------------------------------ *

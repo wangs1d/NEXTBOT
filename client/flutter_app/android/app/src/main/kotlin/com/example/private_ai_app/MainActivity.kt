@@ -58,6 +58,13 @@ class MainActivity : FlutterActivity() {
         if (!route.isNullOrEmpty()) {
             ShareIntakeStore.setRoute(this, route)
         }
+        // 厂商推送点击深链（2026-11-25）：华为 click_action.type=1 带下来的
+        // intentId / deliveryId，落同一条中转队列，Dart 取件后拉取意图端决策半屏页。
+        val pushIntent = intent?.getStringExtra("nb_push_intent")
+        val pushDelivery = intent?.getStringExtra("nb_push_delivery")
+        if (!pushIntent.isNullOrEmpty() || !pushDelivery.isNullOrEmpty()) {
+            ShareIntakeStore.setPushTarget(this, pushIntent, pushDelivery)
+        }
         ShareIntakePlugin.pushReady()
     }
 

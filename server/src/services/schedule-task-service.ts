@@ -6,7 +6,7 @@ import { isIP } from "net";
 import { dirname, join } from "path";
 
 import { buildReminderPolicy, type ScheduleHabitHints, type SchedulePreReminder } from "./schedule-reminder-policy.js";
-import { extractReminderSubject, formatReminderMessage, isEchoLikeReminderCopy } from "./reminder-copy.js";
+import { extractReminderSubject, isEchoLikeReminderCopy } from "./reminder-copy.js";
 import type { RouteEstimate } from "./route-duration-service.js";
 import { expandTaskOccurrenceTimes } from "./schedule-recurrence-expand.js";
 import {
@@ -317,7 +317,8 @@ export type ScheduleTaskServiceOptions = {
  * shortTitle/reminderMessage 是展示文案，不是原句回声。模型自己填的字段
  * （calendar.create 的结构化分支、HTTP 直写）
  * 不经解析服务，全在此统一过检——含时间词/「提醒我」类指令词/悬空助词开头/
- * 超长短标题即视为解析污染，从 description 重推导干净文案。
+ * 超长短标题即视为解析污染。2026-11-25 用户定调：文案只由模型写，回声污染
+ * 一律置空（展示端落中性字段），不再用模板重新包装口吻。
  */
 function normalizeReminderDisplayCopy(
   kind: ScheduleTaskKind,
@@ -344,9 +345,9 @@ function normalizeReminderDisplayCopy(
   return {
     // 短标题回退拿不到干净事项词时宁缺毋滥（今日安排走展示端剥离简化）
     shortTitle: shortBad ? (subject === "到点提醒" ? undefined : subject) : short,
-    // 只拦回声（原句/半截原句），从原句重推导「该X啦」约定文案；干净文案
-    // 原样放行——无条件包装会把「睡觉了」「吃药时间到」改成「该睡觉了啦」类垃圾。
-    reminderMessage: msgBad ? formatReminderMessage(subject) : message || undefined,
+    // 只拦回声（原句/半截原句）：置空，到点展示端落到 description/shortTitle；
+    // 不再硬编码包装（「该X啦」模板已删）。
+    reminderMessage: msgBad ? undefined : message,
   };
 }
 
@@ -1397,7 +1398,7 @@ export class ScheduleTaskService {
     };
     try {
       if (task.kind === "reminder") {
-        const message = task.reminderMessage || task.description;
+        const message = task.reminderMessage || task.shortTitle || task.title || task.description;
         run.output = {
           type: "reminder",
           title: task.title,
@@ -1437,7 +1438,11 @@ export class ScheduleTaskService {
         }
       }
       if (task.kind === "reminder" && run.status === "success" && this.reminderHandler) {
-        const message = task.reminderMessage || task.description;
+        // 文案优先级（2026-11-25 live 验证后定）：模型写的 reminderMessage →
+        // 中性事项词 shortTitle → title。description 是用户原句（回声），只配
+        // 垫底——否则手机端会收到「2分钟后提醒我睡觉」这类原句弹窗。
+        const message =
+          task.reminderMessage || task.shortTitle || task.title || task.description;
         await this.reminderHandler(nextTaskState, message);
       }
     }
@@ -1894,9 +1899,8 @@ export class ScheduleTaskService {
     action?: ScheduleActionConfig,
     agentTask?: ScheduleAgentTaskConfig,
   ): void {
-    if (kind === "reminder" && !(reminderMessage?.trim() || "").length) {
-      throw new Error("reminder task requires reminderMessage");
-    }
+    // reminder 的 reminderMessage 允许为空（2026-11-25 定调：文案只由模型写，
+    // 模型缺位时留空，到点展示端落 description/shortTitle 中性字段）。
     if (kind === "action" && !action?.url?.trim()) {
       throw new Error("action task requires action.url");
     }

@@ -7,6 +7,7 @@
 // 内核统一提供：调度 / 退避熔断 / 水位续采 / 健康上报 / 分发 —— 适配器本身
 // 只负责"这段时间有什么新邮件"。
 import type { ProactiveSensor, Signal } from "./types.js";
+import { mailEventKey } from "./event-key.js";
 
 /** MailWatchService 的只读取数口（结构最小面，便于测试注入桩） */
 export interface MailWatchReadPort {
@@ -29,13 +30,17 @@ export class MailSensor implements ProactiveSensor {
     const fresh = this.port.fetchNewSince(since);
     return fresh.map(({ uid, mail, importance }) => {
       const at = mail.date ? Date.parse(mail.date) : NaN;
+      const receivedAt = Number.isFinite(at) ? at : Date.now();
       return {
         stream: "mail" as const,
         actorId: mail.actorId,
-        at: Number.isFinite(at) ? at : Date.now(),
+        at: receivedAt,
         // 有 uid 用 uid（稳定）；否则退 from+subject+date 指纹。UID 是"一个邮箱里"的编号，
         // 两个账号各自的第 1234 封不是同一封信——指纹必须带上归属，否则互相把对方的信号去重掉
         fingerprint: `mail:${mail.actorId}:${uid >= 0 ? uid : `${mail.from}|${mail.subject}|${mail.date ?? ""}`}`,
+        // 事件键（2026-11-25）：同航班/车次的确认信与日历行程在 SourceStore 合并成
+        // 一条事件；没有可核验锚点时退回「同主题线程」，同一封来回邮件不算多件事。
+        eventKey: mailEventKey(mail.actorId, mail.subject, mail.textSnippet, receivedAt),
         // noise（系统通知）/otp（验证码）理论上到不了这里（MailWatchService 入口已短路），防御性归 low
         salience: importance === "critical" || importance === "high" ? "high" : importance === "promotional" || importance === "noise" || importance === "otp" ? "low" : "medium",
         delta: `新邮件：${mail.subject || "(无主题)"}`,

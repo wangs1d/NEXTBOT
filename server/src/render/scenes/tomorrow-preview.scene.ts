@@ -256,7 +256,6 @@ export const tomorrowPreviewScene: RenderScene = {
   phase: "pre",
   produces: {
     forms: ["structured"],
-    singleBubble: true,
     promptBoundary: TOMORROW_PREVIEW_BOUNDARY,
   },
   contract: "行程/天气/到期/近期由系统作为事实注入 prompt；正文由模型一次写成，服务端不重排不替换。",

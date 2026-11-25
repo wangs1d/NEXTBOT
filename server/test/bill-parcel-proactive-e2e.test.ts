@@ -86,6 +86,7 @@ function makeHarness(opts: { online?: boolean; pushEnabled?: boolean } = {}) {
         return { ok: true, provider: "stub" };
       },
     },
+    transcriptAppend: () => {},
   });
 
   return { dir, clock, ledger, ingest, reporter, pipeline, submitted, delivered, pushes, presence };

@@ -94,8 +94,8 @@ class StructuredAssistantMessageBody extends StatelessWidget {
 /// 泡内空行折叠（2026-11-14 P0-B 根修：单泡中间隔一段空白的消息样式）。
 ///
 /// 一个气泡 = 一条消息：空白段（空行）只该出现在「多条消息」之间，泡内多行
-/// 内容只允许单换行分隔。单泡轮（检索/信息类工具并泡、场景 singleBubble、
-/// markdown 整块收口）的正文来自 done.finalText，模型按段落排版留下的
+/// 内容只允许单换行分隔。单泡轮（检索/信息类工具并泡、markdown 整块收口）的
+/// 正文来自 done.finalText，模型按段落排版留下的
 /// `\n\n` 会被纯文本渲染器原样画成一整行空白——用户看到的就是「一个绿泡里
 /// 中间隔了一段空白」。
 ///

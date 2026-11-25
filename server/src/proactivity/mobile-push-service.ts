@@ -30,11 +30,39 @@ export type PushInput = {
   intentId?: string;
   /** 动作视图（带按钮的决策）：厂商通道只能降级成「点开处理」，不能渲染按钮 */
   actionIntent?: ClientActionIntent | null;
+  /**
+   * 稳定去重键（同一件事多次推送尝试保持不变，如提案 dedupKey）。
+   * 透传写穿到本地对话时以它为消息 id，推送重试不会在聊天里留下两条同样的内容。
+   */
+  stableKey?: string;
 };
 
 /** 通知 id 的唯一口径：有 intent 用 intent，没有就用 delivery（两端必须一致） */
 export function pushNotificationKey(input: PushInput): string {
   return input.intentId?.trim() || input.deliveryId;
+}
+
+/**
+ * 厂商通知的点击深链（2026-11-25 用户拍板「点通知直达」）。
+ *
+ * 华为 `click_action.type=1` 允许带自定义 intent：点开通知直接拉起 App 并落到
+ * 对话页；带 intentId 时再把它捎进原生队列，App 起来可拉取意图端出决策半屏页。
+ * 参数名与 Android 原生 ShareIntakeStore 的 extra 逐字一致（nb_widget_route 等），
+ * 复用既有「原生中转队列 → Dart 取件」那条路，不另开一套深链解析。
+ * 包名必须与 android/app/build.gradle.kts 的 applicationId 一致（AGC 也按它登记）。
+ */
+export function buildNotificationClickIntent(input: PushInput): string {
+  const pkg = process.env.MOBILE_APP_PACKAGE?.trim() || "com.nextbot.app";
+  const extras = [
+    "S.nb_widget_route=chat",
+    ...(input.intentId?.trim()
+      ? [`S.nb_push_intent=${encodeURIComponent(input.intentId.trim())}`]
+      : []),
+    ...(input.deliveryId?.trim()
+      ? [`S.nb_push_delivery=${encodeURIComponent(input.deliveryId.trim())}`]
+      : []),
+  ];
+  return `intent://push#Intent;scheme=nextbot;package=${pkg};${extras.join(";")};end`;
 }
 
 export type PushAttemptResult = { ok: boolean; provider: string; reason?: string };
@@ -352,9 +380,13 @@ export class HuaweiPushProvider implements PushProvider {
               // 0 是 HarmonyOS NEXT 的 clickAction.actionType 取值，不是这个字段。
               // 此前写 0 导致华为一律回 80100003「no valid click type」，全部推送
               // 失败（2026-11-24 实测：改为 3 后返回 80000000 Success）。
-              // 选 3：点开通知即拉起 App，不需要原生深链；deviceId/intentId 随 data
-              // 下发但 type=3 不透传，决策仍走「拉起 → 半屏页」链路。
-              click_action: { type: 3 },
+              // 2026-11-25 改为 1 + 深链：type=3 只能「拉起 App」，带不动任何参数，
+              // 用户点开只会落到首页再自己翻对话；type=1 的 intent 能带 route/intentId，
+              // 点开直达对话、决策类直接端半屏页（见 buildNotificationClickIntent）。
+              click_action: {
+                type: 1,
+                intent: buildNotificationClickIntent(input),
+              },
               // 通知 id 统一口径（2026-11-13）：与 App 自建通知、华为推送、Webhook
               // 三处同源——此前这里用 title+body 哈希、App 侧用 deliveryId.hashCode，
               // 后果是同一条决策跨层投递变成两条通知（其中一条的按钮是死的）。
@@ -378,27 +410,65 @@ export class HuaweiPushProvider implements PushProvider {
       // 华为 messages:send 的业务错误（如 80300002 token 无效/指纹不匹配）也走
       // HTTP 200 + body.code —— 只看 HTTP 状态会把被拒的推送误记成「已送达」。
       // 必须解析 body：code 缺失或 80000000 才算成功（实测 2026-10-14）。
-      const response = await fetch(
-        `https://push-api.cloud.huawei.com/v1/${this.appId}/messages:send`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
-          body: JSON.stringify(payload),
-          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-        },
-      );
-      const text = (await response.text().catch(() => "")).slice(0, 500);
-      let bodyCode = "";
-      try {
-        bodyCode = (JSON.parse(text) as { code?: string }).code ?? "";
-      } catch {
-        /* 非 JSON 响应按 HTTP 状态判定 */
+      const send = async (body: unknown): Promise<{ ok: boolean; reason?: string }> => {
+        const response = await fetch(
+          `https://push-api.cloud.huawei.com/v1/${this.appId}/messages:send`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
+            body: JSON.stringify(body),
+            signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+          },
+        );
+        const text = (await response.text().catch(() => "")).slice(0, 500);
+        let bodyCode = "";
+        try {
+          bodyCode = (JSON.parse(text) as { code?: string }).code ?? "";
+        } catch {
+          /* 非 JSON 响应按 HTTP 状态判定 */
+        }
+        if (!response.ok) return { ok: false, reason: `huawei HTTP ${response.status}: ${text}` };
+        if (bodyCode && bodyCode !== "80000000") {
+          return { ok: false, reason: `huawei code=${bodyCode}: ${text}` };
+        }
+        return { ok: true };
+      };
+
+      const notifyResult = await send(payload);
+      // 透传写穿（2026-11-25）：通知消息只负责弹窗（系统层保证），内容进不了 App
+      // 进程。再补一条 data-only 消息，HMS 会把被杀掉的 App 拉起来交给
+      // onMessageReceived，客户端落本地对话——「不点通知，打开 App 也能看到」。
+      // 失败不影响整体结果：弹窗已由通知消息保证，服务端 WAL 也会在下次连网时补齐。
+      if (notifyResult.ok) {
+        try {
+          await send({
+            validate_only: false,
+            message: {
+              android: {
+                collapse_key: -1,
+                urgency: "HIGH",
+                category,
+                // 写穿只补「同一晚/同一上午」的内容：超过 12h 的老消息不该再插进对话
+                ttl: "43200s",
+                data: JSON.stringify({
+                  title: input.title,
+                  body: input.body,
+                  deliveryId: input.deliveryId,
+                  intentId: input.intentId ?? "",
+                  kind: input.kind,
+                  importance: input.importance,
+                  stableKey: input.stableKey ?? input.deliveryId,
+                  ts: Date.now(),
+                }),
+              },
+              token: [target.token],
+            },
+          });
+        } catch {
+          /* 透传是增强通道，失败不改变「通知已弹出」这一结论 */
+        }
       }
-      if (!response.ok) return { ok: false, reason: `huawei HTTP ${response.status}: ${text}` };
-      if (bodyCode && bodyCode !== "80000000") {
-        return { ok: false, reason: `huawei code=${bodyCode}: ${text}` };
-      }
-      return { ok: true };
+      return notifyResult;
     } catch (err) {
       return { ok: false, reason: `huawei 请求失败: ${err}` };
     }

@@ -1037,6 +1037,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     // 今日安排面板数据刷新：设置（创建/删除）提醒日程后，通过信号刷新右侧面板
     _scheduleReloadSignal.addListener(_onScheduleReloadSignal);
     _configureAmbientFeeds();
+    // WS 路由必须先接线、先绑定平台，再允许任何连接发起（2026-11-25
+    // 「一直正在连接服务器」根修）：手机端首帧就会建 MobileChatController 并
+    // `connect()`，而接线原先埋在 _bootstrap 十几个 await 之后——窗口期发出的
+    // `ws_connected` 既没有监听者、平台标志也还是桌面，chat 通道整条丢失，
+    // 聊天页永久停在未连接（离线补发/启动定位等副作用也一并跳过）。
+    WsEventRouter.instance.bindPlatform(isMobile: _isMobile);
+    WsEventRouter.instance.attach(_ws.events);
     _bootstrap();
   }
 
@@ -1083,6 +1090,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               defaultTargetPlatform == TargetPlatform.iOS)) {
         unawaited(MobilePushRegistrar.registerIfNeeded());
       }
+      // 透传写穿（2026-11-25）：HMS 透传消息在 App 被杀/后台时已落到原生队列，
+      // 回前台立即取件落进本地对话——不用点通知，打开 App 就能看到。
+      unawaited(_drainPushedInbox());
     }
     if (state == AppLifecycleState.detached) {
       _writeCrashLog("[EXIT]", "app detached (window closed)");
@@ -1447,12 +1457,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         );
       }());
     }
-    // 唯一连接的事件源先接进路由器，再建立连接——归属表
-    // （ws_event_router.dart）是唯一事实源，本文件不再逐 type 判断。
-    WsEventRouter.instance.bindPlatform(isMobile: _isMobile);
+    // 唯一连接的事件源已在 initState 接进路由器并绑定平台（必须先于任何
+    // 连接发起，见 initState 处注释）——归属表（ws_event_router.dart）是
+    // 唯一事实源，本文件不再逐 type 判断。
     // 模块级总线订阅（单连接 + 事件总线）：各业务模块自行声明 owned 的
     // 事件类型（见各文件 ensureBusSubscription），main 根监听器只保留
-    // 强绑定本 State 的 UI 分支。必须在 attach 之前全部就位。
+    // 强绑定本 State 的 UI 分支。晚到的订阅者由状态型事件补投兜底。
     SharedBrowserHost.ensureBusSubscription();
     MediaPlaybackService.ensureBusSubscription();
     AlarmEngine.ensureBusSubscription();
@@ -1463,7 +1473,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       store: _store,
       onViewsChanged: _notifyScheduleViewsChanged,
     );
-    WsEventRouter.instance.attach(_ws.events);
     _ws.connect();
     // 共享连接可能已被手机聊天控制器先行拉起（两端共用同一条 WS）：那种情况
     // onConnected 不会再触发，这里回放一次"连上就该做"的补挂动作（各动作幂等：
@@ -6139,9 +6148,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           ShareIntakeService.instance
             ..attachChat(chat)
             ..onEntryRequest = _openQuickNoteSheet
-            ..onRouteRequest = _applyWidgetRoute;
+            ..onRouteRequest = _applyWidgetRoute
+            ..onPushOpen = _handlePushOpen;
           // 厂商通知点开 → 冷启动 → 补投事件带回来的决策，从控制器接出来端上半屏页
           chat.onDecisionRequest = _openDecisionSheet;
+          // 透传写穿：原生队列里 App 被杀期间收到的消息，主壳就绪即落对话
+          unawaited(_drainPushedInbox());
           // 上一次取件（主壳还没建好时留下的队列）现在有机会端了
           _drainDecisionQueue();
         }
@@ -6259,6 +6271,66 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       if (tab == null) return;
       home.goToTab(tab);
     });
+  }
+
+  /// 透传写穿取件（2026-11-25）：HMS 透传在 App 被杀/后台时由原生落队列，
+  /// 这里取走并写进本地对话。服务端 WAL 留底是另一条路（连网时历史回填），
+  /// 两条路在控制器里按稳定 id / 正文包含去重，不会出现两份。
+  Future<void> _drainPushedInbox() async {
+    if (kIsWeb || !Platform.isAndroid) return;
+    final MobileChatController? chat = _mobileChatController;
+    if (chat == null) return;
+    try {
+      final List<Map<String, dynamic>> items =
+          await MobilePushRegistrar.takePushedInbox();
+      if (items.isEmpty) return;
+      chat.ingestPushedMessages(items);
+    } catch (e) {
+      debugPrint("[push-inbox] 取件失败: $e");
+    }
+  }
+
+  /// 厂商推送点开（2026-11-25「点通知直达」）：深链把 intentId/deliveryId 带进来。
+  ///
+  /// - 落到对话页：这条内容已有服务端留底，历史回填后就在对话里，不再让用户自己翻；
+  /// - 有 intentId：拉取该意图的可渲染视图，直接端决策半屏页——厂商系统模板
+  ///   渲染不出按钮，点开不处理等于白推一条。
+  void _handlePushOpen(String intentId, String deliveryId) {
+    // 服务端深链已带 route=chat；旧服务端/参数丢失时这里兜一次
+    _applyWidgetRoute("chat");
+    if (intentId.isEmpty) return;
+    unawaited(_openIntentFromPush(intentId));
+  }
+
+  Future<void> _openIntentFromPush(String intentId) async {
+    try {
+      final Uri uri = Uri.parse(
+        "${ApiConfig.httpBase}/api/action-intents/$intentId",
+      ).replace(queryParameters: <String, String>{
+        "userId": ApiConfig.effectiveActorId,
+      });
+      final http.Response res = await NbHttp.get(
+        uri,
+        headers: AccessCredentialStore.instance.authHeaders,
+      ).timeout(const Duration(seconds: 10));
+      if (res.statusCode != 200) return;
+      final Map<String, dynamic> body =
+          jsonDecode(res.body) as Map<String, dynamic>;
+      final Object? rawView = body["view"];
+      if (rawView is! Map) return;
+      final DecisionRequest? decision = DecisionRequest.parse(
+        rawView.cast<String, dynamic>(),
+        nowMs: DateTime.now().millisecondsSinceEpoch,
+      );
+      if (decision == null) return;
+      _openDecisionSheet(decision);
+      // 冷启动时导航器可能还在建：下一帧再端一次，避免决策留在队列里等下一次触发
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _drainDecisionQueue();
+      });
+    } catch (e) {
+      debugPrint("[push-open] 拉取意图失败: $e");
+    }
   }
 
   /// 注册门禁页：与独立预览窗口同款深色整页（页面自带自绘标题栏与

@@ -358,19 +358,6 @@ test("明日预览：命中时不接管正文，正文仍由模型自己写", ()
   assert.equal(decision.text, undefined, "场景不得替换正文");
 });
 
-test("结构化摘要轮声明 singleBubble：整块呈现，不分泡", () => {
-  for (const id of ["tomorrow_preview", "digest_roundup"]) {
-    assert.equal(
-      sceneRegistry.get(id)?.produces?.singleBubble,
-      true,
-      `${id} 是整块内容，拆成几条绿泡就散了`,
-    );
-  }
-  // 这条只给摘要类，不许把闲聊/天气带走
-  assert.notEqual(sceneRegistry.get("markdown")?.produces?.singleBubble, true);
-  assert.notEqual(sceneRegistry.get("weather")?.produces?.singleBubble, true);
-});
-
 test("明日预览：日期解析容错", () => {
   assert.equal(formatPreviewDate("2026-11-06"), "11月6日 周五");
   assert.equal(formatPreviewDate("下周"), "下周");

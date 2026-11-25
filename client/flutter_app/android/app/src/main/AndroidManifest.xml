@@ -99,6 +99,17 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
+            <!-- 厂商推送点击深链（2026-11-25「点通知直达」）：服务端华为通知用
+                 click_action.type=1 带 nextbot://push，参数走 intent extra
+                 （nb_widget_route / nb_push_intent / nb_push_delivery），
+                 由 MainActivity.forwardIntake 落进既有原生中转队列 →
+                 ShareIntakeService 取件 → 跳对话/端决策半屏页。 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <category android:name="android.intent.category.BROWSABLE"/>
+                <data android:scheme="nextbot" android:host="push"/>
+            </intent-filter>
             <!-- 图标长按快捷方式（2026-11-23 §8.1）：记一下 / 拍一下 / 问一下。
                  静态 shortcuts 不需要运行时注册，也就没有「第一次装好长按没入口」
                  那种要等 Launcher 拉一遍的时序问题。 -->

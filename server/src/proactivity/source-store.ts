@@ -130,6 +130,14 @@ export class SourceStore {
   private readonly window: Signal[] = [];
   /** 实体词 → 命中的信号（倒排索引；Map 迭代序 = LRU 序，尾=最近访问） */
   private readonly entityIndex = new Map<string, SourceHit[]>();
+  /**
+   * 事件键 → 主信号指纹（2026-11-25 跨源汇聚）。
+   * 同一 eventKey 的后续信号不再入窗，而是把来源作为 refs 并到主信号上——
+   * "一封邮件 + 一个日历项 = 一件事"，判断与开口只面对一条。
+   */
+  private readonly eventIndex = new Map<string, string>();
+  /** 被事件键合并掉的信号条数（诊断指标） */
+  private mergedByEventKey = 0;
   /** 因索引容量被淘汰的实体键计数 */
   private evicted = 0;
   /** 最近一次按天清理的日期键（每日至多一次，避免每写都扫目录） */
@@ -177,8 +185,60 @@ export class SourceStore {
    */
   feed(signal: Signal): void {
     if (!this.enabled()) return;
+    // 跨源同一件事：后到的信号并进主信号（refs 记来源），不再各存一条。
+    // 合并也要落一份原始记录（审计/重启后重建 refs 用）；窗口里只留主信号。
+    // SENSOR_EVENT_KEY_MERGE=0 可一键回退旧行为（每条各存）。
+    if (this.env.SENSOR_EVENT_KEY_MERGE !== "0" && this.mergeByEventKey(signal)) {
+      if (!this.disablePersist) this.appendPartition(signal);
+      return;
+    }
     this.ingest(signal, !this.disablePersist);
     if (!this.disablePersist) this.maybePrune();
+  }
+
+  /** 事件键合并（零 LLM）：命中已有主信号 → 并 refs/sources、补索引，返回 true。 */
+  private mergeByEventKey(signal: Signal): boolean {
+    const eventKey = signal.eventKey?.trim();
+    if (!eventKey) return false;
+    const idxKey = `${signal.actorId ?? "*"}|${eventKey}`;
+    const primaryFp = this.eventIndex.get(idxKey);
+    if (!primaryFp || primaryFp === signal.fingerprint) return false;
+    const at = this.window.findIndex((s) => s.fingerprint === primaryFp);
+    if (at < 0) {
+      // 主信号已被 FIFO 挤出窗口：撤销映射，让本信号正常入库
+      this.eventIndex.delete(idxKey);
+      return false;
+    }
+    const primary = this.window[at]!;
+    const refs = new Set<string>(stringArray(primary.payload?.refs));
+    refs.add(primary.fingerprint);
+    refs.add(signal.fingerprint);
+    const sources = new Set<string>(stringArray(primary.payload?.sources));
+    sources.add(primary.stream);
+    sources.add(signal.stream);
+    primary.payload = {
+      ...primary.payload,
+      refs: [...refs],
+      sources: [...sources],
+      lastSeenAt: Math.max(Number(primary.payload?.lastSeenAt ?? 0), signal.at),
+    };
+    // 后到信号的实体也要能被跨源检索到：以主信号指纹入索引（命中即主事件）
+    this.indexSignal({ ...signal, fingerprint: primary.fingerprint });
+    this.mergedByEventKey += 1;
+    return true;
+  }
+
+  /** 按事件键取主信号（同一件事只有一条；refs 里是它的所有来源指纹） */
+  findByEventKey(eventKey: string, opts: { actorId?: string; limit?: number } = {}): Signal[] {
+    const key = String(eventKey ?? "").trim();
+    if (!key) return [];
+    const out: Signal[] = [];
+    for (const s of this.window) {
+      if (s.eventKey !== key) continue;
+      if (opts.actorId !== undefined && s.actorId !== opts.actorId) continue;
+      out.push(s);
+    }
+    return opts.limit !== undefined ? out.slice(-opts.limit) : out;
   }
 
   /** 批量汇聚 */
@@ -224,9 +284,17 @@ export class SourceStore {
     }
     if (collected.length === 0) return 0;
     collected.sort((a, b) => a.at - b.at);
-    for (const s of collected) this.ingest(s, false);
+    // 加载也走合并：磁盘上每个来源各一行原始记录，重启后重建出"一件事 + refs"，
+    // 否则重启就把跨源关联丢了（窗口里出现两条，判断又说两遍）。
+    for (const s of collected) this.feedLoaded(s);
     this.loadedCount = collected.length;
     return collected.length;
+  }
+
+  /** 启动加载专用：只读合并 + 入窗，不重复落盘 */
+  private feedLoaded(signal: Signal): void {
+    if (this.env.SENSOR_EVENT_KEY_MERGE !== "0" && this.mergeByEventKey(signal)) return;
+    this.ingest(signal, false);
   }
 
   /**
@@ -331,6 +399,8 @@ export class SourceStore {
     dropped: number;
     /** 共享发现层台账（subjects=有发现的共同键数 / pending=待开口 / consumed=已说出 / reserved=被读走等裁决） */
     findings: { subjects: number; pending: number; consumed: number; reserved: number };
+    /** 跨源事件合并台账（keys=在册事件键数 / merged=被合并掉的信号条数） */
+    eventMerge: { keys: number; merged: number };
   } {
     const streams: Record<string, number> = {};
     for (const s of this.window) streams[s.stream] = (streams[s.stream] ?? 0) + 1;
@@ -346,6 +416,7 @@ export class SourceStore {
       loadDays: this.loadDays(),
       dropped: this.evicted,
       findings: this.findingStats(),
+      eventMerge: { keys: this.eventIndex.size, merged: this.mergedByEventKey },
     };
   }
 
@@ -582,9 +653,27 @@ export class SourceStore {
   /** 并入窗口 + 索引（可选落盘）。加载路径传 persist=false。 */
   private ingest(signal: Signal, persist: boolean): void {
     this.window.push(signal);
-    while (this.window.length > MEMORY_WINDOW) this.window.shift();
+    this.registerEventKey(signal);
+    while (this.window.length > MEMORY_WINDOW) {
+      const dropped = this.window.shift();
+      if (dropped) this.unregisterEventKey(dropped);
+    }
     this.indexSignal(signal);
     if (persist) this.appendPartition(signal);
+  }
+
+  private registerEventKey(signal: Signal): void {
+    const key = signal.eventKey?.trim();
+    if (!key) return;
+    this.eventIndex.set(`${signal.actorId ?? "*"}|${key}`, signal.fingerprint);
+  }
+
+  /** FIFO 挤出时清掉映射（只清仍指向这条的，避免误删后来者的映射） */
+  private unregisterEventKey(signal: Signal): void {
+    const key = signal.eventKey?.trim();
+    if (!key) return;
+    const idxKey = `${signal.actorId ?? "*"}|${key}`;
+    if (this.eventIndex.get(idxKey) === signal.fingerprint) this.eventIndex.delete(idxKey);
   }
 
   /**
@@ -670,6 +759,11 @@ export class SourceStore {
     const n = Number.parseInt(raw, 10);
     return Number.isFinite(n) ? n : def;
   }
+}
+
+/** 从 payload 取字符串数组（refs/sources 这类内部字段的防御式读取） */
+function stringArray(v: unknown): string[] {
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
 }
 
 /** 本地日期键 YYYY-MM-DD（按天分区文件名） */

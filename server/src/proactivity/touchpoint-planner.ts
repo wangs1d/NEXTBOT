@@ -98,7 +98,8 @@ const COLD_START_CONFIDENCE = 0.5;
 /**
  * 各候选类型偏好落哪个 slot（§3.4 容量与偏好表）。
  *
- * 键是提案的 kind（或 source）——含带点 kind 的最后一段，见 preferenceOf。
+ * 键是提案的 kind（或 source）——含前缀命名族的最后一段（点号 / 冒号都算），
+ * 见 preferenceOf。
  * 顺序即优先级：排进第一个「还没过、还有容量」的槽。
  * 两条取舍：① 节律/关怀类只进明日预览——它需要一段不被打断的时间看，白天弹出来
  * 只会招人烦；② 用户要拍板的（目标确认/待处理事项）不进深夜槽，宁可排到下一趟通勤。
@@ -141,6 +142,9 @@ const SLOT_PREFERENCE: Record<string, TouchpointSlotKind[]> = {
   drowsy_driving: ["tomorrow_preview"],
   mute_suggest: ["tomorrow_preview"],
   agent_pulse: ["midday", "leave_work", "tomorrow_preview"],
+  // 情报（2026-11-25 接缝 3）：除 must 外不再即时弹，进白天与收尾时段合并说
+  intel: ["midday", "leave_work", "tomorrow_preview"],
+  intel_service: ["midday", "leave_work", "tomorrow_preview"],
   interest_alert: ["midday", "leave_work", "tomorrow_preview"],
   social: ["midday", "leave_work", "leave_home", "tomorrow_preview"],
   life_reminder: ["midday", "leave_work", "tomorrow_preview"],
@@ -173,17 +177,27 @@ function isWeekendDate(d: Date): boolean {
 }
 
 /**
- * 候选归类：kind 优先、source 次之，都支持「带点命名族取最后一段」。
- * 真实提案的 kind 形如 wellness.sleep_boundary / action.bill_parcel，表里登记的是
- * 语义叶子名（sleep_boundary / bill_parcel）——否则每个新前缀都要回来补一张键。
+ * 候选归类：kind 优先、source 次之，都支持「带前缀的命名族取最后一段」。
+ * 真实提案有两类前缀：
+ *   - kind 形如 wellness.sleep_boundary / action.bill_parcel（点号命名族）；
+ *   - source 形如 evaluator:morning_brief（评估器规则名，冒号前缀，2026-11-25 修）。
+ * 表里登记的是语义叶子名（sleep_boundary / bill_parcel / morning_brief）——否则
+ * 每个新前缀都要回来补一张键。
+ *
+ * 冒号段不能漏：评估器的 proposalKind 只是话术分类（greeting / life_reminder…），
+ * 决定「这类内容该在哪个触点说」的是规则名（morning_brief 只属于早安）。此前只按
+ * 点号切，晨报因此落到 default 的午间→下班→明日预览，早报被当晚安在 22 点推出去。
  */
 function preferenceOf(p: ProactiveProposal): TouchpointSlotKind[] {
   const candidates = [p.kind, p.source];
   for (const key of candidates) {
     const exact = SLOT_PREFERENCE[key];
     if (exact) return exact;
-    const leaf = key.includes(".") ? key.split(".").pop() ?? "" : "";
-    const byLeaf = leaf ? SLOT_PREFERENCE[leaf] : undefined;
+  }
+  for (const key of candidates) {
+    const leaf = key.split(/[.:]/).pop() ?? "";
+    if (!leaf || leaf === key) continue;
+    const byLeaf = SLOT_PREFERENCE[leaf];
     if (byLeaf) return byLeaf;
   }
   return SLOT_PREFERENCE.default!;

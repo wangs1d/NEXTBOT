@@ -1,13 +1,13 @@
 /**
  * 闹钟调度服务（服务端兜底路）—— 触发主路在客户端本地（Android 精确闹钟 / iOS 本地通知），
- * 服务端负责：意图落库、跨设备同步（alarm.sync）、到点兜底触发（alarm.trigger）、
- * 客户端超时未回报时的系统级推送兜底、触发台账。
+ * 服务端负责：意图落库、跨设备同步（alarm.sync）、到点兜底触发（alarm.trigger）、触发台账。
  *
  * 时序约定（docs/mobile-agent-reminder-alarm-design.md §8.3）：
  *  - tick 每 15s 扫描 nextFireAt ≤ now 的 active 闹钟 → 触发；
- *  - WS 直推成功 → 客户端应在 FALLBACK_MS 内回报 trigger-callback；
- *  - WS 失败（全离线）→ 立即走 MobilePushService 系统推送（0 延迟横幅）；
+ *  - WS 直推成功 → 客户端回报 trigger-callback；
  *  - 回报幂等由 AlarmStore.recordTrigger 保证。
+ *
+ * 离线兜底推送已删除（2026-11-25 用户定调：不再发「手机端未响应」系统级推送）。
  *
  * 叫醒语音缓存「用完即删除」（2026-11-09 用户定调，事件驱动而非等 TTL）：
  *  - 主路：端侧把 mp3 落到应用私有文件、本地精确闹钟排好后回报 voice/consume，
@@ -18,13 +18,11 @@
  *  - 重复闹钟每推进一跳 = 新的一次使用：旧音频删掉，按下一跳时刻重新实时生成。
  */
 import { Buffer } from "node:buffer";
-import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 
 import type { WsConnectionRegistry } from "../ws-connection-registry.js";
 import { readJson, writeJson } from "../../proactivity/persist-file.js";
-import type { MobilePushChannel } from "../../proactivity/mobile-push-service.js";
 import { advanceAlarmNextFireMs } from "./alarm-rrule.js";
 import { AlarmStore, type AlarmCreateInput } from "./alarm-store.js";
 import type { Alarm, AlarmTriggerPayload } from "./alarm-types.js";
@@ -56,8 +54,6 @@ export type WakeScriptFn = (input: {
 
 export type AlarmClockServiceDeps = {
   wsRegistry: WsConnectionRegistry;
-  /** 离线必达推送（MobilePushService）；未装配时兜底降级为仅 WS */
-  mobilePush?: MobilePushChannel | null;
   dataDir: string;
   /** 用户时区拉取器（actorContext.resolveClock(actorId).timezone）；缺省回退服务器时区 */
   resolveTimezone?: ((actorId: string) => string | undefined | null) | null;
@@ -139,9 +135,6 @@ const TICK_MS = 15_000;
 const VOICE_CLIP_AFTER_FIRE_TTL_MS = 30 * 60_000;
 /** 最短存活：fireAt 解析失败或已过时，也不会刚生成就被清掉 */
 const VOICE_CLIP_MIN_TTL_MS = 30 * 60_000;
-const FALLBACK_MS = 5 * 60_000; // WS 已送达但客户端未回报 → 5 分钟后推送兜底
-// （2026-11-23 改版：WS 全离线 → 0 延迟立即推送横幅，原 30s 等待常量删除——
-//   卓易通/冻结容器场景下横幅是唯一即时触达，晚 30 秒等于没弹）
 const MAX_SNOOZE_HARD_CAP = 10; // 贪睡硬上限（防客户端死循环顺延）
 /** 提醒智能路由的"活跃窗口"：窗口内有真人活动的设备 = 用户此刻所在端，提醒只发它。
  * 可用 AGENT_REMINDER_ACTIVE_WINDOW_MS 覆盖；窗口内无活跃端（人在两端都不动/全离线）
@@ -151,9 +144,7 @@ const DEFAULT_ACTIVE_WINDOW_MS = 120_000;
 export class AlarmClockService {
   readonly store: AlarmStore;
   private timer: NodeJS.Timeout | null = null;
-  private readonly fallbacks = new Map<string, NodeJS.Timeout>(); // `${alarmId}:${firedAtMs}` → timer
   private readonly wsRegistry: WsConnectionRegistry;
-  private readonly mobilePush: MobilePushChannel | null;
   private readonly synthesizeSpeech: TtsSynthesizeFn | null;
   private readonly composeWakeScript: WakeScriptFn | null;
   private readonly resolveTimezone: ((actorId: string) => string | undefined | null) | null;
@@ -172,7 +163,6 @@ export class AlarmClockService {
 
   constructor(deps: AlarmClockServiceDeps) {
     this.wsRegistry = deps.wsRegistry;
-    this.mobilePush = deps.mobilePush ?? null;
     this.synthesizeSpeech = deps.synthesizeSpeech ?? null;
     this.composeWakeScript = deps.composeWakeScript ?? null;
     this.resolveTimezone = deps.resolveTimezone ?? null;
@@ -407,8 +397,6 @@ export class AlarmClockService {
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
-    for (const t of this.fallbacks.values()) clearTimeout(t);
-    this.fallbacks.clear();
   }
 
   // ─── CRUD（HTTP 路由薄壳直接透传到这里） ───
@@ -509,7 +497,6 @@ export class AlarmClockService {
   ): { accepted: boolean; duplicate: boolean } {
     const firedAtMs = Number(body.firedAtMs);
     if (!Number.isFinite(firedAtMs)) return { accepted: false, duplicate: false };
-    this.clearFallback(alarmId, firedAtMs);
     const result = this.store.recordTrigger({
       alarmId,
       firedAtMs,
@@ -616,11 +603,6 @@ export class AlarmClockService {
       // 单次：等 dismiss / acked 收尾删；异常路径（端侧一直没回报）由兜底 TTL 收敛
       this.refreshVoiceClipExpiry(alarm.id);
     }
-    // 兜底：客户端超时未回报 → 系统级推送。
-    // WS 全离线时立即推（0 延迟）：卓易通/冻结容器场景下 AlarmManager 到点广播不派发、
-    // WS 也断着，系统级横幅推送是唯一即时触达——由鸿蒙系统层展示，不依赖容器进程；
-    // 用户点横幅 → 容器解冻 → 端侧收敛闸门补响。WS 已送达时保留 5 分钟观察窗。
-    this.scheduleFallback(alarm, firedAtMs, sent.ok ? FALLBACK_MS : 0);
     // 即时提醒（kind=reminder）补一条 reminder.deliver 供客户端按 channelPlan 升级链展示
     if (alarm.kind === "reminder") {
       this.deliverTrigger(
@@ -660,51 +642,6 @@ export class AlarmClockService {
     }
     const ok = this.wsRegistry.trySend(alarm.actorId, data);
     return { ok, route: ok ? "reminder_fanout_location_unknown" : "offline" };
-  }
-
-  private scheduleFallback(alarm: Alarm, firedAtMs: number, delayMs: number): void {
-    const key = `${alarm.id}:${firedAtMs}`;
-    const prev = this.fallbacks.get(key);
-    if (prev) clearTimeout(prev);
-    const timer = setTimeout(() => {
-      this.fallbacks.delete(key);
-      void this.fireFallbackPush(alarm, firedAtMs).catch(() => {});
-    }, delayMs);
-    this.fallbacks.set(key, timer);
-  }
-
-  private clearFallback(alarmId: string, firedAtMs: number): void {
-    const key = `${alarmId}:${firedAtMs}`;
-    const timer = this.fallbacks.get(key);
-    if (timer) {
-      clearTimeout(timer);
-      this.fallbacks.delete(key);
-    }
-  }
-
-  private async fireFallbackPush(alarm: Alarm, firedAtMs: number): Promise<void> {
-    if (!this.mobilePush) return;
-    // 客户端可能已回报（竞态）：台账里已有非 ringing 记录则跳过
-    const reported = this.store
-      .listTriggers(alarm.id)
-      .some((t) => Math.abs(t.firedAtMs - firedAtMs) < 90_000 && t.outcome !== "ringing");
-    if (reported) return;
-    const result = await this.mobilePush.push({
-      actorId: alarm.actorId,
-      title: alarm.kind === "alarm" ? `闹钟：${alarm.label}` : `提醒：${alarm.label}`,
-      body: `到点了。手机端未响应（应用离线或被系统冻结），点按打开响铃。`,
-      importance: alarm.dnd.bypass ? "high" : "normal",
-      kind: "alarm_fallback",
-      deliveryId: `alarmfb_${randomUUID()}`,
-    });
-    this.log.info(`fallback push alarm=${alarm.id} ok=${result.ok} provider=${result.provider}`);
-    this.store.recordTrigger({
-      alarmId: alarm.id,
-      firedAtMs,
-      via: "fallback_push",
-      outcome: "missed",
-      reportedAt: new Date().toISOString(),
-    });
   }
 
   /** 跨设备同步：把最新状态 fan-out 到该用户全部在线设备（客户端写入本地闹钟库并重排本地调度） */

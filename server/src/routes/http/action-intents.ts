@@ -89,6 +89,10 @@ export function registerActionIntentRoutes(app: FastifyInstance, deps: ActionInt
         executedActions: intent.executedActions,
         ...(intent.lastResult ? { lastResult: intent.lastResult } : {}),
       },
+      // 可渲染视图（2026-11-25「点通知直达」）：厂商通知点开时客户端只拿到 intentId，
+      // 靠这一份把标题/正文/按钮（含各自一次性 token）补回来端出决策半屏页。
+      // 归属校验在上面已按 actorId 做过；按钮 token 本身就是执行凭据。
+      view: actionIntentService.renderForClient(intent),
     };
   });
 }

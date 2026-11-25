@@ -124,6 +124,7 @@ import { DdlRadarService } from "../services/ddl-radar-service.js";
 import { IngestService } from "../services/ingest-service.js";
 import { createIngestVisionExtract } from "../services/ingest-vision.js";
 import { EveningDigestScheduler } from "../services/evening-digest-scheduler.js";
+import { getTurnWalService } from "../services/turn-wal-service.js";
 import { registerPreviewDigestSource } from "../services/tomorrow-preview-bridge.js";
 import { LifeRhythmEngine } from "../rhythm/engine.js";
 import { RhythmProfileStore } from "../rhythm/profile-store.js";
@@ -334,6 +335,7 @@ import { MessageHubService, type MessageHubPlatform } from "../services/message-
 import { MessagePlatformGateway } from "../services/message-platform-gateway.js";
 import { MessageBridgeService } from "../services/message-bridge-service.js";
 import { registerPhoneBridgeTools } from "../tools/phone-bridge-tools.js";
+import { registerMailWatchTools } from "../tools/mail-watch-tools.js";
 import { PhoneBridgeCoordinator } from "../services/phone-bridge-coordinator.js";
 import { PhoneCallCoordinator } from "../services/phone-call-coordinator.js";
 import { registerWebTools } from "../tools/web-tools.js";
@@ -519,6 +521,16 @@ import { AttentionStore } from "../proactivity/attention-store.js";
 import { ReachRouter, type ReachChannelDeps } from "../proactivity/reach-router.js";
 import { OutcomeStore } from "../proactivity/outcome-store.js";
 import { AgentPulseService, extractRapport } from "../proactivity/agent-pulse.js";
+// 共享上下文快照（2026-11-25 接缝 2）：pulse 与情报判断吃同一份事实
+import {
+  buildSharedContext,
+  collectOpenLoops,
+  presenceText,
+  screenFocusText,
+  type SharedContextSnapshot,
+} from "../proactivity/context-snapshot.js";
+import { listFollowUps } from "../services/followup-store.js";
+import { intelTierFor } from "../proactivity/intel/intel-tier.js";
 import { TopicDismissTracker } from "../proactivity/topic-dismiss-tracker.js";
 // ─── 五层主动性架构（传感→评估→仲裁→目标→表达）───
 import { registerFeeder } from "../proactivity/sensors/kernel.js";
@@ -2724,6 +2736,17 @@ export async function createAppServices(
           evidence: ["morning_briefing_scheduled", "ws_push_failed"],
           directText: desktopPayload.narrationText,
           createdAt: Date.now(),
+          // 早安简报只在上午有意义：推送失败的重试窗口到当天中午为止，
+          // 不会把「早上好」拖到下午或夜里
+          expiresAt: new Date(
+            new Date().getFullYear(),
+            new Date().getMonth(),
+            new Date().getDate(),
+            12,
+            0,
+            0,
+            0,
+          ).getTime(),
           source: "time",
         });
       }
@@ -2851,8 +2874,28 @@ export async function createAppServices(
           evidence: ["evening_digest_scheduled", "ws_push_failed"],
           directText: digest.narrationText,
           createdAt: Date.now(),
+          // 明日预览有时效：推送失败的重试窗口只到一小时后，不会把「明天带伞」拖到后半夜
+          expiresAt: Date.now() + 60 * 60_000,
           source: "time",
         });
+      } else {
+        // 对话留底（2026-11-25）：明日预览此前只活在「收到事件那台设备」的本地库，
+        // 重装/换机后聊天记录里就没了。直推成功时同步写一条主会话轮次，历史回填后
+        // 对话里翻得到；dispatched 却不在本机时也补回同一条。
+        // 同端不会出现「卡 + 文字」两份：历史合并在孤儿助手消息上按正文包含去重，
+        // 卡面 text 就是 narrationText（离线推送路径由管道负责写，这里不重复写）。
+        void getTurnWalService()
+          .append({
+            ts: new Date().toISOString(),
+            actorId: sessionId,
+            userText: "",
+            assistantText: digest.narrationText,
+            messageId: `evening-digest-${digest.date}`,
+            context: "main",
+          })
+          .catch((err) => {
+            console.log(`[EveningDigest] 对话留底失败（忽略）sessionId=${sessionId}: ${err}`);
+          });
       }
     },
   });
@@ -3038,7 +3081,7 @@ export async function createAppServices(
     app.log.info("[RhythmEngine] 生活节律引擎已启动（夜间统计建模 + 三出口落权）");
   }
 
-  const scheduleIntentService = new ScheduleIntentService(externalChat);
+  const scheduleIntentService = new ScheduleIntentService(externalChat, personaSoulProvider);
   // 购物建议商品库（runtime 内置能力）：shopping.suggest 工具数据源；数据落 data/recommendation/。
   const recommendationCatalog = createRecommendationCatalog(
     join(getDataDir(), "recommendation"),
@@ -5936,6 +5979,62 @@ export async function createAppServices(
   const builtinServices = proactivityRulesLayer.services;
   console.log("[Bootstrap] 主动性已装配（传感→状态板→映射规则→仲裁→目标，零 LLM）");
 
+  // ─── 共享上下文读取口（2026-11-25 接缝 2）───
+  // AgentPulse 与情报判断从此吃同一份「他此刻在哪/在干什么/多久没说话/什么没聊完」。
+  // 零 LLM、不新增采集：只把世界板 + 在场 + 位置 + 情绪 + 未闭环事读一遍再归一，
+  // version 随内容变化写进提案 evidence，诊断可归因「这句话基于哪版上下文」。
+  const readSharedContext = (actorId: string): SharedContextSnapshot => {
+    const board = worldBoardRef.current;
+    const presenceRow = board?.read<{ state?: string; since?: number }>(actorId, "current", "presence");
+    const focusRow = board?.read<{ kind?: string; since?: number }>(actorId, "current", "screenFocus");
+    const turns =
+      board?.read<Array<{ at?: number; text?: string }>>(actorId, "session", "recentTurns") ?? [];
+    const locCtx = actorContext.get(actorId);
+    const loc = locCtx?.location;
+    const place = loc
+      ? {
+          kind: loc.placeKind,
+          ...(loc.placeLabel ? { label: loc.placeLabel } : {}),
+          ...(loc.city ? { city: loc.city } : {}),
+          ...(loc.poi ? { poi: loc.poi } : {}),
+          updatedMinutesAgo: Math.max(0, Math.round((Date.now() - loc.observedAt) / 60_000)),
+        }
+      : null;
+    const moodRaw = userPersonalizationService.getRecentMood(actorId);
+    const lastConvAt = proactivityHub.lastInteractionAtOf(actorId);
+    // 没聊完的事：在办目标 + 已过点未完成的单次日程 + 待跟进的承诺（PRD §3.5）
+    let followUps: Array<{ event: string }> = [];
+    try {
+      followUps = listFollowUps(undefined, actorId, { status: "active", limit: 5 });
+    } catch {
+      followUps = [];
+    }
+    const overdue = (builtinServices.listPulseTasks?.(actorId) ?? []).filter((t) => t.overdue === true);
+    return buildSharedContext({
+      actorId,
+      presence: presenceRow ?? null,
+      screenFocus: focusRow ?? null,
+      place,
+      activity: locCtx?.activity ?? null,
+      mood: moodRaw === "neutral" ? null : (moodRaw as "positive" | "negative" | "stressed"),
+      idleMinutes:
+        lastConvAt == null ? null : Math.max(0, Math.round((Date.now() - lastConvAt) / 60_000)),
+      interests: builtinServices.interestLines?.(actorId) ?? [],
+      findings: (discoveryRef.current?.allUnconsumed(actorId, 5) ?? []).map(
+        (f) => `${f.source}：${f.content.slice(0, 80)}`,
+      ),
+      recentTurns: turns
+        .slice(0, 4)
+        .map((t) => String(t.text ?? "").slice(0, 80))
+        .filter((t) => t.length > 0),
+      openLoops: collectOpenLoops({
+        activeGoal: builtinServices.activeGoalLine?.(actorId) ?? null,
+        overdueTasks: overdue,
+        followUps,
+      }),
+    });
+  };
+
   // 主动性模块的消息聚合开口（2026-10-25 取代 digest_beat 固定节拍「心跳回顾」）：
   // 聚合同一批程序数据（日程/课表/未读/就绪目标/关注话题/活动目标，**不含天气**——
   // 天气归晚间 digest 的明日预告），材料有新增且过了打扰闸（最小间隔/
@@ -5970,64 +6069,10 @@ export async function createAppServices(
         ...new Set(builtinServices.unreadSenders?.(actorId) ?? []),
       ];
       const goals = (builtinServices.readyGoals?.(actorId) ?? []).map((g) => g.title);
-      const interests = (builtinServices.interestLines?.(actorId) ?? []).filter(
-        (line) => line.trim().length > 0,
-      );
       const goalLine = builtinServices.activeGoalLine?.(actorId) ?? null;
-      // 共享发现层未消费发现（邮件/日历/目标/承诺等攒下还没说出口的事）：
-      // 主动性聚合的主体——agent 审阅后开口时经 openMouth 按主题/实体合并消费
-      const findings = (discoveryRef.current?.allUnconsumed(actorId, 5) ?? []).map(
-        (f) => `${f.source}：${f.content.slice(0, 80)}`,
-      );
-      // 世界板此刻状态 + 最近对话（agent 才真正"知道你在干嘛、你已经知道什么"）。
-      // since → 持续时长：焦点切换/上下线本身就是"情境变了"的信号（进材料指纹）。
-      const board = worldBoardRef.current;
-      const sinceLabel = (since?: number): string => {
-        if (!since) return "";
-        const min = Math.round((Date.now() - since) / 60_000);
-        return min >= 1 ? `（已持续 ${min} 分钟）` : "（刚刚）";
-      };
-      const FOCUS_LABEL: Record<string, string> = {
-        coding: "写代码",
-        terminal: "终端操作",
-        browsing: "浏览网页",
-        video: "看视频",
-        game: "打游戏",
-        office: "办公文档",
-        chat: "聊天",
-      };
-      const presenceRow = board?.read<{ state?: string; since?: number }>(
-        actorId,
-        "current",
-        "presence",
-      );
-      const presence = presenceRow?.state
-        ? `${presenceRow.state}${sinceLabel(presenceRow.since)}`
-        : null;
-      const focusRow = board?.read<{ kind?: string; since?: number }>(
-        actorId,
-        "current",
-        "screenFocus",
-      );
-      const screenFocus =
-        focusRow?.kind && focusRow.kind !== "unknown"
-          ? `${FOCUS_LABEL[focusRow.kind] ?? focusRow.kind}${sinceLabel(focusRow.since)}`
-          : null;
-      const turns = board?.read<Array<{ at?: number; text?: string }>>(
-        actorId,
-        "session",
-        "recentTurns",
-      ) ?? [];
-      const recentTurns = turns
-        .slice(0, 4) // 追加列表新值在前
-        .map((t) => String(t.text ?? "").slice(0, 80))
-        .filter((t) => t.length > 0);
-      // 距上次对话：关系时钟的唯一输入（>6h 才允许「没事找话说」）。
-      // lastInteractionAtOf = observeConversationTurn 记的对话时刻，不是设备活跃，
-      // 否则桌面端心跳刷新会让人的「刚聊过」永远为真。
-      const lastConvAt = proactivityHub.lastInteractionAtOf(actorId);
-      const idleMinutes =
-        lastConvAt == null ? null : Math.max(0, Math.round((Date.now() - lastConvAt) / 60_000));
+      // 共享上下文（2026-11-25 接缝 2）：在场/屏幕/位置/活动/情绪/未闭环事/关注话题
+      // 不再在这里各拼一份，改由 readSharedContext 统一归一——情报判断读的也是它。
+      const ctx = readSharedContext(actorId);
       // 「你记得的他」：画像里的短事实（称呼/城市/职业/偏好），闲聊的锚点。
       // 只取 key：value 型短行、敏感字段过滤——主动消息会出现在锁屏上，
       // 记忆里有的事不等于适合这个渠道说。画像读失败不影响主动性。
@@ -6038,41 +6083,43 @@ export async function createAppServices(
       } catch (err) {
         console.log(`[AgentPulse] 画像读取失败（忽略）actor=${actorId}: ${err}`);
       }
-      // 位置 + 活动：闲聊最自然的锚点不是天气，是「我看到你在哪」。
-      // 置超过 2h 就视为旧数据（人早走了，再说「你在公司」就是瞎猜）。
-      const locCtx = actorContext.get(actorId);
-      const loc = locCtx?.location;
-      const placeFresh = loc && Date.now() - loc.observedAt <= 2 * 60 * 60_000;
-      const place = placeFresh
-        ? {
-            kind: loc.placeKind,
-            ...(loc.placeLabel ? { label: loc.placeLabel } : {}),
-            ...(loc.city ? { city: loc.city } : {}),
-            ...(loc.poi ? { poi: loc.poi } : {}),
-            updatedMinutesAgo: Math.max(0, Math.round((Date.now() - loc.observedAt) / 60_000)),
-          }
-        : null;
-      const activity = locCtx?.activity ?? null;
-      // 情绪只留标签：低/压力大时闲聊要收着，不把整段语气指导塞进来
-      const moodRaw = userPersonalizationService.getRecentMood(actorId);
-      const mood = moodRaw === "neutral" ? null : moodRaw;
+      // 人格与长期记忆（2026-11-25）：主动评审不是一套独立的推送 prompt——
+      // 同一份 SOUL 人格 + 按当前材料召回的长期记忆，和对话回合同一副嗓子。
+      const persona = personaSoulProviderRef.current?.(actorId) ?? null;
+      const memoryQuery = [
+        ...ctx.findings,
+        ...ctx.openLoops,
+        ...ctx.interests,
+        ...ctx.recentTurns,
+      ].join(" ").slice(0, 200);
+      let memories: string[] = [];
+      try {
+        memories = (await builtinServices.recallMemory?.(actorId, memoryQuery || "最近的事", 3)) ?? [];
+      } catch {
+        memories = [];
+      }
       // 2026-11-19：不再「材料全空就 return null」——那等于「没事发生就永不开口」，
       // 主动性退化成告警器。空材料也返回，由 AgentPulse 的关系时钟决定要不要评审。
       return {
         tasks,
         unread,
         goals,
-        interests,
+        interests: ctx.interests,
         goalLine,
-        findings,
-        presence,
-        screenFocus,
-        recentTurns,
-        idleMinutes,
+        findings: ctx.findings,
+        presence: presenceText(ctx),
+        screenFocus: screenFocusText(ctx),
+        recentTurns: ctx.recentTurns,
+        idleMinutes: ctx.idleMinutes,
+        // 接话的锚点（2026-11-25）：此前只在 fixture 里有值，真实聚合从没填过
+        openLoops: ctx.openLoops,
         rapport,
-        place,
-        activity,
-        mood,
+        place: ctx.place,
+        activity: ctx.activity,
+        mood: ctx.mood,
+        contextVersion: ctx.version,
+        persona,
+        memories,
       };
     },
     // 单次小 LLM 审阅。调用形态刻意对齐 decision-maker-factory 的 e2e-proaction
@@ -6244,6 +6291,9 @@ export async function createAppServices(
       .map((s) => s.trim())
       .filter(Boolean),
     styleBrief: (actorId) => intelStyleBrief(actorId),
+    // 共享上下文（2026-11-25 接缝 2）：与 AgentPulse 读同一份「他此刻在哪/在干什么/
+    // 什么还没聊完」，判断不再是一个只看邮件、一个只看日程的两个瞎子。
+    context: (actorId) => readSharedContext(actorId),
     feedback: () =>
       (proactivePipelineRef.current?.diagnostics().recentOutcomes ?? []).map((o) => ({
         at: o.at,
@@ -6264,23 +6314,28 @@ export async function createAppServices(
     deliver: async ({ entry, message }) => {
       const pipeline = proactivePipelineRef.current;
       if (!pipeline) return "retry";
+      // 投递层级（2026-11-25 接缝 3）：只有「等不了」的情报直投（要拍板 / 4h 内失效），
+      // 其余降为 social 进当天触点槽，与其它候选合并说——不再每条情报都即时弹一次。
+      const tier = intelTierFor(entry, Date.now());
       // 正文直接用成稿模型写的这句话：不再过润色层，也不机器拼接类别前缀
       const decision = pipeline.submitProposal({
         proposalId: `intel_${entry.id}`,
         actorId: entry.actorId,
         kind: "intel",
-        tier: "must", // 判断为值得说的事不跟社交预算排队
-        importance: "high",
+        tier: tier.tier,
+        importance: tier.tier === "must" ? "high" : "medium",
         dedupKey: `intel:${entry.id}`,
         title: entry.brief.slice(0, 120),
         summary: message.slice(0, 200),
         evidence: [
           entry.source,
+          `intel_tier:${tier.reason}`,
+          `ctx=${readSharedContext(entry.actorId).version}`,
           ...(entry.judgment?.reason ? [entry.judgment.reason] : []),
           ...entry.refs,
         ]
           .filter(Boolean)
-          .slice(0, 6),
+          .slice(0, 8),
         directText: message,
         createdAt: Date.now(),
         ...(entry.judgment?.expiresAt !== undefined || entry.expiresAt !== undefined
@@ -6675,6 +6730,10 @@ export async function createAppServices(
     }, 1500);
     if (typeof loadTimer.unref === "function") loadTimer.unref();
   }
+
+  // Agent 侧读邮件入口（mail.recent）：内存缓冲负责实时，SourceStore 的 mail 流
+  // 负责重启后仍能查历史。必须放在 sourceStore 定义之后。
+  registerMailWatchTools(toolRegistry, { mailWatch, sourceStore });
 
   // ─── Task 16 消费管家闭环装配（场景B）───
   // 工具执行成功 → hookBus tool.executed → 自动入账（finance-deep）
@@ -7556,6 +7615,24 @@ export async function createAppServices(
     // 送达 ≠ 被看到 的兜底改由送达确认与重连补投承担，电话仅保留为显式触达级别。
   });
   proactivePipeline.start();
+  // 明日预览的订阅不再依赖「此刻有设备在线」（2026-11-25 实证：11-23 全天 0 次推送）：
+  // 断线不退订，开机再把近 7 天交互过的账号补进订阅表（与 module-factory 的
+  // isActiveActor 同一口径，避免把测试 actor 坟场带进来）。到点照常生成 digest，
+  // 投递走既有两跳——在线 WS 直推 / 离线转统一管道升级系统推送（含对话留底）；
+  // App 没开的晚上不会再整天静默丢失。
+  {
+    const ACTIVE_WINDOW_MS = 7 * 24 * 60 * 60_000;
+    const now = Date.now();
+    let seeded = 0;
+    for (const a of proactivityHub.exportActors()) {
+      if (now - a.lastInteractionAt >= ACTIVE_WINDOW_MS) continue;
+      eveningDigestScheduler.subscribe(a.actorId);
+      seeded += 1;
+    }
+    if (seeded > 0) {
+      console.log(`[EveningDigest] 启动补订阅近 7 天活跃账号 ${seeded} 个（App 未开也照常生成）`);
+    }
+  }
   // 通知栏动作执行器（2026-11-13）：把 actionId 接到真实管道能力上——
   // 每个按钮按下去都必须真的改变某个状态，否则就是骗人的按钮。
   // 2026-11-23 通知闭环 M1：领域动作（已取件 / 已处理 / 日程完成 / 推迟）接到台账与日程服务。
@@ -7843,10 +7920,9 @@ export async function createAppServices(
 
   // ─── 闹钟/即时提醒（docs/mobile-agent-reminder-alarm-design.md）───
   // 触发主路在客户端本地（Android 精确闹钟 / iOS 本地通知）；服务端负责落库、
-  // 跨设备同步（alarm.sync）、到点兜底触发（alarm.trigger）与推送兜底。
+  // 跨设备同步（alarm.sync）与到点兜底触发（alarm.trigger）。
   const alarmClockService = new AlarmClockService({
     wsRegistry: wsConnectionRegistry,
-    mobilePush: proactivePushService,
     dataDir: join(getDataDir(), "alarm-clock"),
     // 话术里的「触发时刻」必须按用户时区念（服务器可能跑在 UTC）：唯一来源
     // 与 prompt-context-builder 同源 —— actorContext.resolveClock().timezone

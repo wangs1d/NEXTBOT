@@ -504,7 +504,10 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             socialFeedService.unsubscribe(boundActorId);
             wsConnectionRegistry.unregister(boundActorId, socket);
             morningBriefingScheduler?.unsubscribe(boundActorId);
-            eveningDigestScheduler?.unsubscribe(boundActorId);
+            // 晚间 digest 断线不退订（2026-11-25 实证）：明日预览的投递有两跳——
+            // 在线 WS 直推、离线转统一管道升级系统推送。此前 close 就退订，等于
+            // 「App 没开的那一晚整天不生成也不推送」（11-23 全天 0 次）。订阅只增不减，
+            // 由每日 lastSentDay 控一天一次。
             // 会话结束触发：立即整合该 actor 待处理记忆候选（不等 30s 防抖）。
             // fire-and-forget——含 LLM 抽取，不阻塞断开清理路径。
             void getMemoryConsolidationService()?.flushForActor(boundActorId);

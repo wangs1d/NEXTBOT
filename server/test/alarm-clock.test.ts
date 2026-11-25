@@ -1,4 +1,5 @@
-// 闹钟调度服务单测 —— RRULE 展开 / 贪睡顺延 / 触发回执幂等 / 兜底推送去重
+// 闹钟调度服务单测 —— RRULE 展开 / 贪睡顺延 / 触发回执幂等 / 智能路由
+// （离线兜底推送已删除，2026-11-25）
 // 运行：npx tsx --test test/alarm-clock.test.ts
 import fs from "node:fs";
 import os from "node:os";
@@ -135,52 +136,8 @@ test("服务端调度：到点触发 → advanceAfterFire 推进下一跳 → �
   service.stop();
 });
 
-test("兜底推送：客户端超时未回报 → mobilePush 被调用", async () => {
-  let pushed = 0;
-  const wsRegistry = {
-    trySend() {
-      return true;
-    },
-    trySendToActiveDevice() {
-      return false;
-    },
-    trySendToDeviceClassOrder() {
-      return false;
-    },
-  } as unknown as WsLike extends never ? never : import("../src/services/ws-connection-registry.js").WsConnectionRegistry;
-
-  const service = new AlarmClockService({
-    wsRegistry,
-    dataDir: tmpDir,
-    mobilePush: {
-      hasChannel: () => true,
-      push: async () => {
-        pushed += 1;
-        return { ok: true, provider: "test" };
-      },
-    },
-    env: process.env,
-  });
-
-  const { alarm } = service.createAlarm({
-    actorId: "actor_fb",
-    label: "单次提醒",
-    kind: "alarm",
-    fireAt: new Date(Date.now() - 60_000).toISOString(),
-    source: "user",
-  });
-  await service["tick"]();
-  // 等 fallback timer：服务里 WS 成功 → 5 分钟太久，这里直接调内部 fireFallbackPush 语义等价验证去重
-  const firedAtMs = new Date(service.getAlarm(alarm.id)!.lastFiredAt!).getTime();
-  await service["fireFallbackPush"](alarm, firedAtMs);
-  assert.equal(pushed, 1, "未回报时应推送兜底");
-  await service["fireFallbackPush"](alarm, firedAtMs);
-  assert.equal(pushed, 1, "台账已记 missed 后不应重复推送");
-  // 客户端后补回报：兜底已记 missed（非 ringing）→ 同跳判重
-  const cb = service.reportTriggerCallback(alarm.id, { firedAtMs, via: "local", outcome: "acked" });
-  assert.equal(cb.duplicate, true, "兜底已记 missed 后，同跳回报应判重");
-  service.stop();
-});
+// 兜底推送测试已删除（2026-11-25 用户定调：移除「手机端未响应」系统级兜底推送，
+// fireFallbackPush / scheduleFallback / mobilePush 通道随之下线）。
 
 test("智能路由：提醒只发最近活跃端 / 位置未知才 fan-out / 闹钟 mobile 优先", async () => {
   const calls: Array<{ fn: string; arg?: string }> = [];

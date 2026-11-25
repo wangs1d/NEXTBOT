@@ -15,7 +15,7 @@ import type {
 import type { SynapseBus } from "../brain/synapse-bus.js";
 import { getChatThreadStore } from "../external-model/chat-thread-store.js";
 import type { ChatToolExecutionContext, ExternalChatProvider } from "../external-model/types.js";
-import { StreamSegmenter } from "../agent/stream-segmenter.js";
+import { buildAssistantTurnFrames } from "../agent/assistant-turn-publisher.js";
 import { resolvePrimaryChatSessionId } from "../agent/master-chat-session.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import type { ToolContext, ToolRegistry } from "../tools/tool-registry.js";
@@ -319,59 +319,26 @@ export function createProactiveOutreachExecutor(
     }
 
     // 3. 通过 SynapseBus.sendToUser 投递（WS + MessageHub 离线降级）
-    //    注意：synapseBus 可能在 brainNeuroEnabled=0 时未创建
-    //    垫词 + 分段已统一到 StreamSegmenter（与 chat 主回复同一模块）：
-    //    垫词 = 话术首个分句（interim），信息块分段 + 增量去重后逐段（stream）推送，
-    //    模拟真人"开口一句、再打一段发一段"的节奏，而不是一次性冒出完整结论。
+    //    表达统一到对话出口（2026-11-25）：一个 done 帧带 bubbles，不再在服务端
+    //    自己 sleep 分段发多条 agent.proactive_message。
     const targetBus = deps.synapseBus();
     if (targetBus) {
-      const bubbles: Array<{ text: string; phase: "interim" | "stream" }> = [];
-      const proactiveSegmenter = new StreamSegmenter(
-        (seg, phase) => bubbles.push({ text: seg, phase }),
-        {
-          pauseMs: 400,
-          minSegmentChars: 6,
-          interimReplyGapMs: 600,
-          segmentationEnabled: true,
-          blockCharTarget: 56,
-          maxStreamSegments: 3,
+      const built = buildAssistantTurnFrames({
+        sessionId: signal.actorId,
+        traceId: `outreach-${Date.now()}`,
+        finalText: message.trim(),
+        proactive: {
+          deliveryId: `outreach_${Date.now()}`,
+          title: "Agent 主动联系",
+          kind: "outreach",
+          why: decision.rationale,
+          importance: signal.importance ?? (decision.valueScore > 5 ? "high" : "medium"),
         },
-      );
-      proactiveSegmenter.feed(message.trim());
-      await proactiveSegmenter.flushFinal();
-      if (bubbles.length === 0) {
-        // 极端兜底：分段器未产出（可能全被去重），整条作为单个消息发
-        await targetBus.sendToUser(signal.actorId, {
-          type: "agent.proactive_message",
-          payload: {
-            title: "Agent 主动联系",
-            text: message.trim(),
-            channel: decision.channel ?? "websocket",
-            reason: decision.rationale,
-          },
-        });
-      } else {
-        // 逐段发送：垫词气泡先行，随后正文逐段，间隔由 StreamSegmenter 的停顿保证
-        for (let i = 0; i < bubbles.length; i++) {
-          const isLast = i === bubbles.length - 1;
-          await targetBus.sendToUser(signal.actorId, {
-            type: "agent.proactive_message",
-            payload: {
-              title: "Agent 主动联系",
-              text: bubbles[i].text,
-              channel: decision.channel ?? "websocket",
-              // importance 透传：客户端据此选择弹窗触达（高重要度主动消息可弹窗）
-              importance: signal.importance ?? (decision.valueScore > 5 ? "high" : "medium"),
-              reason: isLast ? decision.rationale : undefined,
-              isPartial: !isLast,
-            },
-          });
-          if (!isLast) {
-            await sleep(400);
-          }
-        }
+      });
+      for (const frame of built.frames) {
+        await targetBus.sendToUser(signal.actorId, JSON.parse(frame));
       }
-      console.log(`[ProactiveOutreach] 主动消息已发送给 ${signal.actorId}（${bubbles.length} 段）: ${message.slice(0, 50)}...`);
+      console.log(`[ProactiveOutreach] 主动消息已发送给 ${signal.actorId}（${built.bubbles} 泡）: ${message.slice(0, 50)}...`);
     } else {
       // synapseBus 不存在时降级到 proactiveOutbound
       await proactiveOutbound.send({

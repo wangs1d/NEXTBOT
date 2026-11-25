@@ -149,6 +149,11 @@ export type IntelJudgeInput = {
   feedback: IntelJudgeFeedback;
   /** 用户画像浅层（称呼/偏好）；null=无 */
   styleBrief?: string | null;
+  /**
+   * 共享上下文快照（2026-11-25 接缝 2）：与 AgentPulse 同一份「他此刻在哪 /
+   * 在干什么 / 多久没说话 / 什么还没聊完」。判断只看事实，开口理由仍各自独立。
+   */
+  shared?: import("../context-snapshot.js").SharedContextSnapshot | null;
 };
 
 export type IntelJudgeResult = {

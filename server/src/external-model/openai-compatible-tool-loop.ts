@@ -14,7 +14,6 @@ import {
   type LlmInputBreakdown,
 } from "../services/llm-token-audit.js";
 import { currentBlockingStep, getTaskPlanStore, taskPlanKey } from "../agent/task-plan-store.js";
-import { receiptProducesCard } from "../services/receipt-card-projection.js";
 import { isMediaOnlyRequest, mediaToolNameForText, resolveTurnReferent } from "../agent/realtime-search-query.js";
 import { recordThinkingLatency, effortSentFrom } from "./thinking-policy.js";
 import { filterMediaModalityTools, filterTextSearchTools } from "../agent/web-search-consent.js";
@@ -42,6 +41,7 @@ import { AIP_CHAT_TOOLS } from "../aip/aip-chat-completion-tools.js";
 import { OBS_RECALL_CHAT_TOOL } from "./builtin-chat-tools.js";
 import { normalizeTraditionalToSimplified } from "../utils/simplified-chinese.js";
 import { getPhoneBridgeChatTools } from "../tools/phone-bridge-chat-tools.js";
+import { MAIL_WATCH_CHAT_TOOLS } from "../tools/mail-watch-chat-tools.js";
 import { BROWSER_SESSION_LIST_CHAT_TOOL } from "../tools/browser-session-chat-tools.js";
 import {
   COMPOSITE_ABSORBED_TOOL_NAMES,
@@ -286,10 +286,7 @@ const META_TOOL_NAMES = new Set<string>([
  * 上下文管线支撑工具：只回读已归档的历史结果，不产生新的外部数据。
  * 不写入 allToolExecResults（避免读回的旧内容虚增数据质量评分）。
  * brain.recall 同属此类（2026-11-10）：记忆召回的结果只进模型上下文、
- * 永不出卡——曾在「按实质工具扣流」的旧判据下触发整轮答案留存，
- * 「游完了，马尔代夫排一下」这类闲聊+查记忆轮的正文整轮不流式、不分泡
- * （真链探针实证）。扣流判据已改为「回执出卡」（receiptProducesCard），
- * 本集合只承担数据质量评估的排除口径。
+ * 永不出卡。本集合只承担数据质量评估的排除口径。
  */
 const SUPPORT_PLUMBING_TOOLS = new Set<string>([OBS_RECALL_TOOL_NAME, "brain.recall"]);
 
@@ -1172,6 +1169,7 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
       ...SMART_HOME_CHAT_TOOLS,
       ...DEVICE_CHAT_TOOLS,
       ...getPhoneBridgeChatTools(),
+      ...MAIL_WATCH_CHAT_TOOLS,
       BROWSER_SESSION_LIST_CHAT_TOOL,
       ...capabilityModuleTools,
       ..._brainChatTools,
@@ -1644,18 +1642,6 @@ export async function streamCompletionWithTools(
      * 工具不在本轮可见集/查询词为空时跳过（出口闸仍兜底）。
      */
     deterministicToolCalls?: Array<{ name: string; args: Record<string, unknown> }>;
-    /**
-     * 答案留存（2026-10-13 根修：工具轮的答案不进流式通道）。
-     *
-     * "after_tool_use"：本轮一旦执行过实质工具，其后所有波次的 content 一律
-     * 不再经 onDelta 直推（fullText 照常累积，随返回值交 done 结构化下发）——
-     * 答案与卡片同帧呈现，「先流式输出正文 → done 弹卡」的跳变从通道上根除。
-     * 调工具前的确认语（先一句话）不受影响（执行发生在其后）。
-     * "always"：从第一波就留存（agent-core 前置检索证据轮：检索发生在循环外，
-     * 循环看不见，但答案同样基于检索事实、同样配搜索卡，通道契约一致）。
-     * 缺省 = 不留存（任务面/子 Agent 等既有流式消费方行为不变）。
-     */
-    holdAnswer?: "after_tool_use" | "always";
     promptCache?: PrefixCacheRequest;
     requestSystemMessages?: ChatCompletionMessageParam[];
     /** volatile 动态上下文（记忆/时间等），沉底注入到最新 user 消息尾部，保护前缀缓存 */
@@ -1903,21 +1889,10 @@ export async function streamCompletionWithTools(
     result: Record<string, unknown>;
   }> = [];
 
-  // ── 答案留存闸（2026-10-13 根修；2026-11-10 判据收窄为「回执出卡」）──
-  // 扣流的唯一正当理由：done 会给这轮回执确定性附卡，卡片必须与正文同帧
-  // （跳变根除）。因此不看「调过实质工具了吗」，看「这份回执会不会出卡」
-  // （receiptProducesCard，与 done 建卡投影同源）——查记忆/记账等不出卡的
-  // 工具轮正文照常流式分泡；工具失败的轮次（无卡）也不再黑等。
-  // 决策点唯一且确定性：本函数是唯一知道「本轮是否执行过工具」的地方。
-  // 命中后波内直推（onContentDelta → onDelta → chat.assistant_chunk）对正文
-  // 关闸，fullText 照常累积并随返回值交 done 与卡片同帧下发。对账细节见
-  // options.holdAnswer 注释。每波求值（工具执行发生在波间，波内恒定）。
-  const answerHeld = (): boolean =>
-    options?.holdAnswer === "always" ||
-    (options?.holdAnswer === "after_tool_use" &&
-      allToolExecResults.some(
-        (r) => r.ok && receiptProducesCard(r.toolName, r.result),
-      ));
+  // ── 答案留存闸已退役（2026-11-25 统一管道）──
+  // 正文恒流式（I1）：所有波次的 content 一律经 onContentDelta → onDelta
+  // 实时直推，done 只做封口附加（卡片与最后气泡同帧），不存在「答案留存到
+  // done 才下发」的第二交付路径。
   // 轮内去重缓存：同一工具 + 同一参数在本轮对话内只真实执行一次（用完即丢，
   // 不跨轮持久——跨轮 TTL 结果缓存已整层拆除，2026-11-22：键不含 userText/actor，
   // 曾致天气「问明天仍回今天+明天」、图片「再来几张」复用同批图两次真机事故）。
@@ -2495,18 +2470,12 @@ export async function streamCompletionWithTools(
               // 逐 delta 净化后立即推给前端，最终波/前导话不再等收尾才整段推送。
               // 闸门规则：本波出现 tool_call 增量前 → 直推（确认语打字机透出）；
               // 关闸后 → 滞留 waveHeldText（工具波丢弃、最终波冲刷），思考过程
-              // 不再透出。与最终文本的分叉由 WS 层收口裁决承接。
+              // 不再透出。定稿文本即本出口的累计（流末 flush 见收尾）。
               const clean0 = waveMetaFilter(waveTagSanitizer(d));
               if (!clean0) return;
               // 繁→简出口正规化（2026-10-11）：累计（waveStreamedText/waveHeldText）
               // 与直推用同一归一文本，1:1 等长替换不破坏闸门滞留与残差对账。
               const clean = normalizeTraditionalToSimplified(clean0).text;
-              // 答案留存闸（2026-10-13 根修）：命中即不直推（fullText 已累积，
-              // 返回值带全量文本交 done）。与 10-11 关闸闸门的分工：那道闸拦
-              // 「调工具前的思考/伴随话」，这道闸拦「调工具后的答案本体」。
-              if (answerHeld()) {
-                return;
-              }
               if (waveGateClosed) {
                 waveHeldText += clean;
                 return;
@@ -2766,38 +2735,44 @@ export async function streamCompletionWithTools(
       // 用户，正是「先流式说没搜到、突然变成搜索结果卡」的直接源头。LLM 说没搜到就
       // 如实收尾，不靠兜底换货。
       const effectiveFinalText = normalizeTraditionalToSimplified(finalText).text;
-      // 流式推送最终内容到 onDelta（→ onAssistantDelta → 前端 chat.assistant_chunk）
-      // 根源净化：先把 LLM 混进正文的内部控制标签（[STOP...] / [话题切换...]）剥离，
-      // 保证推给前端的气泡不出现这些内部信号（此前在 agent-core finishLlmTurn 后置剥离
-      // 太晚——流式早已透出，无法撤回）。
-      //
-      // 2026-08-29 扩展：再走一次元术语整句过滤，兜底 LLM 把系统元描述（"上一轮转入
-      // 规划任务，执行脑已接手处理中"）写成完整句子的场景——这类整句与正常内容混编
-      // 时整段丢弃，避免污染前端气泡。
-      //
-      // 2026-10-11：这里改用**整串版** `stripMetaSentences`（而非 createStreamMetaSentenceFilter
-      // 的整串调用）。后者按 chunk 语义设计，未遇句末标点的尾部会留在缓冲里累积——对已
-      // 完整的整串来说等于把末尾那句吞掉。同时该函数已加入「元决策自述句」判据
-      // （「根据规范必须调用…」「系统已注入…但强制规则要求必须调用工具」），覆盖
-      // 「问时间」4 泡事故那一族；流式路径（waveMetaFilter）走同一套判据。
-      const sanitizedFinalText = stripRequestCardTags(
-        stripInternalControlTags(stripMetaSentences(stripInlineThinkBlocks(effectiveFinalText))),
-      );
+      // ── 正文单一出口（2026-11-25 统一管道根修）────────────────────────────
+      // 定稿文本 = 经 onDelta 放出的文本。此前这里另起一条整串净化链产出
+      // sanitizedFinalText，与流式链（逐 delta 净化 + 繁转简）是两套过滤器、两种
+      // 粒度，产出天然不同——流式过就以流式为准，差额丢给 WS 层比对两份文本去
+      // 补推：markdown 整段重复渲染、末句滞留都出在这里。
+      // 流式净化器是带缓冲的流变换：流结束必须 flush，缓冲（无句末标点的末句、
+      // 待判的半截标签）经同一条出口放出，关闸后照旧进滞留。
+      const emitWaveTail = (tail: string): void => {
+        if (!tail) return;
+        const clean = normalizeTraditionalToSimplified(tail).text;
+        if (waveGateClosed) {
+          waveHeldText += clean;
+          return;
+        }
+        waveStreamedText += clean;
+        onDelta(clean);
+      };
+      emitWaveTail(waveMetaFilter(waveTagSanitizer.flush()));
+      emitWaveTail(waveMetaFilter.flush());
       // 关闸滞留冲刷（2026-10-11）：最终波正常不关闸（无 tool_call 增量），
       // 此分支承接「流中出现 tool_call 增量但最终 stop」的罕见序——滞留的
-      // 后半段正文属于最终回复，冲刷补齐，不丢内容。答案留存轮例外：滞留
-      // 文本随返回值交 done（2026-10-13），不再补推到流式通道。
-      if (waveHeldText && !answerHeld()) {
+      // 后半段正文属于最终回复，冲刷补齐，不丢内容。
+      if (waveHeldText) {
         onDelta(waveHeldText);
         waveStreamedText += waveHeldText;
         waveHeldText = "";
       }
-      // 本波已直推过（波内直推）→ 不再整段重推；与 sanitizedFinalText 的差异
-      // 由 WS 层 streamedText vs reply.text 的残差补推对齐（见 chat-user-message）。
-      // 非流式/规划波（waveStreamedText 空）→ 维持收尾整推。
-      // 答案留存轮（2026-10-13 根修）→ 整推也关闭：正文只随返回值走 done。
-      if (sanitizedFinalText && !waveStreamedText.trim() && !answerHeld()) {
-        onDelta(sanitizedFinalText);
+      let sanitizedFinalText: string;
+      if (waveStreamedText.trim()) {
+        sanitizedFinalText = stripRequestCardTags(
+          stripAllTimestampFrameLines(waveStreamedText).trim(),
+        );
+      } else {
+        // 没有任何流式产出（非流式规划波、正文整段被净化掉）→ 整串净化后一次放出。
+        sanitizedFinalText = stripRequestCardTags(
+          stripInternalControlTags(stripMetaSentences(stripInlineThinkBlocks(effectiveFinalText))),
+        );
+        if (sanitizedFinalText) onDelta(sanitizedFinalText);
       }
       messages.push({
         role: "assistant",
@@ -3533,7 +3508,6 @@ export async function streamCompletionWithTools(
         // → tool*，foldCompletedToolChains 折成「[动作台账]…本轮未生成可见回复」，
         // 下一轮模型看到「问了天气但没回复」就把工具重新调一遍。最终答案必须与
         // 最终波路径（上方 messages.push assistant(content)）同契约落进 messages。
-        // holdAnswer 轮 streamedVisible 为空，provider 层兜底也救不回来，只能在这里补。
         if (probe.text.trim()) {
           messages.push({ role: "assistant", content: probe.text });
         }
@@ -3704,11 +3678,8 @@ export async function streamCompletionWithTools(
 
       let summaryText = "";
       let needMore = false;
-      // 答案留存闸（2026-10-13 根修）：工具全成功波的最终答案正是这条 schema-less
-      // 汇总通道产出的——它绕过主 consumer 的波内直推，必须独立关闸，否则
-      // 「先流式输出答案 → done 弹卡」从这里整段漏出。留存轮 summaryText 照常
-      // 累积并随返回值交 done；NEED_MORE 首行探测不受影响（replan 判定仍需）。
-      const holdSummary = answerHeld();
+      // 汇总通道照常流式直推（2026-11-25 统一管道：正文恒流式）；
+      // NEED_MORE 首行探测不受影响（replan 判定仍需）。
       // 逃生模式下先缓冲首行（或前 48 字符）再决定是否推送给前端，防止标记透出
       let headDecided = !escapeAllowed;
       let pendingHead = "";
@@ -3722,7 +3693,7 @@ export async function streamCompletionWithTools(
             const nd = normalizeTraditionalToSimplified(d).text;
             summaryText += nd;
             if (headDecided) {
-              if (!needMore && !holdSummary) onDelta(nd);
+              if (!needMore) onDelta(nd);
               return;
             }
             pendingHead += nd;
@@ -3732,7 +3703,7 @@ export async function streamCompletionWithTools(
               const firstLine = (nl >= 0 ? pendingHead.slice(0, nl) : pendingHead).trim();
               if (firstLine.startsWith(NEED_MORE_TOOLS_MARKER)) {
                 needMore = true;
-              } else if (!holdSummary) {
+              } else {
                 onDelta(pendingHead);
               }
               pendingHead = "";
@@ -3749,7 +3720,7 @@ export async function streamCompletionWithTools(
         headDecided = true;
         if (pendingHead.trim().startsWith(NEED_MORE_TOOLS_MARKER)) {
           needMore = true;
-        } else if (pendingHead && !holdSummary) {
+        } else if (pendingHead) {
           onDelta(pendingHead);
         }
         pendingHead = "";

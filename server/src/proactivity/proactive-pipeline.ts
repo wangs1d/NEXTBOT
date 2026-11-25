@@ -20,6 +20,7 @@ import { registerIntentForProposal } from "./notification-actions.js";
 import { explainTiming } from "./explain.js";
 import type { TouchpointPlan, TouchpointPlanner } from "./touchpoint-planner.js";
 import { emitHook } from "../services/hooks/index.js";
+import { getTurnWalService, type TurnWalEntry } from "../services/turn-wal-service.js";
 
 export type ProactivePipelineDeps = {
   /** 数据目录（默认 data/proactivity）：proposals.json / frequency.json / known-actors.json */
@@ -52,6 +53,12 @@ export type ProactivePipelineDeps = {
    * 通道禁用，离线一律挂起待重连（重连后直推进对话流），不再落站内信。
    */
   mobilePush?: import("./mobile-push-service.js").MobilePushChannel;
+  /**
+   * 离线推送成功后的对话留底（2026-11-25 用户拍板）：把推送正文落成主会话
+   * 轮次（userText 空 + assistantText），打开 App 拉历史时对话里能看到同一条。
+   * 未注入 = 写 turn WAL；测试注入捕获器，避免动真实数据目录。
+   */
+  transcriptAppend?: (entry: TurnWalEntry) => Promise<void> | void;
   /**
    * 动作意图服务（2026-11-13「通知即界面」）：离线推送路径也要签发动作意图——
    * 厂商通道渲染不出按钮，但点开通知能进 App 处理这个决策。
@@ -146,6 +153,19 @@ const VERDICTS_OUT_OF_QUEUE: ReadonlySet<ProposalVerdict> = new Set<ProposalVerd
 ]);
 
 /**
+ * 离线推送失败的有界重试（2026-11-25 用户拍板）：一次失败就丢会把大量主动消息
+ * 吞掉——推送偶尔 5xx/超时并不代表内容过期。失败留在待发区按退避重试，
+ * 总时限按内容时效封顶（提案自带 expiresAt 优先），过了就如实丢并留痕。
+ */
+const PUSH_RETRY_BACKOFF_MS = [60_000, 3 * 60_000, 10 * 60_000, 30 * 60_000];
+const PUSH_RETRY_MAX_ATTEMPTS = 8;
+/** 无 expiresAt 时的重试总时限：必达类 6h、社交类 2h（内容时效是消息价值的一部分） */
+const PUSH_RETRY_WINDOW_MUST_MS = 6 * 60 * 60_000;
+const PUSH_RETRY_WINDOW_SOCIAL_MS = 2 * 60 * 60_000;
+/** 华为 token 失效：重试同一个死 token 没有意义，直接丢，等客户端重注册 */
+const PUSH_DEAD_TOKEN_HINT = "80300002";
+
+/**
  * 同触点多条候选 → 一条正文（§3.4 步骤 2）。
  *
  * 正文取各条已渲染好的话术（directText 优先，退回 summary）逐行拼接：合并是
@@ -178,6 +198,11 @@ export class ProactivePipeline {
   private pushSeq = 0;
   /** dedupKey → 被 reachGate 延后的次数（防「永远等时机」饿死消息） */
   private readonly reachDefers = new Map<string, number>();
+  /**
+   * dedupKey → 离线推送已失败次数（有界重试账本，2026-11-25）。
+   * 进程内即可：即使重启清零，总时限仍由 createdAt + 窗口兜底，不会无限重试。
+   */
+  private readonly pushRetries = new Map<string, number>();
   /** 上次未回复结算扫描时刻（UNANSWERED_SWEEP_MS 节流） */
   private lastUnansweredSweepAt = 0;
 
@@ -597,21 +622,18 @@ export class ProactivePipeline {
   }
 
   /**
-   * 离线送达（2026-11-24 定稿）：两端都不在线（或 WS 投递竞态失败）时，
-   * 手机系统推送是**唯一**出口——推送前先把提案从待发区 take 掉（消费），
-   * 成功即记 delivered，失败即记 dropped 丢弃，**不再回待发区重试**。
+   * 离线送达：两端都不在线（或 WS 投递竞态失败）时，手机系统推送是主出口。
    *
-   * 为什么不再重试（用户拍板）：推送失败后 reschedule 回待发区会让同一条消息
-   * 每隔几分钟再推一次、每次都失败，日志刷屏且永不收敛；系统推送通道既然已
-   * 接入，就把送达责任完全交给它，失败就如实丢弃，不制造"看起来还在补"的假象。
+   * 2026-11-25 用户拍板改为**有界重试**：一次推送失败不代表内容过期（厂商接口
+   * 偶发 5xx/超时很常见），此前「失败即丢」把大量主动消息吞掉了。现在失败留在
+   * 待发区按退避重试，总时限按内容时效封顶（提案自带 expiresAt 优先；没有则
+   * 必达 6h / 社交 2h），到点仍未送达才如实丢弃并留痕。token 失效不重试。
    */
   private attemptOfflinePush(p: ProactiveProposal): void {
     const clock = () => this.deps.nowFn?.() ?? Date.now();
     const push = this.deps.mobilePush;
 
-    // 手机系统推送（所有 tier）：离线时唯一出口。先出队消费，失败也不回流。
     if (push && push.hasChannel(p.actorId)) {
-      this.store.take(p.dedupKey);
       const deliveryId = `dp_${clock().toString(36)}_${(this.pushSeq++).toString(36)}`;
       // 「通知即界面」：离线推送同样签发动作意图。厂商通道渲染不出按钮（系统模板），
       // 但通知里带上 intentId → 点开进 App 能直接处理这个决策（降级路径同一套语义）。
@@ -645,27 +667,45 @@ export class ProactivePipeline {
           importance: p.importance,
           kind: p.kind,
           deliveryId,
+          // 透传写穿的本地消息 id：同一件事重试多次也只落一条
+          stableKey: p.dedupKey,
           ...(intentId ? { intentId } : {}),
           ...(actionIntent ? { actionIntent } : {}),
         })
         .then((result) => {
           if (!result.ok) {
-            // 失败即丢弃：不回待发区、不重试（2026-11-24 用户拍板）
-            this.deps.outcomes.record({
-              deliveryId,
-              actorId: p.actorId,
-              kind: p.kind,
-              channel: "mobile_push",
-              outcome: "ignored",
-              at: clock(),
-              createdAt: clock(),
-              tier: p.tier,
-              ...(topicKeyOfProposal(p) ? { topic: topicKeyOfProposal(p) } : {}),
-            });
-            console.log(`[ProactivePipeline] 离线推送失败（丢弃，不重试）kind=${p.kind} provider=${result.provider} reason=${result.reason}`);
+            this.handlePushFailure(p, deliveryId, String(result.reason ?? ""));
             return;
           }
+          // 送达：这时才出队消费（失败要留在待发区重试）
+          this.store.take(p.dedupKey);
+          this.pushRetries.delete(p.dedupKey);
           this.store.markDelivered(p.dedupKey, clock());
+          // 对话留底（2026-11-25 用户拍板）：系统推送是离线时主出口，但此前的
+          // 结果是「推完对话里什么都不留」——点开通知只看得到主界面、找不到内容。
+          // 这里把同一条正文落成主会话轮次（userText 空 + assistantText），
+          // /api/chat-data/history?full=1 回填后对话里就是同一条消息。
+          // 只在推送成功时写一次：在线直投由客户端本地持久化，两端各写会重复。
+          const keptText = String(p.directText ?? p.summary ?? p.title ?? "").trim();
+          if (keptText) {
+            const append =
+              this.deps.transcriptAppend ??
+              ((entry: TurnWalEntry) => getTurnWalService().append(entry));
+            void Promise.resolve(
+              append({
+                ts: new Date(clock()).toISOString(),
+                actorId: p.actorId,
+                userText: "",
+                assistantText: keptText,
+                messageId: `proactive-${p.proposalId}`,
+                context: "main",
+              }),
+            ).catch((err) => {
+              console.log(
+                `[ProactivePipeline] 离线推送对话留底失败（忽略）kind=${p.kind}: ${err}`,
+              );
+            });
+          }
           // 手机推送真的送达 → 读走的发现此刻结算成消费（否则会随预留到期释放、被再合并一遍）
           if (this.deps.discovery && p.findingFingerprints?.length) {
             this.deps.discovery.settle(p.findingFingerprints, "delivered");
@@ -684,16 +724,78 @@ export class ProactivePipeline {
           console.log(`[ProactivePipeline] 离线推送已送达 kind=${p.kind} provider=${result.provider} actor=${p.actorId}`);
         })
         .catch((err) => {
-          console.log(`[ProactivePipeline] 离线推送异常（忽略）kind=${p.kind}: ${err}`);
+          // 通道抛异常与「返回失败」同待遇：可重试，别静默吞掉
+          this.handlePushFailure(p, deliveryId, String(err));
         });
       return;
     }
 
-    // 无推送通道：同样出队丢弃，不留待发区等重连（2026-11-24 三条兜底全删）。
-    // 站内信不承载聊天式提醒（只做平台/运营消息），无通道即如实放弃这一次开口。
+    // 无推送通道（没有注册 token / 未配置 provider）：重试也不会变好，如实丢弃。
+    // 站内信不承载聊天式提醒（只做平台/运营消息）。
     this.store.take(p.dedupKey);
+    this.pushRetries.delete(p.dedupKey);
     console.log(
       `[ProactivePipeline] 离线且无推送通道（丢弃，不重试）kind=${p.kind} actor=${p.actorId}`,
+    );
+  }
+
+  /**
+   * 推送失败后的去向：能重试就退避重排，过了内容时效才丢。
+   * token 失效（80300002）重试同一个死 token 没有意义——直接丢，客户端重注册后
+   * 新提案会走新 token。
+   */
+  private handlePushFailure(p: ProactiveProposal, deliveryId: string, reason: string): void {
+    const now = this.deps.nowFn?.() ?? Date.now();
+    const attempts = (this.pushRetries.get(p.dedupKey) ?? 0) + 1;
+    this.pushRetries.set(p.dedupKey, attempts);
+
+    const windowMs =
+      p.tier === "must" || p.importance === "high" || p.importance === "critical"
+        ? PUSH_RETRY_WINDOW_MUST_MS
+        : PUSH_RETRY_WINDOW_SOCIAL_MS;
+    const deadline = Math.min(p.expiresAt ?? Number.POSITIVE_INFINITY, p.createdAt + windowMs);
+    const backoff =
+      PUSH_RETRY_BACKOFF_MS[
+        Math.min(attempts - 1, PUSH_RETRY_BACKOFF_MS.length - 1)
+      ] ?? PUSH_RETRY_BACKOFF_MS[PUSH_RETRY_BACKOFF_MS.length - 1]!;
+    const tokenDead = reason.includes(PUSH_DEAD_TOKEN_HINT);
+    const canRetry =
+      !tokenDead && attempts < PUSH_RETRY_MAX_ATTEMPTS && now + backoff <= deadline;
+
+    if (canRetry) {
+      this.store.reschedule(p.dedupKey, now + backoff);
+      console.log(
+        `[ProactivePipeline] 离线推送失败，${Math.round(backoff / 60_000)} 分钟后重试` +
+          `（第 ${attempts} 次，最晚 ${new Date(deadline).toLocaleString("zh-CN")}）` +
+          `kind=${p.kind} reason=${reason}`,
+      );
+      return;
+    }
+
+    // 超出重试窗口 / token 失效 / 次数用尽：如实丢弃并留痕（不制造"还在补"的假象）
+    this.store.take(p.dedupKey);
+    this.pushRetries.delete(p.dedupKey);
+    this.deps.outcomes.record({
+      deliveryId,
+      actorId: p.actorId,
+      kind: p.kind,
+      channel: "mobile_push",
+      outcome: "ignored",
+      at: now,
+      createdAt: now,
+      tier: p.tier,
+      ...(topicKeyOfProposal(p) ? { topic: topicKeyOfProposal(p) } : {}),
+    });
+    if (this.deps.discovery && p.findingFingerprints?.length) {
+      this.deps.discovery.settle(p.findingFingerprints, "dropped");
+    }
+    const why = tokenDead
+      ? "push token 失效，等客户端重注册"
+      : attempts >= PUSH_RETRY_MAX_ATTEMPTS
+        ? "重试次数用尽"
+        : "超出内容时效";
+    console.log(
+      `[ProactivePipeline] 离线推送最终失败（丢弃：${why}）kind=${p.kind} attempts=${attempts} reason=${reason}`,
     );
   }
 
@@ -851,11 +953,10 @@ export class ProactivePipeline {
       case "deferred": {
         const now = this.deps.nowFn?.() ?? Date.now();
         if (decision.reasonChain.includes("offline_wait_reconnect")) {
-          // 时效信息不靠「等手机上线再补」兜底（2026-11-24 用户拍板）：
-          // 离线这一刻就是唯一送达机会——有系统推送就推一次，失败即丢，
-          // 绝不再 reschedule 回待发区等重连。重连 flushDue 会重裁决旧提案、
-          // 把几小时前的睡觉/闹钟话术补进对话流，正是用户看到的「上线推旧内容」。
-          this.attemptOfflinePush(p); // 内部 take 出队（推送或丢弃都不回流）
+          // 时效信息不靠「等手机上线再补」兜底（2026-11-24 用户拍板）：离线这一刻
+          // 就交给系统推送。2026-11-25 起推送失败会在内容时效内退避重试（见
+          // handlePushFailure），不再一次失败就吞掉。
+          this.attemptOfflinePush(p);
           disposition = "dropped";
         } else if (decision.deliverAfter !== undefined) {
           // 非离线原因的延迟（通话中 / 勿扰 / 排槽窗口）仍按点重裁决——

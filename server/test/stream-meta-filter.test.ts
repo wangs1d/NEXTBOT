@@ -133,3 +133,19 @@ test("后台旁白：agent 正常口吻的确认句不受影响", () => {
     assert.equal(stripMetaSentences(s), s);
   }
 });
+
+// ── 流末 flush（2026-11-26 正文单一出口）──
+// 净化器带缓冲：没有句末标点的最后一句会一直卡在缓冲里。流结束时必须 flush，
+// 缓冲经同一出口放出，否则末句丢失。
+test("flush 放出无句末标点的末句（元句仍丢弃）", () => {
+  const feed = createStreamMetaSentenceFilter();
+  assert.equal(feed("今天兴义小雨，记得带伞"), "", "未终结：继续缓冲");
+  assert.equal(feed.flush(), "今天兴义小雨，记得带伞", "流末放出缓冲");
+  assert.equal(feed.flush(), "", "缓冲只放一次");
+});
+
+test("flush 对卡在缓冲里的元句仍然丢弃", () => {
+  const feed = createStreamMetaSentenceFilter();
+  feed("上一轮转入规划任务，执行脑已接手处理中");
+  assert.equal(feed.flush(), "", "元描述句不因 flush 而漏出");
+});

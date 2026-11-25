@@ -93,8 +93,8 @@ export interface RenderEnvelope {
     preSceneIds: string[];
     /**
      * 正文是否被出口重排/抽走（列表切卡、引用抽块、长文折叠、结构化正文）。
-     * 呈现裁决（bubble-policy）用它决定本轮必须收成单条消息：流式气泡里的
-     * 原文已不是最终正文，继续逐泡落屏就是同一内容渲染两遍。
+     * 统一管道（2026-11-25）下 WS 流式轮恒走 cards-only（恒 false），
+     * full 模式的非流式调用方仍据此感知正文形态是否被出口接管。
      */
     bodyRewritten: boolean;
     /** 是否可安全下发给 v1 blocks 消费者（含 v1 不认识的形态时降级） */

@@ -16,6 +16,7 @@ import { getMemoryComponents } from "../agentic-memory/index.js";
 import { applyAgentIdentityRename } from "../tools/agent-identity-tools.js";
 import { getUserPreferences } from "../routes/http/user-preferences.js";
 import { ServerEventType } from "../protocol.js";
+import { publishAssistantTurn } from "../agent/assistant-turn-publisher.js";
 import type { AgentAccountService } from "./agent-account-service.js";
 import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
 import type { WsConnectionRegistry } from "./ws-connection-registry.js";
@@ -100,9 +101,9 @@ export class OnboardingIntroService {
     this.pushBubble(actorId, greeting);
     const secondMessageId = `onboarding-intro-${now()}`;
     const sendSecond = () => {
-      this.pushBubble(actorId, askName, secondMessageId);
+      const bubbleId = this.pushBubble(actorId, askName, secondMessageId);
       // 取名卡挂在第二泡下方：先泡后卡，WS 同连接保序，客户端按 messageId 挂载。
-      this.pushNameCard(actorId, secondMessageId);
+      this.pushNameCard(actorId, bubbleId);
     };
     const delay = this.deps.secondBubbleDelayMs ?? SECOND_BUBBLE_DELAY_MS;
     if (delay <= 0) {
@@ -247,24 +248,25 @@ export class OnboardingIntroService {
   }
 
   /** 定向手机推一条普通文本气泡；messageId 供客户端落历史并挂取名卡。 */
-  private pushBubble(actorId: string, text: string, messageId?: string): void {
-    const payload = {
-      // 留空：引导气泡不是「主动性触达」，不参与 outcome 统计/重连补投。
-      deliveryId: "",
-      ...(messageId ? { messageId } : {}),
-      title: "",
-      text,
-      importance: "normal",
-      kind: "first_meeting_intro",
-    };
+  private pushBubble(actorId: string, text: string, messageId?: string): string {
+    // 与对话回复同一个出口（2026-11-25）：done 帧；deliveryId 留空 = 不参与 outcome。
+    const traceId = messageId?.startsWith("assistant-")
+      ? messageId.slice("assistant-".length)
+      : `onboarding-${Date.now()}`;
     try {
-      this.deps.wsRegistry?.trySendToDeviceClasses(
-        actorId,
-        JSON.stringify({ type: "agent.proactive_message", payload }),
-        ["mobile"],
-      );
+      return publishAssistantTurn(
+        (json) =>
+          this.deps.wsRegistry?.trySendToDeviceClasses(actorId, json, ["mobile"]) ?? false,
+        {
+          sessionId: actorId,
+          traceId,
+          finalText: text,
+          proactive: { deliveryId: "", title: "", kind: "first_meeting_intro" },
+        },
+      ).messageId;
     } catch (err) {
       console.log(`[OnboardingIntro] 开场白推送失败: ${err}`);
+      return `assistant-${traceId}`;
     }
   }
 

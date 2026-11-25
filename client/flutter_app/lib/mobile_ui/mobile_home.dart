@@ -17,6 +17,7 @@ import "../features/chat/image_preview_panel.dart";
 import "../features/chat/travel_plan_launcher.dart";
 import "../features/chat/travel_plan_mobile_page.dart";
 import "../features/chat/travel_plan_models.dart";
+import "../features/help/feedback_dialog.dart";
 import "mobile_browser_preview_overlay.dart";
 import "mobile_chat_controller.dart";
 import "mobile_chat_page.dart";
@@ -24,6 +25,7 @@ import "mobile_dynamics_page.dart";
 import "mobile_library_page.dart";
 import "mobile_line_icons.dart";
 import "mobile_profile_page.dart";
+import "mobile_recharge_page.dart";
 import "mobile_schedule_page.dart";
 import "mobile_sidebar.dart";
 import "mobile_theme.dart";
@@ -51,6 +53,10 @@ class WidgetNav {
   /// 意思是「只把 App 带到前台，不乱跳页」。
   static int? tabFor(String? route) {
     switch (route) {
+      case "chat":
+        // 厂商推送点开（2026-11-25）：通知对应的那条内容已在对话里（服务端留底 +
+        // 历史回填），直接落到对话页，用户不用自己找。
+        return tabChat;
       case "schedule":
         // 2×2 整卡 / 4×2「下一件事」那一行：下一件事的本体就是行程表今天这页
         return tabSchedule;
@@ -491,10 +497,13 @@ class MobileHomePageState extends State<MobileHomePage>
                   key: _sidebarKey,
                   activeSessionId:
                       _chatController.activeSideSessionId ?? _lastSideChatId,
-                  onClose: _closeSidebar,
                   onOpenChat: (SideChatSummary chat) =>
                       unawaited(_openSideChat(chat)),
                   onOpenSettings: _openSettings,
+                  onOpenAppearance: _showAppearanceSheet,
+                  onOpenRecharge: () =>
+                      _openSidebarPage(const MobileRechargePage(), "额度充值"),
+                  onOpenFeedback: _openFeedbackFromSidebar,
                   onDeleted: (String sessionId) {
                     if (sessionId == _lastSideChatId) {
                       _lastSideChatId = null;
@@ -634,6 +643,100 @@ class MobileHomePageState extends State<MobileHomePage>
           ),
         ),
       ),
+    );
+  }
+
+  /// 账号卡「外观」：底部三选一，抽屉保持打开以便直接看到切色效果。
+  void _showAppearanceSheet() {
+    final ThemeMode? mode = widget.themeMode;
+    final ValueChanged<ThemeMode>? onChanged = widget.onThemeModeChanged;
+    if (mode == null || onChanged == null) {
+      _openSettings();
+      return;
+    }
+    final MobilePalette p = MobileTheme.of(context);
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      backgroundColor: p.surface,
+      builder: (BuildContext sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  "外观",
+                  style: TextStyle(
+                    color: p.textPrimary,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ),
+            for (final (ThemeMode value, IconData icon, String label)
+                in <(ThemeMode, IconData, String)>[
+              (ThemeMode.light, Icons.light_mode_outlined, "亮色"),
+              (ThemeMode.dark, Icons.dark_mode_outlined, "暗色"),
+              (ThemeMode.system, Icons.brightness_auto_outlined, "跟随系统"),
+            ])
+              ListTile(
+                leading: Icon(icon, size: 22, color: p.textSecondary),
+                title: Text(
+                  label,
+                  style: TextStyle(color: p.textPrimary, fontSize: 15),
+                ),
+                trailing: mode == value
+                    ? Icon(
+                        Icons.check,
+                        size: 20,
+                        color: Theme.of(sheetContext).colorScheme.primary,
+                      )
+                    : null,
+                onTap: () {
+                  Navigator.of(sheetContext).pop();
+                  onChanged(value);
+                },
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 账号卡「充值」等二级页：关抽屉后全屏 push，顶栏带返回键。
+  void _openSidebarPage(Widget page, String title) {
+    _closeSidebar();
+    unawaited(
+      Navigator.of(context).push(
+        MaterialPageRoute<void>(
+          builder: (BuildContext ctx) => Scaffold(
+            backgroundColor: MobileTheme.of(ctx).background,
+            appBar: AppBar(
+              title: Text(title),
+              centerTitle: true,
+              leading: IconButton(
+                tooltip: "返回",
+                icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 20),
+                onPressed: () => unawaited(Navigator.of(ctx).maybePop()),
+              ),
+            ),
+            body: page,
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 账号卡「反馈」：关抽屉后弹反馈弹窗。
+  void _openFeedbackFromSidebar() {
+    _closeSidebar();
+    showDialog<void>(
+      context: context,
+      builder: (BuildContext ctx) => const FeedbackDialog(),
     );
   }
 

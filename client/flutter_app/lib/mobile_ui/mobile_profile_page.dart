@@ -8,6 +8,7 @@ import "../core/config/api_config.dart";
 import "../core/presentation/user_avatar.dart";
 import "../core/services/user_avatar_api.dart";
 import "../features/help/feedback_dialog.dart";
+import "mobile_capabilities_page.dart";
 import "mobile_chat_controller.dart";
 import "mobile_recharge_page.dart";
 import "mobile_service_access_page.dart";
@@ -214,6 +215,16 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
               _divider(context),
               _ListRow(
                 leading:
+                    Icon(Icons.link_rounded, color: p.textSecondary, size: 22),
+                title: "能力连接",
+                trailing:
+                    Icon(Icons.chevron_right, color: p.textMuted, size: 20),
+                onTap: () => _push(const MobileCapabilitiesPage(), "能力连接",
+                    wrapped: false),
+              ),
+              _divider(context),
+              _ListRow(
+                leading:
                     Icon(Icons.tune_outlined, color: p.textSecondary, size: 22),
                 title: "服务接入",
                 trailing:
@@ -230,8 +241,8 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
               if (widget.themeMode != null &&
                   widget.onThemeModeChanged != null) ...<Widget>[
                 _ListRow(
-                  leading:
-                      Icon(Icons.contrast, color: p.textSecondary, size: 22),
+                  leading: Icon(Icons.light_mode_outlined,
+                      color: p.textSecondary, size: 22),
                   title: "外观",
                   trailing: Text(
                     _themeModeLabel(widget.themeMode!),

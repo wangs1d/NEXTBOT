@@ -6,37 +6,49 @@ import "dart:ui" as ui;
 import "package:flutter/material.dart";
 
 import "../core/config/api_config.dart";
+import "../core/presentation/user_avatar.dart";
 import "../core/services/side_chat_api.dart";
+import "../core/services/user_avatar_api.dart";
 import "mobile_line_icons.dart";
 import "mobile_theme.dart";
 
 /// 左侧抽屉：只保留「旁聊」列表（无「选项卡」分组），设置迁到左下角。
 ///
-/// 设计稿 2026-11-07 第二屏：
+/// 设计稿 2026-11-26：
 /// - 288px 宽玻璃抽屉，打开时主界面整体右移、右侧留 32px 缝
-/// - 头部：关闭键（「主会话在后台运行」小字已移除）
+/// - 头部：账号卡（头像 + 名字 + 外观/充值/反馈/设置四个入口），
+///   右上角关闭键已移除，关闭走点遮罩 / 左滑
 /// - 旁聊列表：标题 + 预览 + 相对时间；长按重命名 / 右侧按钮删除
 /// - 列表末尾虚线「新建旁聊」卡
-/// - 底部 dock：设置齿轮（左下角）· 搜索旁聊输入框 · 新建旁聊
+/// - 底部 dock：搜索旁聊输入框 · 新建旁聊
 ///
 /// 所有操作都落到真实接口 `/api/side-chats`，无本地假数据。
 class MobileSidebar extends StatefulWidget {
   const MobileSidebar({
     super.key,
-    required this.onClose,
     required this.onOpenChat,
     required this.onOpenSettings,
+    required this.onOpenAppearance,
+    required this.onOpenRecharge,
+    required this.onOpenFeedback,
     this.activeSessionId,
     this.onDeleted,
   });
 
-  final VoidCallback onClose;
-
   /// 点某条旁聊：主壳负责切会话 + 关抽屉。
   final ValueChanged<SideChatSummary> onOpenChat;
 
-  /// 左下角设置：打开原「我的」页（设置不再占底栏）。
+  /// 账号卡「设置」：打开原「我的」页。
   final VoidCallback onOpenSettings;
+
+  /// 账号卡「外观」：弹出亮色 / 暗色 / 跟随系统三选一。
+  final VoidCallback onOpenAppearance;
+
+  /// 账号卡「充值」：打开额度充值页。
+  final VoidCallback onOpenRecharge;
+
+  /// 账号卡「反馈」：弹出反馈弹窗。
+  final VoidCallback onOpenFeedback;
 
   /// 当前激活的旁聊线程键（高亮选中项）。
   final String? activeSessionId;
@@ -50,6 +62,7 @@ class MobileSidebar extends StatefulWidget {
 
 class MobileSidebarState extends State<MobileSidebar> {
   final SideChatApi _api = SideChatApi(baseUrl: ApiConfig.httpBase);
+  final UserAvatarApi _avatarApi = UserAvatarApi();
   final TextEditingController _searchInput = TextEditingController();
 
   List<SideChatSummary> _chats = const <SideChatSummary>[];
@@ -57,6 +70,10 @@ class MobileSidebarState extends State<MobileSidebar> {
   String _query = "";
   Timer? _debounce;
   int _requestSeq = 0;
+
+  /// 用户头像相对路径（null=未设置，渲染首字母球）；每次打开抽屉刷新，
+  /// 以便在「我的」页换过头像后回来能立刻同步。
+  String? _avatarPath;
 
   @override
   void initState() {
@@ -74,6 +91,7 @@ class MobileSidebarState extends State<MobileSidebar> {
   /// 重新拉取列表（每次打开抽屉 / 增删改后调用）。
   Future<void> reload() async {
     final int seq = ++_requestSeq;
+    unawaited(_loadAvatar());
     if (mounted) setState(() => _loading = true);
     final List<SideChatSummary> list = await _api.list(query: _query);
     if (!mounted || seq != _requestSeq) return;
@@ -81,6 +99,12 @@ class MobileSidebarState extends State<MobileSidebar> {
       _chats = list;
       _loading = false;
     });
+  }
+
+  Future<void> _loadAvatar() async {
+    final String? path = await _avatarApi.fetchAvatarPath();
+    if (!mounted) return;
+    setState(() => _avatarPath = path);
   }
 
   void _onSearchChanged(String value) {
@@ -237,7 +261,7 @@ class MobileSidebarState extends State<MobileSidebar> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: <Widget>[
-              _buildHeader(p),
+              _buildAccountCard(p),
               _buildSectionLabel(p),
               Expanded(child: _buildList(p)),
               _buildDock(p),
@@ -249,37 +273,104 @@ class MobileSidebarState extends State<MobileSidebar> {
     return panel;
   }
 
-  /// 顶部只保留关闭键。
-  Widget _buildHeader(MobilePalette p) {
+  /// 顶部账号卡：头像 + 名字一行，下方四个功能入口。
+  Widget _buildAccountCard(MobilePalette p) {
     final bool dark = Theme.of(context).brightness == Brightness.dark;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(18, 18, 18, 4),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.end,
+    final String actorId = ApiConfig.effectiveActorId;
+    // 与「我的」页同名规则：邮箱取 @ 前缀。
+    final String displayName =
+        actorId.contains("@") ? actorId.split("@").first : actorId;
+    final String initial =
+        displayName.isEmpty ? "U" : displayName.characters.first.toUpperCase();
+    final Color fg = dark ? const Color(0xFFE8E9EE) : p.textPrimary;
+    final Widget avatarFallback = Container(
+      width: 48,
+      height: 48,
+      decoration: BoxDecoration(color: p.accent, shape: BoxShape.circle),
+      alignment: Alignment.center,
+      child: Text(
+        initial,
+        style: TextStyle(
+          color: p.onAccent,
+          fontSize: 18,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 12, 12, 4),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        // 深色卡底比抽屉底(#121212)亮一档，卡片才能浮起来。
+        color: dark ? const Color(0xFF1F2025) : p.surface,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: dark ? Colors.white.withValues(alpha: 0.06) : p.divider,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
-          GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: widget.onClose,
-            child: Container(
-              width: 32,
-              height: 32,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: dark
-                    ? Colors.white.withValues(alpha: 0.05)
-                    : p.surface.withValues(alpha: 0.05),
-                border: Border.all(
-                  color: dark
-                      ? Colors.white.withValues(alpha: 0.06)
-                      : p.divider.withValues(alpha: 0.55),
+          Row(
+            children: <Widget>[
+              UserAvatar(
+                url: UserAvatarApi.resolveUrl(_avatarPath),
+                size: 48,
+                fallback: avatarFallback,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  displayName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontFamily: "HarmonyOS Sans SC",
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                    color: fg,
+                  ),
                 ),
               ),
-              child: Icon(
-                Icons.close_rounded,
-                size: 15,
-                color: dark ? const Color(0xFF9A9EA8) : p.textMuted,
+            ],
+          ),
+          const SizedBox(height: 18),
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: _QuickAction(
+                  // 主流做法：外观 / 显示与亮度统一用太阳，22px 下辨识度最高。
+                  icon: Icons.light_mode_outlined,
+                  label: "外观",
+                  color: fg,
+                  onTap: widget.onOpenAppearance,
+                ),
               ),
-            ),
+              Expanded(
+                child: _QuickAction(
+                  icon: Icons.account_balance_wallet_outlined,
+                  label: "充值",
+                  color: fg,
+                  onTap: widget.onOpenRecharge,
+                ),
+              ),
+              Expanded(
+                child: _QuickAction(
+                  icon: Icons.feedback_outlined,
+                  label: "反馈",
+                  color: fg,
+                  onTap: widget.onOpenFeedback,
+                ),
+              ),
+              Expanded(
+                child: _QuickAction(
+                  icon: Icons.settings_outlined,
+                  label: "设置",
+                  color: fg,
+                  onTap: widget.onOpenSettings,
+                ),
+              ),
+            ],
           ),
         ],
       ),
@@ -289,11 +380,23 @@ class MobileSidebarState extends State<MobileSidebar> {
   Widget _buildSectionLabel(MobilePalette p) {
     final bool dark = Theme.of(context).brightness == Brightness.dark;
     final Color hintColor = dark ? const Color(0xFF5F636C) : p.textMuted;
+    final Color labelColor =
+        dark ? const Color(0xFF7C808B) : p.textMuted;
     return Padding(
       padding: const EdgeInsets.fromLTRB(18, 14, 18, 8),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.end,
         children: <Widget>[
+          Text(
+            "旁聊",
+            style: TextStyle(
+              fontFamily: "HarmonyOS Sans SC",
+              fontSize: 13,
+              fontWeight: FontWeight.w500,
+              letterSpacing: 0.4,
+              color: labelColor,
+            ),
+          ),
+          const Spacer(),
           Text(
             _loading ? "…" : "${_chats.length} 个",
             style: TextStyle(
@@ -615,14 +718,6 @@ class MobileSidebarState extends State<MobileSidebar> {
         height: 42,
         child: Row(
           children: <Widget>[
-            _dockButton(
-              p,
-              // 设计稿为 Feather 线性齿轮（原误画成太阳，已修正）。
-              icon: Icons.settings_outlined,
-              tooltip: "设置",
-              onTap: widget.onOpenSettings,
-            ),
-            const SizedBox(width: 8),
             Expanded(
               child: Container(
                 height: 40,
@@ -740,6 +835,44 @@ class MobileSidebarState extends State<MobileSidebar> {
             color: dark ? const Color(0xFFD7DAE2) : p.textPrimary,
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// 账号卡里的单个功能入口：图标在上、文案在下，四等分排布。
+class _QuickAction extends StatelessWidget {
+  const _QuickAction({
+    required this.icon,
+    required this.label,
+    required this.color,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String label;
+  final Color color;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Icon(icon, size: 22, color: color),
+          const SizedBox(height: 8),
+          Text(
+            label,
+            style: TextStyle(
+              fontFamily: "HarmonyOS Sans SC",
+              fontSize: 12,
+              color: color,
+            ),
+          ),
+        ],
       ),
     );
   }

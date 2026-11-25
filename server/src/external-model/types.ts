@@ -364,20 +364,6 @@ export type AgentStreamOptions = {
    */
   deterministicToolCalls?: Array<{ name: string; args: Record<string, unknown> }>;
   /**
-   * 答案留存（2026-10-13 根修；2026-11-10 判据收窄为「回执出卡」）。
-   *
-   * "after_tool_use"：本轮回执会确定性出卡时（receiptProducesCard，与 done
-   * 建卡投影同源），答案正文不再经流式通道直推，随返回值交 done 与卡片
-   * 同帧下发（对话面卡片轮跳变的通道级根除）。不出卡的回执（查记忆/记账/
-   * 失败回执）不扣流，正文照常流式分泡。
-   * "always"：从第一波就留存——前置检索证据轮（检索发生在循环外）同样
-   * 基于检索事实作答、同样配搜索卡，通道契约与工具轮一致。
-   * 仅对话面主链路置位（语音轮豁免：TTS 消费流式分句）；任务面/子 Agent
-   * 等既有流式消费方不置位，行为不变。provider 必须透传进
-   * streamCompletionWithTools（漏传 = 留存静默失效）。
-   */
-  holdAnswer?: "after_tool_use" | "always";
-  /**
    * chat 车道主生成采样放开（2026-10-06 语感治理 A）：true 时 provider 对该轮
    * 主生成下发 temperature/frequency_penalty（CHAT_TEMPERATURE / CHAT_FREQUENCY_PENALTY
    * 可覆盖）。仅 agent-core 的 chat 车道主链路置位；任务面、ephemeral 内部调用
