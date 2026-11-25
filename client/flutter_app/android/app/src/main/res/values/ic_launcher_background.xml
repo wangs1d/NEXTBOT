@@ -1,5 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 与桌面端 app_icon.ico 底色同源(圆角方块取色 #0A0A0A) -->
 <resources>
-    <color name="ic_launcher_background">#0A0A0A</color>
+    <color name="ic_launcher_background">#070707</color>
 </resources>

@@ -90,6 +90,10 @@ function withRegistry(now: Date) {
       seen = range;
       return [];
     },
+    listTaskViewsBySession: (_sessionId: string, range: SeenRange) => {
+      seen = range;
+      return [];
+    },
   } as unknown as ScheduleTaskService;
   const registry = new ToolRegistry();
   registerCalendarTools(registry, svc, null as never);

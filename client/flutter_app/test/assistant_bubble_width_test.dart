@@ -92,6 +92,81 @@ void main() {
       expect(assistantBodyNeedsWideWidth(m), isTrue);
     });
 
+    // 2026-11-24 回归：泡外渲染的块不能撑宽气泡——带接续建议 / 外移卡的
+    // 纯闲聊回复此前被拉成通栏（截图为证：两行闲聊泡顶满屏宽）。
+    test("信封 followups 块（泡外画）+ 纯叙述正文 → 设计稿泡宽", () {
+      final ChatMessage m = _msg(
+        text: "行，到点手机响，你放下手机就出门。",
+        envelopeBlocks: <Map<String, dynamic>>[
+          <String, dynamic>{"type": "text", "text": "行，到点手机响，你放下手机就出门。"},
+          <String, dynamic>{
+            "type": "followups",
+            "items": <String>["再提醒我一次", "换成 10 分钟"],
+          },
+        ],
+      );
+      expect(assistantBodyNeedsWideWidth(m), isFalse);
+    });
+
+    test("信封卡已外移 + 纯叙述正文 → 设计稿泡宽", () {
+      final ChatMessage m = _msg(
+        text: "行，到点手机响。",
+        envelopeBlocks: <Map<String, dynamic>>[
+          <String, dynamic>{"type": "text", "text": "行，到点手机响。"},
+          <String, dynamic>{
+            "type": "card",
+            "card": <String, dynamic>{"cardType": "reminder_confirm"},
+          },
+          <String, dynamic>{"type": "followups", "items": <String>["好的"]},
+        ],
+      );
+      expect(
+        assistantBodyNeedsWideWidth(
+          m,
+          excludeCardTypes: <String>["reminder_confirm"],
+        ),
+        isFalse,
+      );
+      // 同一个消息，卡没外移（泡内渲染）→ 仍全宽
+      expect(assistantBodyNeedsWideWidth(m), isTrue);
+    });
+
+    test("正文卡标记的卡已外移 → 设计稿泡宽", () {
+      final ChatMessage m = _msg(
+        text: "行，到点手机响。\n"
+            "[AGENT_RESULT_CARD_START]"
+            '{"cardType":"reminder_confirm","title":"已定好提醒"}'
+            "[AGENT_RESULT_CARD_END]",
+      );
+      expect(
+        assistantBodyNeedsWideWidth(
+          m,
+          excludeCardTypes: <String>["reminder_confirm"],
+        ),
+        isFalse,
+      );
+    });
+
+    test("卡已外移但正文是结构化 markdown → 仍全宽", () {
+      final ChatMessage m = _msg(
+        text: _structuredBody,
+        envelopeBlocks: <Map<String, dynamic>>[
+          <String, dynamic>{"type": "text", "text": _structuredBody},
+          <String, dynamic>{
+            "type": "card",
+            "card": <String, dynamic>{"cardType": "reminder_confirm"},
+          },
+        ],
+      );
+      expect(
+        assistantBodyNeedsWideWidth(
+          m,
+          excludeCardTypes: <String>["reminder_confirm"],
+        ),
+        isTrue,
+      );
+    });
+
     test("摘要卡轮（正文被清空）→ 全宽", () {
       final ChatMessage m = _msg(
         text: "",

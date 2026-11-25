@@ -24,10 +24,17 @@ import "display_effects/soft_icon_chip.dart";
 import "media_gallery.dart";
 import "morning_briefing_card.dart";
 import "reminder_confirm_card.dart";
-import "ride_quote_card.dart";
-import "ride_pickup_card.dart";
+import "ride_hailing_card.dart";
 import "travel_guide_select_card.dart";
 import "media_thumbnail.dart";
+
+/// extra 里的 Map → 客户端统一的 `Map<String, dynamic>`（键一律字符串）。
+Map<String, dynamic> _asStringMap(Object? raw) {
+  if (raw is! Map) return const <String, dynamic>{};
+  return <String, dynamic>{
+    for (final MapEntry<Object?, Object?> e in raw.entries) e.key.toString(): e.value,
+  };
+}
 
 /// 智能体结果卡片 —— 用于呈现「任务执行总结」「工具调用结果」
 /// 这类**短而固定结构**的轻量数据(3~7 条 ✓/• 项 + 可选追问)。
@@ -158,33 +165,33 @@ class AgentResultCard extends StatelessWidget {
           // 注意：这是 shopping.suggest（开源保留）的二分化对比卡， oss 不闸
           return _ProductCompareCard(data: data, cs: cs);
         case "ride_quote": {
-          // 叫车报价选择卡：每档车型独立价格 + 「就选这个」卡内动作。
-          // 载荷缺失（旧服务端/历史消息）时由组件自绘空态，不白屏。
+          // 叫车卡阶段二（选车型）。与 ride_pickup 共用同一个组件：card.update
+          // 换卡时 runtimeType 不变，State 与卡内地图（WebView）原地复用，
+          // 不重新加载地图（2026-11-24 用户定稿）。
           final Object? rawRide = data.extra?["ride"];
-          return RideQuoteCard(
+          return RideHailingCard(
+            key: const ValueKey<String>("ride_hailing"),
             cs: cs,
-            payload: rawRide is Map
-                ? <String, dynamic>{
-                    for (final MapEntry<Object?, Object?> e in rawRide.entries)
-                      e.key.toString(): e.value,
-                  }
-                : const <String, dynamic>{},
+            payload: <String, dynamic>{
+              ..._asStringMap(rawRide),
+              "stage": "quote",
+            },
             onUserAction: onUserAction,
             cardData: data,
           );
         }
         case "ride_pickup": {
           // 上车点选择卡（2026-11-19）：起点没着落时服务端推卡，用户点候选
-          // 或拖地图选点后经 ride.pickup.select 直接续报价，零文字追问。
+          // 或拖地图选点后经 ride.pickup.select 就地续报价——同一张卡、同一张
+          // 地图换成车型列表，不追加新卡。
           final Object? rawPickup = data.extra?["ridePickup"];
-          return RidePickupCard(
+          return RideHailingCard(
+            key: const ValueKey<String>("ride_hailing"),
             cs: cs,
-            payload: rawPickup is Map
-                ? <String, dynamic>{
-                    for (final MapEntry<Object?, Object?> e in rawPickup.entries)
-                      e.key.toString(): e.value,
-                  }
-                : const <String, dynamic>{},
+            payload: <String, dynamic>{
+              ..._asStringMap(rawPickup),
+              "stage": "pickup",
+            },
             onUserAction: onUserAction,
             cardData: data,
           );

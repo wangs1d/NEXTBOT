@@ -7896,6 +7896,8 @@ export async function createAppServices(
 
   registerHttpRoutes(app, {
     pictureKits,
+    // 选点卡拖图重推候选（/api/ride/pickup-candidates）直接调滴图
+    mcpClientService,
     toolRegistry,
     skillManager,
     featureCatalog,

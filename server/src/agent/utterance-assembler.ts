@@ -21,8 +21,9 @@
  *
  * 角色划分是**时间性**的，不依赖工具语义猜测：任何在"本轮首个工具开始执行"之前
  * 产出的文本 = 过程话（preamble），之后产出的文本 = 结论（conclusion）。
- * 结算（settle）在过程话与结论**语义等价或过程话无实质内容**时裁掉过程话，
- * 由展示侧塌缩成单条发言（复用既有 finalTextReplacesStream 通道）。
+ * 结算（settle）在过程话与结论**语义等价或过程话无实质内容**时裁掉过程话。
+ * 2026-11-25 车道架构后 settle 只服务遥测/回归观测，不再驱动任何展示行为
+ * （旧的 finalTextReplacesStream 展示通道已退役）。
  *
  * 纯逻辑模块：不碰 socket、不碰存储，可独立单测。
  */
@@ -215,10 +216,10 @@ export class UtteranceAssembler {
     const preamble = this.preambleText;
     // 无工具轮没有"过程话/结论"之分——角色划分是时间性的，依赖工具边界；
     // 没有工具，整条流就是发言本体。若仍把 finalText 兜底成结论段，它与
-    // 已流分段内容天然等价 → preamble_equals_conclusion → 每个纯聊天轮都被
-    // 整轮塌缩成单泡（finalTextReplacesStream → 客户端删光已分的绿泡、用
-    // finalText 落一条），真·分绿泡在无工具轮全部失效（2026-10-11 实盘回归，
-    // 症状：回复内容看得出分段、实际只有一个泡）。
+    // 已流分段内容天然等价 → preamble_equals_conclusion → 每个纯聊天轮的
+    // 遥测都被误报成「塌缩」（2026-10-11 实盘回归遗留的闸，当年它驱动
+    // finalTextReplacesStream 展示翻案；该通道已退役，本闸如今只保遥测
+    // 不误报，避免回归断言被噪音淹没）。
     // 因此结论兜底补登只对「有工具轮」或「全程无分段」（缓冲模式/扣流轮，
     // 分段列表为空）生效；后者的结论段是唯一分段，不受塌缩影响。
     const hasTools = this.toolNames.length > 0;

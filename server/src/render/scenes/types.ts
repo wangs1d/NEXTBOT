@@ -79,9 +79,10 @@ export interface SceneProduces {
    * 整块呈现：本轮正文**不分泡**（2026-11-09 用户指令）。
    *
    * 结构化摘要类内容（明日速览/盘点清单）拆成几条绿泡就散了——用户要的是
-   * 一整块看完。声明为 true 后，done 帧走 finalTextReplacesStream，客户端把
-   * 流式期间产生的泡收口成一条；**注意与旧的 rewritesText 不同：这不改正文**，
-   * 正文仍由模型一次写。
+   * 一整块看完。声明为 true 后，该轮在 T0 判入单条车道（decideTextLane 的
+   * scene-single-bubble，2026-11-25 车道架构）：不发 chat.assistant_chunk
+   * 文字块，正文由 done 一次交付；**注意与旧的 rewritesText 不同：这不改正
+   * 文**，正文仍由模型一次写。
    */
   singleBubble?: boolean;
   /**

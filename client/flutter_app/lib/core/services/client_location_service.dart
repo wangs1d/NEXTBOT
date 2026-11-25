@@ -467,26 +467,52 @@ class ClientLocationService {
   /// 服务端 `agent.location_request` 专用：纯坐标快回，不做客户端逆地理
   /// （服务端拿到坐标后自己反查城市）。
   ///
-  /// 快速窗口契约：服务端 requestLocation 只等 12s，本方法任何分支总时长
-  /// 封顶 8s——GPS 直接走 medium 单次尝试（high 冷启动在无 GPS 硬件的桌面
-  /// 上必挂满 timeLimit 才轮到下一个，是按需定位超时的根源），外层再兜一层
-  /// 总超时。拿不到就返回 null，由服务端落「最近已知位置」兜底（带龄期）；
-  /// 绝不拿磁盘旧缓存冒充实时坐标——那会把无龄期的旧坐标写进服务端缓存。
-  static Future<ClientLocationPayload?> getCurrentLocationForAgentReply() async {
-    try {
-      // 服务端 requestLocation 等 12s：端侧收口略早于服务端（11s），
-      // 给室内/冷启动 GPS 留更多收敛时间，减少「预选位置出不来」。
-      return await _fetchAgentReplyCoords()
-          .timeout(const Duration(seconds: 11));
-    } catch (e) {
-      debugPrint("[ClientLocationService] 按需定位未取到坐标（回 null 交服务端兜底）: $e");
-      return null;
-    }
-  }
+  /// 时间/精度契约（2026-11-24 根修）：
+  ///   - 服务端 requestLocation 等 12s，端侧必须在 ~8s 内收口；
+  ///   - 采纳门槛 target 15m / accept 30m（2026-11-24 用户要求「精度调高」）：
+  ///     ≤30m 的 fix 立即返回，否则继续在 6s 预算内择优——室外 GPS 常在
+  ///     3~6s 收敛到 10~25m，不再被 WiFi 的 40m+ fix「先到先得」抢先；
+  ///     室内始终达不到就取预算内最好的那个（如实带 accuracy），不再回空包。
+  ///   - 旧实现门槛 10m + 预算 10s：手机常态 acc=43~60m 永远不达标 →
+  ///     跑满预算 → 顶到 11s 外层超时 → catch 返回 null，连已经到手的
+  ///     43m fix 一起丢掉。线上日志实证：选点卡 `origin=无 candidates=0`，
+  ///     预选态与 3D 俯仰视角全都不出现。
+  ///   - 预算内确实没 fix：回 45s 内的内存 fix（带 accuracy/capturedAt），
+  ///     不再回空包；超龄才返回 null。
+  static const double _agentReplyTargetAccuracyMeters = 15;
+  static const double _agentReplyAcceptAccuracyMeters = 30;
+  static const Duration _agentReplyBudget = Duration(milliseconds: 6000);
+  static const Duration _agentReplyReuseMaxAge = Duration(seconds: 45);
 
-  static Future<ClientLocationPayload?> _fetchAgentReplyCoords() {
-    // 工具按需路径（服务端等 12s）：给足 10s，高德 + geolocator 并行共享预算。
-    return _fetchPreciseCoords(budget: const Duration(milliseconds: 10000));
+  static Future<ClientLocationPayload?> getCurrentLocationForAgentReply() async {
+    // 显式拒绝过定位：不回任何坐标（系统权限在下面的定位调用里兜底）。
+    try {
+      final bool? consent = await getLocationConsent();
+      if (consent == false) return null;
+    } catch (_) {
+      /* 读不到 consent 不阻断：交给系统权限裁定 */
+    }
+
+    ClientLocationPayload? precise;
+    try {
+      precise = await _fetchPreciseCoords(
+        budget: _agentReplyBudget,
+        targetAccuracyMeters: _agentReplyTargetAccuracyMeters,
+        acceptAccuracyMeters: _agentReplyAcceptAccuracyMeters,
+      ).timeout(_agentReplyBudget + const Duration(milliseconds: 900));
+    } catch (e) {
+      debugPrint("[ClientLocationService] 按需定位未在预算内收口（回最近 fix）: $e");
+    }
+    if (precise != null) return precise;
+
+    final ClientLocationPayload? cached = _cached;
+    final DateTime? cachedAt = _cachedAt;
+    if (cached != null &&
+        cachedAt != null &&
+        DateTime.now().difference(cachedAt) <= _agentReplyReuseMaxAge) {
+      return cached;
+    }
+    return null;
   }
 
   /// 高精度取点（高德 ⇄ geolocator **并行赛跑**，达标即回）。
@@ -563,10 +589,17 @@ class ClientLocationService {
     );
 
     // 两个引擎各自带预算，这里再兜一层（防某个通道卡住不回调）。
-    return completer.future.timeout(
+    final ClientLocationPayload? result = await completer.future.timeout(
       budget + const Duration(milliseconds: 400),
       onTimeout: () => best,
     );
+    // 拿到 fix 就刷新内存缓存（下一次预算超时时用它兜底）；不写持久层——
+    // 这里是纯坐标、无 city/district，覆盖 prefs 会把逆地理结果抹掉。
+    if (result != null) {
+      _cached = result;
+      _cachedAt = DateTime.now();
+    }
+    return result;
   }
 
   static bool _isAccurateEnough(double? accuracyMeters, double maxAccuracyMeters) {

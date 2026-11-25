@@ -249,32 +249,6 @@ export class StreamSegmenter {
   }
 
   /**
-   * 运行时开启气泡拆分模式（真·分绿泡）。供 WS 层在轮次门禁就绪后调用——
-   * 门禁依赖语音态（文字轮才拆）与 env 开关，二者在首个主回复 delta
-   * 之前必然就绪，故不存在拆分态竞态。
-   * 必须在任何 feed 之前调用。
-   */
-  enableBubbleMode(): void {
-    if (this.disposed) return;
-    this.bubbleMode = true;
-    this.holdFirstSentence = false;
-    this.interimDone = true;
-  }
-
-  /**
-   * 运行时关闭气泡拆分（2026-11-06 深夜收窄版，仅信息展示类工具轮）：
-   * WS 层在**检索/信息域**工具（search/weather/market/clock——查资料、天气、
-   * 行情、时间这类「结果需要一次完整展示」的轮）开始执行时调用，剩余正文
-   * 以不带 meta 的普通分段发出（由 BubbleTracker 并回当前泡/兜底开首泡）。
-   * **只对信息类域关泡**：操作类工具（提醒/日程/购物/智能家居/发消息…）
-   * 禁止调用——工具后正文照常分泡连发（「定好了，到点叫你。」+「不过…」
-   * 必须是两泡，2026-11-06 截图事故的回归红线）。允许在流中途调用。
-   */
-  disableBubbleMode(): void {
-    this.bubbleMode = false;
-  }
-
-  /**
    * 喂入新的流式 delta，累积并按信息块切分，逐块推送给 emit。
    * 未闭合的半截文本留在缓冲/当前块中，等待后续 delta 或 flushFinal。
    * 异步串行：块间停顿走 setTimeout，不阻塞事件循环。

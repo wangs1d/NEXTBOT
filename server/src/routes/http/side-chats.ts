@@ -5,7 +5,8 @@
 //
 // 端点：
 //  - GET    /api/side-chats?actorId=&q=      列表（标题 + 实时预览/条数/最近时间）
-//  - POST   /api/side-chats {actorId,title}  新建
+//  - POST   /api/side-chats {actorId,title}  新建（该 actor 已有零内容旁聊时直接
+//            复用返回，响应带 reused:true；显式传 title 视为明确要新开，不复用）
 //  - PATCH  /api/side-chats {actorId,id,title} 重命名
 //  - DELETE /api/side-chats?actorId=&id=     删除（同时清空该线程）
 import type { FastifyInstance } from "fastify";
@@ -111,6 +112,28 @@ export function registerSideChatRoutes(app: FastifyInstance): void {
       const actorId = String(body.actorId ?? "").trim();
       if (!actorId) {
         return reply.code(400).send({ ok: false, error: "actorId required" });
+      }
+      // 复用零内容旁聊（2026-11-24）：侧边栏反复点「新建」不该攒出一堆空会话，
+      // 已有从未发过消息的旁聊时路由回它。显式传 title = 明确要新开，不复用。
+      if (!String(body.title ?? "").trim()) {
+        for (const entry of await registry.list(actorId)) {
+          const sessionId = sideChatSessionId(actorId, entry.id);
+          if (threadSummary(sessionId).messageCount === 0) {
+            return {
+              ok: true,
+              reused: true,
+              chat: {
+                id: entry.id,
+                sessionId,
+                title: entry.title,
+                preview: "",
+                messageCount: 0,
+                createdAt: entry.createdAt,
+                updatedAt: entry.updatedAt,
+              },
+            };
+          }
+        }
       }
       const entry = await registry.create(actorId, body.title);
       return {

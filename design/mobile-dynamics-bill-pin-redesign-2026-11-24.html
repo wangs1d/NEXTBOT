@@ -1,0 +1,627 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>手机端 · 动态 Tab 重设计 V2：一类一卡 + 槽位互斥（2026-11-24）</title>
+<style>
+  :root{
+    --font: "MiSans","PingFang SC","Noto Sans CJK SC","Source Han Sans SC",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  }
+  html[data-theme="dark"]{
+    --bg:#121214; --surface:#1B1B1E; --primary:#F2F2F4; --secondary:#9A9AA2;
+    --muted:#6C6C75; --divider:#26262B; --accent:#FFFFFF; --on-accent:#000000;
+    --page-shell:#0A0A0B; --stroke:rgba(38,38,43,.85); --stroke-soft:rgba(38,38,43,.6);
+    --seg:rgba(255,255,255,.06); --ghost:rgba(242,242,244,.14);
+    --glass:rgba(27,27,31,.45); --glass-stroke:rgba(255,255,255,.12); --glass-hi:rgba(255,255,255,.09);
+    --glass-shadow:0 12px 32px rgba(0,0,0,.38);
+    --glass-blur:blur(26px) saturate(1.35);
+  }
+  html[data-theme="light"]{
+    --bg:#EDF0F5; --surface:#FFFFFF; --primary:#14161C; --secondary:#5E6470;
+    --muted:#8B919E; --divider:#E3E6ED; --accent:#000000; --on-accent:#FFFFFF;
+    --page-shell:#E9E9EC; --stroke:rgba(213,219,231,.9); --stroke-soft:rgba(213,219,231,.6);
+    --seg:rgba(20,26,40,.05); --ghost:rgba(20,26,40,.14);
+    --glass:rgba(255,255,255,.48); --glass-stroke:rgba(255,255,255,.60); --glass-hi:rgba(255,255,255,.75);
+    --glass-shadow:0 12px 28px rgba(30,41,59,.18);
+    --glass-blur:blur(26px) saturate(1.3);
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;font-family:var(--font);background:var(--page-shell);color:var(--primary);
+       -webkit-font-smoothing:antialiased;transition:background .3s;}
+
+  .workbench{max-width:1780px;margin:0 auto;padding:28px 24px 64px;}
+  .wb-head{display:flex;flex-wrap:wrap;align-items:flex-end;gap:14px;justify-content:space-between;margin-bottom:10px;}
+  .wb-title{font-size:22px;font-weight:700;letter-spacing:.2px;}
+  .wb-title small{display:block;font-size:12px;font-weight:400;color:var(--secondary);margin-top:6px;letter-spacing:0;}
+  .controls{display:flex;gap:10px;flex-wrap:wrap;}
+  .seg{display:inline-flex;background:var(--seg);border:1px solid var(--stroke);border-radius:12px;padding:3px;}
+  .seg button{font-family:var(--font);font-size:12px;color:var(--secondary);background:transparent;border:0;
+    padding:7px 13px;border-radius:9px;cursor:pointer;transition:.18s;}
+  .seg button.active{background:var(--surface);color:var(--primary);box-shadow:0 1px 3px rgba(0,0,0,.18);font-weight:600;}
+  .wb-notes{font-size:12.5px;color:var(--secondary);line-height:1.7;margin:0 0 22px;max-width:1000px;}
+  .wb-notes b{color:var(--primary);}
+
+  .layout{display:flex;gap:26px;align-items:flex-start;flex-wrap:wrap;justify-content:flex-start;}
+
+  /* ---------- 磨砂玻璃卡（雾面：大 blur + 半透 + 细描边 + 顶部微高光） ---------- */
+  .glass{
+    background:var(--glass);
+    -webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);
+    border:1px solid var(--glass-stroke);
+    box-shadow:var(--glass-shadow),inset 0 1px 0 var(--glass-hi);
+  }
+
+  /* ---------- 手机框 ---------- */
+  .phoneCol{flex:0 0 auto;display:flex;flex-direction:column;gap:10px;}
+  .phoneCap{font-size:12px;color:var(--secondary);text-align:center;line-height:1.5;}
+  .phoneCap b{color:var(--primary);font-size:12.5px;}
+  .phone{
+    width:376px;height:796px;flex:0 0 auto;background:var(--bg);border-radius:44px;
+    border:10px solid #000;box-shadow:0 24px 70px rgba(0,0,0,.55),0 0 0 1px rgba(255,255,255,.05) inset;
+    position:relative;overflow:hidden;display:flex;flex-direction:column;
+  }
+  .statusbar{height:44px;flex:0 0 44px;display:flex;align-items:center;justify-content:space-between;
+    padding:0 26px;font-size:12px;font-weight:600;color:var(--primary);position:relative;}
+  .statusbar .notch{position:absolute;left:50%;top:9px;transform:translateX(-50%);width:104px;height:26px;
+    background:#000;border-radius:16px;}
+  .statusbar .sb-r{display:flex;gap:6px;align-items:center;font-size:11px;}
+  .appbar{height:52px;flex:0 0 52px;display:flex;align-items:center;justify-content:center;position:relative;
+    background:var(--glass);-webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);
+    border-bottom:1px solid var(--glass-stroke);}
+  .appbar .ttl{font-size:17px;font-weight:600;letter-spacing:.2px;}
+  .appbar .back{position:absolute;left:10px;top:0;height:52px;display:flex;align-items:center;padding:0 6px;color:var(--primary);}
+  .appbar .sub{font-size:11px;color:var(--muted);position:absolute;right:14px;}
+  .screen{flex:1;overflow-y:auto;overflow-x:hidden;padding-bottom:88px;scrollbar-width:none;position:relative;}
+  .screen::-webkit-scrollbar{display:none;}
+  .screen.noPad{padding-bottom:14px;}
+
+  /* ---------- 置顶槽位（两槽等宽固定，中间隔开） ---------- */
+  .slots{display:flex;gap:10px;padding:14px 16px 0;height:150px;}
+  .slot{flex:1;border-radius:17px;position:relative;transition:.18s;}
+  .slot .slotCard{background:var(--glass);-webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);
+    border:1px solid var(--glass-stroke);border-radius:14px;
+    box-shadow:var(--glass-shadow),inset 0 1px 0 var(--glass-hi);
+    height:132px;padding:12px;position:relative;overflow:hidden;}
+  .slot.empty{background:var(--glass);-webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);
+    border:1px dashed var(--glass-stroke);border-radius:14px;
+    box-shadow:var(--glass-shadow),inset 0 1px 0 var(--glass-hi);
+    display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;}
+  .slot.empty .lb{font-size:11px;color:var(--muted);}
+  .slot.empty svg{width:22px;height:22px;color:var(--muted);}
+  .slot.dragTarget{outline:1.5px solid var(--primary);outline-offset:2px;background:var(--seg);}
+  .slot.dragTarget .slotCard{opacity:.25;}
+  .slotHead{display:flex;align-items:center;gap:7px;}
+  .slotHead .ico{width:24px;height:24px;border-radius:7px;background:var(--seg);
+    display:flex;align-items:center;justify-content:center;flex:0 0 auto;}
+  .slotHead .ico svg{width:14px;height:14px;color:var(--primary);}
+  .slotHead .cap{font-size:11px;color:var(--secondary);}
+  .slotBig{font-size:15px;font-weight:600;line-height:1.35;margin-top:8px;white-space:nowrap;
+    overflow:hidden;text-overflow:ellipsis;}
+  .slotHint{font-size:10px;color:var(--muted);margin-top:4px;line-height:1.35;}
+  .pickup{background:var(--accent);color:var(--on-accent);border-radius:8px;padding:5px 10px;
+    text-align:center;flex:0 0 auto;}
+  .pickup .lb{font-size:9px;letter-spacing:1px;opacity:.75;}
+  .pickup .code{font-size:14px;font-weight:600;letter-spacing:.5px;}
+  .slotCard .pickup{position:absolute;right:12px;bottom:12px;}
+
+  /* ---------- 聚合卡（信息流，一类一卡） ---------- */
+  .agg{background:var(--glass);-webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);
+    border:1px solid var(--glass-stroke);border-radius:12px;
+    box-shadow:var(--glass-shadow),inset 0 1px 0 var(--glass-hi);
+    margin:0 16px 10px;padding:12px 14px;position:relative;overflow:hidden;}
+  .agg .head{display:flex;align-items:center;gap:7px;}
+  .agg .head .ico{width:24px;height:24px;border-radius:7px;background:var(--seg);
+    display:flex;align-items:center;justify-content:center;flex:0 0 auto;}
+  .agg .head .ico svg{width:14px;height:14px;color:var(--primary);}
+  .agg .head .cap{font-size:12px;color:var(--secondary);font-weight:600;}
+  .agg .head .right{margin-left:auto;display:flex;align-items:center;gap:8px;color:var(--muted);}
+  .agg .head .right svg{width:16px;height:16px;}
+  .dots{display:flex;gap:4px;}
+  .dots i{width:4px;height:4px;border-radius:50%;background:var(--ghost);transition:.3s;}
+  .dots i.on{background:var(--primary);width:12px;border-radius:2px;}
+  .carW{position:relative;margin-top:8px;}
+  .panel{position:absolute;inset:0;opacity:0;transform:translateX(14px);transition:.45s ease;pointer-events:none;}
+  .panel.on{opacity:1;transform:none;}
+  .panel .t{font-size:14px;font-weight:600;color:var(--primary);line-height:1.35;}
+  .panel .meta{font-size:12px;color:var(--muted);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .panel .big{font-size:24px;font-weight:600;letter-spacing:-.3px;line-height:1.1;}
+  .panel .big small{font-size:12px;font-weight:400;color:var(--secondary);letter-spacing:0;margin-left:8px;}
+  .panel .sub{font-size:12px;color:var(--muted);margin-top:6px;display:flex;align-items:center;gap:6px;}
+  .panel .sub .tag{color:var(--secondary);}
+  .bar{height:5px;border-radius:3px;background:var(--ghost);margin-top:8px;overflow:hidden;}
+  .bar i{display:block;height:100%;border-radius:3px;background:var(--primary);}
+  .mailMain{display:flex;align-items:flex-start;gap:10px;margin-top:8px;}
+  .mailMain .mi{flex:1;min-width:0;}
+
+  /* ---------- 拖拽演示 ---------- */
+  .ghostDrag{position:absolute;left:26px;top:170px;width:calc(100% - 52px);z-index:9;
+    transform:rotate(2deg) scale(1.03);border-radius:12px;
+    box-shadow:0 18px 44px rgba(0,0,0,.4);}
+  .ghostDrag .agg{margin:0;}
+  .dragTip{position:absolute;left:50%;transform:translateX(-50%);bottom:96px;z-index:9;
+    background:var(--accent);color:var(--on-accent);font-size:11px;font-weight:600;
+    border-radius:999px;padding:7px 14px;white-space:nowrap;box-shadow:0 6px 18px rgba(0,0,0,.25);}
+  .placeholder{margin:0 16px 10px;border:1.5px dashed var(--glass-stroke);border-radius:12px;height:106px;
+    background:var(--glass);-webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);
+    display:flex;align-items:center;justify-content:center;}
+  .placeholder .lb{font-size:11px;color:var(--muted);}
+
+  /* ---------- 详情页 ---------- */
+  .msCard{background:var(--glass);-webkit-backdrop-filter:var(--glass-blur);backdrop-filter:var(--glass-blur);
+    border:1px solid var(--glass-stroke);border-radius:14px;
+    box-shadow:var(--glass-shadow),inset 0 1px 0 var(--glass-hi);
+    margin:12px 16px 0;padding:14px;}
+  .msHead{display:flex;align-items:center;gap:8px;}
+  .msHead .ttl{font-size:15px;font-weight:600;}
+  .chip{font-size:10px;padding:2px 7px;border-radius:6px;background:var(--seg);color:var(--secondary);
+    border:1px solid var(--stroke-soft);}
+  .msTotal{display:flex;align-items:baseline;gap:8px;margin-top:10px;}
+  .msTotal .v{font-size:24px;font-weight:600;letter-spacing:-.3px;}
+  .msTotal .n{font-size:12px;color:var(--secondary);}
+  .msTwo{display:flex;gap:8px;margin-top:10px;}
+  .msItem{flex:1;background:var(--seg);border-radius:10px;padding:9px 11px;}
+  .msItem .k{font-size:10px;color:var(--muted);}
+  .msItem .v{font-size:14px;font-weight:600;margin-top:3px;}
+  .msItem .h{font-size:10px;color:var(--muted);margin-top:2px;}
+  .msCats{margin-top:12px;display:flex;flex-direction:column;gap:7px;}
+  .msCat{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--secondary);}
+  .msCat .nm{width:64px;flex:0 0 auto;}
+  .msCat .bar{flex:1;margin-top:0;}
+  .msCat .pc{width:36px;text-align:right;color:var(--muted);}
+  .filterRow{display:flex;gap:7px;overflow-x:auto;padding:14px 16px 4px;scrollbar-width:none;}
+  .filterRow::-webkit-scrollbar{display:none;}
+  .fChip{flex:0 0 auto;font-size:11px;color:var(--secondary);background:var(--glass);
+    border:1px solid var(--glass-stroke);border-radius:999px;padding:5px 12px;}
+  .fChip.on{background:var(--accent);color:var(--on-accent);border-color:var(--accent);font-weight:600;}
+  .listCap{display:flex;align-items:baseline;padding:10px 20px 6px;gap:8px;}
+  .listCap .t{font-size:13px;font-weight:600;color:var(--secondary);}
+  .listCap .n{font-size:11px;color:var(--muted);margin-left:auto;}
+  .billRow{display:flex;align-items:center;gap:10px;}
+  .billRow .main{flex:1;min-width:0;}
+  .typeChip{display:inline-flex;align-items:center;gap:3px;font-size:10px;color:var(--secondary);
+    background:var(--seg);border:1px solid var(--stroke-soft);border-radius:6px;padding:1.5px 7px;flex:0 0 auto;}
+  .typeChip svg{width:9px;height:9px;opacity:.7;}
+  .amt{font-size:15px;font-weight:600;white-space:nowrap;}
+
+  /* ---------- 底部 tab ---------- */
+  .tabbar-wrap{position:absolute;left:0;right:0;bottom:0;height:78px;pointer-events:none;
+    background:linear-gradient(to top,var(--bg) 46%,transparent);}
+  .tabbar{position:absolute;left:8px;right:8px;bottom:14px;height:54px;border-radius:27px;
+    background:var(--glass);backdrop-filter:var(--glass-blur);-webkit-backdrop-filter:var(--glass-blur);
+    border:1px solid var(--glass-stroke);display:flex;align-items:center;justify-content:space-around;
+    box-shadow:var(--glass-shadow),inset 0 1px 0 var(--glass-hi);}
+  .tab{display:flex;flex-direction:column;align-items:center;gap:3px;color:var(--muted);width:60px;}
+  .tab .ic{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;}
+  .tab .ic svg{width:20px;height:20px;}
+  .tab .lb{font-size:10px;}
+  .tab.active{color:var(--primary);}
+  .tab.active .ic{box-shadow:inset 0 0 0 1.5px var(--primary);}
+  .tab.active .lb{font-weight:600;}
+
+  /* ---------- 规格 ---------- */
+  .specWrap{max-width:1780px;margin:34px auto 0;display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:18px;}
+  .spec{background:var(--surface);border:1px solid var(--stroke);border-radius:20px;padding:20px 22px;}
+  .spec h3{margin:0 0 4px;font-size:15px;font-weight:700;}
+  .spec .sub{font-size:12px;color:var(--secondary);margin-bottom:14px;line-height:1.55;}
+  .spec table{width:100%;border-collapse:collapse;font-size:12px;}
+  .spec th{text-align:left;color:var(--secondary);font-weight:600;padding:7px 8px;border-bottom:1px solid var(--stroke);}
+  .spec td{padding:7px 8px;border-bottom:1px solid var(--stroke-soft);vertical-align:top;line-height:1.5;}
+  .spec td:first-child{color:var(--primary);font-weight:600;white-space:nowrap;}
+  .spec code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:11px;color:var(--secondary);}
+  .legend{margin-top:14px;font-size:12px;color:var(--secondary);line-height:1.7;}
+  .legend b{color:var(--primary);}
+</style>
+</head>
+<body data-theme="dark">
+<div class="workbench">
+  <div class="wb-head">
+    <div class="wb-title">
+      手机端 · 动态 Tab 重设计 V3（一类一卡 + 磨砂玻璃）
+      <small>改动：① 卡片全面玻璃化——磨砂玻璃质感（大模糊雾面 + 细描边 + 顶部微高光），非液态玻璃 ② 浅色模式加深壁纸斑块 + 白玻璃描边 + 阴影，卡片轮廓清晰 ③ 保留 V2 全部规则：一类一卡、槽位互斥、取件码进槽、无角标</small>
+    </div>
+    <div class="controls">
+      <div class="seg" id="themeSeg">
+        <button data-theme="dark" class="active">深色</button>
+        <button data-theme="light">浅色</button>
+      </div>
+      <div class="seg" id="playSeg">
+        <button data-play="1" class="active">轮播播放中</button>
+        <button data-play="0">暂停</button>
+      </div>
+    </div>
+  </div>
+  <div class="wb-notes">
+    <b>一条硬规则管全部：</b>每一类内容（快递 / 账单 / 邮件）在全页<b>只有一个占位</b>——要么在顶部槽位，要么在信息流，二选一。
+    卡片拖进槽位的瞬间，信息流里这一类整块消失；被挤出的卡回到信息流。槽位卡直接展示该类最关键的信息：
+    快递 = 取件码反白块，账单 = 合计 / 订阅小轮播，邮件 = 最新一封。
+  </div>
+
+  <div class="layout">
+
+    <!-- ============ 屏1：常态 ============ -->
+    <div class="phoneCol">
+      <div class="phone">
+        <div class="statusbar"><span>9:41</span><div class="notch"></div><span class="sb-r">▮▮▮ ⌁ ▰</span></div>
+        <div class="appbar"><span class="ttl">动态</span></div>
+        <div class="screen noPad">
+          <div class="slots">
+            <div class="slot">
+              <div class="slotCard car" data-car="s1">
+                <div class="slotHead">
+                  <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2v20l2-1.5L8 22l2-1.5L12 22l2-1.5L16 22l2-1.5L20 22V2l-2 1.5L16 2l-2 1.5L12 2l-2 1.5L8 2 6 3.5 4 2z"/><path d="M8 7h8"/><path d="M8 11h8"/><path d="M8 15h5"/></svg></span>
+                  <span class="cap">账单</span>
+                </div>
+                <div class="carW" style="height:66px">
+                  <div class="panel on">
+                    <div class="big" style="font-size:20px">¥1,408<small>.50</small></div>
+                    <div class="sub" style="margin-top:4px"><span class="tag">本月合计 · 12 笔 · −8.2%</span></div>
+                  </div>
+                  <div class="panel">
+                    <div class="big" style="font-size:20px">¥186<small>.00</small></div>
+                    <div class="sub" style="margin-top:4px"><span class="tag">订阅续费 · 下笔 12月01日</span></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="slot">
+              <div class="slotCard">
+                <div class="slotHead">
+                  <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg></span>
+                  <span class="cap">邮件</span>
+                </div>
+                <div class="slotBig">机票行程单：MU5212</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 信息流：只剩快递聚合卡（账单/邮件已占槽，整块消失） -->
+          <div class="agg car" data-car="p1" style="margin-top:18px">
+            <div class="head">
+              <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg></span>
+              <span class="cap">快递 · 2 件待取</span>
+              <span class="right"><span class="dots"><i class="on"></i><i></i></span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></span>
+            </div>
+            <div class="carW" style="height:64px">
+              <div class="panel on">
+                <div class="rowFlex" style="display:flex;align-items:center;gap:10px">
+                  <div style="flex:1;min-width:0">
+                    <div class="t">中通 · 包裹已到驿站</div>
+                    <div class="meta">今天 10:24 · 菜鸟驿站</div>
+                  </div>
+                  <div class="pickup"><div class="lb">取件码</div><div class="code">6-2-3087</div></div>
+                </div>
+              </div>
+              <div class="panel">
+                <div class="rowFlex" style="display:flex;align-items:center;gap:10px">
+                  <div style="flex:1;min-width:0">
+                    <div class="t">圆通 · 包裹已到驿站</div>
+                    <div class="meta">昨天 18:07 · 菜鸟驿站</div>
+                  </div>
+                  <div class="pickup"><div class="lb">取件码</div><div class="code">3-1-8826</div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="tabbar-wrap">
+            <div class="tabbar">
+              <div class="tab"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 9 9 0 0 1-4-.9L3 20l1-4.9A8.4 8.4 0 0 1 3.5 11.5 8.5 8.5 0 0 1 12 3a8.5 8.5 0 0 1 9 8.5z"/></svg></span><span class="lb">对话</span></div>
+              <div class="tab"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 10h18"/></svg></span><span class="lb">日程</span></div>
+              <div class="tab active"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2-6 3 12 3-9 2 5h4"/></svg></span><span class="lb">动态</span></div>
+              <div class="tab"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5a2 2 0 0 1 2-2h11l3 3v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg></span><span class="lb">资料库</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="phoneCap"><b>① 常态：一类一卡</b><br>快递 / 账单 / 邮件各只有一张聚合卡；槽位自动补位占用了账单和邮件，<br>信息流里这两类整块消失，只剩快递卡（2 件轮播，取件码在卡上）。<br>无任何角标文案。</div>
+    </div>
+
+    <!-- ============ 屏2：拖拽态 ============ -->
+    <div class="phoneCol">
+      <div class="phone">
+        <div class="statusbar"><span>9:41</span><div class="notch"></div><span class="sb-r">▮▮▮ ⌁ ▰</span></div>
+        <div class="appbar"><span class="ttl">动态</span></div>
+        <div class="screen noPad" style="overflow:hidden">
+          <div class="slots">
+            <div class="slot dragTarget">
+              <div class="slotCard car" data-car="s1">
+                <div class="slotHead">
+                  <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2v20l2-1.5L8 22l2-1.5L12 22l2-1.5L16 22l2-1.5L20 22V2l-2 1.5L16 2l-2 1.5L12 2l-2 1.5L8 2 6 3.5 4 2z"/><path d="M8 7h8"/><path d="M8 11h8"/><path d="M8 15h5"/></svg></span>
+                  <span class="cap">账单</span>
+                </div>
+                <div class="carW" style="height:66px">
+                  <div class="panel on">
+                    <div class="big" style="font-size:20px">¥1,408<small>.50</small></div>
+                    <div class="sub" style="margin-top:4px"><span class="tag">本月合计 · 12 笔 · −8.2%</span></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="slot">
+              <div class="slotCard">
+                <div class="slotHead">
+                  <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg></span>
+                  <span class="cap">邮件</span>
+                </div>
+                <div class="slotBig">机票行程单：MU5212</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="placeholder" style="margin-top:18px"><span class="lb">快递卡已拿起 · 原位占位</span></div>
+
+          <div class="ghostDrag">
+            <div class="agg">
+              <div class="head">
+                <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg></span>
+                <span class="cap">快递 · 2 件待取</span>
+                <span class="right"><span class="dots"><i class="on"></i><i></i></span></span>
+              </div>
+              <div class="carW" style="height:64px">
+                <div class="panel on">
+                  <div class="rowFlex" style="display:flex;align-items:center;gap:10px">
+                    <div style="flex:1;min-width:0">
+                      <div class="t">中通 · 包裹已到驿站</div>
+                      <div class="meta">今天 10:24 · 菜鸟驿站</div>
+                    </div>
+                    <div class="pickup"><div class="lb">取件码</div><div class="code">6-2-3087</div></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="dragTip">松手置顶 · 账单卡退回信息流</div>
+        </div>
+      </div>
+      <div class="phoneCap"><b>② 拖拽态</b><br>长按 220ms 抬起（放大 + 阴影 + 微倾），原位虚线占位；<br>悬停槽 1 高亮描边。松手后快递卡整体入槽，<br>原槽的账单卡回到信息流。</div>
+    </div>
+
+    <!-- ============ 屏3：置顶后 ============ -->
+    <div class="phoneCol">
+      <div class="phone">
+        <div class="statusbar"><span>9:41</span><div class="notch"></div><span class="sb-r">▮▮▮ ⌁ ▰</span></div>
+        <div class="appbar"><span class="ttl">动态</span></div>
+        <div class="screen noPad">
+          <div class="slots">
+            <div class="slot">
+              <div class="slotCard">
+                <div class="slotHead">
+                  <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg></span>
+                  <span class="cap">快递</span>
+                </div>
+                <div class="slotBig">中通 · 包裹已到驿站</div>
+                <div class="slotHint">今天 10:24 · 菜鸟驿站 · 待取 2 件</div>
+                <div class="pickup"><div class="lb">取件码</div><div class="code">6-2-3087</div></div>
+              </div>
+            </div>
+            <div class="slot">
+              <div class="slotCard">
+                <div class="slotHead">
+                  <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg></span>
+                  <span class="cap">邮件</span>
+                </div>
+                <div class="slotBig">机票行程单：MU5212</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 信息流：只剩账单聚合卡（快递/邮件已占槽，整块消失） -->
+          <div class="agg car" data-car="p3" style="margin-top:18px">
+            <div class="head">
+              <span class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2v20l2-1.5L8 22l2-1.5L12 22l2-1.5L16 22l2-1.5L20 22V2l-2 1.5L16 2l-2 1.5L12 2l-2 1.5L8 2 6 3.5 4 2z"/><path d="M8 7h8"/><path d="M8 11h8"/><path d="M8 15h5"/></svg></span>
+              <span class="cap">账单 · 11月</span>
+              <span class="right"><span class="dots"><i class="on"></i><i></i><i></i><i></i></span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m9 18 6-6-6-6"/></svg></span>
+            </div>
+            <div class="carW" style="height:70px">
+              <div class="panel on">
+                <div class="big">¥1,408.50<small>本月合计</small></div>
+                <div class="sub"><span class="tag">12 笔</span>·<span class="tag">较上月 −8.2%</span></div>
+              </div>
+              <div class="panel">
+                <div class="big">¥186.00<small>订阅续费</small></div>
+                <div class="sub"><span class="tag">已扣 5 笔</span>·<span class="tag">下笔 视频会员 12月01日</span></div>
+              </div>
+              <div class="panel">
+                <div class="big">¥532.40<small>生活缴费 · 38%</small></div>
+                <div class="bar"><i style="width:38%"></i></div>
+                <div class="sub"><span class="tag">本月最大类目，其次 订阅 27%</span></div>
+              </div>
+              <div class="panel">
+                <div class="big">¥398.00<small>最大单笔</small></div>
+                <div class="sub"><span class="tag">双十一家电订单 · 11月11日</span></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="tabbar-wrap">
+            <div class="tabbar">
+              <div class="tab"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 9 9 0 0 1-4-.9L3 20l1-4.9A8.4 8.4 0 0 1 3.5 11.5 8.5 8.5 0 0 1 12 3a8.5 8.5 0 0 1 9 8.5z"/></svg></span><span class="lb">对话</span></div>
+              <div class="tab"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 10h18"/></svg></span><span class="lb">日程</span></div>
+              <div class="tab active"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2-6 3 12 3-9 2 5h4"/></svg></span><span class="lb">动态</span></div>
+              <div class="tab"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5a2 2 0 0 1 2-2h11l3 3v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg></span><span class="lb">资料库</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="phoneCap"><b>③ 置顶后</b><br>快递整体进槽 1——取件码照样反白大字显示在槽位卡里；<br>信息流只剩账单聚合卡（完整 4 页轮播）。<br>全页每一类只有一个占位。</div>
+    </div>
+
+    <!-- ============ 屏4：账单详情页 ============ -->
+    <div class="phoneCol">
+      <div class="phone">
+        <div class="statusbar"><span>9:41</span><div class="notch"></div><span class="sb-r">▮▮▮ ⌁ ▰</span></div>
+        <div class="appbar">
+          <span class="back"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"/></svg></span>
+          <span class="ttl">账单</span><span class="sub">2026 年 11 月</span>
+        </div>
+        <div class="screen">
+          <div class="msCard">
+            <div class="msHead"><span class="ttl">11月小结</span><span class="chip">草稿 · 持续汇总</span></div>
+            <div class="msTotal"><span class="v">¥1,408.50</span><span class="n">12 笔 · 较上月 −8.2%</span></div>
+            <div class="msTwo">
+              <div class="msItem"><div class="k">订阅续费</div><div class="v">¥186.00</div><div class="h">5 笔 · 下笔 视频会员 12/01</div></div>
+              <div class="msItem"><div class="k">最大单笔</div><div class="v">¥398.00</div><div class="h">双十一家电 · 11月11日</div></div>
+            </div>
+            <div class="msCats">
+              <div class="msCat"><span class="nm">生活缴费</span><span class="bar"><i style="width:38%"></i></span><span class="pc">38%</span></div>
+              <div class="msCat"><span class="nm">订阅</span><span class="bar"><i style="width:27%;opacity:.55"></i></span><span class="pc">27%</span></div>
+              <div class="msCat"><span class="nm">购物</span><span class="bar"><i style="width:21%;opacity:.35"></i></span><span class="pc">21%</span></div>
+            </div>
+          </div>
+
+          <div class="filterRow">
+            <span class="fChip on">全部</span><span class="fChip">生活缴费</span><span class="fChip">订阅</span>
+            <span class="fChip">购物</span><span class="fChip">交通</span><span class="fChip">其他</span>
+          </div>
+
+          <div class="listCap"><span class="t">全部账单</span><span class="n">12 笔 · 类目点击可改</span></div>
+          <div class="agg"><div class="billRow">
+            <div class="main"><div class="panel on" style="position:static"><div class="t">8月水电费补缴</div><div class="meta">短信 · 今天 09:12</div></div></div>
+            <span class="typeChip">生活缴费<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931z"/></svg></span>
+            <span class="amt">¥128.50</span>
+          </div></div>
+          <div class="agg"><div class="billRow">
+            <div class="main"><div class="panel on" style="position:static"><div class="t">视频会员自动续费</div><div class="meta">手机通知 · 11月12日 08:00</div></div></div>
+            <span class="typeChip">订阅<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931z"/></svg></span>
+            <span class="amt">¥25.00</span>
+          </div></div>
+          <div class="agg"><div class="billRow">
+            <div class="main"><div class="panel on" style="position:static"><div class="t">双十一家电订单</div><div class="meta">邮件 · 11月11日 20:41</div></div></div>
+            <span class="typeChip">购物<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931z"/></svg></span>
+            <span class="amt">¥398.00</span>
+          </div></div>
+          <div class="agg"><div class="billRow">
+            <div class="main"><div class="panel on" style="position:static"><div class="t">音乐会员年度续费</div><div class="meta">邮件 · 11月10日 09:30</div></div></div>
+            <span class="typeChip">订阅<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931z"/></svg></span>
+            <span class="amt">¥15.00</span>
+          </div></div>
+          <div class="agg"><div class="billRow">
+            <div class="main"><div class="panel on" style="position:static"><div class="t">燃气费</div><div class="meta">短信 · 11月05日 10:02</div></div></div>
+            <span class="typeChip">生活缴费<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931z"/></svg></span>
+            <span class="amt">¥86.20</span>
+          </div></div>
+        </div>
+      </div>
+      <div class="phoneCap"><b>④ 账单详情页（点聚合卡进入）</b><br>月份小结降级为详情页顶部的一小块：<br>合计 / 环比 / 订阅 / 最大单笔 / Top3 类目；<br>下面是类目筛选 + 全部明细（类目 chip 可改）。</div>
+    </div>
+  </div>
+
+  <!-- ============ 规格 ============ -->
+  <div class="specWrap">
+    <div class="spec">
+      <h3>一类一卡 · 聚合卡总则</h3>
+      <div class="sub">动态页信息流从「分区头 + N 张单卡」改为<b>最多三张聚合卡</b>，一类一张；分区头取消，卡头自带「类型 · 数量」标签。</div>
+      <table>
+        <tbody>
+          <tr><td>快递卡</td><td>待取件每件一页轮播（标题 / 驿站 / 时间 / <b>取件码反白块</b>）；单件时静态不显示圆点；无待取件时退回显示最新轨迹</td></tr>
+          <tr><td>账单卡</td><td>4 页轮播：本月合计 → 订阅续费 → 生活缴费等 Top 类目 → 最大单笔；数据取 <code>monthly.totals / subscriptions / topCategories / largest</code>，缺页跳过；无月报退回最新一笔</td></tr>
+          <tr><td>邮件卡</td><td>现有收束卡收编：最新一封标题 / 摘要 + 共 N 封（<code>_MailDigestCard</code> 形态）</td></tr>
+          <tr><td>轮播节奏</td><td>自动 4s + 左右滑切换；手动切换后暂停 8s 再恢复；单页时无圆点</td></tr>
+          <tr><td>点击</td><td>账单卡 → 账单详情页（屏④）；邮件卡 → 邮件要事详情页；快递卡点击不跳页</td></tr>
+        </tbody>
+      </table>
+      <div class="legend"><b>月份小结不在动态页出现</b>——它是账单详情页顶部的一小块（屏④）。</div>
+    </div>
+
+    <div class="spec">
+      <h3>置顶槽位 · 互斥与关键信息</h3>
+      <div class="sub">两个槽位（132px）语义不变；与信息流严格互斥，全页一类一占位。</div>
+      <table>
+        <tbody>
+          <tr><td>两槽规格</td><td>顶部两槽<b>等宽固定</b>（各 50% 减间距，不随内容伸缩），中间隔开 10px，各自独立玻璃卡、四角圆角</td></tr>
+          <tr><td>互斥</td><td>聚合卡进入槽位（手动拖入或空槽自动补位）的瞬间，信息流里<b>该类整块消失</b>——不存在"上面置顶一张、下面还留一张"；被挤出 / 移出的卡回到信息流原位</td></tr>
+          <tr><td>取件码</td><td>快递卡置顶进槽后，取件码<b>照样反白大字显示在槽位卡右下角</b>（置顶不丢关键信息）；账单槽卡 = 合计 / 订阅小轮播；邮件槽卡 = 最新一封标题，无统计文案</td></tr>
+          <tr><td>无角标</td><td>卡片上不出现「置顶」「自动」等文字标签，槽位即语义</td></tr>
+          <tr><td>单槽约束</td><td>一张卡同时最多占一个槽位；已入槽的卡不在信息流出现，物理上无法重复塞入；<code>_slotIds</code> 的 <code>used</code> 去重保留兜底</td></tr>
+          <tr><td>移出</td><td>槽位卡长按拖到信息流 → 插到目标卡前；两槽之间拖动 = 换位；空槽自动补位优先级最高的一张</td></tr>
+          <tr><td>持久化</td><td>沿用 <code>_DynamicsLayoutStore</code>（order / pins / excluded）；被挤出的卡不再进 <code>_autoExcluded</code>（修复凭空消失）</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="spec">
+      <h3>拖拽交互 · 统一手势</h3>
+      <div class="sub">现状：信息流卡 <code>ReorderableDelayedDragStartListener</code> 外层又包 <code>Listener</code> 做槽位命中，两套手势竞争导致部分卡拖不动。</div>
+      <table>
+        <tbody>
+          <tr><td>统一手势</td><td>信息流卡与槽位卡统一 <code>LongPressDraggable</code>（delay 220ms）；槽位命中挂在 <code>DragTarget onMove</code>，删除外层裸 <code>Listener</code></td></tr>
+          <tr><td>抬起反馈</td><td>长按 220ms 抬起：scale 1.025 + 大阴影 + 微倾 2°；原位虚线占位</td></tr>
+          <tr><td>落点反馈</td><td>悬停槽位：1.5px 描边高亮 + 内衬底色，槽内原卡淡出至 25%</td></tr>
+          <tr><td>点击与拖拽</td><td>长按触发拖拽，轻点走 <code>InkWell onTap</code>（账单 / 邮件进详情页），互不干扰</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="spec">
+      <h3>账单详情页结构</h3>
+      <div class="sub">点账单聚合卡进入；复用 <code>MobileMonthlyDetailPage</code> 数据（monthly + bills.recent + billTypes），不发第二次请求。</div>
+      <table>
+        <tbody>
+          <tr><td>① 小结块</td><td>「{月份}小结」+ 阶段 chip：合计 / 笔数 / 环比，订阅续费、最大单笔两枚小项，Top3 类目横条</td></tr>
+          <tr><td>② 类目筛选</td><td>横滑 chips（全部 / 生活缴费 / 订阅 / 购物 …），选中后过滤下方明细</td></tr>
+          <tr><td>③ 明细列表</td><td>全部账单按时间倒序；每条：标题 + 来源·时间 + 类目 chip（点击改类目 → <code>POST /api/dynamics/bills/category</code>）+ 金额</td></tr>
+          <tr><td>入口</td><td>信息流账单卡、槽位账单卡，点按均进此页</td></tr>
+        </tbody>
+      </table>
+      <div class="legend"><b>配色与组件沿用 mobile_theme.dart palette</b>（本稿色值取自现有深 / 浅色 token），示例数值为演示占位。</div>
+    </div>
+
+    <div class="spec">
+      <h3>磨砂玻璃视觉规格（对齐参照图第二档）</h3>
+      <div class="sub">不是液态玻璃（无强镜面高光边），是<b>雾面磨砂</b>：玻璃后内容大面积虚化成雾，仅隐约透出色块。</div>
+      <table>
+        <tbody>
+          <tr><td>玻璃底</td><td>深色 <code>rgba(27,27,31,.45)</code> / 浅色 <code>rgba(255,255,255,.48)</code> —— 透明度拉高，玻璃更通透，仅卡片有磨砂感</td></tr>
+          <tr><td>模糊</td><td><code>blur(26px) saturate(1.3~1.35)</code>：大模糊雾面；Flutter 落地用 <code>BackdropFilter(ImageFilter.blur(sigma 26))</code> + <code>ClipRRect</code></td></tr>
+          <tr><td>描边</td><td>深色 <code>rgba(255,255,255,.12)</code> / 浅色 <code>rgba(255,255,255,.60)</code> 细白描边 + <code>inset 0 1px</code> 顶部 1px 微高光</td></tr>
+          <tr><td>投影</td><td>深色 <code>0 12px 32px rgba(0,0,0,.38)</code> / 浅色 <code>0 12px 28px rgba(30,41,59,.18)</code>，让玻璃卡浮出背景</td></tr>
+          <tr><td>背景</td><td>手机屏保持纯色深底（深色黑 <code>#121214</code>）——<b>只有卡片有磨砂玻璃感，背景不加任何壁纸/渐变</b>；玻璃透出底色与相邻内容</td></tr>
+          <tr><td>浅色对比</td><td>正文 / 次要文字加深一档（primary <code>#14161C</code> / secondary <code>#5E6470</code> / muted <code>#8B919E</code>），白玻璃卡靠描边 + 阴影勾轮廓</td></tr>
+          <tr><td>应用范围</td><td>槽位卡、聚合卡、小结块、明细卡、筛选 chips、AppBar、底部 tab 全部玻璃化；取件码反白块、按钮等实心元素保持不变</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+  const html = document.documentElement;
+  document.querySelectorAll('#themeSeg button').forEach(b => b.onclick = () => {
+    document.querySelectorAll('#themeSeg button').forEach(x => x.classList.remove('active'));
+    b.classList.add('active'); html.dataset.theme = b.dataset.theme;
+  });
+
+  let playing = true;
+  document.querySelectorAll('#playSeg button').forEach(b => b.onclick = () => {
+    document.querySelectorAll('#playSeg button').forEach(x => x.classList.remove('active'));
+    b.classList.add('active'); playing = b.dataset.play === '1';
+  });
+
+  const groups = {};
+  document.querySelectorAll('[data-car]').forEach(el => {
+    const panels = el.querySelectorAll('.panel');
+    const dots = el.querySelectorAll('.dots i');
+    if (!panels.length) return;
+    (groups[el.dataset.car] = groups[el.dataset.car] || []).push({ car: el, panels, dots, i: 0 });
+  });
+  function show(g, n) {
+    g.i = (n + g.panels.length) % g.panels.length;
+    g.panels.forEach((p, idx) => p.classList.toggle('on', idx === g.i));
+    g.dots.forEach((d, idx) => d.classList.toggle('on', idx === g.i));
+  }
+  setInterval(() => { if (playing) Object.values(groups).forEach(g => show(g, g.i + 1)); }, 4000);
+  document.querySelectorAll('.dots').forEach(dotsEl => {
+    dotsEl.style.cursor = 'pointer';
+    dotsEl.onclick = e => {
+      const idx = [...dotsEl.children].indexOf(e.target);
+      if (idx < 0) return;
+      const host = dotsEl.closest('[data-car]');
+      const g = groups[host.dataset.car].find(x => x.car === host);
+      if (g) show(g, idx);
+    };
+  });
+</script>
+</body>
+</html>

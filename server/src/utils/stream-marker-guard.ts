@@ -205,3 +205,38 @@ export function createStreamMarkerGuard(): StreamMarkerGuard {
     },
   };
 }
+
+/**
+ * 出口纯文本化：把模型写进正文的全部展示协议内容剥成纯散文。
+ * 车道收口的兜底补漏（done seal 的「持有残段」计算）用它保证补漏文本
+ * 永不携带标记/帧——与 createStreamMarkerGuard 同一册正则，不另立名单。
+ * 覆盖：卡片块（含未闭合残块）、NEXT_UP 块、标记 token、独占行标记、
+ * RENDER 声明变体、裸 END token。
+ */
+const CARD_BLOCK_STRIP_RE =
+  /\[AGENT_RESULT_CARD_START\][\s\S]*?\[AGENT_RESULT_CARD_END\]/g;
+
+export function stripDisplayProtocol(text: string): string {
+  let out = text.replace(CARD_BLOCK_STRIP_RE, "");
+  // 未闭合的卡片残块：从 START 起整段丢弃（与 guard.flush 的丢弃语义一致）
+  const startIdx = out.indexOf(CARD_START_LINE);
+  if (startIdx !== -1) out = out.slice(0, startIdx);
+  // NEXT_UP 块：从 START 到 END / 裸 END / 文本末尾（块内建议行不透出）
+  out = out.replace(
+    new RegExp(
+      `${NEXT_UP_START_RE.source}[\\s\\S]*?(?:${NEXT_UP_END_RE.source}|${BARE_END_RE.source}|$)`,
+      "gi",
+    ),
+    "",
+  );
+  out = out
+    .replace(MARKER_TOKEN_RE, "")
+    .replace(NEXT_UP_MARKER_TOKEN_RE, "")
+    .replace(BARE_END_GLOBAL_RE, "")
+    .replace(RENDER_DECL_VARIANT_RE, "");
+  out = out
+    .split("\n")
+    .filter((line) => !MARKER_LINE_RE.test(line))
+    .join("\n");
+  return out.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+}

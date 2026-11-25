@@ -78,33 +78,74 @@ Widget buildMessageBody(
 /// - 有非 text 块（卡 / 媒体 / media_segments）→ 宽
 /// - 纯媒体、无卡、正文不结构化 → 窄（图廊自成一块，泡不撑满）
 /// - 其余看正文段是否结构化（标题 / 列表 / 表格 / 代码块 / 引用）
-bool assistantBodyNeedsWideWidth(ChatMessage message) {
+///
+/// 泡外内容不算（2026-11-24 根修「闲聊泡被撑成通栏」）：宽度必须按泡里
+/// 真正画出来的东西判——信封里的 `followups` 块由消息行在泡外画，`form` /
+/// 不识别 `structured` 块渲染器直接跳过，[excludeCardTypes] 里的卡也已外移到
+/// 泡外独立渲染。此前这些块一律算「非 text → 宽」，于是带接续建议的纯闲聊
+/// 回复被拉满整个屏幕。
+bool assistantBodyNeedsWideWidth(
+  ChatMessage message, {
+  List<String> excludeCardTypes = const <String>[],
+}) {
   if (message.role == "user") return false;
   if (message.summaryCard != null) return true;
 
-  bool hasCard = message.text.contains(AgentResultParser.startMarker);
+  bool hasCard = false;
   bool hasMedia = (message.mediaCards?.isNotEmpty ?? false) ||
       (message.pendingMediaCards?.isNotEmpty ?? false);
   bool hasNonText = hasMedia;
   // 渲染面实际会被画出来的正文段（同一份源，顺序同 buildMessageBody）。
   final List<String> renderedTexts = <String>[];
 
-  void scanBlocks(List<Map<String, dynamic>>? blocks) {
+  void scanBlocks(
+    List<Map<String, dynamic>>? blocks, {
+    bool envelope = false,
+  }) {
     if (blocks == null) return;
     for (final Map<String, dynamic> b in blocks) {
       final String type = b["type"]?.toString() ?? "text";
+      // 信封块的渲染闸门（与 _buildEnvelopeBlocksBody 对齐）：这些块不进泡。
+      if (envelope &&
+          (type == "followups" ||
+              type == "form" ||
+              (type == "structured" &&
+                  b["kind"]?.toString() != "content_summary"))) {
+        continue;
+      }
       if (type == "text") {
         final String t = b["text"]?.toString() ?? "";
         if (t.trim().isNotEmpty) renderedTexts.add(t);
         continue;
       }
-      if (type == "media") hasMedia = true;
-      if (type == "card") hasCard = true;
+      if (type == "card") {
+        final Object? raw = b["card"];
+        final String cardType = raw is Map
+            ? AgentResultData.fromJson(Map<String, dynamic>.from(raw)).cardType
+            : "";
+        if (excludeCardTypes.contains(cardType)) continue;
+        hasCard = true;
+        hasNonText = true;
+        continue;
+      }
+      if (type == "media" || type == "media_segments") {
+        hasMedia = true;
+        hasNonText = true;
+        // 交错段里的文字段同样会画进泡里，宽度判定要带上。
+        final Object? segs = b["segments"];
+        if (type == "media_segments" && segs is List) {
+          scanBlocks(<Map<String, dynamic>>[
+            for (final Object? seg in segs)
+              if (seg is Map) Map<String, dynamic>.from(seg),
+          ]);
+        }
+        continue;
+      }
       hasNonText = true;
     }
   }
 
-  scanBlocks(message.envelopeBlocks);
+  scanBlocks(message.envelopeBlocks, envelope: true);
   scanBlocks(message.replyBlocks);
   final List<Map<String, dynamic>>? renderBlocks = message.renderBlocks;
   if (renderBlocks != null && renderBlocks.isNotEmpty) {
@@ -120,11 +161,31 @@ bool assistantBodyNeedsWideWidth(ChatMessage message) {
     }
   }
 
+  // 正文内嵌卡标记：渲染器按 parseBlocks 拆块，卡外移后泡里只剩散文。
+  final List<String> textProse = <String>[];
+  if (message.text.contains(AgentResultParser.startMarker)) {
+    for (final AgentResultBlock block
+        in AgentResultParser.parseBlocks(message.text)) {
+      final AgentResultData? data = block.data;
+      if (data != null) {
+        if (excludeCardTypes.contains(data.cardType)) continue;
+        hasCard = true;
+        hasNonText = true;
+        continue;
+      }
+      final String t = block.text ?? "";
+      if (t.trim().isNotEmpty) textProse.add(t);
+    }
+  } else {
+    textProse.add(message.text);
+  }
+
   // 有 text 块且块里确有正文 → 只按块判；块全空（渲染器会回退旧链）才读 text。
   final bool structured = renderedTexts.isNotEmpty
-      ? renderedTexts
-          .any((String t) => StructuredAssistantMessageBody.isStructuredText(t))
-      : StructuredAssistantMessageBody.isStructuredText(message.text);
+      ? renderedTexts.any(
+          (String t) => StructuredAssistantMessageBody.isStructuredText(t))
+      : textProse.any(
+          (String t) => StructuredAssistantMessageBody.isStructuredText(t));
   if (hasMedia && !hasCard && !structured) return false;
   if (hasNonText) return true;
   return structured;

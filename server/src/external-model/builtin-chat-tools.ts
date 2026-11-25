@@ -455,18 +455,29 @@ export const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
       // 每个 action 的语义、参数与回执保持不变。
       description:
         "【内置 Calendar】日程/提醒/定时任务的统一入口（用 action 分流）。\n" +
-        "action=create：创建提醒/日程/定时任务。优先把用户原句放进 text（含时间与事项，如「明天 9:00 提醒我开会」），服务端确定性解析时间与事项；只有时间/类型已结构化时才用下方字段。常见触发：「明天早上九点提醒我开会」「十分钟后提醒我」「到点叫我吃药」「提醒我交周报」。用户明确说要闹钟/叫醒/响铃（「明早七点叫我起床」「定个8点闹钟」「用闹钟提醒我」「六点半叫醒我」）必须传 alarmIntent=true 建手机本地闹钟（到点响铃+语音叫醒），别漏传——漏传就只是普通日程提醒、手机到点只弹窗不响铃；纯提醒（「提醒我开会/吃药」）不传。带明确时间点时直接调用，不要追问；**用户只说了要做什么、没给任何时间（如「设置一个闹钟」「提醒我交周报」）时，先问清几点并停止本轮，不要调用本工具，也不要把自己猜的时间写进 text/runAt**；仅当返回 needsRecurrenceConfirm=true 时按 suggestedQuestion 追问一次后重调。kind=reminder 时返回 whenSpoken（口语时间，如「明天上午十一点」；**仅在时间不是用户说的、或与他说的不同时才用它交代一句，用户刚说过就别重复**，也别把钟点念成 11:00、别念 11/6 这种日期）；advanceReminderKinds 只说明提前提醒的性质（departure=出发前、evening_before=前一晚），是事实不是台词：要不要提起、怎么提起你自己判断，别提字段名、别说几级、别报时点；hasAdvanceReminder 为 true 时说明另有提前提醒，别让用户以为只响一次，但不要解释提醒是怎么排的，也不要罗列提醒时间点。提醒方式默认弹窗；仅用户明确要求电话/语音才升级。\n" +
+        "action=create：创建提醒/日程/定时任务。优先把用户原句放进 text（含时间与事项，如「明天 9:00 提醒我开会」），服务端确定性解析时间与事项；只有时间/类型已结构化时才用下方字段。常见触发：「明天早上九点提醒我开会」「十分钟后提醒我」「到点叫我吃药」「提醒我交周报」。用户明确说要闹钟/叫醒/响铃（「明早七点叫我起床」「定个8点闹钟」「用闹钟提醒我」「六点半叫醒我」）必须传 alarmIntent=true 建手机本地闹钟（到点响铃+语音叫醒），别漏传——漏传就只是普通日程提醒、手机到点只弹窗不响铃；纯提醒（「提醒我开会/吃药」）不传。带明确时间点时直接调用，不要追问；**用户只说了要做什么、没给任何时间（如「设置一个闹钟」「提醒我交周报」）时，先问清几点并停止本轮，不要调用本工具，也不要把自己猜的时间写进 text/runAt**。重复方式由你自己判断、用 recurrence 参数表达：用户没提重复就按单次建（不要为「一次还是每天」中断一轮）；说了每天/每周/工作日才传对应值，「每天除周一」「周一到周五」这类用 cronExpression（如「0 11 * * 2-7」「0 9 * * 1,2,3,4,5」）。kind=reminder 时返回 whenSpoken（口语时间，如「明天上午十一点」；**仅在时间不是用户说的、或与他说的不同时才用它交代一句，用户刚说过就别重复**，也别把钟点念成 11:00、别念 11/6 这种日期）；advanceReminderKinds 只说明提前提醒的性质（departure=出发前、evening_before=前一晚），是事实不是台词：要不要提起、怎么提起你自己判断，别提字段名、别说几级、别报时点；hasAdvanceReminder 为 true 时说明另有提前提醒，别让用户以为只响一次，但不要解释提醒是怎么排的，也不要罗列提醒时间点。提醒方式默认弹窗；仅用户明确要求电话/语音才升级。\n" +
         "action=batch_create：批量创建日程（一次最多 60 条）。用于用户一次性导入多件日程的场景（课表/排班表/会议日程/行程单），先从图/文提取每条的 description 与 runAt（ISO 时间），再一次创建；逐条转述结果，冲突/失败条目如实说明。单条日程不要用本 action。\n" +
         "action=list_tasks：查询当前用户已创建的定时日程/提醒（含下次执行时间）。**服务端会从用户原话自动判定查询范围（今天/昨天/前天/本周/上周/下周/最近N天/未来N天），from/to 一般不用传**；没说时间范围时默认只查未来 120 天。返回项里 status=completed 与 lastRunAt 表示已经执行过，属于过去事件；回执 rangeLabel 说明服务端按哪个时间范围查询，据此如实转述。仅当用户**明确**要查看/确认日程或定时任务时调用；禁止用于「你确定？」「真的吗？」等短句追问。\n" +
         "action=delete_task：删除用户已创建的定时日程/提醒。仅当用户明确要求删除/取消某个日程或提醒时调用；可先用 action=list_tasks 找到 taskId。\n" +
         "action=update_task：改期/编辑单个日程：改时间、改时长、改提前量、暂停或恢复。taskId 来自 list_tasks。\n" +
-        "action=find_free_slots：查询未来空闲时段（自动扣除已有安排占用）。用于「什么时候有空」「帮我约时间」，或改期遇 conflict=true 后给用户改期建议。返回 slots[]（startLocal/endLocal 展示），由用户选定。",
+        "action=find_free_slots：查询未来空闲时段（自动扣除已有安排占用）。用于「什么时候有空」「帮我约时间」，或改期遇 conflict=true 后给用户改期建议。返回 slots[]（startLocal/endLocal 展示），由用户选定。\n" +
+        "action=skip_occurrence：跳过重复提醒里的某一次（「这周三不去游泳」「明天那次不提醒」），其余天数照旧。传 taskId + occurrenceAt（该次时刻，取 list_tasks 的 nextRunAt/occurrences）。\n" +
+        "action=reschedule_occurrence：只把重复提醒里的某一次挪到别的时刻（「明天那次改到下午三点」），其余不变。传 taskId + occurrenceAt + at。",
       parameters: {
         type: "object",
         properties: {
           action: {
             type: "string",
-            enum: ["create", "batch_create", "list_tasks", "delete_task", "update_task", "find_free_slots"],
+            enum: [
+              "create",
+              "batch_create",
+              "list_tasks",
+              "delete_task",
+              "update_task",
+              "find_free_slots",
+              "skip_occurrence",
+              "reschedule_occurrence",
+            ],
             description: "要执行的日历动作。",
           },
           // ── action=create ──
@@ -540,7 +551,19 @@ export const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
           from: { type: "string", description: "action=list_tasks/find_free_slots：范围起点 ISO，可选兜底。list_tasks 一般不用传——服务端已从用户原话判定（昨天/上周/今天等）；仅原话无时间词时用它" },
           to: { type: "string", description: "action=list_tasks/find_free_slots：范围终点 ISO，可选兜底，服务端已从用户原话判定" },
           // ── action=delete_task / update_task ──
-          taskId: { type: "string", description: "action=delete_task/update_task：日程 taskId（list_tasks 返回）" },
+          taskId: {
+            type: "string",
+            description: "action=delete_task/update_task/skip_occurrence/reschedule_occurrence：日程 taskId（list_tasks 返回）",
+          },
+          occurrenceAt: {
+            type: "string",
+            description:
+              "action=skip_occurrence/reschedule_occurrence：要处理的那一次实例时刻（ISO-8601），取 list_tasks 返回的 nextRunAt 或 occurrences 里的值",
+          },
+          at: {
+            type: "string",
+            description: "action=reschedule_occurrence：改到的新时刻（ISO-8601，须在未来）",
+          },
           // ── action=update_task 补充 ──
           status: {
             type: "string",

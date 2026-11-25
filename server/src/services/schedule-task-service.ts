@@ -8,7 +8,13 @@ import { dirname, join } from "path";
 import { buildReminderPolicy, type ScheduleHabitHints, type SchedulePreReminder } from "./schedule-reminder-policy.js";
 import { extractReminderSubject, formatReminderMessage, isEchoLikeReminderCopy } from "./reminder-copy.js";
 import type { RouteEstimate } from "./route-duration-service.js";
-import { taskHasOccurrenceInRange } from "./schedule-recurrence-expand.js";
+import { expandTaskOccurrenceTimes } from "./schedule-recurrence-expand.js";
+import {
+  buildRule,
+  expandRuleOccurrences,
+  nextRuleOccurrenceMs,
+  type RuleOccurrence,
+} from "./schedule-rule.js";
 
 export type ScheduleRecurrence = "none" | "daily" | "weekly" | "yearly" | "cron";
 export type ScheduleTaskKind = "reminder" | "action" | "weather_brief" | "agent_task";
@@ -64,6 +70,16 @@ export type ScheduleTaskRecord = {
   runAt: string;
   nextRunAt: string | null;
   cronExpression?: string;
+  /**
+   * 重复规则唯一真源（RRULE 子集，见 schedule-rule.ts）。
+   * recurrence/cronExpression 保留为兼容字段与输入格式，时间计算一律以它为准；
+   * 老数据在 load 时按 runAt + 枚举惰性补齐。
+   */
+  rule?: string;
+  /** 被跳过的实例（ISO，按规则本应触发的时刻对齐）——「这周三不去」。 */
+  excludedOccurrences?: string[];
+  /** 单次改期：把某一次挪到别的时刻，规则其余实例不变。 */
+  occurrenceOverrides?: Array<{ originalAt: string; at: string }>;
   webhookToken?: string;
   status: ScheduleTaskStatus;
   reminderMessage?: string;
@@ -462,6 +478,7 @@ export class ScheduleTaskService {
   }
 
   async load(): Promise<void> {
+    let backfilledRules = false;
     try {
       const raw = await readFile(this.persistPath, "utf8");
       const data = JSON.parse(raw) as PersistedScheduleState;
@@ -469,6 +486,20 @@ export class ScheduleTaskService {
       this.runsByTaskId.clear();
       for (const task of data.tasks ?? []) {
         if (task?.taskId && task?.sessionId) {
+          // 老数据没有 rule：按 runAt + 枚举补一条 RRULE（确定性换算，不算"猜"）。
+          // 补完统一落盘一次，之后的读写只有 rule 一个真源。
+          if (!task.rule && (task.recurrence !== "none" || task.cronExpression)) {
+            const rule = this.ruleForSchedule(
+              task.recurrence,
+              task.cronExpression,
+              task.runAt,
+              task.timezone || "Asia/Shanghai",
+            );
+            if (rule) {
+              task.rule = rule;
+              backfilledRules = true;
+            }
+          }
           this.byTaskId.set(task.taskId, task);
         }
       }
@@ -482,6 +513,14 @@ export class ScheduleTaskService {
       const err = e as NodeJS.ErrnoException;
       if (err.code === "ENOENT") return;
       throw e;
+    }
+    if (backfilledRules) {
+      // 迁移落盘失败不挡启动：内存里的 rule 已经可用，下次 persist 会再写一次。
+      try {
+        await this.persist();
+      } catch {
+        /* ignore */
+      }
     }
   }
 
@@ -548,9 +587,9 @@ export class ScheduleTaskService {
       .filter((task) => task.sessionId === sessionId)
       .filter((task) => {
         if (task.status === "cancelled") return false;
-        // 周期任务（daily/weekly/yearly）：用展开器检查区间内是否有任何实例
+        // 周期任务（daily/weekly/yearly/cron）：用展开器检查区间内是否有任何实例
         if (task.recurrence !== "none") {
-          return taskHasOccurrenceInRange(task, from, toForRecurring);
+          return this.occurrenceTimesInRange(task, from, toForRecurring).length > 0;
         }
         const relevantAt =
           task.status === "completed"
@@ -566,6 +605,117 @@ export class ScheduleTaskService {
       );
   }
 
+  /**
+   * 任务在 [fromMs, toMs] 内的全部触发时刻（UTC ms）。
+   *
+   * 与「只算下一跳」（nextRunAt）不同，这里给的是完整实例序列：客户端日程表要在
+   * 用户设置提醒的那一刻就把未来每一天都渲染出来，而不是等到前一天才冒出下一条
+   * （2026-11-24 修）。cron（如「每天除周一」）按字段枚举，daily/weekly/yearly 走展开器。
+   */
+  occurrenceTimesInRange(
+    task: ScheduleTaskRecord,
+    fromMs: number,
+    toMs: number,
+  ): number[] {
+    return this.occurrencesInRange(task, fromMs, toMs).map((o) => o.at);
+  }
+
+  /**
+   * 任务的实例序列（含 originalAt）：跳过 / 改期都以它为唯一算法。
+   * 单次任务给一条；周期任务走 RRULE 引擎；只有 RRULE 表达不了的复杂 cron
+   * （步长、一天多次等历史遗留）才退回旧展开器。
+   */
+  private occurrencesInRange(
+    task: ScheduleTaskRecord,
+    fromMs: number,
+    toMs: number,
+  ): RuleOccurrence[] {
+    if (task.status === "cancelled") return [];
+    if (task.recurrence === "none" && !task.cronExpression) {
+      const at = new Date(task.nextRunAt ?? task.runAt).getTime();
+      return Number.isFinite(at) && at >= fromMs && at <= toMs ? [{ at, originalAt: at }] : [];
+    }
+    const rule = this.ruleOf(task);
+    if (rule) {
+      return expandRuleOccurrences({
+        rule,
+        anchorIso: this.ruleAnchorIso(task, toMs),
+        timezone: task.timezone,
+        fromMs,
+        toMs,
+        exdates: task.excludedOccurrences,
+        overrides: task.occurrenceOverrides,
+      });
+    }
+    const cron = task.cronExpression?.trim();
+    const legacy = cron
+      ? this.expandCronOccurrenceTimes(cron, task.timezone, fromMs, toMs)
+      : expandTaskOccurrenceTimes(task, fromMs, toMs);
+    return legacy.map((at) => ({ at, originalAt: at }));
+  }
+
+  /**
+   * 规则锚点：正常用 runAt（规则起点）；runAt 晚于参考时刻（异常/未来锚点）时
+   * 退回 nextRunAt 的槽位——同一条规则里时分与日期约束一致，等价可用，
+   * 避免「锚点在未来 → 窗口内一个实例都算不出来」。
+   */
+  private ruleAnchorIso(task: ScheduleTaskRecord, referenceMs: number): string {
+    const runMs = new Date(task.runAt).getTime();
+    // 一年内（含未来）都用 runAt：任务"明天才开始"是常态，不能因为锚点在未来就
+    // 改用它处的 nextRunAt——那会把刚恢复的实例又跳过去。只有远未来（异常数据/
+    // 测试构造）才退回 nextRunAt 的槽位。
+    if (Number.isFinite(runMs) && runMs - referenceMs <= 400 * 24 * 60 * 60 * 1000) {
+      return task.runAt;
+    }
+    const nextMs = new Date(task.nextRunAt ?? task.runAt).getTime();
+    return Number.isFinite(nextMs) ? new Date(nextMs).toISOString() : task.runAt;
+  }
+
+  /** 显式规则优先；没有则按枚举 + cron 归一（老数据惰性迁移的唯一入口）。 */
+  private ruleOf(task: ScheduleTaskRecord): string | null {
+    if (task.rule) return task.rule;
+    if (task.recurrence === "none" && !task.cronExpression) return null;
+    return this.ruleForSchedule(task.recurrence, task.cronExpression, task.runAt, task.timezone);
+  }
+
+  private ruleForSchedule(
+    recurrence: ScheduleRecurrence,
+    cronExpression: string | undefined,
+    runAt: string,
+    timezone: string,
+  ): string | null {
+    return buildRule({ recurrence, cronExpression, runAt, timezone });
+  }
+
+  /**
+   * 行程视图（手机端/桌面端日程渲染用）：任务本体 + 窗口内每一次触发时刻（ISO）。
+   *
+   * 返回浅拷贝，绝不把 occurrences 写回 byTaskId 里的记录——否则 persist() 会把
+   * 派生字段落盘，污染存储与幂等签名。单次任务固定给一条（已完成看 lastRunAt）。
+   */
+  listTaskViewsBySession(
+    sessionId: string,
+    range?: { from?: string; to?: string },
+  ): Array<ScheduleTaskRecord & { occurrences: string[] }> {
+    const now = this.now().getTime();
+    const from = range?.from ? new Date(range.from).getTime() : now;
+    const to = range?.to ? new Date(range.to).getTime() : now + 7 * 24 * 60 * 60 * 1000;
+    // 周期实例只渲染「还没到点」的那些：服务端没有逐次完成状态，把今早已经过去的
+    // 那一跳画成未完成待办会误导。窗口整体在过去（历史查询）时仍按 from 展开。
+    const expandFrom = to < now ? from : Math.max(from, now);
+    return this.listTasksBySession(sessionId, range).map((task) => {
+      const recurring = task.recurrence !== "none" || !!task.cronExpression?.trim();
+      const occurrences = recurring
+        ? this.occurrenceTimesInRange(task, expandFrom, to).map((ms) => new Date(ms).toISOString())
+        : [
+            task.status === "completed"
+              ? (task.lastRunAt ?? task.runAt)
+              : (task.nextRunAt ?? task.runAt),
+          ];
+      return { ...task, occurrences };
+    });
+  }
+
   listRuns(taskId: string, limit = 20): ScheduleTaskRun[] {
     const list = this.runsByTaskId.get(taskId) ?? [];
     return [...list].sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, limit);
@@ -573,6 +723,143 @@ export class ScheduleTaskService {
 
   getTask(taskId: string): ScheduleTaskRecord | undefined {
     return this.byTaskId.get(taskId);
+  }
+
+  /**
+   * 跳过「某一次」实例（RECURRENCE-ID 的最小版）：只加一条 exdate，
+   * 规则与其余实例不动。被跳过的正好是下一跳时，nextRunAt 立即推进到再下一次，
+   * 不会出现"列表里跳过了、到点还是响"。
+   */
+  async skipOccurrence(taskId: string, occurrenceAt: string): Promise<ScheduleTaskRecord> {
+    const task = this.byTaskId.get(taskId);
+    if (!task) throw new Error("task not found");
+    if (task.status === "cancelled") throw new Error("task already cancelled");
+    const key = this.requireOccurrenceKey(task, occurrenceAt);
+    const excluded = new Set(task.excludedOccurrences ?? []);
+    excluded.add(key);
+    const next: ScheduleTaskRecord = {
+      ...task,
+      excludedOccurrences: [...excluded].sort(),
+      updatedAt: this.now().toISOString(),
+    };
+    this.syncNextRunAtAfterException(next, key);
+    this.byTaskId.set(taskId, next);
+    await this.persist();
+    await this.emitTaskChange("updated", next);
+    return next;
+  }
+
+  /**
+   * 把「某一次」挪到别的时刻：规则里其它实例不变。
+   * originalAt 被移动后不再按原时刻触发，改在新时刻触发（仍占该实例的位）。
+   */
+  async rescheduleOccurrence(
+    taskId: string,
+    originalAt: string,
+    at: string,
+  ): Promise<ScheduleTaskRecord> {
+    const task = this.byTaskId.get(taskId);
+    if (!task) throw new Error("task not found");
+    if (task.status === "cancelled") throw new Error("task already cancelled");
+    const key = this.requireOccurrenceKey(task, originalAt);
+    const movedMs = new Date(at).getTime();
+    if (!Number.isFinite(movedMs)) throw new Error("invalid target time");
+    if (movedMs <= this.now().getTime()) throw new Error("target time must be in the future");
+    const overrides = (task.occurrenceOverrides ?? []).filter(
+      (o) => this.occurrenceKey(o.originalAt) !== key,
+    );
+    overrides.push({ originalAt: key, at: new Date(movedMs).toISOString() });
+    const next: ScheduleTaskRecord = {
+      ...task,
+      occurrenceOverrides: overrides.sort((a, b) => a.originalAt.localeCompare(b.originalAt)),
+      updatedAt: this.now().toISOString(),
+    };
+    this.syncNextRunAtAfterException(next, key);
+    this.byTaskId.set(taskId, next);
+    await this.persist();
+    await this.emitTaskChange("updated", next);
+    return next;
+  }
+
+  /** 清空某条提醒的实例例外（跳过 + 改期一起撤销）。 */
+  async clearOccurrenceExceptions(taskId: string): Promise<ScheduleTaskRecord> {
+    const task = this.byTaskId.get(taskId);
+    if (!task) throw new Error("task not found");
+    const next: ScheduleTaskRecord = {
+      ...task,
+      excludedOccurrences: undefined,
+      occurrenceOverrides: undefined,
+      updatedAt: this.now().toISOString(),
+    };
+    next.nextRunAt = this.nextRunAfter(next, this.now().getTime());
+    this.byTaskId.set(taskId, next);
+    await this.persist();
+    await this.emitTaskChange("updated", next);
+    return next;
+  }
+
+  /** 校验该时刻确实是这条提醒的一个实例（周期任务才有实例概念）。 */
+  private requireOccurrenceKey(task: ScheduleTaskRecord, occurrenceAt: string): string {
+    const rule = this.ruleOf(task);
+    if (!rule) {
+      throw new Error("single-shot task has no occurrence to edit; cancel it instead");
+    }
+    const atMs = new Date(occurrenceAt).getTime();
+    if (!Number.isFinite(atMs)) throw new Error("invalid occurrence time");
+    const hit = expandRuleOccurrences({
+      rule,
+      anchorIso: this.ruleAnchorIso(task, atMs),
+      timezone: task.timezone,
+      fromMs: atMs - 60_000,
+      toMs: atMs + 60_000,
+      exdates: task.excludedOccurrences,
+      overrides: task.occurrenceOverrides,
+    });
+    if (hit.length === 0) throw new Error("time is not an occurrence of this task");
+    return this.occurrenceKey(occurrenceAt);
+  }
+
+  private occurrenceKey(iso: string): string {
+    const ms = new Date(iso).getTime();
+    return new Date(Math.round(ms / 60_000) * 60_000).toISOString();
+  }
+
+  /** 例外变更后修正 nextRunAt：被动过的那一跳正好是下一跳时，重算到未来。 */
+  private syncNextRunAtAfterException(task: ScheduleTaskRecord, touchedKey: string): void {
+    const nextMs = new Date(task.nextRunAt ?? "").getTime();
+    const touchedMs = new Date(touchedKey).getTime();
+    const isNext =
+      Number.isFinite(nextMs) && Math.abs(nextMs - touchedMs) < 60_000;
+    if (!isNext) return;
+    task.nextRunAt = this.nextRunAfter(task, Math.max(touchedMs, this.now().getTime()));
+    if (task.nextRunAt === null && task.recurrence !== "none") {
+      // 规则已无后续实例（COUNT/UNTIL 用尽）：收口，别留一条永远不响的 active。
+      task.status = "completed";
+    }
+  }
+
+  /** 给定起点之后的下一跳（rule 优先，复杂 cron 兜底）。 */
+  private nextRunAfter(task: ScheduleTaskRecord, afterMs: number): string | null {
+    const rule = this.ruleOf(task);
+    if (rule) {
+      const ms = nextRuleOccurrenceMs({
+        rule,
+        anchorIso: this.ruleAnchorIso(task, afterMs),
+        timezone: task.timezone,
+        afterMs,
+        exdates: task.excludedOccurrences,
+        overrides: task.occurrenceOverrides,
+      });
+      return ms === null ? null : new Date(ms).toISOString();
+    }
+    if (task.cronExpression) {
+      return this.computeNextCronRun(
+        task.cronExpression,
+        task.timezone,
+        new Date(afterMs).toISOString(),
+      );
+    }
+    return null;
   }
 
   /** 按关联预订订单号查找未结束的日程（预订取消/改期反向同步用）。 */
@@ -706,6 +993,7 @@ export class ScheduleTaskService {
       runAt: schedule.runAt,
       nextRunAt: schedule.nextRunAt,
       cronExpression: schedule.cronExpression,
+      rule: this.ruleForSchedule(schedule.recurrence, schedule.cronExpression, schedule.runAt, tz) ?? undefined,
       webhookToken: this.normalizeWebhookToken(input.webhookToken),
       status: "active",
       reminderMessage: copy.reminderMessage,
@@ -840,6 +1128,9 @@ export class ScheduleTaskService {
       next.runAt = schedule.runAt;
       next.nextRunAt = schedule.nextRunAt;
       next.cronExpression = schedule.cronExpression;
+      next.rule =
+        this.ruleForSchedule(schedule.recurrence, schedule.cronExpression, schedule.runAt, next.timezone) ??
+        undefined;
     }
     if (input.status) {
       next.status = input.status;
@@ -1222,6 +1513,31 @@ export class ScheduleTaskService {
     // 成功清零失败计数
     if (task.consecutiveFailures !== undefined) updated.consecutiveFailures = 0;
     if (task.lastError !== undefined) updated.lastError = undefined;
+    if (updated.recurrence === "none" && !updated.cronExpression) {
+      updated.status = "completed";
+      updated.nextRunAt = null;
+      return updated;
+    }
+    // 推进也走同一个规则引擎：跳过/改期的实例在这里同样生效，
+    // 不会出现「列表里跳过了、到点还是响」。
+    const rule = this.ruleOf(updated);
+    if (rule) {
+      const afterMs = new Date(
+        updated.lastRunAt ?? updated.nextRunAt ?? updated.runAt,
+      ).getTime();
+      const nextMs = nextRuleOccurrenceMs({
+        rule,
+        anchorIso: this.ruleAnchorIso(updated, afterMs),
+        timezone: updated.timezone,
+        afterMs,
+        exdates: updated.excludedOccurrences,
+        overrides: updated.occurrenceOverrides,
+      });
+      updated.nextRunAt = nextMs === null ? null : new Date(nextMs).toISOString();
+      if (nextMs === null) updated.status = "completed";
+      return updated;
+    }
+    // 单条 RRULE 表达不了的复杂 cron（步长/一天多次）仍走旧计算（兼容分支）。
     if (updated.cronExpression) {
       updated.recurrence = "cron";
       updated.nextRunAt = this.computeNextCronRun(
@@ -1229,11 +1545,6 @@ export class ScheduleTaskService {
         updated.timezone,
         updated.lastRunAt ?? updated.runAt,
       );
-      return updated;
-    }
-    if (updated.recurrence === "none") {
-      updated.status = "completed";
-      updated.nextRunAt = null;
       return updated;
     }
 
@@ -1357,6 +1668,76 @@ export class ScheduleTaskService {
   private normalizeWebhookToken(token: string | undefined): string | undefined {
     const normalized = token?.trim();
     return normalized ? normalized : undefined;
+  }
+
+  /**
+   * cron 表达式在 [fromMs, toMs] 内的全部触发时刻（UTC ms）。
+   *
+   * 逐「本地日」遍历：先判月/日/周是否命中，再对命中的 hours × minutes 组合换算
+   * 回 UTC——比逐分钟扫描快两个数量级，也不受窗口长度拖累（computeNextCronRun
+   * 那种逐分钟找下一跳只适合单点）。字段语义与 computeNextCronRun 保持一致
+   * （日/周同时限定时取 AND），保证「列表里能看到的」与「真正会响的」同源。
+   */
+  private expandCronOccurrenceTimes(
+    cronExpression: string,
+    timezone: string,
+    fromMs: number,
+    toMs: number,
+  ): number[] {
+    const fields = cronExpression.trim().split(/\s+/);
+    if (fields.length !== 5) return [];
+    let minutes: Set<number>;
+    let hours: Set<number>;
+    let daysOfMonth: Set<number>;
+    let months: Set<number>;
+    let daysOfWeek: Set<number>;
+    try {
+      minutes = this.parseCronField(fields[0]!, 0, 59);
+      hours = this.parseCronField(fields[1]!, 0, 23);
+      daysOfMonth = this.parseCronField(fields[2]!, 1, 31);
+      months = this.parseCronField(fields[3]!, 1, 12);
+      daysOfWeek = this.parseCronField(fields[4]!, 0, 7, true);
+    } catch {
+      // 非法 cron 不抛：列表接口宁可少渲染，也不能整页 500。
+      return [];
+    }
+    if (fromMs > toMs) return [];
+    const sortedHours = [...hours].sort((a, b) => a - b);
+    const sortedMinutes = [...minutes].sort((a, b) => a - b);
+
+    const cursor = this.toLocalInTimezone(new Date(fromMs), timezone);
+    cursor.setHours(0, 0, 0, 0);
+    const endLocal = this.toLocalInTimezone(new Date(toMs), timezone);
+    endLocal.setHours(23, 59, 59, 999);
+    // 窗口上限兜底：正常查询 ≤ 30/31 天，异常入参也不至于把事件循环拖住。
+    const maxDays = Math.min(
+      400,
+      Math.max(1, Math.ceil((endLocal.getTime() - cursor.getTime()) / 86_400_000) + 2),
+    );
+
+    const out: number[] = [];
+    for (let i = 0; i < maxDays; i += 1) {
+      const y = cursor.getFullYear();
+      const mo = cursor.getMonth();
+      const d = cursor.getDate();
+      const dayStart = new Date(y, mo, d, 0, 0, 0, 0);
+      if (dayStart.getTime() > endLocal.getTime()) break;
+      if (
+        months.has(mo + 1) &&
+        daysOfMonth.has(d) &&
+        daysOfWeek.has(dayStart.getDay())
+      ) {
+        for (const h of sortedHours) {
+          for (const m of sortedMinutes) {
+            const t = this.toUtcFromLocalTime(new Date(y, mo, d, h, m, 0, 0), timezone).getTime();
+            if (t >= fromMs && t <= toMs) out.push(t);
+          }
+        }
+      }
+      cursor.setDate(d + 1);
+      cursor.setHours(0, 0, 0, 0);
+    }
+    return out.sort((a, b) => a - b);
   }
 
   private computeNextCronRun(

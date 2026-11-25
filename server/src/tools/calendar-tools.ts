@@ -25,8 +25,30 @@ import {
   normalizeRemindBeforeMinutes,
   parseScheduleTaskCategory,
 } from "../services/schedule-task-service.js";
+import { describeRule } from "../services/schedule-rule.js";
 import { toolResultFromScheduleParse } from "./schedule-create-guard.js";
 import type { ToolContext, ToolRegistry } from "./tool-registry.js";
+
+/**
+ * 模型显式给了 recurrence 就以它为准（2026-11-25「删闸，交给 agent 抉择」）。
+ *
+ * 自然语言分支此前完全忽略工具参数里的 recurrence，模型即便判断出「这是每天」
+ * 也无法修改解析结果——删掉确认闸后必须补上这条覆盖，否则"交给 agent"是空话。
+ */
+function applyModelRecurrenceOverride(
+  draft: ScheduleDraft,
+  input: Record<string, unknown>,
+): ScheduleDraft {
+  const raw = String(input.recurrence ?? "").trim();
+  if (!["none", "daily", "weekly", "yearly", "cron"].includes(raw)) return draft;
+  const recurrence = raw as ScheduleDraft["recurrence"];
+  const cronExpression =
+    recurrence === "cron"
+      ? String(input.cronExpression ?? "").trim() || draft.cronExpression
+      : undefined;
+  if (recurrence === draft.recurrence && cronExpression === draft.cronExpression) return draft;
+  return { ...draft, recurrence, cronExpression };
+}
 
 /** 将 ISO UTC 时间字符串格式化为用户可读的本地时间描述 */
 export function formatNextRunAtLocal(iso: string | null | undefined, timezone: string): string {
@@ -187,6 +209,7 @@ export function buildScheduleCreateInput(
       category: draft.category,
       runAt: draft.runAt,
       recurrence: draft.recurrence,
+      cronExpression: draft.cronExpression,
       timezone: tz,
       reminderMessage: draft.reminderMessage?.trim() || draft.description,
       durationMinutes: draft.durationMinutes,
@@ -207,6 +230,7 @@ export function buildScheduleCreateInput(
       category: draft.category,
       runAt: draft.runAt,
       recurrence: draft.recurrence,
+      cronExpression: draft.cronExpression,
       timezone: tz,
       action: draft.action,
       durationMinutes: draft.durationMinutes,
@@ -221,6 +245,7 @@ export function buildScheduleCreateInput(
     category: draft.category,
     runAt: draft.runAt,
     recurrence: draft.recurrence,
+    cronExpression: draft.cronExpression,
     timezone: tz,
     durationMinutes: draft.durationMinutes,
   };
@@ -330,7 +355,15 @@ export function parseScheduleRangeIntent(
  */
 export function createLinkedAlarmIfRequested(
   getAlarmClockService: (() => AlarmClockService | null) | undefined,
-  input: { alarmIntent: boolean; label: string; runAt: string; recurrence: string; actorId: string },
+  input: {
+    alarmIntent: boolean;
+    label: string;
+    runAt: string;
+    recurrence: string;
+    /** recurrence=cron 时的表达式（「除周一」等排除式重复靠它转 RRULE.BYDAY）。 */
+    cronExpression?: string;
+    actorId: string;
+  },
 ): { alarmId: string; nextFireAt: string | null; repeatRule: string | null; label: string } | null {
   const alarmClockService = getAlarmClockService?.();
   if (!alarmClockService) return null;
@@ -339,7 +372,10 @@ export function createLinkedAlarmIfRequested(
   // 时间语义必须成立：过去时刻/非法时间不建闹钟（日程层自会给出自己的报错路径）
   const fireMs = new Date(input.runAt).getTime();
   if (!Number.isFinite(fireMs) || fireMs <= Date.now()) return null;
-  const { rule, ok } = repeatRuleFromRecurrence(input.recurrence as ScheduleRecurrence);
+  const { rule, ok } = repeatRuleFromRecurrence(
+    input.recurrence as ScheduleRecurrence,
+    input.cronExpression,
+  );
   if (!ok) return null;
   const label = input.label.trim().slice(0, 24) || "闹钟";
   try {
@@ -436,7 +472,7 @@ export function registerCalendarTools(
     });
     const guarded = toolResultFromScheduleParse(parsed);
     if (!guarded.proceed) return guarded.result;
-    const draft = guarded.draft;
+    const draft = applyModelRecurrenceOverride(guarded.draft, input);
     try {
       if (conflictService) {
         const conflictResult = precheckCreateConflict(conflictService, {
@@ -461,6 +497,7 @@ export function registerCalendarTools(
           draft.description,
         runAt: draft.runAt,
         recurrence: draft.recurrence,
+        cronExpression: draft.cronExpression,
         actorId: sessionId,
       });
       return buildCreateResponse(
@@ -502,13 +539,25 @@ export function registerCalendarTools(
     ) {
       return { ok: false, error: "kind 须为 reminder、action、weather_brief 或 agent_task" };
     }
-    if (!["none", "daily", "weekly", "yearly"].includes(recurrenceRaw)) {
-      return { ok: false, error: "recurrence 须为 none、daily、weekly 或 yearly" };
+    // cron：「除周一」这类排除式重复唯一能表达的形态（结构化分支直传）。
+    const cronRaw = String(input.cronExpression ?? "").trim();
+    const cronExpression = /^\S+\s+\S+\s+\S+\s+\S+\s+\S+$/.test(cronRaw) ? cronRaw : undefined;
+    if (cronRaw && !cronExpression) {
+      return { ok: false, error: "cronExpression 须为 5 段 cron（分 时 日 月 周）" };
+    }
+    const recurrenceOk =
+      ["none", "daily", "weekly", "yearly"].includes(recurrenceRaw) ||
+      (recurrenceRaw === "cron" && !!cronExpression);
+    if (!recurrenceOk) {
+      return {
+        ok: false,
+        error: "recurrence 须为 none、daily、weekly、yearly 或 cron（cron 需同时提供 cronExpression）",
+      };
     }
     if (kindRaw !== "reminder" && !title) {
       return { ok: false, error: "非提醒类型需要提供 title" };
     }
-    const recurrence = recurrenceRaw as "none" | "daily" | "weekly" | "yearly";
+    const recurrence = (cronExpression ? "cron" : recurrenceRaw) as ScheduleRecurrence;
     const durationMinutes = normalizeDurationMinutes(input.durationMinutes);
     const remindBeforeMinutes = normalizeRemindBeforeMinutes(input.remindBeforeMinutes);
     const forceCreate = input.forceCreate === true;
@@ -537,6 +586,7 @@ export function registerCalendarTools(
           category,
           runAt,
           recurrence,
+          cronExpression,
           timezone,
           reminderMessage,
           durationMinutes,
@@ -548,6 +598,7 @@ export function registerCalendarTools(
           label: shortTitle || task.shortTitle || task.reminderMessage || task.title || description,
           runAt: task.nextRunAt ?? runAt,
           recurrence,
+          cronExpression,
           actorId: sessionId,
         });
         return buildCreateResponse(task, timezone, "提醒已写入日程", linkedAlarm);
@@ -562,6 +613,7 @@ export function registerCalendarTools(
           category,
           runAt,
           recurrence,
+          cronExpression,
           timezone,
         });
         return buildCreateResponse(task, timezone, "日程已写入");
@@ -583,6 +635,7 @@ export function registerCalendarTools(
           category,
           runAt,
           recurrence,
+          cronExpression,
           timezone,
           agentTask: { prompt, accessMode },
         });
@@ -604,6 +657,7 @@ export function registerCalendarTools(
         category,
         runAt,
         recurrence,
+        cronExpression,
         timezone,
         action: { url, method, body: actionIn?.body },
       });
@@ -644,7 +698,7 @@ export function registerCalendarTools(
           ? String(input.to).trim()
           : new Date(now.getTime() + 120 * 86400000).toISOString();
     }
-    const tasks = scheduleTaskService.listTasksBySession(sessionId, { from, to });
+    const tasks = scheduleTaskService.listTaskViewsBySession(sessionId, { from, to });
     return {
       ok: true,
       from,
@@ -660,8 +714,13 @@ export function registerCalendarTools(
         kind: t.kind,
         status: t.status,
         recurrence: t.recurrence,
+        // 人话规则（「每天除周一」「每个工作日」）：模型转述时用它，别按枚举猜。
+        repeatLabel: describeRule(t.rule ?? null, t.runAt, t.timezone),
         nextRunAt: t.nextRunAt,
         runAt: t.runAt,
+        // 最近 5 次的真实时刻：用户说「这周三那次」时，occurrenceAt 从这里取值，
+        // 不要自己按星期推算（会撞上跳过/改期后的实例）。
+        occurrences: t.occurrences.slice(0, 5),
         // 已完成的提醒（from 传过去时间才会出现在结果里）：lastRunAt 是其真实
         // 响过时刻，属于过去事件，据此回答「过了吗/几点响的」，别再当成未来安排。
         lastRunAt: t.lastRunAt ?? null,
@@ -766,6 +825,71 @@ export function registerCalendarTools(
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       return { ok: false, error: msg };
+    }
+  };
+
+  /**
+   * 跳过重复提醒里的某一次（实例层，2026-11-25）。
+   * 只加一条 exdate：规则与其余实例不动，且不会在到点时照样响。
+   */
+  const handleSkipOccurrence = async (
+    input: Record<string, unknown>,
+    context: ToolContext,
+  ): Promise<Record<string, unknown>> => {
+    const sessionId = resolveActorId(context);
+    const taskId = String(input.taskId ?? "").trim();
+    const occurrenceAt = String(input.occurrenceAt ?? input.at ?? "").trim();
+    if (!taskId || !occurrenceAt) {
+      return { ok: false, error: "需要 taskId 与 occurrenceAt（要跳过的那一次时刻）" };
+    }
+    const task = scheduleTaskService.getTask(taskId);
+    if (!task || task.sessionId !== sessionId) return { ok: false, error: "没有找到这条提醒" };
+    try {
+      const updated = await scheduleTaskService.skipOccurrence(taskId, occurrenceAt);
+      return {
+        ok: true,
+        action: "skip_occurrence",
+        taskId,
+        taskTitle: updated.shortTitle || updated.description,
+        skippedAt: occurrenceAt,
+        nextRunAt: updated.nextRunAt,
+        whenSpoken: formatNextRunAtLocal(updated.nextRunAt, updated.timezone),
+        summary: "已跳过这一次，其余重复照旧。请只说跳过的是哪一次，不要念钟点数字。",
+      };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  };
+
+  /** 只把重复提醒里的某一次挪到别的时刻（其余实例不变）。 */
+  const handleRescheduleOccurrence = async (
+    input: Record<string, unknown>,
+    context: ToolContext,
+  ): Promise<Record<string, unknown>> => {
+    const sessionId = resolveActorId(context);
+    const taskId = String(input.taskId ?? "").trim();
+    const occurrenceAt = String(input.occurrenceAt ?? "").trim();
+    const at = String(input.at ?? "").trim();
+    if (!taskId || !occurrenceAt || !at) {
+      return { ok: false, error: "需要 taskId、occurrenceAt（原时刻）与 at（新时刻）" };
+    }
+    const task = scheduleTaskService.getTask(taskId);
+    if (!task || task.sessionId !== sessionId) return { ok: false, error: "没有找到这条提醒" };
+    try {
+      const updated = await scheduleTaskService.rescheduleOccurrence(taskId, occurrenceAt, at);
+      return {
+        ok: true,
+        action: "reschedule_occurrence",
+        taskId,
+        taskTitle: updated.shortTitle || updated.description,
+        originalAt: occurrenceAt,
+        at,
+        nextRunAt: updated.nextRunAt,
+        whenSpoken: formatNextRunAtLocal(at, updated.timezone),
+        summary: "已把这一次改到新时间，其余重复不变。",
+      };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
   };
 
@@ -999,10 +1123,16 @@ export function registerCalendarTools(
         const r = await handleFindFreeSlots(input, context);
         return { ...r, action: "find_free_slots" };
       }
+      case "skip_occurrence": {
+        return { ...(await handleSkipOccurrence(input, context)), action: "skip_occurrence" };
+      }
+      case "reschedule_occurrence": {
+        return { ...(await handleRescheduleOccurrence(input, context)), action: "reschedule_occurrence" };
+      }
       default:
         return {
           ok: false,
-          error: `未知 action「${action || "(空)"}」，可选值：create、batch_create、list_tasks、delete_task、update_task、find_free_slots`,
+          error: `未知 action「${action || "(空)"}」，可选值：create、batch_create、list_tasks、delete_task、update_task、find_free_slots、skip_occurrence、reschedule_occurrence`,
         };
     }
   });

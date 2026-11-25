@@ -1,5 +1,9 @@
 import type { ExternalChatProvider } from "../external-model/types.js";
-import { normalizeRemindBeforeMinutes, type ScheduleTaskCategory } from "./schedule-task-service.js";
+import {
+  normalizeRemindBeforeMinutes,
+  type ScheduleRecurrence,
+  type ScheduleTaskCategory,
+} from "./schedule-task-service.js";
 import { extractReminderSubject, formatReminderMessage, isEchoLikeReminderCopy } from "./reminder-copy.js";
 
 // 展示文案规整已抽到 reminder-copy.ts（createTask 落库闸口共用）；此处按旧出口转发，
@@ -15,7 +19,13 @@ export type ScheduleDraft = {
   /** 行程分类：itinerary=行程/正事（默认）；trivia=生活琐事（只后台提醒，不进「今日安排」） */
   category?: ScheduleTaskCategory;
   runAt: string;
-  recurrence: "none" | "daily" | "weekly" | "yearly";
+  recurrence: ScheduleRecurrence;
+  /**
+   * cron 表达式（recurrence=cron 时唯一可信的重复规则）。
+   * 「每天早上除周一」这类排除式重复只能用它表达——daily/weekly/yearly 枚举里
+   * 没有「除某天」，此前一律被降级成每天（2026-11-24 修：周一也会提醒去游泳）。
+   */
+  cronExpression?: string;
   /** 事件时长（分钟）；用于冲突检测。缺省 = 时间点提醒（无区间）。 */
   durationMinutes?: number;
   /** 事件地点（如「协和医院」「首都机场T3」）：提醒策略层据此估算路程安排出发预留。 */
@@ -30,27 +40,15 @@ export type ScheduleDraft = {
   };
 };
 
-/** 工具/API 在创建前需向用户确认重复方式时的固定提示（给模型读 tool.result）。 */
-export const SCHEDULE_RECURRENCE_CONFIRM_HINT =
-  "用户尚未说明提醒是否重复。请先向用户确认：这是一次性提醒、每天重复、还是连续一段时间？在用户明确回答前不要创建提醒，也不要声称已设置成功。";
-
-export type TaskRecurrenceSuggestion = {
-  suggestedType: "once" | "daily" | "continuous" | "weekly" | "yearly";
-  confidence: "high" | "medium" | "low";
-  reason: string;
-  question: string;
-  examples?: string[];
-};
-
+/**
+ * 解析结果。
+ *
+ * 2026-11-25 用户定调「删掉重复方式确认闸，交给 agent 自己抉择」：解析层只回答
+ * 「能不能解析出时间与事项」，不再替模型判断该不该追问重复方式——没提重复就按
+ * 单次建，模型想建每天就在工具参数里传 recurrence，由模型自己决策。
+ */
 export type ScheduleIntentParseResult =
   | { matched: true; draft: ScheduleDraft }
-  | {
-      matched: false;
-      needsRecurrenceConfirm: true;
-      draft: ScheduleDraft;
-      hint: string;
-      suggestion?: TaskRecurrenceSuggestion;
-    }
   | { matched: false; hint: string };
 
 export class ScheduleIntentService {
@@ -89,7 +87,14 @@ export class ScheduleIntentService {
     };
   }
 
-  /** 解析并判断是否可立即创建（提醒类在未说明重复时会要求先追问）。 */
+  /**
+   * 解析能否立即创建。
+   *
+   * 只拦「解析不出时间/事项」（问清几点再建）。重复方式不再由解析层替模型裁决
+   * （2026-11-25 用户定调）：用户没提重复就按单次建，是不是每天由 agent 自己判断、
+   * 通过工具参数 recurrence 表达——此前的 needsRecurrenceConfirm 闸会把
+   * 「1 点喊我睡觉」这类明确单次也拦下来追问一轮，纯噪音。
+   */
   async parseForCreate(
     sessionId: string,
     userText: string,
@@ -102,23 +107,6 @@ export class ScheduleIntentService {
         hint:
           "未能解析时间或事项。用户只说了要做什么、没给具体时刻时，先问清几点再创建，" +
           "不要自行假设或补一个默认时间。示例：「一分钟后提醒我吃药」「明天 9:00 提醒我开会」。",
-      };
-    }
-    if (draft.kind === "reminder" && needsRecurrenceConfirmation(userText)) {
-      const suggestion = analyzeTaskRecurrencePattern(userText, draft);
-      // 高置信一次性直接创建（2026-10-13 根修「没进日程」）：「取快递/开会/挂号」
-      // 等一次性事项此前被重复确认闸门拦下（matched=false），而模型在确认问答
-      // 之间口头宣称「已设置」——任务从未落库，日程页自然看不到。对齐 Siri/
-      // ChatGPT「先建后说」语义：一次性先建（用户可再改/再删），没建才是事故。
-      if (suggestion.suggestedType === "once" && suggestion.confidence === "high") {
-        return { matched: true, draft };
-      }
-      return {
-        matched: false,
-        needsRecurrenceConfirm: true,
-        draft,
-        hint: SCHEDULE_RECURRENCE_CONFIRM_HINT,
-        suggestion,
       };
     }
     return { matched: true, draft };
@@ -140,8 +128,13 @@ export class ScheduleIntentService {
     now?: Date,
   ): Promise<ScheduleDraft | null> {
     const ruleDraft = this.parseByRule(userText, userTimezone, now);
+    const tz = userTimezone?.trim() || "Asia/Shanghai";
     if (ruleDraft) {
-      return this.ensureReminderCopy(sessionId, userText, applyRecurrenceFromUserText(userText, ruleDraft));
+      return this.ensureReminderCopy(
+        sessionId,
+        userText,
+        applyRecurrenceFromUserText(userText, ruleDraft, tz),
+      );
     }
     // 时间锚定闸（2026-11-15 根修「设置一个闹钟 → 明早 08:00 自动建」）：用户原句里
     // 没有任何可锚定的时刻时，解析模型给出的 runAt 只能是它替用户编的默认值。
@@ -152,7 +145,11 @@ export class ScheduleIntentService {
     return this.ensureReminderCopy(
       sessionId,
       userText,
-      applyRecurrenceFromUserText(userText, backfillDurationFromUserText(userText, modelDraft)),
+      applyRecurrenceFromUserText(
+        userText,
+        backfillDurationFromUserText(userText, modelDraft),
+        tz,
+      ),
       true,
     );
   }
@@ -479,11 +476,14 @@ function validateDraft(input: unknown): ScheduleDraft | null {
   const runAt = String(v.runAt ?? "");
   const recurrence = v.recurrence;
   const validKind = kind === "reminder" || kind === "action" || kind === "weather_brief";
+  const cronRaw = String(v.cronExpression ?? "").trim();
+  const cronExpression = /^\S+\s+\S+\s+\S+\s+\S+\s+\S+$/.test(cronRaw) ? cronRaw : undefined;
   const validRecurrence =
     recurrence === "none" ||
     recurrence === "daily" ||
     recurrence === "weekly" ||
-    recurrence === "yearly";
+    recurrence === "yearly" ||
+    (recurrence === "cron" && !!cronExpression);
   if (!description || !validKind || !validRecurrence) return null;
   const runAtDate = new Date(runAt);
   if (Number.isNaN(runAtDate.getTime())) return null;
@@ -498,7 +498,7 @@ function validateDraft(input: unknown): ScheduleDraft | null {
   const location = String(v.location ?? "").trim() || undefined;
   if (kind === "weather_brief") {
     if (!title) return null;
-    return { title, shortTitle, description, kind: "weather_brief", category, runAt: runAtDate.toISOString(), recurrence };
+    return { title, shortTitle, description, kind: "weather_brief", category, runAt: runAtDate.toISOString(), recurrence, cronExpression };
   }
   if (kind === "reminder") {
     // reminderMessage 缺省不回填 description（那等于构造性回声）：留空交给
@@ -511,6 +511,7 @@ function validateDraft(input: unknown): ScheduleDraft | null {
       category,
       runAt: runAtDate.toISOString(),
       recurrence,
+      cronExpression,
       durationMinutes,
       location,
       remindBeforeMinutes,
@@ -533,185 +534,9 @@ function validateDraft(input: unknown): ScheduleDraft | null {
     category,
     runAt: runAtDate.toISOString(),
     recurrence,
+    cronExpression,
     durationMinutes,
     action: { url, method, body: actionObj?.body },
-  };
-}
-
-/** 用户是否已明确单次或重复（明确则可直接创建，无需追问）。 */
-export function isRecurrenceExplicit(userText: string): boolean {
-  const normalized = userText.trim();
-  if (parseRelativeDateTimeFromPrompt(normalized)) return true;
-  if (inferRecurrenceFromUserText(normalized) !== "none") return true;
-  if (isAlarmStyleReminder(normalized) && parseDateTimeFromPrompt(normalized)) return true;
-  if (
-    /仅一次|就一次|单次|一次性的|仅此一次|只提醒一次|只叫一次|不要重复|不用每天|不重复|别重复/.test(
-      normalized,
-    )
-  ) {
-    return true;
-  }
-  if (/明天|今天|后天|今早|今晚|明早|明晚|大后天/.test(normalized)) return true;
-  return false;
-}
-
-/** 提醒类且能解析出时间，但未说明是否重复 → 须先向用户确认。 */
-export function needsRecurrenceConfirmation(userText: string): boolean {
-  const normalized = userText.trim();
-  if (!isReminderIntent(normalized)) return false;
-  if (isWeatherBriefIntent(normalized)) return false;
-  if (/https?:\/\/[^\s]+/i.test(normalized)) return false;
-  if (!parseDateTimeFromPrompt(normalized)) return false;
-  return !isRecurrenceExplicit(normalized);
-}
-
-export function buildRecurrenceConfirmToolResult(
-  draft: ScheduleDraft,
-  suggestion?: TaskRecurrenceSuggestion,
-): Record<string, unknown> {
-  const result: Record<string, unknown> = {
-    ok: true,
-    matched: false,
-    needsRecurrenceConfirm: true,
-    hint: SCHEDULE_RECURRENCE_CONFIRM_HINT,
-    parsedNextRunAt: draft.runAt,
-    parsedReminderMessage: draft.reminderMessage ?? draft.description,
-  };
-
-  if (suggestion) {
-    result.suggestedQuestion = suggestion.question;
-    result.suggestedType = suggestion.suggestedType;
-    result.confidence = suggestion.confidence;
-    result.reason = suggestion.reason;
-    if (suggestion.examples) {
-      result.examples = suggestion.examples;
-    }
-  } else {
-    result.suggestedQuestion = "这是一次性提醒，还是每天重复，或者连续一段时间（比如接下来3天）？";
-  }
-
-  return result;
-}
-
-/** 智能分析任务内容，推断最可能的重复类型并提供询问建议 */
-export function analyzeTaskRecurrencePattern(userText: string, draft: ScheduleDraft): TaskRecurrenceSuggestion {
-  const normalized = userText.trim();
-  const subject = (draft.reminderMessage ?? draft.description).trim();
-
-  const ONCE_PATTERNS = [
-    { pattern: /开会|会议|讨论|评审|汇报|演示|面试|约会|聚餐|吃饭|见面|拜访|签合同|交报告|提交|截止|deadline/i, reason: "这类任务通常有明确的时间点，一般只发生一次" },
-    { pattern: /买.*?票|订.*?房|预订|预约|挂号|取件|快递|发货/i, reason: "这类任务通常是一次性的具体事项" },
-    { pattern: /接.*?(人|机|孩子)|送.*?(人|机|孩子)|去.*?(机场|车站|医院)/i, reason: "接送类任务通常是一次性的行程安排" },
-    { pattern: /还书|还钱|还款|缴费|付.*?款|续费/i, reason: "支付/归还类任务通常有明确的单次时间点" },
-    { pattern: /生日.*?(派对|聚会|庆祝|礼物)|纪念.*?(日|活动)|节日.*?(准备|购物|安排)/i, reason: "特殊日期的活动通常是一次性的" },
-  ];
-
-  const DAILY_PATTERNS = [
-    { pattern: /吃药|服药|用药|喝药|胰岛素|打针/i, reason: "用药提醒通常需要每日重复" },
-    { pattern: /喝水|补水|运动|锻炼|健身|跑步|瑜伽|散步|冥想/i, reason: "健康习惯类提醒通常建议每日重复" },
-    { pattern: /打卡|签到|学习|背单词|阅读|写日记|记账/i, reason: "日常习惯养成类任务通常适合每日重复" },
-    { pattern: /喂.*?(宠物|猫|狗|鱼)|铲屎|遛狗/i, reason: "宠物照料通常需要每日重复" },
-    { pattern: /备份|同步|清理.*?(缓存|垃圾|邮件)|整理.*?(桌面|文件)/i, reason: "维护类任务通常建议定期重复" },
-    { pattern: /新闻.*?(推送|简报|早报|日报|推送)|推送.*?新闻|简报|早报|日报|每天.*?(搜|查|看|推送).*?新闻/i, reason: "新闻/简报/早报类任务通常是长期的每日信息推送需求" },
-  ];
-
-  const CONTINUOUS_PATTERNS = [
-    { pattern: /接下来.*?(\d+).*?(天|周|小时)|连续.*?(\d+).*?(天|周|小时)|持续.*?(\d+).*?(天|周|小时)/i, reason: "用户明确提到了持续时间" },
-    { pattern: /这周|本周|这几天|最近.*?几天/i, reason: "用户提到了一个时间段范围" },
-    { pattern: /疗程|训练计划|备考|复习|冲刺|项目.*?(周期|阶段)/i, reason: "这类任务通常需要在特定周期内连续执行" },
-  ];
-
-  for (const { pattern, reason } of ONCE_PATTERNS) {
-    if (pattern.test(normalized) || pattern.test(subject)) {
-      return {
-        suggestedType: "once",
-        confidence: "high",
-        reason,
-        question: `这个「${subject}」看起来像是一次性任务。${reason} 我应该设置为一次性提醒吗？`,
-        examples: [
-          "✅ 就设置一次性的",
-          "📅 其实我想每天重复",
-          "⏰ 接下来一周每天都提醒我",
-        ],
-      };
-    }
-  }
-
-  if (isNewsBriefIntent(normalized) || isNewsBriefIntent(subject)) {
-    return {
-      suggestedType: "daily",
-      confidence: "high",
-      reason: "新闻/简报/早报类任务是长期的信息推送需求，建议设置为每天自动推送",
-      question: `「${subject}」看起来像是日常信息推送需求。你想设置为每天永久性自动推送吗？`,
-      examples: [
-        "✅ 好的，每天永久推送（推荐）",
-        "📅 只需要今天一次",
-        "📆 仅工作日推送（周一到周五）",
-        "⏰ 接下来一周每天推送",
-      ],
-    };
-  }
-
-  for (const { pattern, reason } of CONTINUOUS_PATTERNS) {
-    if (pattern.test(normalized) || pattern.test(subject)) {
-      const durationMatch = normalized.match(/(?:接下来|连续|持续)\s*(\d+)\s*(天|周|小时)/i);
-      const duration = durationMatch ? `${durationMatch[1]}${durationMatch[2]}` : "一段时间";
-      return {
-        suggestedType: "continuous",
-        confidence: "high",
-        reason,
-        question: `你提到了"${duration}"，是想在这段时间内每天重复提醒吗？`,
-        examples: [
-          `✅ 是的，${duration}内每天提醒`,
-          "🔄 改为每天长期重复",
-          "❌ 只需要一次就好",
-        ],
-      };
-    }
-  }
-
-  for (const { pattern, reason } of DAILY_PATTERNS) {
-    if (pattern.test(normalized) || pattern.test(subject)) {
-      return {
-        suggestedType: "daily",
-        confidence: "medium",
-        reason,
-        question: `这个「${subject}」看起来像是日常习惯。${reason} 你想设置为每天重复吗？`,
-        examples: [
-          "✅ 好的，每天重复",
-          "📅 这次只需要一次",
-          "📆 每周一到周五就行（工作日）",
-          "⏰ 接下来7天每天提醒我",
-        ],
-      };
-    }
-  }
-
-  if (isAlarmStyleReminder(normalized)) {
-    return {
-      suggestedType: "daily",
-      confidence: "high",
-      reason: "起床/闹钟类提醒通常是每天的日常需求",
-      question: "这是一个起床/闹钟提醒。你想设置为每天重复吗？（大多数人的闹钟都是每天响的）",
-      examples: [
-        "✅ 每天都响（推荐）",
-        "📅 只要明天一次",
-        "📆 仅工作日（周一到周五）",
-      ],
-    };
-  }
-
-  return {
-    suggestedType: "once",
-    confidence: "low",
-    reason: "未能从任务内容推断出明确的重复模式",
-    question: `关于「${subject}」的提醒，你想怎么设置重复方式？`,
-    examples: [
-      "📅 就这一次",
-      "🔄 每天重复",
-      "📆 每周重复",
-      "⏰ 接下来几天连续提醒",
-    ],
   };
 }
 
@@ -733,6 +558,10 @@ export function inferRecurrenceFromUserText(userText: string): "none" | "daily" 
   ) {
     return "daily";
   }
+  // 工作日类（工作日 / 周一到周五）也是"重复"，只是精确规则要交给 cron（见
+  // applyRecurrenceFromUserText）。这里先判成 daily 是为了通过"是否已明确重复"
+  // 的闸门——退回 none 会让用户被追问一次，且可能被当成单次提醒。
+  if (isWorkdayRecurrence(normalized)) return "daily";
   if (
     isAlarmStyleReminder(normalized) &&
     !/仅一次|就一次|单次|一次性的|仅此一次|只提醒一次|只叫一次|不要重复|不用每天|不重复|别重复|明天|后天|今天|今早|今晚|明早|明晚|大后天/.test(
@@ -744,10 +573,136 @@ export function inferRecurrenceFromUserText(userText: string): "none" | "daily" 
   return "none";
 }
 
-function applyRecurrenceFromUserText(userText: string, draft: ScheduleDraft): ScheduleDraft {
+const WEEKDAY_DOW: Record<string, number> = {
+  日: 0,
+  天: 0,
+  一: 1,
+  二: 2,
+  三: 3,
+  四: 4,
+  五: 5,
+  六: 6,
+};
+
+/** 工作日集合（周一到周五）。「工作日」在这套系统里 = cron BYDAY 1-5。 */
+const WORKDAY_DOW: number[] = [1, 2, 3, 4, 5];
+
+/**
+ * 用户是否在说「工作日」类重复（工作日 / 上班日 / 周一到周五 / 周一至周五）。
+ *
+ * 这类表达在 none/daily/weekly/yearly 里没有精确落点：塞进 daily 会让周末也响，
+ * 塞进 weekly 只在锚点那天响。只有 cron 的 BYDAY 说得清（2026-11-25 修）。
+ */
+export function isWorkdayRecurrence(userText: string): boolean {
+  const text = userText.replace(/\s+/g, "");
+  if (/工作日|上班日|工作天/.test(text)) return true;
+  // 周一到周五 / 周一至周五 / 周一到五 / 星期一到星期五
+  return /(?:周|星期|礼拜)[一二三四五](?:到|至|~|-|—|－)(?:周|星期|礼拜)?[一二三四五]/.test(text);
+}
+
+/**
+ * 从原句抽「被排除的星期」（0=周日…6=周六）。
+ *
+ * 只认明确的排除语义，单纯出现「周一」不算（「周一有个会」不是排除）：
+ *   ① 除周一 / 除了周一和周三 / 除去周一、周三
+ *   ② 周一除外 / 周一以外 / 周一不去 / 周一休息 / 周一不提醒
+ *
+ * 背景（2026-11-24）：用户「每天早上除了周一都去游泳」被 inferRecurrenceFromUserText
+ * 判成 daily，周一照样提醒。recurrence 枚举没有「除某天」，必须走 cron。
+ */
+export function parseWeekdayExclusions(userText: string): number[] {
+  const text = userText.replace(/\s+/g, "");
+  const out = new Set<number>();
+  const dayOf = (ch: string): number | undefined => WEEKDAY_DOW[ch];
+
+  for (const m of text.matchAll(
+    /(?:除了?|除去)((?:周|星期|礼拜)[一二三四五六日天](?:[、和及与]?(?:周|星期|礼拜)[一二三四五六日天])*)/g,
+  )) {
+    for (const d of m[1]!.matchAll(/(?:周|星期|礼拜)([一二三四五六日天])/g)) {
+      const idx = dayOf(d[1]!);
+      if (idx !== undefined) out.add(idx);
+    }
+  }
+  for (const m of text.matchAll(
+    /((?:周|星期|礼拜)[一二三四五六日天](?:[、和及与]?(?:周|星期|礼拜)[一二三四五六日天])*)(?:之外|以外|除外|不去|不用|不要|不提醒|不安排|休息|跳过)/g,
+  )) {
+    for (const d of m[1]!.matchAll(/(?:周|星期|礼拜)([一二三四五六日天])/g)) {
+      const idx = dayOf(d[1]!);
+      if (idx !== undefined) out.add(idx);
+    }
+  }
+  return [...out].sort((a, b) => a - b);
+}
+
+/** ISO 时刻在指定时区的「时:分」（不受服务器本机时区影响）。 */
+function localClockOf(iso: string, timezone: string): { hour: number; minute: number } | null {
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return null;
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: timezone.trim() || "Asia/Shanghai",
+    hour: "2-digit",
+    minute: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(at);
+  const hour = Number(parts.find((p) => p.type === "hour")?.value);
+  const minute = Number(parts.find((p) => p.type === "minute")?.value);
+  if (!Number.isInteger(hour) || !Number.isInteger(minute)) return null;
+  return { hour, minute };
+}
+
+/**
+ * 用 draft.runAt 的用户本地时分 + 指定星期集合编成 5 段 cron。
+ * 返回 null = 集合为空 / 参数不成立（调用方保持原 recurrence）。
+ */
+export function buildWeeklyCronForDays(
+  runAtIso: string,
+  timezone: string,
+  days: number[],
+): string | null {
+  const clock = localClockOf(runAtIso, timezone);
+  if (!clock) return null;
+  const keep = [...new Set(days.filter((d) => Number.isInteger(d) && d >= 0 && d <= 6))].sort(
+    (a, b) => a - b,
+  );
+  if (keep.length === 0) return null;
+  return `${clock.minute} ${clock.hour} * * ${keep.join(",")}`;
+}
+
+/**
+ * 把「被排除的星期」编成 5 段 cron：触发时刻取 draft.runAt 的用户本地时分，
+ * 星期段是剩下的天。返回 null = 全被排除 / 参数不成立（调用方保持原 recurrence）。
+ */
+export function buildWeeklyCronExcluding(
+  runAtIso: string,
+  timezone: string,
+  excludedDow: number[],
+): string | null {
+  const excluded = new Set(excludedDow.filter((d) => Number.isInteger(d) && d >= 0 && d <= 6));
+  const keep = [0, 1, 2, 3, 4, 5, 6].filter((d) => !excluded.has(d));
+  if (keep.length === 0 || keep.length === 7) return null;
+  return buildWeeklyCronForDays(runAtIso, timezone, keep);
+}
+
+function applyRecurrenceFromUserText(
+  userText: string,
+  draft: ScheduleDraft,
+  timezone: string,
+): ScheduleDraft {
   const recurrence = inferRecurrenceFromUserText(userText);
-  if (draft.recurrence === recurrence) return draft;
-  return { ...draft, recurrence };
+  const base = draft.recurrence === recurrence ? draft : { ...draft, recurrence };
+  if (recurrence === "none") return base;
+  // 工作日类先判：「周一到周五」若同时命中去重词（每周一到周五）会被 infer 判成
+  // weekly，这里统一收回到 cron BYDAY=1-5，否则周末不打烊/只在周一响。
+  if (isWorkdayRecurrence(userText)) {
+    const cron = buildWeeklyCronForDays(base.runAt, timezone, WORKDAY_DOW);
+    return cron ? { ...base, recurrence: "cron", cronExpression: cron } : base;
+  }
+  // 「除周一」这类排除式重复：枚举表达不了，落 cron，不能悄悄降级成每天。
+  const excluded = parseWeekdayExclusions(userText);
+  if (excluded.length === 0) return base;
+  const cron = buildWeeklyCronExcluding(base.runAt, timezone, excluded);
+  if (!cron) return base;
+  return { ...base, recurrence: "cron", cronExpression: cron };
 }
 
 /** LLM 路径漏填时长时用规则抽取回填（规则路径已在 parseByRule 内计算）。 */
@@ -768,11 +723,6 @@ function isReminderIntent(text: string): boolean {
 /** 天气/穿衣类定时简报（与普通「提醒我」区分：须含下列关键词之一） */
 function isWeatherBriefIntent(text: string): boolean {
   return /(天气|气温|穿衣|天气预报|天气提醒|出门穿|带伞)/.test(text);
-}
-
-/** 新闻/简报/早报/日报类定时推送（识别为长期每日任务，避免误判为临时性任务） */
-function isNewsBriefIntent(text: string): boolean {
-  return /(新闻.*?(推送|简报|早报|日报)|推送.*?新闻|科技新闻|每日新闻|每天.*?新闻|新闻早报|新闻日报|资讯.*?(推送|简报)|早报|日报|简报)/.test(text);
 }
 
 function validClock(hours: number, minutes: number): boolean {

@@ -14,10 +14,10 @@ import "mobile_theme.dart";
 ///
 /// 设计稿 2026-11-07 第二屏：
 /// - 288px 宽玻璃抽屉，打开时主界面整体右移、右侧留 32px 缝
-/// - 头部：agent 名称 + 「主会话在后台运行」+ 关闭
+/// - 头部：关闭键（「主会话在后台运行」小字已移除）
 /// - 旁聊列表：标题 + 预览 + 相对时间；长按重命名 / 右侧按钮删除
 /// - 列表末尾虚线「新建旁聊」卡
-/// - 底部 dock：设置齿轮（左下角）· 搜索旁聊 · 新建旁聊
+/// - 底部 dock：设置齿轮（左下角）· 搜索旁聊输入框 · 新建旁聊
 ///
 /// 所有操作都落到真实接口 `/api/side-chats`，无本地假数据。
 class MobileSidebar extends StatefulWidget {
@@ -54,7 +54,6 @@ class MobileSidebarState extends State<MobileSidebar> {
 
   List<SideChatSummary> _chats = const <SideChatSummary>[];
   bool _loading = true;
-  bool _searchOpen = false;
   String _query = "";
   Timer? _debounce;
   int _requestSeq = 0;
@@ -85,7 +84,7 @@ class MobileSidebarState extends State<MobileSidebar> {
   }
 
   void _onSearchChanged(String value) {
-    _query = value;
+    setState(() => _query = value);
     _debounce?.cancel();
     _debounce = Timer(const Duration(milliseconds: 260), () {
       unawaited(reload());
@@ -239,13 +238,7 @@ class MobileSidebarState extends State<MobileSidebar> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: <Widget>[
               _buildHeader(p),
-              if (_searchOpen)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(8, 10, 8, 6),
-                  child: _buildSearchField(p),
-                )
-              else
-                _buildSectionLabel(p),
+              _buildSectionLabel(p),
               Expanded(child: _buildList(p)),
               _buildDock(p),
             ],
@@ -256,28 +249,14 @@ class MobileSidebarState extends State<MobileSidebar> {
     return panel;
   }
 
-  /// 顶部只保留「主会话在后台运行」小字与关闭键。
-  /// 2026-11-07：按需求移除 agent 名字（小蛇）大字文案。
+  /// 顶部只保留关闭键。
   Widget _buildHeader(MobilePalette p) {
     final bool dark = Theme.of(context).brightness == Brightness.dark;
     return Padding(
       padding: const EdgeInsets.fromLTRB(18, 18, 18, 4),
       child: Row(
+        mainAxisAlignment: MainAxisAlignment.end,
         children: <Widget>[
-          Expanded(
-            child: Text(
-              "主会话在后台运行",
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontFamily: "HarmonyOS Sans SC",
-                fontSize: 12,
-                letterSpacing: 0.3,
-                color: dark ? const Color(0xFF7C808B) : p.textMuted,
-              ),
-            ),
-          ),
-          const SizedBox(width: 10),
           GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTap: widget.onClose,
@@ -309,35 +288,12 @@ class MobileSidebarState extends State<MobileSidebar> {
 
   Widget _buildSectionLabel(MobilePalette p) {
     final bool dark = Theme.of(context).brightness == Brightness.dark;
-    final Color labelColor = dark ? const Color(0xFF7C808B) : p.textMuted;
     final Color hintColor = dark ? const Color(0xFF5F636C) : p.textMuted;
     return Padding(
       padding: const EdgeInsets.fromLTRB(18, 14, 18, 8),
       child: Row(
+        mainAxisAlignment: MainAxisAlignment.end,
         children: <Widget>[
-          Text(
-            "旁聊",
-            style: TextStyle(
-              fontFamily: "HarmonyOS Sans SC",
-              fontSize: 12,
-              letterSpacing: 1.2,
-              fontWeight: FontWeight.w700,
-              color: labelColor,
-            ),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              "长按重命名 · 右侧删除",
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontFamily: "HarmonyOS Sans SC",
-                fontSize: 11.5,
-                color: hintColor,
-              ),
-            ),
-          ),
           Text(
             _loading ? "…" : "${_chats.length} 个",
             style: TextStyle(
@@ -347,61 +303,6 @@ class MobileSidebarState extends State<MobileSidebar> {
             ),
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _buildSearchField(MobilePalette p) {
-    return SizedBox(
-      height: 38,
-      child: TextField(
-        controller: _searchInput,
-        autofocus: true,
-        onChanged: _onSearchChanged,
-        style: TextStyle(
-          fontFamily: "HarmonyOS Sans SC",
-          fontSize: 13,
-          color: p.textPrimary,
-        ),
-        decoration: InputDecoration(
-          isCollapsed: true,
-          hintText: "搜索旁聊",
-          hintStyle: TextStyle(
-            fontFamily: "HarmonyOS Sans SC",
-            fontSize: 12.5,
-            color: p.textMuted,
-          ),
-          prefixIcon:
-              Icon(Icons.search_rounded, size: 16, color: p.textSecondary),
-          prefixIconConstraints:
-              const BoxConstraints(minWidth: 34, minHeight: 30),
-          suffixIcon: GestureDetector(
-            onTap: () {
-              _searchInput.clear();
-              _query = "";
-              setState(() => _searchOpen = false);
-              unawaited(reload());
-            },
-            child: Icon(Icons.close_rounded, size: 15, color: p.textMuted),
-          ),
-          suffixIconConstraints:
-              const BoxConstraints(minWidth: 32, minHeight: 30),
-          filled: true,
-          fillColor: p.surface.withValues(alpha: 0.55),
-          contentPadding: const EdgeInsets.symmetric(vertical: 10),
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(18),
-            borderSide: BorderSide(color: p.divider.withValues(alpha: 0.7)),
-          ),
-          enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(18),
-            borderSide: BorderSide(color: p.divider.withValues(alpha: 0.7)),
-          ),
-          focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(18),
-            borderSide: BorderSide(color: p.divider),
-          ),
-        ),
       ),
     );
   }
@@ -723,42 +624,65 @@ class MobileSidebarState extends State<MobileSidebar> {
             ),
             const SizedBox(width: 8),
             Expanded(
-              child: GestureDetector(
-                behavior: HitTestBehavior.opaque,
-                onTap: () {
-                  setState(() => _searchOpen = true);
-                },
-                child: Container(
-                  height: 40,
-                  padding: const EdgeInsets.symmetric(horizontal: 13),
-                  decoration: BoxDecoration(
-                    color: fill.withValues(alpha: 0.06),
-                    borderRadius: BorderRadius.circular(20),
-                    border: Border.all(color: line.withValues(alpha: 0.08)),
-                    boxShadow: dark
-                        ? <BoxShadow>[
-                            BoxShadow(
-                              color: Colors.white.withValues(alpha: 0.05),
-                              offset: const Offset(0, 1),
-                              blurRadius: 0,
-                            ),
-                          ]
-                        : null,
-                  ),
-                  child: Row(
-                    children: <Widget>[
-                      Icon(Icons.search_rounded, size: 16, color: searchText),
-                      const SizedBox(width: 7),
-                      Text(
-                        "搜索旁聊",
+              child: Container(
+                height: 40,
+                padding: const EdgeInsets.symmetric(horizontal: 13),
+                decoration: BoxDecoration(
+                  color: fill.withValues(alpha: 0.06),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: line.withValues(alpha: 0.08)),
+                  boxShadow: dark
+                      ? <BoxShadow>[
+                          BoxShadow(
+                            color: Colors.white.withValues(alpha: 0.05),
+                            offset: const Offset(0, 1),
+                            blurRadius: 0,
+                          ),
+                        ]
+                      : null,
+                ),
+                child: Row(
+                  children: <Widget>[
+                    Icon(Icons.search_rounded, size: 16, color: searchText),
+                    const SizedBox(width: 7),
+                    Expanded(
+                      child: TextField(
+                        controller: _searchInput,
+                        onChanged: _onSearchChanged,
                         style: TextStyle(
                           fontFamily: "HarmonyOS Sans SC",
                           fontSize: 12.5,
-                          color: searchText,
+                          color: p.textPrimary,
+                        ),
+                        decoration: InputDecoration(
+                          isCollapsed: true,
+                          border: InputBorder.none,
+                          hintText: "搜索旁聊",
+                          hintStyle: TextStyle(
+                            fontFamily: "HarmonyOS Sans SC",
+                            fontSize: 12.5,
+                            color: searchText,
+                          ),
                         ),
                       ),
-                    ],
-                  ),
+                    ),
+                    if (_query.isNotEmpty)
+                      GestureDetector(
+                        onTap: () {
+                          _searchInput.clear();
+                          setState(() => _query = "");
+                          unawaited(reload());
+                        },
+                        child: Padding(
+                          padding: const EdgeInsets.only(left: 7),
+                          child: Icon(
+                            Icons.close_rounded,
+                            size: 15,
+                            color: searchText,
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
               ),
             ),

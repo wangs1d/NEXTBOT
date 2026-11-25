@@ -1,9 +1,9 @@
-/// 会出卡片的轮次不流式（2026-10-08）：`chat.stream_reset` 链路测试。
+/// 单条车道轮撤回（2026-11-25 车道架构）：`chat.stream_reset` 链路测试。
 ///
-/// 服务端确认本轮将携带结构化卡片后先推 reset 撤回已流正文，再静默，
-/// 最终由 `chat.assistant_done` 一次性结构化下发。覆盖：
+/// 服务端在首块文字外发前判出带卡/结构化产出后，先推 reset 撤回已流正文并
+/// 清空气泡账本，最终由 `chat.assistant_done` 一次性单条下发。覆盖：
 /// - 普通轮：清空已流正文、保留占位泡，done 后结构化内容落位
-/// - 分泡轮：流式泡清空（已定稿泡由 done 塌缩统一收口）
+/// - 分泡轮：流式泡清空（done 不带 bubbles，finalText 单条落屏）
 /// - 兜底：无 traceId 时清当前流式泡；他轮 trace 不误伤
 /// - reset 保留已挂照片（pendingMediaCards）
 library;
@@ -72,7 +72,6 @@ void main() {
     String? messageId,
     String finalText = "",
     List<Map<String, dynamic>>? bubbles,
-    bool replacesStream = false,
     List<Map<String, dynamic>>? mediaCards,
     List<Map<String, dynamic>>? replyBlocks,
   }) =>
@@ -83,7 +82,6 @@ void main() {
           if (messageId != null) "messageId": messageId,
           "finalText": finalText,
           if (bubbles != null) "bubbles": bubbles,
-          if (replacesStream) "finalTextReplacesStream": true,
           if (mediaCards != null) "mediaCards": mediaCards,
           if (replyBlocks != null) "blocks": replyBlocks,
         },
@@ -119,7 +117,6 @@ void main() {
     c.debugHandleWsEvent(done(
       messageId: "assistant-trace-1",
       finalText: "兴义两日游安排如下。",
-      replacesStream: true,
       replyBlocks: <Map<String, dynamic>>[
         <String, dynamic>{
           "type": "card",
@@ -133,7 +130,7 @@ void main() {
     expect(c.messages.first.replyBlocks, isNotNull, reason: "结构化卡片落位");
   });
 
-  test("分泡轮：reset 撤掉揭示缓冲，done 塌缩统一收口", () {
+  test("分泡轮：reset 撤掉揭示缓冲，done 单条落屏（车道架构）", () {
     final MobileChatController c = MobileChatController(wsBaseUrl: wsUrl());
     addTearDown(c.dispose);
     c.debugHandleWsEvent(chunk("assistant-trace-1-b1", "第一泡先说说路线。"));
@@ -145,17 +142,13 @@ void main() {
 
     c.debugHandleWsEvent(streamReset(traceId: "trace-1"));
     expect(c.messages.length, 1, reason: "占位泡保留");
-    expect(c.messages.first.text, isEmpty, reason: "本轮转卡片，缓冲正文一并撤掉");
+    expect(c.messages.first.text, isEmpty, reason: "本轮转单条车道，缓冲正文一并撤掉");
 
     c.debugHandleWsEvent(done(
+      messageId: "assistant-trace-1",
       finalText: "路线与住宿的完整结构化回复。",
-      replacesStream: true,
-      bubbles: <Map<String, dynamic>>[
-        <String, dynamic>{"id": "assistant-trace-1-b1", "text": "第一泡先说说路线。"},
-        <String, dynamic>{"id": "assistant-trace-1-b2", "text": "第二泡继续补住宿。"},
-      ],
     ));
-    expect(c.messages.length, 1, reason: "分泡塌缩落单泡（含占位让位）");
+    expect(c.messages.length, 1, reason: "撤回轮单条落屏，不与泡壳并存");
     expect(c.messages.first.messageId, "assistant-trace-1");
     expect(c.messages.first.text, "路线与住宿的完整结构化回复。");
     expect(c.messages.first.streaming, isFalse);

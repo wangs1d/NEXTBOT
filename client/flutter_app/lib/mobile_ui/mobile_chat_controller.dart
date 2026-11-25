@@ -2943,6 +2943,22 @@ class MobileChatController extends ChangeNotifier {
     // 数组（旧版兼容），把揭示缓冲里的泡立即整泡落屏，不留黑洞。
     _flushHiddenBubblesNow();
     final String? traceId = payload["traceId"]?.toString();
+    // 撤回轮（chat.stream_reset，2026-11-25 车道架构）：服务端已撤回流式块并
+    // 清空气泡账本，done 不带 bubbles → 走本单条路径。把本 trace 遗留的空
+    // 流式占位泡（撤回清空后的泡壳）一并撤掉，finalText 以单条落屏——
+    // 不存在「泡壳在、单条又落一条」的并存。
+    if (traceId != null && traceId.isNotEmpty) {
+      list.removeWhere((ChatMessage m) =>
+          m.streaming &&
+          m.text.trim().isEmpty &&
+          _isBubbleId(m.messageId) &&
+          _bubbleTraceOf(m.messageId) == traceId);
+      if (t.streamingMessageId != null &&
+          _isBubbleId(t.streamingMessageId!) &&
+          _bubbleTraceOf(t.streamingMessageId!) == traceId) {
+        t.streamingMessageId = null;
+      }
+    }
     final String? messageId = payload["messageId"]?.toString();
     // 优先用已经打开的流式消息;否则尝试按 trace 对齐
     int idx;
@@ -3047,8 +3063,8 @@ class MobileChatController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 真·分绿泡 done 收口：逐泡以服务端对账数组定稿；
-  /// finalTextReplacesStream=true 时整轮塌缩成单泡（删除全部分泡）。
+  /// 真·分绿泡 done 收口：逐泡以服务端对账数组定稿（流式块即最终呈现，
+  /// 2026-11-25 车道架构：done 只做对账定稿，不再有整轮塌缩/整段替换）。
   /// 全程操作 [threadKey] 线程桶（2026-11-12 P1 并发：不碰其他线程）。
   void _finalizeBubbles(
     Map<String, dynamic> payload,
@@ -3061,9 +3077,6 @@ class MobileChatController extends ChangeNotifier {
       () => <ChatMessage>[],
     );
     final String? traceId = payload["traceId"]?.toString();
-    final String traceKey = traceId != null && traceId.isNotEmpty
-        ? "assistant-$traceId"
-        : "assistant-final";
     // 出口一次性分泡（2026-11-23）：本轮没有流式 chunk，turn_started 留下的
     // 空占位不让位就会在首泡上方留一条空消息——只清本轮占位，避免误删同线程
     // 其它轮次的空消息。
@@ -3075,8 +3088,6 @@ class MobileChatController extends ChangeNotifier {
           m.text.trim().isEmpty &&
           (placeholderId == null || m.messageId == placeholderId),
     );
-    final String finalText =
-        stripAssistantProtocolFrames(payload["finalText"]?.toString() ?? "");
     final List<Map<String, dynamic>>? mediaCards =
         _parseStructuredList(payload, "mediaCards");
     final Map<String, dynamic>? summaryCard =
@@ -3087,60 +3098,11 @@ class MobileChatController extends ChangeNotifier {
         _parseStructuredList(payload, "renderBlocks");
     final List<Map<String, dynamic>>? replyBlocks =
         _parseStructuredList(payload, "blocks");
-    // v2 统一信封块（P4）：唯一权威序列。塌缩轮挂完整序列（正文=finalText，
-    // 渲染层按块直读不重复）；正常分泡轮只挂非 text 块（正文已在各气泡里）。
+    // v2 统一信封块（P4）：唯一权威序列。单泡轮挂完整序列（正文=finalText，
+    // 渲染层按块直读不重复）；多泡轮只挂非 text 块（正文已在各气泡里）。
     final List<Map<String, dynamic>>? envelopeBlocksAll =
         extractEnvelopeBlocks(payload);
     final List<String>? followUps = _parseFollowUps(payload);
-    if (payload["finalTextReplacesStream"] == true) {
-      // 塌缩：删除本轮所有分泡（含 id 对账与同 trace 兜底），落单泡 finalText
-      list.removeWhere((m) {
-        final bool hit =
-            bubbles.any((b) => b["id"]?.toString() == m.messageId) ||
-                (traceId != null &&
-                    traceId.isNotEmpty &&
-                    _bubbleTraceOf(m.messageId) == traceId);
-        return hit;
-      });
-      // 还在揭示缓冲/队列里的同 trace 泡一并丢弃（塌缩后不留旧泡）
-      if (traceId != null && traceId.isNotEmpty) {
-        _dropHiddenBubblesForTrace(traceId);
-      }
-      // 空占位让位：塌缩单泡 id = assistant-$traceId，与占位同 id，必须先撤
-      list.removeWhere(
-        (m) => m.streaming && m.text.trim().isEmpty && !_isBubbleId(m.messageId),
-      );
-      if (finalText.trim().isEmpty &&
-          mediaCards == null &&
-          summaryCard == null &&
-          renderBlocks == null &&
-          replyBlocks == null &&
-          envelopeBlocksAll == null) {
-        // 整轮只剩系统内部帧 → 塌缩后也不留空白泡
-        turn.streamingMessageId = null;
-        _resetActivityState(threadKey);
-        notifyListeners();
-        return;
-      }
-      list.add(ChatMessage(
-        messageId: traceKey,
-        sessionId: threadKey,
-        role: "assistant",
-        text: finalText,
-        timestamp: DateTime.now(),
-        mediaCards: mediaCards,
-        summaryCard: summaryCard,
-        renderBlocks: renderBlocks,
-        replyBlocks: replyBlocks,
-        envelopeBlocks: envelopeBlocksAll,
-        followUpPrompts: followUps,
-      ));
-      _persist(list.last);
-      turn.streamingMessageId = null;
-      _resetActivityState(threadKey);
-      notifyListeners();
-      return;
-    }
     // 正常收口：空占位让位，逐泡定稿（服务端文本为准），卡片挂末泡。
     // 多泡时块序列只留非 text 块（text 块按全文切分，挂末泡会整段复读）。
     list.removeWhere((m) =>

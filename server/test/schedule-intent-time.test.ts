@@ -119,17 +119,17 @@ test("高置信一次性事项（取快递）直接创建，不再卡重复确�
   }
 });
 
-test("日常习惯类（吃药）仍走重复确认，不擅自定终身", async () => {
+// 2026-11-25 用户定调：删掉重复方式确认闸，交给 agent 自己抉择。
+// 解析层只回答"时间能不能解析出来"，没提重复就按单次建。
+test("日常习惯类（吃药）不再被重复确认闸拦住：没提重复就是单次", async () => {
   const service = new ScheduleIntentService(null);
   const parsed = await service.parseForCreate(
     "test-session",
     "设置8点提醒我吃药",
     { userTimezone: "Asia/Shanghai", now: AT_18 },
   );
-  assert.equal(parsed.matched, false);
-  if (!parsed.matched && "needsRecurrenceConfirm" in parsed) {
-    assert.equal(parsed.needsRecurrenceConfirm, true);
-  }
+  assert.equal(parsed.matched, true);
+  if (parsed.matched) assert.equal(parsed.draft.recurrence, "none");
 });
 
 test("只说「设置一个闹钟」不落库：无时间锚时不调解析模型，更不采用它编的时刻", async () => {
@@ -167,4 +167,31 @@ test("只说「设置一个闹钟」不落库：无时间锚时不调解析模�
   assert.equal(hasStatedTimeAnchor("设置一个闹钟"), false);
   assert.equal(hasStatedTimeAnchor("提醒我交周报"), false);
   assert.equal(hasStatedTimeAnchor("十分钟后提醒我交周报"), true);
+});
+
+// 2026-11-25 用户实测：「1 点的时候喊我睡觉吧」被追问「今晚一次还是每天」。
+// 既有闸只认「明天/今晚/明早」这类日期词，不认「1 点」这种钟点；兜底建议又是
+// once/low，低于放行阈值。修法：有明确钟点且无重复词 → once/high，直接建单次。
+test("给了具体钟点、没提重复：直接建单次，不再追问重复方式", async () => {
+  const service = new ScheduleIntentService(null);
+  const parsed = await service.parseForCreate(
+    "test-session",
+    "1点的时候喊我睡觉吧",
+    { userTimezone: "Asia/Shanghai", now: AT_18 },
+  );
+  assert.equal(parsed.matched, true, "有钟点就该直接落库");
+  if (parsed.matched) {
+    assert.equal(parsed.draft.recurrence, "none", "没提重复就是单次");
+  }
+});
+
+test("对照：只说时间没给时长的睡觉提醒也不该被当成每天", async () => {
+  const service = new ScheduleIntentService(null);
+  const parsed = await service.parseForCreate(
+    "test-session",
+    "今晚一点喊我睡觉",
+    { userTimezone: "Asia/Shanghai", now: AT_18 },
+  );
+  assert.equal(parsed.matched, true);
+  if (parsed.matched) assert.equal(parsed.draft.recurrence, "none");
 });

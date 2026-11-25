@@ -107,7 +107,6 @@ function createBubbleRecorder(
 ): {
   seg: InstanceType<typeof StreamSegmenter>;
   bubbles: BubbleRecord[];
-  enable: () => void;
 } {
   const bubbles: BubbleRecord[] = [];
   const seg = new StreamSegmenter((text, phase, meta) => {
@@ -117,16 +116,17 @@ function createBubbleRecorder(
     interimReplyGapMs: 0,
     holdFirstSentence: false,
     segmentationEnabled: true,
+    // 车道架构：分泡模式由构造参数开启（车道在 T0 定死），无运行时翻转路径。
+    bubbleMode: true,
     bubbleGapMinMs: 0,
     bubbleGapMaxMs: 0,
     ...opts,
   });
-  return { seg, bubbles, enable: () => seg.enableBubbleMode() };
+  return { seg, bubbles };
 }
 
 test("分泡：用户样例「哎，在呢。有什么事？」切成两泡，首句强边界即切", async () => {
-  const { seg, bubbles, enable } = createBubbleRecorder();
-  enable();
+  const { seg, bubbles } = createBubbleRecorder();
   seg.feed("哎，在呢。有什么事？");
   await seg.chain;
   // 首泡细粒度即切；"有什么事？"仅 4 可见字（后续泡粗粒度）留缓冲
@@ -140,8 +140,7 @@ test("分泡：用户样例「哎，在呢。有什么事？」切成两泡，�
 });
 
 test("分泡：逗号句中不切，整句讲完才发（2026-09-29 用户反馈）", async () => {
-  const { seg, bubbles, enable } = createBubbleRecorder();
-  enable();
+  const { seg, bubbles } = createBubbleRecorder();
   seg.feed("今天下午三点有个会，别忘了。");
   await seg.chain;
   assert.equal(bubbles.length, 1, "逗号处不切，整句一个泡");
@@ -151,8 +150,7 @@ test("分泡：逗号句中不切，整句讲完才发（2026-09-29 用户反馈
 });
 
 test("分泡：截图回归——「这是定律，躲不掉的。」不再被逗号拦腰截断", async () => {
-  const { seg, bubbles, enable } = createBubbleRecorder();
-  enable();
+  const { seg, bubbles } = createBubbleRecorder();
   seg.feed("国庆哪都人多，这是定律，躲不掉的。");
   await seg.chain;
   assert.equal(bubbles.length, 1, "首泡=完整句，不在逗号处切");
@@ -167,8 +165,7 @@ test("分泡：截图回归——「这是定律，躲不掉的。」不再被�
 });
 
 test("分泡：单字句不足 2 可见字不单独成泡，向后并入", async () => {
-  const { seg, bubbles, enable } = createBubbleRecorder();
-  enable();
+  const { seg, bubbles } = createBubbleRecorder();
   seg.feed("嗯。好的。");
   await seg.chain;
   assert.equal(bubbles.length, 1, "「嗯。」不切，整段成单泡");
@@ -176,8 +173,7 @@ test("分泡：单字句不足 2 可见字不单独成泡，向后并入", async
 });
 
 test("分泡：无切泡点的短回复由 flushFinal 以 new 兜底成泡", async () => {
-  const { seg, bubbles, enable } = createBubbleRecorder();
-  enable();
+  const { seg, bubbles } = createBubbleRecorder();
   seg.feed("嗯。");
   await seg.chain;
   assert.equal(bubbles.length, 0, "流中不推");
@@ -188,8 +184,7 @@ test("分泡：无切泡点的短回复由 flushFinal 以 new 兜底成泡", asy
 });
 
 test("分泡：flushFinal 完整句残差开新泡，碎片残差才并末泡", async () => {
-  const { seg, bubbles, enable } = createBubbleRecorder();
-  enable();
+  const { seg, bubbles } = createBubbleRecorder();
   seg.feed("在呢。");
   await seg.chain;
   assert.equal(bubbles.length, 1);
@@ -202,8 +197,7 @@ test("分泡：flushFinal 完整句残差开新泡，碎片残差才并末泡", 
 });
 
 test("分泡：完整句残差在 flushFinal 开新泡（后续泡粗粒度下不再逐句碎裂）", async () => {
-  const { seg, bubbles, enable } = createBubbleRecorder();
-  enable();
+  const { seg, bubbles } = createBubbleRecorder();
   seg.feed("在呢。");
   await seg.chain;
   assert.equal(bubbles.length, 1);
@@ -218,8 +212,7 @@ test("分泡：完整句残差在 flushFinal 开新泡（后续泡粗粒度下�
 });
 
 test("分泡：后续泡 ≥12 字才切，短句合并成饱满的泡", async () => {
-  const { seg, bubbles, enable } = createBubbleRecorder();
-  enable();
+  const { seg, bubbles } = createBubbleRecorder();
   seg.feed("第一句。短句甲。短句乙。这句足够长足够长足够长了。");
   await seg.chain;
   // 首泡细粒度："第一句。"（3 可见字 ≥2）即切；随后短句攒不够 12 字不切，
@@ -234,8 +227,7 @@ test("分泡：后续泡 ≥12 字才切，短句合并成饱满的泡", async (
 });
 
 test("分泡：独立一行的表情不并进下一泡，避免绿泡内分段（2026-11-08 用户反馈）", async () => {
-  const { seg, bubbles, enable } = createBubbleRecorder();
-  enable();
+  const { seg, bubbles } = createBubbleRecorder();
   seg.feed("🙂\n\n有正事就说，没正事我劝你早点睡——煤球这会儿估计都摊成一张饼了。");
   await seg.chain;
   assert.equal(bubbles.length, 2, `表情独立成泡，正文再成一泡（实际 ${bubbles.length}）`);
@@ -246,8 +238,7 @@ test("分泡：独立一行的表情不并进下一泡，避免绿泡内分段�
 });
 
 test("分泡：一行一条消息——极短条（嗯/？/表情）各自成泡，不再并泡", async () => {
-  const { seg, bubbles, enable } = createBubbleRecorder();
-  enable();
+  const { seg, bubbles } = createBubbleRecorder();
   seg.feed("嗯\n？\n🙂\n那你要不要先睡？");
   await seg.chain;
   await seg.flushFinal();
@@ -259,8 +250,7 @@ test("分泡：一行一条消息——极短条（嗯/？/表情）各自成泡
 });
 
 test("分泡：换行后的短尾句不并进上一条消息", async () => {
-  const { seg, bubbles, enable } = createBubbleRecorder();
-  enable();
+  const { seg, bubbles } = createBubbleRecorder();
   seg.feed("今天别熬夜了。\n嗯");
   await seg.chain;
   assert.equal(bubbles.length, 1);
@@ -272,8 +262,7 @@ test("分泡：换行后的短尾句不并进上一条消息", async () => {
 });
 
 test("分泡：泡数封顶，超出内容以 continue 并入末泡", async () => {
-  const { seg, bubbles, enable } = createBubbleRecorder({ maxBubbles: 2 });
-  enable();
+  const { seg, bubbles } = createBubbleRecorder({ maxBubbles: 2 });
   seg.feed("第一句相当长足够过线了。第二句也足够长足够过线了。第三句还是足够长足够过线。第四句依旧足够长足够过线。");
   await seg.chain;
   assert.equal(bubbles.length, 2, `封顶 2 泡（实际 ${bubbles.length}）`);
@@ -284,11 +273,10 @@ test("分泡：泡数封顶，超出内容以 continue 并入末泡", async () =
 });
 
 test("分泡：泡间停顿真实生效且只发生在泡与泡之间", async () => {
-  const { seg, bubbles, enable } = createBubbleRecorder({
+  const { seg, bubbles } = createBubbleRecorder({
     bubbleGapMinMs: 40,
     bubbleGapMaxMs: 60,
   });
-  enable();
   const t0 = Date.now();
   seg.feed("先应一句。再说细节，补一点。");
   await seg.chain;
@@ -303,8 +291,7 @@ test("分泡：泡间停顿真实生效且只发生在泡与泡之间", async ()
 });
 
 test("分泡：句级去重不丢新句、不重复旧句", async () => {
-  const { seg, bubbles, enable } = createBubbleRecorder();
-  enable();
+  const { seg, bubbles } = createBubbleRecorder();
   seg.feed("在呢。怎么了？");
   await seg.chain;
   seg.feed("在呢。又说了一遍。");
@@ -315,47 +302,19 @@ test("分泡：句级去重不丢新句、不重复旧句", async () => {
   assert.ok(total.includes("又说了一遍"), "新句不丢");
 });
 
-test("分泡：enableBubbleMode 运行时置位（WS 门禁路径）", async () => {
-  const { seg, bubbles, enable } = createBubbleRecorder();
-  seg.feed("这句走信息块路径。");
-  await seg.chain;
-  assert.equal(bubbles[0].bubble, undefined, "未开启时 emit 不带 meta");
-  enable();
-  seg.feed("开启后。这句会切泡。");
-  await seg.chain;
-  // 首泡细粒度即切；第二句不足 12 字留缓冲
-  const after = bubbles.slice(1);
-  assert.equal(after.length, 1);
-  assert.equal(after[0].bubble, "new");
-  await seg.flushFinal();
-  assert.equal(bubbles.length - 1, 2, "完整句残差在 flushFinal 开新泡");
-  assert.equal(bubbles[2].bubble, "new");
-});
-
-test("分泡：disableBubbleMode 流中途关泡（信息域工具轮），后续段不带泡标记", async () => {
-  const { seg, bubbles, enable } = createBubbleRecorder();
-  enable();
+test("分泡：disableBubbleMode 流中途关泡已退役（车道在 T0 定死，无运行时翻转）", async () => {
+  // 运行时 enable/disableBubbleMode 已随 done 裁决一并删除：分泡模式只在
+  // 构造参数上，流中途不存在「关泡再开」的第二裁决。本用例只保留回归占位。
+  const { seg, bubbles } = createBubbleRecorder();
   seg.feed("第一句切泡正常。第二句也足够长足够过线了。");
   await seg.chain;
   const newCount = bubbles.filter((b) => b.bubble === "new").length;
-  assert.ok(newCount >= 1, `关泡前应已切出新泡（实际 ${newCount}）`);
-  // 模拟信息类工具（search/weather/market/clock 域）开始执行：WS 层关泡
-  seg.disableBubbleMode();
-  seg.feed("关泡后这段照常成段发出，但绝不再开新泡。资料一次展示完。");
-  await seg.chain;
+  assert.ok(newCount >= 1, `正常分泡应已切出新泡（实际 ${newCount}）`);
   await seg.flushFinal();
-  const after = bubbles.slice(newCount);
-  assert.ok(after.length >= 1, "关泡后内容仍要发出（不丢正文）");
-  assert.ok(
-    after.every((b) => b.bubble === undefined),
-    `关泡后不得再带 new/continue 标记（实际 ${JSON.stringify(after.map((b) => b.bubble))}）`,
-  );
-  // WS 层 BubbleTracker 把无 meta 段并回当前泡 → 信息类轮整轮一个绿泡
 });
 
 test("分泡：discard 后不再推送任何泡", async () => {
-  const { seg, bubbles, enable } = createBubbleRecorder();
-  enable();
+  const { seg, bubbles } = createBubbleRecorder();
   seg.feed("第一泡。");
   seg.discard();
   await seg.chain;
@@ -374,8 +333,7 @@ test("句级去重保留原文换行：列表项不再被压成「… - xxx」�
 });
 
 test("分泡：截图同形态长回复——列表块保留换行，不被句级去重压平", async () => {
-  const { seg, bubbles, enable } = createBubbleRecorder();
-  enable();
+  const { seg, bubbles } = createBubbleRecorder();
   const reply =
     "先不用急着下这个结论，我查一下。大哥，算是开放了，但这次还只是小范围开闸，不是全面放开。" +
     "\n\n- 11月21日，特斯拉开始推送 FSD V15 监督版，首批只给早期体验计划成员，在美国" +
@@ -410,8 +368,7 @@ const MARKET_TABLE = [
 ].join("\n");
 
 test("分泡：表格原子性——整表成单泡，不逐行撕碎", async () => {
-  const { seg, bubbles, enable } = createBubbleRecorder();
-  enable();
+  const { seg, bubbles } = createBubbleRecorder();
   seg.feed(`昨晚美股收盘情况如下：\n${MARKET_TABLE}\n整体跌得比较重。`);
   await seg.chain;
   await seg.flushFinal();
@@ -433,8 +390,7 @@ test("分泡：表格原子性——整表成单泡，不逐行撕碎", async ()
 });
 
 test("分泡：表格单元格里的句末标点不切泡", async () => {
-  const { seg, bubbles, enable } = createBubbleRecorder();
-  enable();
+  const { seg, bubbles } = createBubbleRecorder();
   const table = [
     "| 板块 | 备注 |",
     "|---|---|",
@@ -453,8 +409,7 @@ test("分泡：表格单元格里的句末标点不切泡", async () => {
 });
 
 test("分泡：表格前的引子独立成泡，表格不被并进散文", async () => {
-  const { seg, bubbles, enable } = createBubbleRecorder();
-  enable();
+  const { seg, bubbles } = createBubbleRecorder();
   seg.feed(`刚查了下，收盘数据都在这张表里：\n${MARKET_TABLE}`);
   await seg.chain;
   await seg.flushFinal();
@@ -481,8 +436,7 @@ const SCREENSHOT_TEXT = [
 ].join("\n");
 
 test("结构闭合：截图回归——加粗不再被句号拦腰切断，不再出现只含 ** 的泡", async () => {
-  const { seg, bubbles, enable } = createBubbleRecorder();
-  enable();
+  const { seg, bubbles } = createBubbleRecorder();
   // 逐字喂，模拟真实流式
   for (const ch of SCREENSHOT_TEXT) {
     seg.feed(ch);
@@ -508,8 +462,7 @@ test("结构闭合：截图回归——加粗不再被句号拦腰切断，不�
 });
 
 test("结构闭合：逐字喂入且每字等分发（真实流式粒度）结构与节奏不变", async () => {
-  const { seg, bubbles, enable } = createBubbleRecorder();
-  enable();
+  const { seg, bubbles } = createBubbleRecorder();
   for (const ch of SCREENSHOT_TEXT) {
     seg.feed(ch);
     await seg.chain;
@@ -526,8 +479,7 @@ test("结构闭合：逐字喂入且每字等分发（真实流式粒度）结�
 });
 
 test("结构闭合：逐字喂入时表格不被流式分块撕开", async () => {
-  const { seg, bubbles, enable } = createBubbleRecorder();
-  enable();
+  const { seg, bubbles } = createBubbleRecorder();
   for (const ch of `收盘数据：\n${MARKET_TABLE}\n整体跌得比较重。`) {
     seg.feed(ch);
   }
@@ -539,8 +491,7 @@ test("结构闭合：逐字喂入时表格不被流式分块撕开", async () =>
 });
 
 test("结构闭合：标题与正文段同泡，换行不把标题单独切出去", async () => {
-  const { seg, bubbles, enable } = createBubbleRecorder();
-  enable();
+  const { seg, bubbles } = createBubbleRecorder();
   seg.feed("## 结论\n先给结论：整体还行，但有两个点要留意。");
   await seg.chain;
   await seg.flushFinal();
@@ -550,8 +501,7 @@ test("结构闭合：标题与正文段同泡，换行不把标题单独切出�
 });
 
 test("结构闭合：代码块原子——整块成泡，块内空行与句号不切", async () => {
-  const { seg, bubbles, enable } = createBubbleRecorder();
-  enable();
+  const { seg, bubbles } = createBubbleRecorder();
   const code = [
     "这里是改法：",
     "",
@@ -578,8 +528,7 @@ test("结构闭合：代码块原子——整块成泡，块内空行与句号�
 });
 
 test("结构闭合：列表块原子——连续列表项不逐行成泡", async () => {
-  const { seg, bubbles, enable } = createBubbleRecorder();
-  enable();
+  const { seg, bubbles } = createBubbleRecorder();
   seg.feed("- 价格已经回落。\n- 时间窗口只剩两周。\n- 团队还在原地打转。\n\n结论如上。");
   await seg.chain;
   await seg.flushFinal();
@@ -593,8 +542,7 @@ test("结构闭合：列表块原子——连续列表项不逐行成泡", async
 });
 
 test("结构闭合：未闭合的 ** 在 EOF 前不切，整段兜底成一个完整泡", async () => {
-  const { seg, bubbles, enable } = createBubbleRecorder();
-  enable();
+  const { seg, bubbles } = createBubbleRecorder();
   seg.feed("这句**没有收尾。还有下文。");
   await seg.chain;
   await seg.flushFinal();

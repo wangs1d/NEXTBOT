@@ -578,11 +578,21 @@ export async function handleCardActionEvent(
         // 刚好补上 textsearch 的必填城市，避免「无法定位目的地」。
         let pickupLabel = pickup || "自定义上车点";
         let resolvedCity = city;
+        // 逆地理只在「真的需要」时做：客户端拖图选点已经自己把 POI 名贴在标签上
+        // （卡片点了 220ms 就去问 /pickup-candidates），这里再串一次 maps_regeocode
+        // 只会让「选完上车点 → 出车型」多等 1~3s（2026-11-24）。
+        const genericLabel =
+          !pickup ||
+          pickup === "自定义上车点" ||
+          pickup === "地图上的点" ||
+          pickup === "当前位置" ||
+          pickup === "我的位置附近" ||
+          /^\s*-?\d+(?:\.\d+)?\s*[,，]\s*-?\d+(?:\.\d+)?\s*$/.test(pickup);
         const mcp = deps.mcpClientService ?? null;
-        if (mcp) {
-          const place = await regeocodeViaDidi(mcp, lng, lat);
+        if (mcp && (genericLabel || !resolvedCity)) {
+          const place = await regeocodeViaDidi(mcp, lng, lat, genericLabel ? 1500 : 1200);
           if (place) {
-            if (!pickup || pickup === "自定义上车点") {
+            if (genericLabel) {
               if (place.name) pickupLabel = place.name;
             }
             // city 以「上车点坐标逆地理出的地级市」为权威（P0-2）：

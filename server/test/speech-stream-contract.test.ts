@@ -5,15 +5,15 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
 /**
- * 流式分层契约（2026-11-05 定稿，2026-11-23 方案 C 修订）：
+ * 流式分层契约（2026-11-05 定稿 → 2026-11-25 车道架构修订）：
  *
  *   「流式」「文字块」「分泡」三件事分开，但共用同一条 WS 通道：
  *     模型 stream:true → delta 实时进分段器 → 语音数据帧逐句播报（流式保留）
- *     闲聊轮：分段器切出的每个信息块 = 一个独立文字块（chat.assistant_chunk），
- *     块 id 由 BubbleTracker 统一分配，与 done 的 bubbles 对账数组同源
- *     （assistant-$traceId-bN，按位置一一对应）——同 block 身份原地升级。
- *     语音轮 / 任务面轮：不发文字块，文字由 done 单条收口。
- *     流式后转渲染/塌缩：复用既有 chat.stream_reset + finalTextReplacesStream。
+ *     气泡车道（闲聊轮）：分段器切出的每个信息块 = 一个独立文字块
+ *     （chat.assistant_chunk），块 id 由 BubbleTracker 统一分配；**流式块就是
+ *     最终呈现**，done 只做对账定稿（bubbles 照实快照），绝不重建/替换/塌缩。
+ *     单条车道（语音轮 / 任务面轮 / 整块交付场景）：不发文字块，文字由 done
+ *     一次交付；语音数据帧两种车道照常流式。
  *
  * 运行期行为由 scripts/probe-speech-stream.mjs 对真实服务取证；本文件是
  * 防回归的源码契约，锁住几个「一旦改回去就前功尽弃」的关键点。
@@ -26,7 +26,8 @@ const handler = serverSrc("ws/handlers/chat-user-message.ts");
 const editRoute = serverSrc("routes/http/chat.ts");
 const toolLoop = serverSrc("external-model/openai-compatible-tool-loop.ts");
 const protocol = repoFile("packages/agent-protocol/src/events.ts");
-const mainDart = repoFile("client/flutter_app/lib/main.dart");
+const bubblePolicy = serverSrc("agent/bubble-policy.ts");
+const bubbleTrackerSrc = serverSrc("agent/bubble-tracker.ts");
 const voiceDart = repoFile("client/flutter_app/lib/core/services/pure_voice_mode.dart");
 
 test("模型上游仍是流式生成（stream:true 未被关成非流式）", () => {
@@ -42,13 +43,51 @@ test("主链路 delta 实时进分段器，realtimeStream 默认开启", () => {
   );
 });
 
-test("文字块流式（方案 C）：chunk 携带块 id，done 用同源 bubbles 对账", () => {
-  // 2026-11-23 方案 C：闲聊轮实时外发文字块，块 id 与 done 的 bubbles
-  // 按位置一一对应（同 base + 同序号），客户端原地 patch/追加。
+test("车道门在 T0：decideTextLane 定死车道，done 不再是第二个裁决者", () => {
+  assert.match(bubblePolicy, /export function decideTextLane/, "车道裁决唯一出口");
+  assert.match(bubblePolicy, /lane: TextLane/, "车道只有 bubbles | single 两种");
+  assert.match(handler, /decideTextLane\(\{/, "车道必须在首个文字块外发前定死");
+  // 旧 done 裁决退役：不存在整轮结束后的呈现权翻转（按代码形态匹配，不误伤注释）。
+  assert.doesNotMatch(bubblePolicy, /export (async )?function (decidePresentation|splitReplyBubbles)/);
+  assert.doesNotMatch(handler, /\bdecidePresentation\(|\bsplitReplyBubbles\(/, "done 阶段禁止重判呈现");
+  assert.doesNotMatch(handler, /decideStreamPlan|decideFinalPlan/, "旧两阶段裁决必须删除");
+  assert.doesNotMatch(handler, /renderedReply/, "旧 renderedReply 启发式必须删除");
+  assert.doesNotMatch(handler, /shouldSplitBubbles|resolveBubbleCollapse/, "旧分泡判断必须删除");
+  assert.doesNotMatch(handler, /enableBubbleMode|disableBubbleMode/, "旧流式开泡/关泡必须删除");
+  // 车道只允许两处出现：初始声明 + 路由 .then 精化（首个主回复 delta 之前）。
+  // 文字块出口（sendAssistantChunk）等任何流式路径不得改写车道。
+  assert.match(handler, /let textStreamEnabled = textLane\.lane === "bubbles";/);
+  const laneAssignments = handler.match(/textStreamEnabled =/g) ?? [];
+  assert.equal(laneAssignments.length, 2, "车道只允许「初始声明 + 路由精化」两处赋值（T0 定死）");
+});
+
+test("done = 定稿（seal）：无塌缩通道、无整段替换信号", () => {
+  assert.doesNotMatch(
+    handler,
+    /finalTextReplacesStream:\s*true/,
+    "流式块即最终呈现，整段替换信号必须退役",
+  );
+  assert.doesNotMatch(handler, /let collapseStreamed|collapseStreamed =/, "塌缩判定必须删除");
+  assert.doesNotMatch(handler, /streamSegmenter\.feed\(finalFeed\)/, "收尾不得把定稿整段喂回分段器");
+  assert.match(handler, /await streamSegmenter\.flushFinal\(\)/);
+  // 对账数组照实快照：done 的 bubbles 来自账本，不再有 done 重建入口。
+  assert.doesNotMatch(bubbleTrackerSrc, /setFinalBubbles/, "气泡账本唯一写入路径是流式");
+  assert.match(handler, /bubbleTracker\.hasBubbles \? \{ bubbles: bubbleTracker\.snapshot \}/);
+});
+
+test("撤回路径：stream_reset 后清账，done 回单条（不存在泡在 + 翻案并存）", () => {
+  const resetFnIdx = handler.indexOf("const retractAndSuppressStream");
+  assert.ok(resetFnIdx > 0, "撤回闸必须存在");
+  const section = handler.slice(resetFnIdx, resetFnIdx + 1600);
+  assert.match(section, /bubbleTracker\.reset\(\)/, "撤回后必须清空气泡账本");
+  assert.match(section, /ChatStreamReset/, "撤回复用既有 stream_reset 事件");
+});
+
+test("文字块流式：chunk 携带块 id，done 用同源 bubbles 对账", () => {
   assert.match(
     handler,
     /type:\s*ServerEventType\.ChatAssistantChunk/,
-    "闲聊轮必须实时下发文字块（复用既有事件类型，不新开通道）",
+    "气泡车道必须实时下发文字块（复用既有事件类型，不新开通道）",
   );
   assert.match(
     handler,
@@ -58,8 +97,8 @@ test("文字块流式（方案 C）：chunk 携带块 id，done 用同源 bubble
   assert.match(handler, /messageId: blockId/, "chunk 的 messageId 必须是块 id");
   assert.match(
     handler,
-    /bubbleTracker\.setFinalBubbles\(finalTexts\)/,
-    "done 必须按同源 id 重排定稿（前 N 个 id 与流式块一致）",
+    /messageId: bubbleTracker\.outboundDoneMessageId/,
+    "done 的 messageId 指向末泡（按泡对账）",
   );
   assert.doesNotMatch(
     editRoute,
@@ -68,16 +107,15 @@ test("文字块流式（方案 C）：chunk 携带块 id，done 用同源 bubble
   );
 });
 
-test("呈现裁决统一到整轮之后：工具回调不再开关气泡/拆分通道", () => {
+test("工具回调不再开关气泡/拆分通道（车道在 T0 已定死）", () => {
   const startIdx = handler.indexOf("onExternalToolExecuteStart");
   assert.ok(startIdx > 0, "必须存在工具开始回调");
   const section = handler.slice(startIdx, startIdx + 3000);
-  // 呈现裁决只在整轮之后判一次：流式阶段禁止任何「工具域开泡/关泡」旁路。
   assert.doesNotMatch(section, /bubbleTracker\.freeze\(\)/, "禁止流式冻结气泡");
   assert.doesNotMatch(
     section,
     /SINGLE_BUBBLE_TOOL_DOMAINS|disableBubbleMode/,
-    "工具域白名单/关泡逻辑必须删除（呈现只在 done 判一次）",
+    "工具域白名单/关泡逻辑必须删除（车道只在 T0 判一次）",
   );
   // 发言模型的过程话截止语义保留：awaitPending + noteToolStart 必须还在
   assert.match(section, /awaitPending\(\)/, "工具边界的过程话屏障保留");
@@ -97,44 +135,30 @@ test("final 语音帧恒在 done 之前，done 只做终态对账", () => {
   const doneIdx = handler.indexOf("type: ServerEventType.ChatAssistantDone", finalIdx);
   assert.ok(finalIdx > 0, "必须存在语音收口帧");
   assert.ok(doneIdx > finalIdx, "收口帧必须先于 done 下发");
-  // 文字由流式块实时落屏，done 只按同源 bubbles id 对账定稿。
   assert.match(handler, /ChatAssistantChunk/, "文字块流式通道必须在");
-  assert.match(handler, /messageId: bubbleTracker\.outboundDoneMessageId/);
 });
 
-test("呈现裁决唯一出口：整轮结束后只判一次，旧双阶段判断已删净", () => {
-  const bubblePolicy = serverSrc("agent/bubble-policy.ts");
-  assert.match(bubblePolicy, /export function decidePresentation/);
-  assert.match(handler, /decidePresentation\(\{/, "呈现裁决必须走统一出口");
-  // 禁止再出现并行/两阶段判断：事故根因就是分泡与渲染各说各话。
-  assert.doesNotMatch(handler, /decideStreamPlan|decideFinalPlan/, "旧两阶段裁决必须删除");
-  assert.doesNotMatch(handler, /renderedReply/, "旧 renderedReply 启发式必须删除");
-  assert.doesNotMatch(handler, /shouldSplitBubbles|resolveBubbleCollapse/, "旧分泡判断必须删除");
-  // 流式后转渲染/塌缩轮复用既有 finalTextReplacesStream 通道（不是第二套管线）。
+test("正文重排信号由渲染层产出；气泡车道禁用形态接管", () => {
+  const turn = serverSrc("render/turn.ts");
+  const processor = serverSrc("services/tool-result-processor.ts");
+  assert.match(turn, /bodyRewritten: mode === "full" && decision\.body\.form !== "plain"/);
+  assert.match(
+    processor,
+    /opts\?\.textLane === "bubble" \? "cards-only" : "full"/,
+    "气泡车道必须走 cards-only（形态接管 = done 翻案）",
+  );
   assert.match(
     handler,
-    /collapseStreamed \? \{ finalTextReplacesStream: true \}/,
-    "仅流式后转单泡轮使用塌缩信号",
+    /textLane: textStreamEnabled && !suppressStreamForCards \? "bubble" : "single"/,
+    "主链路必须把车道传给渲染出口",
   );
-  assert.doesNotMatch(handler, /enableBubbleMode|disableBubbleMode/, "旧流式开泡/关泡必须删除");
-  assert.match(handler, /const bodyRewritten = doneSceneMeta\?\.bodyRewritten === true/);
 });
 
-test("正文重排信号由渲染层产出并透传到 done 信封", () => {
-  const turn = serverSrc("render/turn.ts");
-  const handlerSrc = handler;
-  assert.match(turn, /bodyRewritten: mode === "full" && decision\.body\.form !== "plain"/);
-  assert.match(handlerSrc, /const bodyRewritten = doneSceneMeta\?\.bodyRewritten === true/);
-  assert.match(handlerSrc, /const presentationBlocks =/);
-});
-
-test("收尾不再把 finalFeed 喂回分段器（否则 TTS 会把整段复播一遍）", () => {
-  assert.doesNotMatch(
-    handler,
-    /streamSegmenter\.feed\(finalFeed\)/,
-    "流式增量已经在生成过程中下发，收尾只 flush 尾部半句",
-  );
-  assert.match(handler, /await streamSegmenter\.flushFinal\(\)/);
+test("兜底补漏剥离展示协议：气泡永不携带标记", () => {
+  const guard = serverSrc("utils/stream-marker-guard.ts");
+  assert.match(guard, /export function stripDisplayProtocol/, "补漏源必须过展示协议剥离");
+  assert.match(handler, /stripDisplayProtocol\(/, "seal 补漏必须剥离卡片块/NEXT_UP/标记 token");
+  assert.match(handler, /stripSentencesAlreadySaid\(/, "补漏按句去重，已流式内容不重发");
 });
 
 test("客户端语音帧只进 TTS，绝不落消息列表", () => {

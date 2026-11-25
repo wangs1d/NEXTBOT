@@ -147,8 +147,11 @@ class AmapLocationPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
             // Hight_Accuracy = GPS + WiFi + 基站融合；GpsFirst 让有星时优先 GPS。
             setLocationMode(AMapLocationClientOption.AMapLocationMode.Hight_Accuracy)
             setGpsFirst(true)
-            // GPS 优先最多等 3s：等不到就先回来网络/融合 fix，避免整段预算被冷启动吃满。
-            setGpsFirstTimeout(3000L)
+            // GPS 优先最多等 5s（2026-11-24 精度调整，原 3s）：3s 时 GPS 常还没
+            // 收敛，高德会先抛一个 WiFi/基站融合 fix（实测 43~60m）并被我们当成
+            // 结果；给到 5s 能让室外场景拿到 10~25m 的卫星 fix。室内无星时
+            // 5s 后照样回退网络定位，代价只是最坏多等 2s（预算 6s 内收口）。
+            setGpsFirstTimeout(5000L)
             setSensorEnable(true)
             setWifiScan(true)
             // 不要缓存 fix：缓存可能是几分钟前、几十米外的位置，直接与「此刻」矛盾。

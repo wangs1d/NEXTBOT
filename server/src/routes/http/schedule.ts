@@ -112,7 +112,9 @@ export function registerScheduleRoutes(app: FastifyInstance, deps: HttpRouteDeps
       return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
     }
     const { sessionId, from, to } = parsed.data;
-    const tasks = scheduleTaskService.listTasksBySession(sessionId, { from, to });
+    // occurrences：窗口内每一次触发时刻（2026-11-24）。客户端据此在设置提醒的当下
+    // 就把重复提醒的每一天都渲染出来，而不是只画 nextRunAt 那一条。
+    const tasks = scheduleTaskService.listTaskViewsBySession(sessionId, { from, to });
     return { ok: true, tasks };
   });
 
@@ -153,6 +155,56 @@ export function registerScheduleRoutes(app: FastifyInstance, deps: HttpRouteDeps
       return reply.code(400).send({ ok: false, message });
     }
   });
+
+  // ── 实例层：跳过某一次 / 单次改期（2026-11-25）──────────────────────
+  // 「这周三不去」不该删整条提醒；这里只动一个实例，规则与其余天数不变。
+  app.post<{ Params: { taskId: string } }>(
+    "/schedule/tasks/:taskId/occurrences/skip",
+    async (request, reply) => {
+      const at = String((request.body as { at?: unknown } | undefined)?.at ?? "").trim();
+      if (!at) return reply.code(400).send({ ok: false, error: "at required" });
+      try {
+        const task = await scheduleTaskService.skipOccurrence(request.params.taskId, at);
+        return { ok: true, task };
+      } catch (e) {
+        return reply.code(400).send({ ok: false, message: e instanceof Error ? e.message : String(e) });
+      }
+    },
+  );
+
+  app.post<{ Params: { taskId: string } }>(
+    "/schedule/tasks/:taskId/occurrences/reschedule",
+    async (request, reply) => {
+      const body = (request.body ?? {}) as { originalAt?: unknown; at?: unknown };
+      const originalAt = String(body.originalAt ?? "").trim();
+      const at = String(body.at ?? "").trim();
+      if (!originalAt || !at) {
+        return reply.code(400).send({ ok: false, error: "originalAt and at required" });
+      }
+      try {
+        const task = await scheduleTaskService.rescheduleOccurrence(
+          request.params.taskId,
+          originalAt,
+          at,
+        );
+        return { ok: true, task };
+      } catch (e) {
+        return reply.code(400).send({ ok: false, message: e instanceof Error ? e.message : String(e) });
+      }
+    },
+  );
+
+  app.delete<{ Params: { taskId: string } }>(
+    "/schedule/tasks/:taskId/occurrences",
+    async (request, reply) => {
+      try {
+        const task = await scheduleTaskService.clearOccurrenceExceptions(request.params.taskId);
+        return { ok: true, task };
+      } catch (e) {
+        return reply.code(400).send({ ok: false, message: e instanceof Error ? e.message : String(e) });
+      }
+    },
+  );
 
   app.post<{ Params: { taskId: string } }>(
     "/schedule/tasks/:taskId/trigger",

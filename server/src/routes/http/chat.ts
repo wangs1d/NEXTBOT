@@ -178,15 +178,6 @@ export function registerChatRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
       parsed.data.text,
     );
     if (!intent.matched) {
-      if ("needsRecurrenceConfirm" in intent && intent.needsRecurrenceConfirm) {
-        return {
-          ok: true,
-          matched: false,
-          needsRecurrenceConfirm: true,
-          hint: intent.hint,
-          draft: intent.draft,
-        };
-      }
       return reply.code(200).send({ ok: true, matched: false, hint: intent.hint });
     }
     return { ok: true, matched: true, draft: intent.draft };

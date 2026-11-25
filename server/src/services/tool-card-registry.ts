@@ -1262,9 +1262,10 @@ function buildBookingSearchCard(r: Record<string, unknown>): ToolCardPayload | n
   };
 }
 
-/** 网约车 provider key → 展示名（回执里没带 providerLabel 时兜底）。 */
+/** 网约车 provider key → 展示名（回执里没带 providerLabel 时兜底）。
+ *  不再带「（官方 MCP）」这类实现细节：用户要的是「滴滴出行」，不是桥接方式。 */
 const RIDE_PROVIDER_LABELS: Record<string, string> = {
-  didi: "滴滴出行（官方 MCP）",
+  didi: "滴滴出行",
   simulated: "模拟网约车",
 };
 
@@ -1293,13 +1294,12 @@ function buildRideQuoteCard(r: Record<string, unknown>): ToolCardPayload | null 
   const scheduleAt = str(req.scheduleAt);
   const provider = str(r.provider);
   const providerLabel = rideProviderLabel(r);
-  // 加值信息（2026-11-20）：滴图驾车路线（里程/耗时/轨迹）+ 滴滴 App 深链
+  // 加值信息（2026-11-20）：滴图驾车路线（里程/耗时/轨迹）
   const routeRaw = (r.route ?? null) as Record<string, unknown> | null;
-  const rideAppLink = str(r.rideAppLink);
 
   const items: ToolCardItem[] = [];
   const rideOptions: Array<Record<string, unknown>> = [];
-  for (const raw of rawOptions.slice(0, 4)) {
+  for (const raw of rawOptions.slice(0, 6)) {
     const o = (raw ?? {}) as Record<string, unknown>;
     const optionId = str(o.id);
     const fullTitle = str(o.title);
@@ -1357,19 +1357,13 @@ function buildRideQuoteCard(r: Record<string, unknown>): ToolCardPayload | null 
   if (routeDistance || routeDuration) {
     items.unshift({
       type: "check",
-      text: ["驾车路线", routeDistance, routeDuration].filter(Boolean).join(" · "),
+      text: [routeDistance, routeDuration].filter(Boolean).join(" · "),
     });
   }
 
-  const note = str(r.note) || str(r.pickupNote);
-  const footer = [
-    providerLabel,
-    scheduleAt ? `用车时间 ${shortTime(scheduleAt)}` : "",
-    note,
-    "价格为预估，实际以平台结算为准",
-  ]
-    .filter(Boolean)
-    .join(" · ");
+  // 卡面只留「这一趟多少钱」，渠道实现/确认流程/免责说明一概不写
+  // （「官方 MCP」「两阶段确认」「价格为预估…」用户不需要看到，2026-11-24）。
+  const footer = scheduleAt ? `用车时间 ${shortTime(scheduleAt)}` : "";
 
   // 轨迹点压缩下发（前端画线用）：>400 点截断，[lat,lng] 对比对象省 40% 体积
   const rawPoints = Array.isArray(routeRaw?.points) ? (routeRaw!.points as Array<{ lat: number; lng: number }>) : [];
@@ -1380,11 +1374,14 @@ function buildRideQuoteCard(r: Record<string, unknown>): ToolCardPayload | null 
         ...(rawPoints.length > 0
           ? { points: rawPoints.slice(0, 400).map((p) => [p.lat, p.lng] as [number, number]) }
           : {}),
+        // 起终点坐标（WGS-84）：没有轨迹时客户端也要能标出两端点
+        ...(routeRaw.from ? { from: routeRaw.from } : {}),
+        ...(routeRaw.to ? { to: routeRaw.to } : {}),
       }
     : null;
 
   return {
-    title: pickup && dropoff ? `叫车报价 · ${pickup} → ${dropoff}` : "叫车报价",
+    title: "选车型",
     items,
     footer,
     cardType: "ride_quote",
@@ -1397,10 +1394,8 @@ function buildRideQuoteCard(r: Record<string, unknown>): ToolCardPayload | null 
         dropoff,
         providerLabel,
         scheduleAt,
-        note,
         options: rideOptions,
         ...(route ? { route } : {}),
-        ...(rideAppLink ? { rideAppLink } : {}),
       },
     },
   };
@@ -1435,7 +1430,7 @@ function buildRideBookCard(r: Record<string, unknown>): ToolCardPayload | null {
     return {
       title: "确认叫车",
       items: rows.map((row) => ({ type: "num" as const, text: `${row.k}：${row.v}` })),
-      footer: simulated ? "当前为模拟模式，不会真实下单或扣费" : "确认后立即叫车，费用以平台结算为准",
+      footer: simulated ? "当前为模拟模式，不会真实下单或扣费" : "确认后立即叫车",
       cardType: "shopping_confirm",
       extra: {
         shopping: {
@@ -1444,7 +1439,6 @@ function buildRideBookCard(r: Record<string, unknown>): ToolCardPayload | null {
           ...(expiresInMs != null && expiresInMs > 0 ? { expiresInMs } : {}),
           rows,
           ...(amount != null ? { total: `¥${amount}`, totalLabel: "预估车费" } : {}),
-          note: "确认令牌有时效，过期需重新报价",
           buttons: [
             { label: "确认叫车", variant: "primary", cardAction: "ride.book.confirm" },
             { label: "先不叫", variant: "secondary", cardAction: "local.dismiss" },

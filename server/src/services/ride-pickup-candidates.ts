@@ -56,7 +56,17 @@ function toNumber(v: unknown): number | null {
 }
 
 /**
- * 定位坐标周边的可上车点候选（默认搜「停车场」，按距离排 top5）。
+ * 定位坐标周边的可上车点候选（默认搜「停车场」，按距离排 **top3**）。
+ *
+ * 对齐滴滴「上车点推荐算法」四步（网信算备120116299582406230049号）：
+ *   1. 上车点生成：滴滴基于**路网拓扑**生成「可上车位置」，并用附近 POI 命名；
+ *      我们没有路网吸附接口，用滴图 maps_place_around 的停车场/落客点近似，
+ *      这是明确的近似项，不假装成路网级推荐。
+ *   2. 召回打分：按距离召回（radius 800m）。
+ *   3. 规则重排：距离为主，可停靠属性由「停车场」关键词天然满足 → **只留 3 条**
+ *      （滴滴官方口径就是「推荐 1~3 条」，不是把周边全列出来）。
+ *   4. 命名：直接用 POI 的 display_name（如「九华苑停车场」）。
+ *
  * 入参 `lng/lat` 与返回候选坐标均为 **WGS-84**（服务端基准）；内部转 GCJ 调滴滴。
  * 坐标/数字参数按滴滴 MCP 契约一律传字符串。
  */
@@ -109,7 +119,7 @@ export async function searchNearbyPickupsViaDidi(
         lat: wgs.latitude,
         distM: distRaw != null && distRaw > 0 ? Math.round(distRaw) : null,
       });
-      if (out.length >= 5) break;
+      if (out.length >= 3) break;
     }
     return out.sort((a, b) => (a.distM ?? Infinity) - (b.distM ?? Infinity));
   } catch {
@@ -184,6 +194,9 @@ export async function regeocodeViaDidi(
   mcp: McpClientService,
   lng: number,
   lat: number,
+  /** 单次调用上限：推卡前置的反查必须短（默认 20s 会把卡片拖死），
+   *  选点卡传 3.5s，失败就用定位原始 label（2026-11-24）。 */
+  timeoutMs = 20_000,
 ): Promise<{ name: string; address: string; city: string; county: string } | null> {
   if (!mcp.listServers().some((s) => s.alias === "didi")) return null;
   const gcj = wgs84ToGcj02(lat, lng);
@@ -192,7 +205,7 @@ export async function regeocodeViaDidi(
       "didi",
       "maps_regeocode",
       { location: `${gcj.longitude.toFixed(6)},${gcj.latitude.toFixed(6)}` },
-      20_000,
+      timeoutMs,
     );
     if (!res.ok) return null;
     const parsed = parseJsonLoose(res.result) as Record<string, unknown> | null;
@@ -215,6 +228,9 @@ export interface DrivingRouteSummary {
   distanceKm: number | null;
   durationMin: number | null;
   points: Array<{ lat: number; lng: number }>;
+  /** 起点/终点（WGS-84）：算路失败时客户端仍要能标出“在哪儿上车、去哪儿” */
+  from?: { lat: number; lng: number };
+  to?: { lat: number; lng: number };
 }
 
 /**

@@ -237,3 +237,71 @@ test("history query: completed reminders are returned when from is in the past",
     assert.equal(history[0].lastRunAt, firedAt);
   });
 });
+
+/**
+ * 2026-11-24 修：手机端日程表要「设置提醒的那一刻就把未来每一次都渲染出来」。
+ * 旧实现每个任务只给 nextRunAt 一条——每天重复的「去游泳」得等到前一天才冒出来。
+ */
+test("listTaskViewsBySession expands every occurrence in window (cron except Monday + daily)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "schedule-views-"));
+  // 冻结时钟：本地（Asia/Shanghai）2026-05-20 04:00
+  const frozen = new Date("2026-05-19T20:00:00.000Z");
+  const service = new ScheduleTaskService({
+    now: () => frozen,
+    persistPath: join(dir, "schedule-tasks.json"),
+  });
+  try {
+    await service.createTask({
+      sessionId: "s-views",
+      description: "去游泳",
+      shortTitle: "去游泳",
+      kind: "reminder",
+      reminderMessage: "该去游泳啦",
+      recurrence: "cron",
+      cronExpression: "0 7 * * 2-7",
+      timezone: "Asia/Shanghai",
+      source: "manual",
+    });
+    await service.createTask({
+      sessionId: "s-views",
+      description: "起床闹钟",
+      shortTitle: "起床闹钟",
+      kind: "reminder",
+      reminderMessage: "该起床啦",
+      recurrence: "daily",
+      runAt: "2026-05-20T07:00:00",
+      timezone: "Asia/Shanghai",
+      source: "manual",
+    });
+
+    const from = new Date("2026-05-19T16:00:00.000Z"); // 本地 5/20 00:00
+    const to = new Date(from.getTime() + 30 * 86_400_000);
+    const views = service.listTaskViewsBySession("s-views", {
+      from: from.toISOString(),
+      to: to.toISOString(),
+    });
+    assert.equal(views.length, 2);
+
+    const swim = views.find((v) => v.description === "去游泳");
+    assert.ok(swim);
+    // 30 天去掉 4 个周一（5/25、6/1、6/8、6/15）
+    assert.equal(swim.occurrences.length, 26);
+    assert.equal(swim.occurrences[0], "2026-05-19T23:00:00.000Z");
+    const weekdayFmt = new Intl.DateTimeFormat("en-US", {
+      timeZone: "Asia/Shanghai",
+      weekday: "short",
+    });
+    assert.equal(
+      swim.occurrences.some((iso) => weekdayFmt.format(new Date(iso)) === "Mon"),
+      false,
+    );
+    // 派生字段绝不写回任务本体（否则 persist 会把 occurrences 落盘）
+    assert.equal("occurrences" in (service.getTask(swim.taskId) as object), false);
+
+    const daily = views.find((v) => v.description === "起床闹钟");
+    assert.ok(daily);
+    assert.equal(daily.occurrences.length, 30);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

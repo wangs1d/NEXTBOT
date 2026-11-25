@@ -1,12 +1,11 @@
 /**
- * BubbleTracker —— 气泡块 id 分配与记账（方案 C：同 block 身份原地升级）。
+ * BubbleTracker —— 气泡块 id 分配与记账（2026-11-25 车道架构）。
  *
- * 两条写入路径共用同一套 id 分配（`assistant-$traceId-bN`，N 从 1 递增；
- * 避开历史垫词气泡的 `interim-` 保留前缀，见 main.dart 去重逻辑）：
- * - 流式：`appendStreamBlock` 按分段器块边界开新块/续写当前块，块 id 随
- *   `chat.assistant_chunk` 实时下发；
- * - 定稿：`setFinalBubbles` 按最终文本重排，前 N 个 id 与流式块**按位置一一
- *   对应**（同 base + 同序号），客户端据此原地 patch/追加，不重建、不闪回。
+ * 唯一写入路径是流式：`appendStreamBlock` 按分段器块边界开新块/续写当前块，
+ * 块 id（`assistant-$traceId-bN`，N 从 1 递增；避开历史垫词气泡的 `interim-`
+ * 保留前缀，见 main.dart 去重逻辑）随 `chat.assistant_chunk` 实时下发。
+ * 流式块就是最终呈现——done 的 bubbles 对账数组只是本账本照实快照
+ * （id+文本），客户端按 id 原地定稿，不存在 done 重建/重排的另一套分配。
  *
  * done 载荷携带 bubbles 对账数组（id+定稿文本），客户端逐泡定稿。
  */
@@ -19,6 +18,11 @@ export class BubbleTracker {
   /** 是否已推出过气泡（决定 done 是否携带 bubbles 字段）。 */
   get hasBubbles(): boolean {
     return this.bubbles.length > 0;
+  }
+
+  /** 已流出的全部块文本（兜底补漏的「已说过」口径；段间以换行相连）。 */
+  get streamedText(): string {
+    return this.bubbles.map((b) => b.text).join("\n");
   }
 
   /**
@@ -35,16 +39,14 @@ export class BubbleTracker {
     return this.bubbles[this.bubbles.length - 1].id;
   }
 
-  /** 出口一次性建泡：整段裁决通过后，按最终文本拆出的气泡写入对账数组。 */
-  setFinalBubbles(texts: string[]): void {
-    this.bubbles.length = 0;
+  /**
+   * 流式撤回后清账：chat.stream_reset 已让客户端删掉全部已落屏块，本轮回到
+   * 单条车道语义（done 按普通单条收口，不带 bubbles）。seq 一并归零，避免
+   * 同 trace 复用轮的 id 继续递增造成跨轮错位。
+   */
+  reset(): void {
     this.seq = 0;
-    for (const text of texts) {
-      const trimmed = text.trim();
-      if (!trimmed) continue;
-      this.seq += 1;
-      this.bubbles.push({ id: `${this.baseMessageId}-b${this.seq}`, text: trimmed });
-    }
+    this.bubbles.length = 0;
   }
 
   /** 末泡 id（done 的 messageId 指向它）；无泡时回退基础 id。 */

@@ -211,6 +211,48 @@ void main() {
     expect(find.text("1 件安排"), findsOneWidget);
   });
 
+  testWidgets("重复提醒按 occurrences 一次展开:设置当下未来每一天都在日程表上", (WidgetTester tester) async {
+    // 2026-11-24 修：此前只有 nextRunAt 一条 → 每天重复的「去游泳」只有前一天
+    // 才冒出来。服务端给出窗口内每一次触发时刻，页面必须逐条渲染。
+    final DateTime now = DateTime(2026, 5, 20, 10, 0);
+    final DateTime todayAt = DateTime(2026, 5, 20, 12, 0);
+    final DateTime d2At = DateTime(2026, 5, 21, 7, 0);
+    final DateTime d3At = DateTime(2026, 5, 22, 7, 0);
+    await tester.pumpWidget(_wrap(
+      <Map<String, dynamic>>[
+        <String, dynamic>{
+          "taskId": "swim",
+          "shortTitle": "去游泳",
+          "runAt": _isoAt(todayAt),
+          "nextRunAt": _isoAt(todayAt),
+          "recurrence": "cron",
+          "status": "active",
+          "occurrences": <String>[
+            _isoAt(todayAt),
+            _isoAt(d2At),
+            _isoAt(d3At),
+          ],
+        },
+      ],
+      now: () => now,
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.text("去游泳"), findsOneWidget);
+    expect(find.text("1 件安排"), findsOneWidget);
+
+    await tester.tap(find.text(d2At.day.toString()));
+    await tester.pumpAndSettle();
+    expect(find.text("去游泳"), findsOneWidget);
+    expect(find.text("07:00"), findsOneWidget);
+    expect(find.text("1 件安排"), findsOneWidget);
+
+    await tester.tap(find.text(d3At.day.toString()));
+    await tester.pumpAndSettle();
+    expect(find.text("去游泳"), findsOneWidget);
+    expect(find.text("1 件安排"), findsOneWidget);
+  });
+
   testWidgets("refresh() 重拉:保活页在数据源变化后经外部触发拿到新条目", (WidgetTester tester) async {
     final DateTime now = DateTime.now();
     final DateTime todayAt = DateTime(now.year, now.month, now.day, 10, 0);

@@ -106,6 +106,7 @@ import { registerTravelPlanRoutes } from "./travel-plan.js";
 import { registerTravelPlanSessionRoutes } from "../../skills/travel-planning/travel-plan-session.js";
 import { registerTravelMapRoutes, registerPoiDetailsRoute } from "./travel-map.js";
 import { registerRideMapRoutes } from "./ride-map.js";
+import { registerRidePickupRoutes } from "./ride-pickup.js";
 import { registerShoppingDecisionRoutes } from "./shopping-decision.js";
 import { registerTravelDataRoutes } from "./travel-data.js";
 import { registerRecommendationRoutes } from "../../recommendation/http.js";
@@ -175,6 +176,8 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   }
   // 叫车卡 3D 地图页面（选点卡/报价卡 WebView 加载；AMAP_JS_KEY 未配时 503）
   registerRideMapRoutes(app);
+  // 选点卡拖图后重新推荐上车点（滴滴「更改逻辑」；MCP 未装配时 503）
+  registerRidePickupRoutes(app, deps);
   registerCompanionRoutes(app, deps);
   registerChatRoutes(app, deps);
   registerWalletRoutes(app, deps);

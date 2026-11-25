@@ -30,7 +30,7 @@ import type {
   BookingOrderStatus,
 } from "../booking-provider.js";
 import type { McpClientService } from "../../mcp-client-service.js";
-import { drivingRouteViaDidi, rideAppLinkViaDidi, type DrivingRouteSummary } from "../../ride-pickup-candidates.js";
+import { drivingRouteViaDidi, type DrivingRouteSummary } from "../../ride-pickup-candidates.js";
 import { gcj02ToWgs84, wgs84ToGcj02 } from "../../../skills/travel-planning/coord-transform.js";
 
 /** 从 MCP 工具结果提取文本（content[].text 或原始 JSON） */
@@ -121,7 +121,7 @@ function parseLineAmount(line: string): number | null {
 export class DidiMcpRideProvider implements BookingProvider {
   readonly key = "didi";
   readonly domain = "ride" as const;
-  readonly label = "滴滴出行（官方 MCP）";
+  readonly label = "滴滴出行";
 
   constructor(private readonly mcp: McpClientService) {}
 
@@ -335,19 +335,20 @@ export class DidiMcpRideProvider implements BookingProvider {
       extra: { carType: m.name, estimateTraceId: m.traceId, productCategory: m.category },
     }));
 
-    // 加值信息（2026-11-20 接入滴图地图族）：驾车路线（里程/耗时/轨迹）+
-    // 滴滴 App 深链（备用发单入口），随报价结果带给 ride_quote 卡。
-    // 尽力而为：失败/超时不影响报价本身。
+    // 加值信息（2026-11-20 接入滴图地图族）：驾车路线（里程/耗时/轨迹）随报价
+    // 带给叫车卡。算路失败也把起终点带回去——选完上车点后地图至少要标出两端。
+    //
+    // 不再生成「在滴滴 App 打开」深链：卡面已去掉这个入口，而这次调用最长
+    // 20s 且与算路并联，是「选完上车点后要等很久」的主因（2026-11-24）。
     let route: DrivingRouteSummary | undefined;
-    let rideAppLink: string | undefined;
     try {
-      // 起终点为 WGS-84；drivingRouteViaDidi / rideAppLinkViaDidi 内部转 GCJ 调滴滴
-      const [routeRes, linkRes] = await Promise.all([
-        drivingRouteViaDidi(this.mcp, from.lng, from.lat, dest.lng, dest.lat),
-        rideAppLinkViaDidi(this.mcp, from.lng, from.lat, dest.lng, dest.lat, usable[0]?.category),
-      ]);
-      route = routeRes ?? undefined;
-      rideAppLink = linkRes ?? undefined;
+      // 起终点为 WGS-84；drivingRouteViaDidi 内部转 GCJ 调滴滴
+      const routeRes = await drivingRouteViaDidi(this.mcp, from.lng, from.lat, dest.lng, dest.lat);
+      route = {
+        ...(routeRes ?? { distanceText: "", durationText: "", distanceKm: null, durationMin: null, points: [] }),
+        from: { lat: from.lat, lng: from.lng },
+        to: { lat: dest.lat, lng: dest.lng },
+      };
     } catch {
       /* 加值失败不影响报价 */
     }
@@ -355,9 +356,7 @@ export class DidiMcpRideProvider implements BookingProvider {
     return {
       ok: true,
       options,
-      note: "滴滴官方 MCP 报价；下单需两阶段确认（confirm + confirmationToken）",
       ...(route ? { route } : {}),
-      ...(rideAppLink ? { rideAppLink } : {}),
     };
   }
 

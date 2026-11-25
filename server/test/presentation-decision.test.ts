@@ -1,22 +1,19 @@
 /**
- * 呈现裁决 × 渲染出口 的真实联调回归（2026-11-23 截图事故）。
+ * 车道 × 渲染出口 的真实联调回归（2026-11-23 截图事故 → 2026-11-25 车道架构）。
  *
- * 事故形态：同一条回复上半部分是流式原文气泡，下半部分是 done 重排出的
- * 列表卡——同一段内容渲染两遍。根因是「边收边判要不要开泡」与「整段到了才
- * 判要不要渲染」两个判断碰撞。
+ * 旧事故形态：同一条回复上半部分是流式原文气泡，下半部分是 done 重排出的
+ * 列表卡——同一段内容渲染两遍。根因是 done 阶段二次裁决呈现权（塌缩重建）。
  *
- * 现在的架构（2026-11-23 方案 C）：流式块与定稿共用同一套气泡 id（块身份
- * 按位置一一对应），整轮结束后用真实 renderTurn 的结果只做一次裁决——
- * 信息类收成单条渲染消息，闲聊沿用流式块做气泡定稿（不重建、不闪回）。
+ * 现在的架构（2026-11-25 车道架构）：车道在 T0 定死，done 不再重判。
+ * - 气泡车道走 renderTurn "cards-only"：正文形态不被接管（切卡/引用/折叠/
+ *   结构化重排都会改写已流式正文 = 翻案），回执卡照常附加（卡是新内容，
+ *   与已流式散文共存是既有交付契约，不是重复渲染）。
+ * - 单条车道仍走 "full"：done 一次交付，形态接管全部有效。
  */
 import assert from "node:assert/strict";
 import test from "node:test";
 
 import { renderTurn } from "../src/render/turn.js";
-import {
-  decidePresentation,
-  splitReplyBubbles,
-} from "../src/agent/bubble-policy.js";
 
 const FSD_REPLY = [
   "先不用急着下这个结论，我查一下。大哥，算是开放了，但这次还只是小范围开闸，不是全面放开。",
@@ -29,46 +26,59 @@ const FSD_REPLY = [
   "所以，你要是问的是“现在能不能用”，那得看你开的是哪款车、有没有 EAP 名额。",
 ].join("\n");
 
-function planFor(text: string, extra: Record<string, unknown> = {}) {
-  const rendered = renderTurn({ text, ...extra });
-  const meta = rendered.envelope.meta;
-  return {
-    meta,
-    plan: decidePresentation({
-      voiceMode: false,
-      segmentable: true,
-      utteranceCollapse: false,
-      sceneSingleBubble: false,
-      bodyRewritten: meta.bodyRewritten,
-      presentationBlocks:
-        meta.forms.length > 0 ||
-        meta.blockTypes.some((t) => t !== "text" && t !== "followups"),
-    }),
-  };
-}
+const SEARCH_EFFECTS = [
+  {
+    tool: "web.search",
+    status: "ok",
+    result: {
+      items: [
+        { title: "特斯拉 FSD V15 开始推送", snippet: "首批面向 EAP 成员，美国先行" },
+      ],
+    },
+  },
+];
 
-test("截图同形态：短列表回复被切成卡 → 整轮单条渲染", () => {
-  const { meta, plan } = planFor(FSD_REPLY, {
+test("气泡车道（cards-only）：正文形态不被接管，列表保持 markdown 原样落泡", () => {
+  const rendered = renderTurn(
+    {
+      text: FSD_REPLY,
+      toolName: "web.search",
+      userText: "特斯拉FSD15开放了是吧？",
+      effects: SEARCH_EFFECTS,
+    },
+    "cards-only",
+  );
+  const meta = rendered.envelope.meta;
+  assert.equal(meta.bodyRewritten, false, "气泡车道绝不允许 done 翻案（bodyRewritten 恒 false）");
+  assert.equal(rendered.text, FSD_REPLY, "正文逐字保持流式原文：不切卡、不折叠、不追加卡标记");
+  assert.ok(
+    !meta.blockTypes.includes("card"),
+    "正文形态转换（列表切卡）属于接管，气泡车道禁止",
+  );
+});
+
+test("气泡车道：引用块不抽卡，引用随散文按 markdown 原样落泡", () => {
+  const text = "> 今天的会议改到下午三点。\n\n收到，我记下了。";
+  const rendered = renderTurn({ text }, "cards-only");
+  assert.equal(rendered.text, text, "引用块整段保留，不做形态重排");
+  assert.equal(rendered.envelope.meta.bodyRewritten, false);
+});
+
+test("单条车道（full）：形态接管与 bodyRewritten 标记保持原语义", () => {
+  const rendered = renderTurn({
+    text: FSD_REPLY,
     toolName: "web.search",
     userText: "特斯拉FSD15开放了是吧？",
+    effects: SEARCH_EFFECTS,
   });
-  assert.equal(meta.bodyRewritten, true, "渲染出口必须标记正文被重排");
-  assert.ok(meta.blockTypes.includes("card"), "信封里必须有列表卡");
-  assert.equal(plan.owner, "single", "信息类回复不得分泡");
-  assert.equal(plan.reason, "body-rewritten");
+  assert.equal(rendered.envelope.meta.bodyRewritten, true, "full 模式保持切卡标记");
+  assert.ok(rendered.envelope.meta.blockTypes.includes("card"));
 });
 
-test("闲聊短句仍分泡，且出口能拆出完整气泡", async () => {
-  const { meta, plan } = planFor("在呢。好的。");
-  assert.equal(meta.bodyRewritten, false);
-  assert.equal(plan.owner, "bubbles");
-  const bubbles = await splitReplyBubbles("在呢。好的。");
-  assert.ok(bubbles.length >= 1);
-  assert.equal(bubbles.join(""), "在呢。好的。");
-});
-
-test("引用块回复：抽成引用卡后同样单条渲染", () => {
-  const { meta, plan } = planFor("> 今天的会议改到下午三点。\n\n收到，我记下了。");
-  assert.equal(meta.bodyRewritten, true);
-  assert.equal(plan.owner, "single");
+test("气泡车道：普通闲聊 prose 原样通过（无形态、无卡）", () => {
+  const text = "在呢。刚看你说要早点出门，闹钟帮你往前调了十分钟。";
+  const rendered = renderTurn({ text }, "cards-only");
+  assert.equal(rendered.text, text);
+  assert.equal(rendered.envelope.meta.bodyRewritten, false);
+  assert.ok(!rendered.envelope.meta.blockTypes.includes("card"));
 });

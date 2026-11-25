@@ -9,7 +9,7 @@
  * （见 auth.ts PUBLIC_PATH_PREFIXES）——WebView 打开时不需要带设备凭证。
  * 未配置 AMAP_JS_KEY 时返回 503：客户端据此保留 flutter_map 平面地图。
  */
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 
@@ -24,6 +24,19 @@ function safeJsonString(value: string): string {
 }
 
 export function registerRideMapRoutes(app: FastifyInstance): void {
+  // 启动自检（2026-11-24）：3D 到底是「没配」「配错」还是「页面缺失」，
+  // 只看一行日志就能分清——此前排查全靠 curl 反推。
+  const bootKey = amapJsKey();
+  if (!bootKey) {
+    console.log("[ride-map] 3D 关闭：未配置 AMAP_JS_KEY → 客户端保留 flutter_map 平面地图");
+  } else {
+    console.log(
+      `[ride-map] 3D 启用 key=…${bootKey.slice(-6)} ` +
+        `securityCode=${amapJsSecurityCode() ? "已配置" : "未配置"} ` +
+        `page=${existsSync(PAGE_PATH) ? "ok" : `缺失(${PAGE_PATH})`}`,
+    );
+  }
+
   app.get("/ride-map/picker", async (_req, reply) => {
     const key = amapJsKey();
     if (!key) {
@@ -32,7 +45,16 @@ export function registerRideMapRoutes(app: FastifyInstance): void {
         .type("text/plain; charset=utf-8")
         .send("AMAP_JS_KEY 未配置：叫车卡暂用平面地图");
     }
-    let html = readFileSync(PAGE_PATH, "utf8");
+    let html: string;
+    try {
+      html = readFileSync(PAGE_PATH, "utf8");
+    } catch {
+      // 页面没随部署上传（tar 漏打包 web/）时别抛 500，给客户端一个明确的降级信号
+      return reply
+        .code(503)
+        .type("text/plain; charset=utf-8")
+        .send("叫车地图页面缺失：server/web/ride-map/picker.html 未随部署同步");
+    }
     html = html
       .replaceAll("__AMAP_JS_KEY__", encodeURIComponent(key))
       .replaceAll("__AMAP_SECURITY_JSON__", safeJsonString(amapJsSecurityCode()));

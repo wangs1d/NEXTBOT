@@ -143,7 +143,12 @@ test("didi-mcp - search：沙箱文本解析出车型选项，optionId 编码报
 
   const result = await provider.search(SEARCH_QUERY, PROVIDER_CTX);
   assert.equal(result.ok, true);
-  const { options, note } = result as { ok: true; options: Array<Record<string, unknown>>; note?: string };
+  const { options, note, route } = result as {
+    ok: true;
+    options: Array<Record<string, unknown>>;
+    note?: string;
+    route?: { from?: { lat: number; lng: number }; to?: { lat: number; lng: number } };
+  };
 
   // 三档车型，optionId = didi:{预估流程ID}:{product_category}
   assert.equal(options.length, 3);
@@ -159,7 +164,10 @@ test("didi-mcp - search：沙箱文本解析出车型选项，optionId 编码报
   assert.equal(options[2].etaMinutes, null);
   assert.equal((options[0].extra as Record<string, unknown>).estimateTraceId, "traceECO123");
   assert.equal((options[0].extra as Record<string, unknown>).productCategory, "3");
-  assert.match(note ?? "", /滴滴官方 MCP/);
+  // 卡面文案不再暴露实现细节（「官方 MCP」「两阶段确认」已删）
+  assert.equal(note, undefined);
+  // 算路失败也要带回起终点：选完上车点后地图要能标出两端
+  assert.ok(route?.from && route?.to);
 
   // 坐标必须来自 maps_textsearch（滴滴契约），数字/坐标参数一律字符串
   const textsearchCalls = fake.calls.filter((c) => c.tool === "maps_textsearch");

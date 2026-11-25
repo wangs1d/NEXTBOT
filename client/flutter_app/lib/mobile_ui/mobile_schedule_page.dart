@@ -181,6 +181,11 @@ class MobileSchedulePageState extends State<MobileSchedulePage> {
 
   /// 服务端任务记录 → 展示条目。时刻口径与后台一致：
   /// 已完成看 lastRunAt（实际执行时刻），未完成看 nextRunAt（下一次触发）。
+  ///
+  /// 重复提醒（每天/每周/cron 等）由服务端在 `occurrences` 里给出窗口内**每一次**
+  /// 触发时刻，这里逐条展开——设置提醒的当下，未来每一天就都在日程表上，而不是
+  /// 只显示 nextRunAt 那一条、等到前一天才冒出下一条（2026-11-24）。
+  /// 旧缓存 / 老服务端无该字段时回退到单条口径，行为与改动前一致。
   List<_ScheduleEntry> _parse(
     List<Map<String, dynamic>> tasks,
     DateTime rangeFrom,
@@ -190,13 +195,6 @@ class MobileSchedulePageState extends State<MobileSchedulePage> {
       final String status = t["status"]?.toString() ?? "active";
       if (status == "cancelled") continue;
       final bool completed = status == "completed";
-      final String? iso = completed
-          ? ((t["lastRunAt"] ?? t["runAt"]) as String?)
-          : ((t["nextRunAt"] ?? t["runAt"]) as String?);
-      if (iso == null || iso.isEmpty) continue;
-      final DateTime? at = DateTime.tryParse(iso)?.toLocal();
-      if (at == null) continue;
-      if (at.isBefore(rangeFrom)) continue;
       final String title = (t["shortTitle"] ??
               t["reminderMessage"] ??
               t["title"] ??
@@ -205,13 +203,35 @@ class MobileSchedulePageState extends State<MobileSchedulePage> {
           .toString()
           .trim();
       if (title.isEmpty) continue;
-      out.add(_ScheduleEntry(
-        id: t["taskId"]?.toString() ?? "",
-        at: at,
-        title: title,
-        location: t["location"]?.toString(),
-        completed: completed,
-      ));
+
+      final List<String> isos = <String>[];
+      final Object? rawOccurrences = t["occurrences"];
+      if (!completed && rawOccurrences is List) {
+        for (final Object? raw in rawOccurrences) {
+          if (raw is String && raw.isNotEmpty) isos.add(raw);
+        }
+      }
+      if (isos.isEmpty) {
+        final String? iso = completed
+            ? ((t["lastRunAt"] ?? t["runAt"]) as String?)
+            : ((t["nextRunAt"] ?? t["runAt"]) as String?);
+        if (iso != null && iso.isNotEmpty) isos.add(iso);
+      }
+
+      final Set<DateTime> seen = <DateTime>{};
+      for (final String iso in isos) {
+        final DateTime? at = DateTime.tryParse(iso)?.toLocal();
+        if (at == null) continue;
+        if (at.isBefore(rangeFrom)) continue;
+        if (!seen.add(at)) continue;
+        out.add(_ScheduleEntry(
+          id: t["taskId"]?.toString() ?? "",
+          at: at,
+          title: title,
+          location: t["location"]?.toString(),
+          completed: completed,
+        ));
+      }
     }
     out.sort((_ScheduleEntry a, _ScheduleEntry b) => a.at.compareTo(b.at));
     return out;

@@ -107,6 +107,8 @@ export type HttpRouteDeps = {
   weatherPrefsService: WeatherPrefsService;
   /** 位置协调器（客户端 GPS）：简报天气未配置城市时的优先兜底；可选 */
   locationCoordinator?: import("../../services/location-coordinator.js").LocationCoordinator;
+  /** MCP 客户端（选点卡「拖图后重新推荐」直接调滴图 maps_place_around）；未装配时端点 503 */
+  mcpClientService?: import("../../services/mcp-client-service.js").McpClientService;
   virtualPhoneService: VirtualPhoneService;
   ttsService: TtsService;
   /** 语音消息落盘服务（voice.send_message 工具 + 用户上传录音共用） */

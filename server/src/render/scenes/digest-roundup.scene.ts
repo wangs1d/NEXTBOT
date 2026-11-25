@@ -98,7 +98,8 @@ export function renderRoundupFacts(items: RoundupItem[]): string {
     .join("\n");
 }
 
-function isRoundupQuestion(userText?: string): boolean {
+/** T0 可判：盘点类意图只看用户措辞（车道门在首个 delta 之前用） */
+export function isRoundupQuestion(userText?: string): boolean {
   return ROUNDUP_INTENT.test(userText ?? "");
 }
 

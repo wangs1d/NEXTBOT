@@ -1565,7 +1565,9 @@ class _MobileChatPageState extends State<MobileChatPage> {
     // 判定唯一源在渲染层（assistantBodyNeedsWideWidth）：它按「真正会被画出来
     // 的那份正文」判结构，页面侧自读 m.text 会在「信封 text 块带全文、
     // finalText 只剩一句/为空」的轮次上判反（2026-11-21 根修）。
-    final bool wideAssistant = !isUser && assistantBodyNeedsWideWidth(m);
+    // 外移卡（excludeCardTypes）不在泡里，不能撑宽气泡（2026-11-24 根修）。
+    final bool wideAssistant = !isUser &&
+        assistantBodyNeedsWideWidth(m, excludeCardTypes: excludeCardTypes);
     final double screenWidth = MediaQuery.sizeOf(context).width;
     // 「为什么是现在」（§3.10，2026-11-23）：只有带 why 的主动消息泡响应长按，
     // 普通助手回复 / 用户泡维持原手势（文本选择归外层 SelectionArea 管）。

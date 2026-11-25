@@ -2,7 +2,10 @@ import type { ToolHandler, ToolContext, ToolRegistry } from "../../tool-registry
 import type { ClientLocationWire } from "../../../types/client-location.js";
 import type { BookingService } from "../../../services/booking/booking-service.js";
 import type { McpClientService } from "../../../services/mcp-client-service.js";
-import { searchNearbyPickupsViaDidi } from "../../../services/ride-pickup-candidates.js";
+import {
+  regeocodeViaDidi,
+  searchNearbyPickupsViaDidi,
+} from "../../../services/ride-pickup-candidates.js";
 import { rideMap3dEnabled } from "../../../services/ride-map-config.js";
 
 /**
@@ -29,6 +32,17 @@ function isCoordOnlyLabel(label: string): boolean {
   return /^\s*-?\d+(?:\.\d+)?\s*[,，]\s*-?\d+(?:\.\d+)?\s*$/.test(label);
 }
 
+/**
+ * 选点卡锚点可接受的定位精度（米）。
+ *
+ * 2026-11-24 真机实测：手机常态 acc=43~60m（室内/WiFi 混合定位），此前门槛
+ * 定 10m 导致每次按需定位都「不达标 → 跑满 GPS 预算 → 超时回空包」，
+ * 选点卡因此 origin=无、candidates=0、预选态全空（线上日志实证）。
+ * 上车点选点只需要「人在哪一栋楼」，50m 足够把地图居中并把候选搜出来，
+ * 精度仍如实带到卡片上由用户自己拖图微调。
+ */
+const RIDE_PICKUP_ACCURACY_M = 50;
+
 function formatLocationLabel(loc: ClientLocationWire): string {
   const label = loc.label?.trim() ?? "";
   if (label && !isCoordOnlyLabel(label)) return label;
@@ -52,11 +66,12 @@ async function resolvePickup(
   // 也不缓存兜底。真机实证：缓存里的旧坐标（湖北随州 113.8,31.57）曾冒充
   // 兴义的实时位置，导致地图中心错、候选错、city 错三连故障。
   // maxAgeMs=0 让 locationCoordinator 无条件绕过复用缓存、向手机现拉一次；
-  // maxAccuracyMeters=10 与客户端精度门槛对齐。拉不到就返回空，由 quote
-  // handler 推纯地图选点卡——宁可让用户手动拖，绝不用旧坐标冒充实时。
+  // 精度门槛 50m（2026-11-24 改）：手机常态 43~60m，10m 门槛把可用的 fix
+  // 全部判死，选点卡因此拿不到 origin。拉不到才返回空，由 quote handler
+  // 推纯地图选点卡——宁可让用户手动拖，绝不用旧坐标冒充实时。
   const requested = (await context.requestLocation?.(
     "叫车需要获取当前位置作为上车点",
-    { maxAgeMs: 0, maxAccuracyMeters: 10 },
+    { maxAgeMs: 0, maxAccuracyMeters: RIDE_PICKUP_ACCURACY_M },
   )) ?? null;
   if (requested) {
     const label = formatLocationLabel(requested);
@@ -100,15 +115,20 @@ function buildPickupParams(
  */
 async function resolveCardOrigin(
   context: ToolContext,
-  existing: { lat: number; lng: number; label: string } | null,
-): Promise<{ lat: number; lng: number; label: string } | null> {
+  existing: { lat: number; lng: number; label: string; accuracyMeters?: number | null } | null,
+): Promise<{ lat: number; lng: number; label: string; accuracyMeters?: number | null } | null> {
   if (existing) return existing;
   const live = (await context.requestLocation?.(
     "叫车需要当前位置校准选点地图",
-    { maxAgeMs: 0, maxAccuracyMeters: 10 },
+    { maxAgeMs: 0, maxAccuracyMeters: RIDE_PICKUP_ACCURACY_M },
   )) ?? null;
   return live
-    ? { lat: live.latitude, lng: live.longitude, label: formatLocationLabel(live) }
+    ? {
+        lat: live.latitude,
+        lng: live.longitude,
+        label: formatLocationLabel(live),
+        accuracyMeters: live.accuracyMeters ?? null,
+      }
     : null;
 }
 
@@ -128,23 +148,37 @@ async function resolveCardOrigin(
 async function pushPickupSelectCard(
   context: ToolContext,
   rideRequest: { dropoff: string; city?: string; scheduleAt?: string | null },
-  origin: { lat: number; lng: number; label: string } | null,
+  origin: { lat: number; lng: number; label: string; accuracyMeters?: number | null } | null,
   mcp?: McpClientService,
 ): Promise<boolean> {
   if (!context.pushMediaCards) return false;
-  const candidates = origin && mcp
-    ? await searchNearbyPickupsViaDidi(mcp, origin.lng, origin.lat)
-    : [];
+  // 候选与逆地理并行（每次 20s 超时的 MCP 串行会让卡片明显变慢）。
+  const emptyCandidates: Awaited<ReturnType<typeof searchNearbyPickupsViaDidi>> = [];
+  const [candidates, poi] = await Promise.all([
+    origin && mcp ? searchNearbyPickupsViaDidi(mcp, origin.lng, origin.lat) : Promise.resolve(emptyCandidates),
+    origin && mcp
+      ? regeocodeViaDidi(mcp, origin.lng, origin.lat, 3500).catch(() => null)
+      : Promise.resolve(null),
+  ]);
+  // 定位标签升级（2026-11-24）：GPS 只能给出「兴义市 · 黔西南布依族苗族自治州」
+  // 这种行政串，卡片上写这个用户根本读不出「我在哪」。用滴图反查 POI 名
+  // （实测该坐标 → 「九华苑」，精确到永康路21号）当上车点标题；反查失败才回退。
+  const originLabel = poi?.name?.trim() || origin?.label || "";
+  const accText = typeof origin?.accuracyMeters === "number"
+    ? `acc=${Math.round(origin.accuracyMeters)}m`
+    : "acc=?";
   console.log(
-    `[ride-pickup] 推选点卡 dropoff=${rideRequest.dropoff} origin=${origin ? `${origin.lng},${origin.lat}(${origin.label})` : "无"} candidates=${candidates.length}`,
+    `[ride-pickup] 推选点卡 dropoff=${rideRequest.dropoff} origin=${origin ? `${origin.lng.toFixed(5)},${origin.lat.toFixed(5)}(${originLabel}) ${accText}` : "无"} candidates=${candidates.length}` +
+      (origin && candidates.length === 0 ? " ← 有定位但候选为空：查 didi MCP maps_place_around" : ""),
   );
   const sent = context.pushMediaCards([
     {
       type: "card",
       cardType: "ride_pickup",
-      title: "选个上车点",
+      title: "选上车点",
       items: [],
-      footer: "点候选或拖动地图，选好后我直接续报价，不用再打字",
+      // 卡面自带地图/候选/按钮，正文不再重复解释操作步骤（2026-11-24 精简）
+      footer: "",
       extra: {
         ridePickup: {
           // 配了 AMAP_JS_KEY 才走卡内 3D 地图（WebView + 高德 JS API）；否则客户端平面地图
@@ -157,7 +191,12 @@ async function pushPickupSelectCard(
                 origin: {
                   lat: origin.lat,
                   lng: origin.lng,
-                  ...(origin.label ? { label: origin.label } : {}),
+                  ...(originLabel ? { label: originLabel } : {}),
+                  // 精度如实下发：客户端据此提示「定位约 ±43m，可拖图微调」，
+                  // 而不是把 50m 的 fix 装成精确点（2026-11-24）。
+                  ...(typeof origin.accuracyMeters === "number"
+                    ? { accuracyMeters: origin.accuracyMeters }
+                    : {}),
                 },
               }
             : {}),

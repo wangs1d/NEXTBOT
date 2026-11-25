@@ -1309,59 +1309,15 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       }
     }
 
-    // 真·分绿泡塌缩残留自愈（2026-09-28）：塌缩轮（finalTextReplacesStream）
-    // 在流式阶段已把分泡逐条落盘，旧版本塌缩只删内存不删盘 → 重载后
-    // "已流分泡 + 塌缩单泡"同框（真机取证：「问了两遍/怕我跑了？」+「对，
-    // 就是这周末10月3、4号。」并存）。气泡轮的 chunk 全部带 -bN 后缀，
-    // assistant-$traceId 只会由塌缩/兜底路径创建——故"同 trace 既有分泡
-    // 又有 assistant-$traceId"即塌缩残留 → 删分泡、保塌缩泡。
-    final Map<String, List<ChatMessage>> bubblesByTrace =
-        <String, List<ChatMessage>>{};
-    for (final ChatMessage m in contentDedupedMessages) {
-      final String? t = _bubbleTraceOf(m.messageId);
-      if (t != null) {
-        (bubblesByTrace[t] ??= <ChatMessage>[]).add(m);
-      }
-    }
-    final Set<String> staleBubbleIds = <String>{};
-    if (bubblesByTrace.isNotEmpty) {
-      for (final ChatMessage m in contentDedupedMessages) {
-        if (m.role != "assistant") continue;
-        if (!m.messageId.startsWith("assistant-")) continue;
-        if (_isBubbleMessageId(m.messageId)) continue;
-        final List<ChatMessage>? stale =
-            bubblesByTrace[m.messageId.substring("assistant-".length)];
-        if (stale != null) {
-          for (final ChatMessage b in stale) {
-            staleBubbleIds.add(b.messageId);
-          }
-        }
-      }
-    }
-    final List<ChatMessage> healedMessages = staleBubbleIds.isEmpty
-        ? contentDedupedMessages
-        : contentDedupedMessages
-            .where((m) => !staleBubbleIds.contains(m.messageId))
-            .toList();
-    for (final String messageId in staleBubbleIds) {
-      try {
-        await _store.deleteMessage(messageId);
-        debugPrint(
-            "[chat] bubble heal: cleaned stale streamed bubble $messageId");
-      } catch (e) {
-        debugPrint("[chat] bubble heal cleanup failed for $messageId: $e");
-      }
-    }
-
     // 简报落聊天流退役自愈（2026-10-02 用户定稿）：对话流不再出现简报消息
     // （早上由桌面悬浮窗卡片直接展示），assistant-briefing-* 历史残留启动即清。
     final Set<String> retiredBriefingIds = <String>{
-      for (final ChatMessage m in healedMessages)
+      for (final ChatMessage m in contentDedupedMessages)
         if (m.messageId.startsWith("assistant-briefing-")) m.messageId,
     };
     final List<ChatMessage> displayMessages = retiredBriefingIds.isEmpty
-        ? healedMessages
-        : healedMessages
+        ? contentDedupedMessages
+        : contentDedupedMessages
             .where((m) => !retiredBriefingIds.contains(m.messageId))
             .toList();
     for (final String messageId in retiredBriefingIds) {
@@ -1914,10 +1870,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           _handleTaskPlaneUpdate(payload);
         }
         // ===== /v2 =====
-        // 会出卡片的轮次不流式：服务端确认本轮将携带结构化卡片（工具附卡/
-        // 识图照片/模型自产标记）后，先撤回该 trace 已流出的正文并转静默，
-        // 最终内容由 chat.assistant_done 一次性结构化下发（done 载荷强制
-        // finalTextReplacesStream=true，整段替换不保留空文本）。
+        // 单条车道轮（2026-11-25 车道架构）：首块文字外发前才判出带卡/结构化
+        // 产出（工具附卡/识图照片/模型自产标记）时，服务端先撤回该 trace 已
+        // 流出的正文并清空气泡账本，最终内容由 chat.assistant_done 一次性
+        // 结构化下发（文字随 done 单条落屏，不留空文本泡壳）。
         if (type == "chat.stream_reset") {
           final String? resetTraceId = payload["traceId"]?.toString();
           final String? activeTraceId = ChatTurnController.instance.activeTraceId;
@@ -2222,8 +2178,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                       .whereType<Map<String, dynamic>>()
                       .toList()
                   : null;
-          final bool collapseToSingle =
-              payload["finalTextReplacesStream"] == true;
           // 结构化产出本身就是一轮的有效回复：正文可以为空，不必也不该补文案。
           final bool hasStructuredReply = mediaCardsFromPayload != null ||
               summaryCardFromPayload != null ||
@@ -2232,31 +2186,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               envelopeBlocksFromPayload != null ||
               followUpsFromPayload != null;
 
-          // 真·分绿泡收口：出口重写/自检重跑让最终文本与已流文本分叉时
-          // （finalTextReplacesStream），整轮塌缩——删本轮所有分泡，落一条
-          // assistant-$traceId 单泡承载 finalText，避免新旧两版拼接。
-          if (collapseToSingle &&
-              bubblesFromPayload != null &&
-              bubblesFromPayload.isNotEmpty) {
-            await _collapseBubblesToFinal(
-              bubbleIds: bubblesFromPayload
-                  .map((b) => b["id"]?.toString() ?? "")
-                  .where((id) => id.isNotEmpty)
-                  .toList(),
-              traceId: doneTraceId ?? "",
-              finalText: resolvedText,
-              playUrl: playUrl,
-              mediaCards: mediaCardsFromPayload,
-              summaryCard: summaryCardFromPayload,
-              renderBlocks: renderBlocksFromPayload,
-              replyBlocks: replyBlocksFromPayload,
-              envelopeBlocks: envelopeBlocksFromPayload,
-              followUps: followUpsFromPayload,
-            );
-          } else if (bubblesFromPayload != null &&
-              bubblesFromPayload.isNotEmpty) {
-            // 正常分泡收口：逐泡以服务端定稿文本为准定稿（含漏收 chunk 的补建），
-            // 卡片/建议/playUrl/信封块挂末泡（服务端收口链的附着目标）。
+          // 真·分绿泡收口（2026-11-25 车道架构）：流式块即最终呈现，done 只按
+          // 服务端账本快照定稿——逐泡以服务端定稿文本为准（含漏收 chunk 的补建），
+          // 卡片/建议/playUrl/信封块挂末泡（服务端收口链的附着目标）。
+          if (bubblesFromPayload != null && bubblesFromPayload.isNotEmpty) {
             await _reconcileBubblesOnDone(
               bubbles: bubblesFromPayload,
               mediaCards: mediaCardsFromPayload,
@@ -2268,6 +2201,33 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               summaryCard: summaryCardFromPayload,
             );
           } else {
+          // 撤回轮（chat.stream_reset，2026-11-25 车道架构）：服务端已撤回流式
+          // 块并清空气泡账本，done 不带 bubbles → 走本单条路径。把本 trace 遗留
+          // 的空流式占位泡一并撤掉，finalText 以单条落屏——不存在「泡壳在、
+          // 单条又落一条」的并存。
+          if (doneTraceId != null && doneTraceId.isNotEmpty) {
+            final List<String> shellIds = <String>[];
+            setState(() {
+              _messages.removeWhere((m) {
+                final bool hit = m.streaming &&
+                    m.text.trim().isEmpty &&
+                    _isBubbleMessageId(m.messageId) &&
+                    _bubbleTraceOf(m.messageId) == doneTraceId;
+                if (hit) {
+                  _assistantMessageIndexById.remove(m.messageId);
+                  shellIds.add(m.messageId);
+                }
+                return hit;
+              });
+            });
+            for (final String id in shellIds) {
+              try {
+                await _store.deleteMessage(id);
+              } catch (e) {
+                debugPrint("[chat] retracted bubble shell delete failed: $e");
+              }
+            }
+          }
           final int? idx = _messageIndexById(messageId);
           if (idx != null) {
             final ChatMessage previous = _messages[idx];
@@ -2292,17 +2252,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               // 则应覆盖中间态文本，否则会把工具原始返回错误地留在聊天气泡里。
               setState(() {
                 final String currentText = previous.text;
-                // 服务端分歧裁决信号（2026-09-28 放流配套）：出口重写/自检重跑/
-                // 确定性收口让最终文本与已流文本分叉时，finalText 整段替换流式
-                // 气泡，避免新旧两版拼接（服务端已跳过残差补推）。
-                final bool serverSaysReplace =
-                    payload["finalTextReplacesStream"] == true;
                 // 摘要卡轮：卡内已是全文，done 的 finalText 为空——此时流式阶段
                 // 显示过的长文若留在气泡里，就成了卡内卡外同一段话读两遍。
                 final bool cardReplacesStream =
                     summaryCardFromPayload != null && resolvedText.trim().isEmpty;
-                final String nextText = (serverSaysReplace ||
-                        cardReplacesStream ||
+                final String nextText = (cardReplacesStream ||
                         _shouldReplaceAssistantTextOnDone(currentText, resolvedText))
                     ? resolvedText
                     : currentText;
@@ -3432,102 +3386,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     for (final ChatMessage m in toSave) {
       await _store.saveMessage(m);
     }
-  }
-
-  /// 真·分绿泡塌缩收口（finalTextReplacesStream）：出口重写/自检重跑让最终
-  /// 文本与已流文本分叉时，删除本轮所有分泡，落一条 assistant-<traceId> 单泡
-  /// 承载 finalText——避免"已流旧版分泡 + 重写新版"两版拼接。
-  Future<void> _collapseBubblesToFinal({
-    required List<String> bubbleIds,
-    required String traceId,
-    required String finalText,
-    required String? playUrl,
-    required List<Map<String, dynamic>>? mediaCards,
-    required Map<String, dynamic>? summaryCard,
-    required List<Map<String, dynamic>>? renderBlocks,
-    required List<Map<String, dynamic>>? replyBlocks,
-    required List<Map<String, dynamic>>? envelopeBlocks,
-    required List<String>? followUps,
-  }) async {
-    final List<String> removedIds = <String>[];
-    setState(() {
-      _messages.removeWhere((m) {
-        final bool hit = bubbleIds.contains(m.messageId) ||
-            (traceId.isNotEmpty && _bubbleTraceOf(m.messageId) == traceId);
-        if (hit) {
-          _assistantMessageIndexById.remove(m.messageId);
-          removedIds.add(m.messageId);
-        }
-        return hit;
-      });
-    });
-    // 关键：流式阶段每泡已即时落盘（Isar 按 messageId upsert），塌缩必须同步
-    // 删盘，否则重载后已塌缩的泡会诈尸回来（内存删了盘上还在）。
-    for (final String id in removedIds) {
-      try {
-        await _store.deleteMessage(id);
-      } catch (e) {
-        debugPrint("[chat] bubble collapse deleteMessage failed: $e");
-      }
-    }
-    final bool hasCards = mediaCards != null ||
-        summaryCard != null ||
-        renderBlocks != null ||
-        replyBlocks != null ||
-        envelopeBlocks != null ||
-        followUps != null;
-    // 整轮无正文也无卡片：分泡已撤、不再落空泡（不填假文案）
-    if (finalText.trim().isEmpty && !hasCards) return;
-    final String collapsedId = traceId.isNotEmpty
-        ? "assistant-$traceId"
-        : "assistant-final-${DateTime.now().microsecondsSinceEpoch}";
-    final int? existingIdx = _messageIndexById(collapsedId);
-    final ChatMessage collapsed;
-    if (existingIdx != null && existingIdx < _messages.length) {
-      final ChatMessage previous = _messages[existingIdx];
-      collapsed = ChatMessage(
-        messageId: previous.messageId,
-        sessionId: previous.sessionId,
-        role: previous.role,
-        text: finalText,
-        timestamp: previous.timestamp,
-        attachmentImageCount: previous.attachmentImageCount,
-        playUrl: playUrl ?? previous.playUrl,
-        attachments: previous.attachments,
-        contentType: previous.contentType,
-        durationMs: previous.durationMs,
-        waveform: previous.waveform,
-        mediaCards: mediaCards ?? previous.mediaCards,
-        summaryCard: summaryCard ?? previous.summaryCard,
-        renderBlocks: renderBlocks,
-        replyBlocks: replyBlocks,
-        envelopeBlocks: envelopeBlocks ?? previous.envelopeBlocks,
-        followUpPrompts: followUps,
-      );
-      setState(() {
-        _messages[existingIdx] = collapsed;
-      });
-    } else {
-      collapsed = ChatMessage(
-        messageId: collapsedId,
-        sessionId: ApiConfig.effectiveActorId,
-        role: "assistant",
-        text: finalText,
-        timestamp: DateTime.now(),
-        playUrl: playUrl,
-        mediaCards: mediaCards,
-        summaryCard: summaryCard,
-        renderBlocks: renderBlocks,
-        replyBlocks: replyBlocks,
-        envelopeBlocks: envelopeBlocks,
-        followUpPrompts: followUps,
-      );
-      setState(() {
-        _messages.add(collapsed);
-        _assistantMessageIndexById[collapsedId] = _messages.length - 1;
-      });
-    }
-    await _store.saveMessage(collapsed);
   }
 
   void _flushAssistantChunks() {

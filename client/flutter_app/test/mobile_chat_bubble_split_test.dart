@@ -8,7 +8,7 @@
 /// - 分泡 chunk 缓冲：流式期间不落屏、旧泡完成入队、flush 后按序整泡落屏
 /// - done 对账：服务端文本为准、漏收补建（走揭示队列）、卡片挂末泡、
 ///   多泡 text 块过滤、占位泡撤除
-/// - 塌缩：finalTextReplacesStream 删泡落单泡（含占位让位防 id 撞车）
+/// - 撤回轮：stream_reset 撤缓冲后 done 不带 bubbles，finalText 单条落屏
 /// - 回归：非分泡单泡链路行为不变
 /// - 跨轮隔离：他轮 trace 的缓冲泡不受本轮 done 影响
 library;
@@ -64,7 +64,6 @@ void main() {
     String? messageId,
     String finalText = "",
     List<Map<String, dynamic>>? bubbles,
-    bool replacesStream = false,
     List<Map<String, dynamic>>? mediaCards,
     List<Map<String, dynamic>>? replyBlocks,
   }) =>
@@ -75,9 +74,16 @@ void main() {
           if (messageId != null) "messageId": messageId,
           "finalText": finalText,
           if (bubbles != null) "bubbles": bubbles,
-          if (replacesStream) "finalTextReplacesStream": true,
           if (mediaCards != null) "mediaCards": mediaCards,
           if (replyBlocks != null) "blocks": replyBlocks,
+        },
+      };
+
+  Map<String, dynamic> streamReset({String? traceId}) =>
+      <String, dynamic>{
+        "type": "chat.stream_reset",
+        "payload": <String, dynamic>{
+          if (traceId != null) "traceId": traceId,
         },
       };
 
@@ -166,25 +172,26 @@ void main() {
     expect(c.messages[1].streaming, isFalse);
   });
 
-  test("塌缩：finalTextReplacesStream 删全部分泡落单泡（占位让位不撞 id）", () {
+  test("撤回轮：stream_reset 撤缓冲，done 不带 bubbles 单条落屏不留泡壳", () {
     final MobileChatController c = MobileChatController(wsBaseUrl: wsUrl());
     addTearDown(c.dispose);
     c.debugHandleWsEvent(chunk("assistant-trace-1-b1", "旧版说法一。"));
     c.debugHandleWsEvent(chunk("assistant-trace-1-b2", "旧版说法二。"));
+    expect(c.messages.length, 1, reason: "分泡只进缓冲，占位展示生成中");
+
+    c.debugHandleWsEvent(streamReset(traceId: "trace-1"));
+    expect(c.messages.length, 1, reason: "占位保留，缓冲正文已撤");
+
     c.debugHandleWsEvent(done(
+      messageId: "assistant-trace-1",
       finalText: "重写后的完整新版本回复。",
-      replacesStream: true,
-      bubbles: <Map<String, dynamic>>[
-        <String, dynamic>{"id": "assistant-trace-1-b1", "text": "旧版说法一。"},
-        <String, dynamic>{"id": "assistant-trace-1-b2", "text": "旧版说法二。"},
-      ],
     ));
-    expect(c.messages.length, 1, reason: "分泡（含占位）全部删除，只落塌缩单泡");
+    expect(c.messages.length, 1, reason: "撤回轮单条落屏，不与泡壳并存");
     expect(c.messages.first.messageId, "assistant-trace-1");
     expect(c.messages.first.text, "重写后的完整新版本回复。");
     expect(c.messages.first.streaming, isFalse);
     c.debugFlushBubbleReveals();
-    expect(c.messages.length, 1, reason: "塌缩后揭示队列已清空，不弹旧泡");
+    expect(c.messages.length, 1, reason: "揭示队列已清，旧泡不再弹出");
   });
 
   test("分泡轮 media_ready 挂占位泡，不开幻影占位", () {

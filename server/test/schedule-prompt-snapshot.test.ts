@@ -161,8 +161,8 @@ test("pending view: recurring daily task lists next occurrence", async () => {
       title: "喝水",
       description: "每天提醒喝水",
       kind: "reminder",
-      // 2099 年锚点的 daily 任务，下一次实例在 2099-01-02（daily 推进）
-      runAt: "2099-01-01T08:00:00",
+      // 明天 08:00 起的 daily 任务：pending 视图应列出（今天窗口内有一跳）
+      runAt: new Date(Date.now() + 24 * 3600_000).toISOString(),
       recurrence: "daily",
       timezone: "Asia/Shanghai",
       reminderMessage: "该喝水啦",

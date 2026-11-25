@@ -830,6 +830,13 @@ export class ToolResultProcessor {
     text: string,
     opts?: {
       plainTextMode?: boolean;
+      /**
+       * 文字车道（2026-11-25 车道架构）：气泡车道传 "bubble" → renderTurn 走
+       * cards-only 模式（卡照出、正文形态不被接管）——折叠/引用/结构化重排
+       * 会改写已流式落屏的正文，等价 done 翻案，气泡车道绝不发生；
+       * 单条车道/缺省走 "full"（原有全部出口形态）。
+       */
+      textLane?: "bubble" | "single";
       userText?: string;
       toolName?: string;
       /** 本轮工具结构化回执：注册工具（tool-card-registry）据此直出卡，不依赖 LLM 抄写列表 */
@@ -887,7 +894,7 @@ export class ToolResultProcessor {
         // 场景数据面（明日预览等）：调用方注入，场景不自己去读
         payloads: opts?.renderPayloads,
       },
-      "full",
+      opts?.textLane === "bubble" ? "cards-only" : "full",
     );
     console.log(
       `[ToolResultProcessor] render: ${result.decision.reason} media=${opts?.mediaCardCount ?? 0}` +

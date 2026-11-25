@@ -2,7 +2,8 @@ import "dart:async";
 import "dart:convert";
 import "dart:io" show Platform;
 
-import "package:flutter/foundation.dart" show kIsWeb;
+import "package:flutter/foundation.dart" show Factory, kIsWeb;
+import "package:flutter/gestures.dart";
 import "package:flutter/material.dart";
 import "package:webview_flutter/webview_flutter.dart";
 
@@ -77,8 +78,12 @@ class RideMap3dView extends StatefulWidget {
     this.controller,
     required this.mode,
     this.origin,
+    this.center,
     this.candidates = const <RideMapCandidate>[],
     this.routePoints = const <({double lat, double lng})>[],
+    this.routeFrom,
+    this.routeTo,
+    this.snapRadiusM = 150,
     this.onSelect,
     this.onFailed,
   });
@@ -87,8 +92,21 @@ class RideMap3dView extends StatefulWidget {
   final String mode;
   final RideMap3dController? controller;
   final ({double lat, double lng, String label})? origin;
+
+  /// 地图居中点（WGS-84）。不给则用 [origin]。
+  /// 全屏选点页用它把地图落在「当前选中的点」，同时让 [origin] 继续画蓝点。
+  final ({double lat, double lng})? center;
   final List<RideMapCandidate> candidates;
   final List<({double lat, double lng})> routePoints;
+
+  /// 路线两端（WGS-84）。没有轨迹（算路失败）时页面只标两个端点，
+  /// 但用户仍能看到「在哪上车、去哪」。
+  final ({double lat, double lng})? routeFrom;
+  final ({double lat, double lng})? routeTo;
+
+  /// 吸附半径（米）：页面把「定位点 → 最近候选」的吸附阈值跟它走，与 Flutter
+  /// 卡片（受定位精度约束，50~120m）保持一致，避免两边判定不同步。
+  final double snapRadiusM;
   final void Function(RideMapPick pick)? onSelect;
   final VoidCallback? onFailed;
 
@@ -97,7 +115,9 @@ class RideMap3dView extends StatefulWidget {
 }
 
 class _RideMap3dViewState extends State<RideMap3dView> {
-  static const Duration _readyTimeout = Duration(seconds: 13);
+  /// 页面 ready 的等待上限。高德 JS（约 1MB）+ 首批瓦片在 4G 弱网下可能
+  /// 8~15s，13s 会把「慢但能成」的页面误判为失败并回退成平面图（2026-11-24）。
+  static const Duration _readyTimeout = Duration(seconds: 18);
 
   WebViewController? _web;
   Timer? _watchdog;
@@ -113,6 +133,7 @@ class _RideMap3dViewState extends State<RideMap3dView> {
     widget.controller?._attach(this);
     if (!_supported) {
       // 桌面/测试环境没有 webview_flutter 实现：直接走 2D 回退
+      debugPrint("[RideMap3d] 当前平台无 WebView 实现，回退平面地图");
       WidgetsBinding.instance.addPostFrameCallback((_) => _fail());
       return;
     }
@@ -129,6 +150,8 @@ class _RideMap3dViewState extends State<RideMap3dView> {
     if (_ready && (oldWidget.candidates != widget.candidates ||
         oldWidget.origin != widget.origin ||
         oldWidget.routePoints != widget.routePoints ||
+        oldWidget.routeFrom != widget.routeFrom ||
+        oldWidget.routeTo != widget.routeTo ||
         oldWidget.mode != widget.mode)) {
       _pushData();
     }
@@ -150,7 +173,10 @@ class _RideMap3dViewState extends State<RideMap3dView> {
 
   void _start() {
     _watchdog = Timer(_readyTimeout, () {
-      if (!_ready) _fail();
+      if (!_ready) {
+        debugPrint("[RideMap3d] ${_readyTimeout.inSeconds}s 内未收到 ready，回退平面地图");
+        _fail();
+      }
     });
     final String url = MediaUrl.webViewPageUrl(
       "${ApiConfig.httpBase}/ride-map/picker",
@@ -210,7 +236,19 @@ class _RideMap3dViewState extends State<RideMap3dView> {
       case "select":
         _onSelect(msg);
         break;
+      case "diag":
+        // 真机 3D 是否成立只看这一行：pitch 应为 50±、webgl 应为 true。
+        // pitch 正常但画面平 = 渲染层降级；pitch=0 = 没收到 center（没定位）。
+        debugPrint(
+          "[RideMap3d] diag stage=${msg["stage"]} pitch=${msg["pitch"]} "
+          "zoom=${msg["zoom"]} rot=${msg["rotation"]} webgl=${msg["webgl"]} "
+          "hasCenter=${msg["hasCenter"]}",
+        );
+        break;
       case "error":
+        // 页面侧把高德的真实报错（key 无效/安全密钥缺失/脚本未加载）原样带回来，
+        // 否则「3D 变平面」永远只能靠猜（2026-11-24）。
+        debugPrint("[RideMap3d] 页面报错: ${msg["message"] ?? "未知"}");
         _fail();
         break;
     }
@@ -242,6 +280,7 @@ class _RideMap3dViewState extends State<RideMap3dView> {
     final WebViewController? web = _web;
     if (web == null || !_ready) return;
     final Map<String, dynamic> payload = <String, dynamic>{"mode": widget.mode};
+    payload["snapM"] = widget.snapRadiusM;
 
     final ({double lat, double lng, String label})? origin = widget.origin;
     ({double lat, double lng})? originGcj;
@@ -264,8 +303,17 @@ class _RideMap3dViewState extends State<RideMap3dView> {
     }
     if (candidates.isNotEmpty) payload["candidates"] = candidates;
 
-    // 地图中心：实时定位优先，其次最近候选（与卡片初始预选同口径）
-    ({double lat, double lng})? centerGcj = originGcj;
+    // 地图中心：显式 center（全屏选点页）优先，其次实时定位，最后最近候选
+    ({double lat, double lng})? centerGcj;
+    final ({double lat, double lng})? forcedCenter = widget.center;
+    if (forcedCenter != null) {
+      final ({double lat, double lng}) gcj =
+          wgs84ToGcj02(forcedCenter.lat, forcedCenter.lng);
+      centerGcj = gcj;
+      payload["center"] = <String, dynamic>{"lat": gcj.lat, "lng": gcj.lng};
+    } else {
+      centerGcj = originGcj;
+    }
     if (centerGcj == null && candidates.isNotEmpty) {
       centerGcj = (
         lat: (candidates.first["lat"] as num).toDouble(),
@@ -281,6 +329,17 @@ class _RideMap3dViewState extends State<RideMap3dView> {
     if (route.isNotEmpty) {
       payload["route"] = route;
       centerGcj ??= (lat: route.first[0], lng: route.first[1]);
+    }
+    final ({double lat, double lng})? from = widget.routeFrom;
+    if (from != null) {
+      final ({double lat, double lng}) gcj = wgs84ToGcj02(from.lat, from.lng);
+      payload["from"] = <String, dynamic>{"lat": gcj.lat, "lng": gcj.lng};
+      centerGcj ??= gcj;
+    }
+    final ({double lat, double lng})? to = widget.routeTo;
+    if (to != null) {
+      final ({double lat, double lng}) gcj = wgs84ToGcj02(to.lat, to.lng);
+      payload["to"] = <String, dynamic>{"lat": gcj.lat, "lng": gcj.lng};
     }
 
     if (centerGcj != null) {
@@ -309,6 +368,60 @@ class _RideMap3dViewState extends State<RideMap3dView> {
       // 父组件会在 onFailed 后切回平面地图；这里只占位一帧
       return const ColoredBox(color: Color(0xFFF2F0EB));
     }
-    return WebViewWidget(controller: web);
+    return Stack(
+      fit: StackFit.expand,
+      children: <Widget>[
+        // ready 前 opacity 0：WebView 照常加载（瓦片/脚本在后台跑），
+        // 就绪后 220ms 淡入，避免「白块 → 突然一张地图」的跳变（流畅度）。
+        AnimatedOpacity(
+          opacity: _ready ? 1 : 0,
+          duration: const Duration(milliseconds: 220),
+          curve: Curves.easeOut,
+          child: WebViewWidget(
+            controller: web,
+            // EagerGestureRecognizer：卡片在聊天列表里，WebView 不抢手势时垂直拖动
+            // 会被外层 ScrollView 接管，地图「拖不动」。让 WebView 优先吃手势，
+            // 地图区域内的拖动/缩放全归页面处理（2026-11-24 用户反馈）。
+            gestureRecognizers: <Factory<OneSequenceGestureRecognizer>>{
+              Factory<OneSequenceGestureRecognizer>(() => EagerGestureRecognizer()),
+            },
+          ),
+        ),
+        if (!_ready) const _RideMapSkeleton(),
+      ],
+    );
+  }
+}
+
+/// 3D 地图首帧骨架：与地图底色同色，中心一枚淡图钉 + 一行状态字。
+/// 只做「加载中有东西在」的观感，不画假地图（避免和真实瓦片叠加闪一下）。
+class _RideMapSkeleton extends StatelessWidget {
+  const _RideMapSkeleton();
+
+  @override
+  Widget build(BuildContext context) {
+    return ColoredBox(
+      color: const Color(0xFFF2F0EB),
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Icon(
+              Icons.location_on,
+              size: 30,
+              color: Colors.black.withValues(alpha: 0.28),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              "正在加载地图…",
+              style: TextStyle(
+                fontSize: 10,
+                color: Colors.black.withValues(alpha: 0.45),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
