@@ -48,16 +48,10 @@ registry.register("search_web", async (input: any) => ({
     { title: "结果 1", snippet: `「${input?.query ?? ""}」的抓取摘要（live 台架 fixture，非真实互联网数据）。`, url: "https://example.com/1" },
   ],
 }));
-registry.register("smart_home.control_device", async (input: any) => ({
-  ok: true, deviceId: "livingroom_ac", temperature: input?.temperature ?? 26,
-}));
 registry.register("calendar.create", async (input: any) => ({
   ok: true, nextRunAtLocal: "2026-09-20T09:00:00+08:00", echo: input ?? {},
 }));
 registry.register("weather.get_local", async () => ({ city: "上海", condition: "多云", tempC: 24 }));
-registry.register("smart_home.list_devices", async () => ({
-  devices: [{ id: "livingroom_ac", name: "客厅空调", type: "air_conditioner", online: true }],
-}));
 const toolCtx = {
   executeTool: (name: string, args: Record<string, unknown>) =>
     registry.execute(name, args, { sessionId: "live-tool-arch" }),
@@ -139,7 +133,6 @@ const SCENARIOS: Array<{
   expectAny: string[]; caps?: string[]; turnIntent?: string;
 }> = [
   { name: "core直调-提醒", lane: "chat", userText: "明天早上九点提醒我开会", expectAny: ["calendar.create"], turnIntent: "action_write" },
-  { name: "预召回+请求卡-智能家居", lane: "chat", userText: "把客厅空调调到26度", expectAny: ["smart_home.control_device"], turnIntent: "action_write" },
   { name: "task-天气/搜索", lane: "task", userText: "上海今天会下雨吗", expectAny: ["search_web", "weather.get_local"], caps: ["search"] },
 ];
 

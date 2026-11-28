@@ -46,7 +46,7 @@ const READ_ONLY_PATTERNS: RegExp[] = [
 /**
  * 复合工具（单入口 + `action` 分流）的 action 级风险覆盖。
  *
- * 2026-11-11 起 calendar / geofence / smart_home 合并为单函数名，按名匹配
+ * 2026-11-11 起 calendar / geofence 等合并为单函数名，按名匹配
  * （delete→irreversible、list→read_only）失效：必须看调用参数里的 action。
  * 未传 args 或 action 不在表内 → 落回按名分级（保守 write）。
  */
@@ -70,11 +70,6 @@ const COMPOSITE_ACTION_RISK: Record<string, Record<string, ToolRiskClass>> = {
     forget: "irreversible",
     timeline: "read_only",
     habits: "read_only",
-  },
-  smart_home: {
-    list_devices: "read_only",
-    control_device: "write",
-    scene: "write",
   },
 };
 

@@ -9,7 +9,7 @@
  * agent.migrate_to（Agent 跨设备迁移）涉及 Agent 状态序列化，留待后续阶段。
  *
  * 工具上下文：通过 ToolContext.sessionId / userId 解析 actorId，
- * 只能看到/调用 actorId 自己的设备（home:default 这种 ownerUserId=system 的全局设备所有人可见）。
+ * 只能看到/调用 actorId 自己的设备（ownerUserId=system 的全局设备所有人可见）。
  */
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 import type { DeviceRegistry } from "../device-bus/device-registry.js";
@@ -24,8 +24,7 @@ export const DEVICE_CHAT_TOOLS: ChatCompletionTool[] = [
       name: "device.list",
       description:
         "列出当前用户的所有在线终端设备及其能力清单。用户问「我有哪些设备」「设备状态」「能控制什么」时调用。" +
-        "返回设备名、kind（phone/tablet/glasses/camera/home 等）、在线状态、能力清单（capabilities）。" +
-        "home:default 是全局智能家居网关，所有用户共享。",
+        "返回设备名、kind（phone/tablet/glasses/camera 等）、在线状态、能力清单（capabilities）。",
       parameters: {
         type: "object",
         properties: {
@@ -44,7 +43,6 @@ export const DEVICE_CHAT_TOOLS: ChatCompletionTool[] = [
       name: "device.use",
       description:
         "调用某台设备的某个能力。如 device.use('phone:abc', 'camera.take_photo') 拍照、" +
-        "device.use('home:default', 'actuator.light.turn_on', {entityId:'light.keting'}) 开灯、" +
         "device.use('camera:xyz', 'camera.take_photo') 拍照。" +
         "可用的 action 在 device.list 返回的 capabilities[].actions 里。",
       parameters: {
@@ -52,15 +50,15 @@ export const DEVICE_CHAT_TOOLS: ChatCompletionTool[] = [
         properties: {
           device_id: {
             type: "string",
-            description: "设备 ID，从 device.list 结果中选取（如 phone:abc123 / home:default / camera:xyz）",
+            description: "设备 ID，从 device.list 结果中选取（如 phone:abc123 / camera:xyz）",
           },
           action: {
             type: "string",
-            description: "要调用的 action，形如 'camera.take_photo' / 'actuator.light.turn_on' / 'screen_capture.screenshot'",
+            description: "要调用的 action，形如 'camera.take_photo' / 'screen_capture.screenshot'",
           },
           params: {
             type: "object",
-            description: "action 的参数（如 {entityId:'light.keting'} / {brightness:128}）。无参数时省略。",
+            description: "action 的参数（如 {brightness:128}）。无参数时省略。",
             additionalProperties: true,
           },
         },
@@ -110,7 +108,7 @@ export function registerDeviceTools(
       const bindings = devicePairingService.listDevices(actorId);
       // 2. DeviceRegistry 中的实时状态
       const onlineDescriptors = deviceRegistry.listByOwner(actorId);
-      // 3. 全局共享设备（ownerUserId=system，如 home:default）
+      // 3. 全局共享设备（ownerUserId=system）
       const systemDevices = deviceRegistry.listByOwner("system");
       const onlineMap = new Map(
         [...onlineDescriptors, ...systemDevices].map((d) => [d.deviceId, d]),
@@ -130,7 +128,7 @@ export function registerDeviceTools(
           capabilities: online?.capabilities ?? [],
         };
       });
-      // 追加全局共享设备（home:default 等，未在 bindings 中但用户可见）
+      // 追加全局共享设备（ownerUserId=system，未在 bindings 中但用户可见）
       for (const desc of systemDevices) {
         if (devices.some((d) => d.deviceId === desc.deviceId)) continue;
         devices.push({

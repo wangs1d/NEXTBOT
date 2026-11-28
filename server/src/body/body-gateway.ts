@@ -445,10 +445,6 @@ export class BodyGateway {
       // 听觉类工具前缀 → ear 域
       ear: "ear",
       auditory: "ear",
-      // 体感类工具前缀 → skin 域
-      skin: "skin",
-      somato: "skin",
-      smart_home: "skin",
       // 前庭类工具前缀 → vestibular 域
       vestibular: "vestibular",
       // 稳态类工具前缀 → homeostasis 域

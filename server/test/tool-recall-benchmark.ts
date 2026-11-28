@@ -101,7 +101,7 @@ interface Case {
   noise?: boolean;
 }
 
-/** 31 条跨域基准：5 条 Core 锚点 + 21 条延迟域 + 1 条多意图 + 4 条噪声对照 */
+/** 22 条跨域基准：4 条 Core 锚点 + 13 条延迟域 + 1 条多意图 + 4 条噪声对照 */
 const CASES: Case[] = [
   // ── Core 常驻锚点（before 也应过；回归保险丝） ──
   { domain: "weather", query: "遵义今天天气怎么样", expected: ["weather.get_local"] },
@@ -111,9 +111,6 @@ const CASES: Case[] = [
   // ── 延迟目录域（根因面：before 须 discover 才能到手） ──
   { domain: "travel", query: "帮我规划一个周末去兴义玩的行程", expected: ["travel.plan-itinerary"] },
   { domain: "travel", query: "十一去北京玩有什么攻略故宫门票好买吗", expected: ["travel.plan-itinerary", "travel.search-poi", "travel.destination-info"] },
-  { domain: "smart_home", query: "把客厅的灯打开", expected: ["smart_home"] },
-  { domain: "smart_home", query: "空调调到二十六度", expected: ["smart_home"] },
-  { domain: "smart_home", query: "帮我打开回家模式", expected: ["smart_home"] },
   { domain: "media", query: "放一首周杰伦的晴天", expected: ["media.play"] },
   { domain: "media", query: "音乐暂停一下", expected: ["media.pause"] },
   { domain: "voice", query: "用语音给老板发条消息说方案已发", expected: ["voice.send_message"] },

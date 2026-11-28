@@ -30,16 +30,15 @@ const { TASK_DISPATCH_TOOL_DEFINITION } = await import("../src/tools/task-dispat
 
 const corpus: any[] = [...getBuiltinAgentChatTools(), TASK_DISPATCH_TOOL_DEFINITION];
 
-// 8 个跨域延迟工具（均不在静态 chat Core 清单中）+ 触达它们的自然语句
+// 7 个跨域延迟工具（均不在静态 chat Core 清单中）+ 触达它们的自然语句
 const CASES: Array<{ tool: string; userText: string }> = [
-  { tool: "smart_home.control_device", userText: "把客厅空调调到26度" },
   { tool: "calendar.update_task", userText: "帮我改一下后天的日程安排" },
   { tool: "geofence.create", userText: "到家的时候提醒我拿快递" },
   { tool: "care.set_important_date", userText: "记住我妈生日是5月20号" },
   { tool: "commitment.create", userText: "我答应了周五给你资料，帮我记一下这个承诺" },
   { tool: "vision.see_device", userText: "帮我看一下门口摄像头画面" },
   { tool: "wallet.transfer", userText: "给张三转500块钱" },
-  { tool: "device.list", userText: "看看我家里现在有哪些智能设备" },
+  { tool: "device.list", userText: "看看我现在有哪些绑定的在线设备" },
 ];
 
 const registry = new ToolRegistry() as any;

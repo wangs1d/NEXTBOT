@@ -40,9 +40,6 @@ import websockets  # noqa: E402
 
 STATIC_DIR = SERVICE_DIR / "static"
 AUDIO_DIR = SERVICE_DIR / "data" / "tts"
-AVATAR_DIR = SERVICE_DIR / "assets" / "avatar_frames"
-UPLOAD_DIR = SERVICE_DIR / "assets" / "avatars"
-AVATAR_STATE_PATH = SERVICE_DIR / "data" / "avatar_state.json"
 TELEMETRY_PATH = SERVICE_DIR / "data" / "telemetry.jsonl"
 
 MAX_UPLOAD_BYTES = 20 * 1024 * 1024   # 上传图片上限 20MB
@@ -59,6 +56,16 @@ def _env_int(name: str, default: int) -> int:
         return default
     try:
         return max(1, int(raw))
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
     except ValueError:
         return default
 
@@ -102,11 +109,25 @@ IDLE_TASK = None                 # 全局空闲推帧任务
 IDLE_T0 = time.monotonic()       # 空闲微动时间基准（跨连接连续，头姿相位不跳变）
 
 
+# 埋点文件上限可用环境变量覆盖（12-Factor：部署相关边界值走环境配置）
+TELEMETRY_MAX_BYTES = int(os.getenv("TELEMETRY_MAX_BYTES", str(8 * 1024 * 1024)))
+
+
 def _telemetry(event: dict):
-    """统一埋点：追加一行 JSON 到 data/telemetry.jsonl，并打印便于实时观察。"""
+    """统一埋点：追加一行 JSON 到 data/telemetry.jsonl，并打印便于实时观察。
+
+    超过上限（默认 8MB，TELEMETRY_MAX_BYTES 可调）轮转为 .1（只保留一代）：
+    埋点文件原本无限增长，小盘机器会被吃满。
+    """
     rec = {"ts": round(time.time(), 3), **event}
     try:
         TELEMETRY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if TELEMETRY_PATH.stat().st_size > TELEMETRY_MAX_BYTES:
+                rotated = TELEMETRY_PATH.with_suffix(".jsonl.1")
+                os.replace(TELEMETRY_PATH, rotated)
+        except FileNotFoundError:
+            pass  # 首次写入前不存在，正常
         with open(TELEMETRY_PATH, "a", encoding="utf-8") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
     except Exception as exc:  # noqa: BLE001
@@ -149,37 +170,6 @@ def _split_first_chunk(chunks: list[str], max_chars: int) -> list[str]:
     if not first:
         return chunks
     return [first] + ([rest] if rest else []) + chunks[1:]
-
-
-def _pick_avatar() -> str:
-    if not AVATAR_DIR.exists():
-        raise RuntimeError(f"头像目录不存在: {AVATAR_DIR}")
-    for f in sorted(AVATAR_DIR.iterdir()):
-        if f.suffix.lower() in (".jpg", ".jpeg", ".png"):
-            return str(f)
-    raise RuntimeError("未找到头像图片")
-
-
-def _read_avatar_state() -> dict:
-    try:
-        with open(AVATAR_STATE_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:  # noqa: BLE001
-        return {}
-
-
-def _write_avatar_state(path: str):
-    AVATAR_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(AVATAR_STATE_PATH, "w", encoding="utf-8") as f:
-        json.dump({"path": path, "updated_at": time.time()}, f, ensure_ascii=False)
-
-
-def _current_avatar_path() -> str:
-    """优先用上次上传的头像，没有则回退到内置头像。"""
-    p = _read_avatar_state().get("path")
-    if p and os.path.exists(p):
-        return p
-    return _pick_avatar()
 
 
 def _decode_image(data: bytes):
@@ -243,28 +233,35 @@ def _face_checks(rgb: np.ndarray):
     return True, "校验通过", meta
 
 
+def _new_engine(avatar: str):
+    """引擎构造参数集中在这（_startup 与冷启动上传共用，避免参数漂移）。"""
+    from ditto_engine import DittoEngine
+
+    return DittoEngine(
+        # max_dim 只影响 warp 特征的内容（warp/decoder 的计算分辨率固定
+        # 64×64），实测 768/1280/1920 帧耗时完全一致；1920 相比 768 嘴部
+        # 清晰度 +66%（Laplacian 65→108，牙缝/唇缘可见），默认拉满。
+        # 注册耗时一次性 +1s，带宽 23KB→32KB/帧（25fps ≈ 0.8MB/s）。
+        avatar, max_dim=_env_int("AVATAR_MAX_DIM", 1920), steps=50,
+        # pose_alpha：头姿幅度全局系数（LMDM 输出与空闲程序化头姿同乘）。
+        # 0.6 时代头部几乎不动；1.0 = 官方自然幅度。
+        pose_alpha=_env_float("AVATAR_POSE_ALPHA", 1.0), use_graph=True,
+        # gesture_gain：说话手势层总增益（头随说话幅度运动，见 ditto_engine
+        # 的 GESTURE_* 常量）。0 关闭手势层。
+        gesture_gain=_env_float("AVATAR_GESTURE_GAIN", 1.0),
+        # q82 会把牙缝/唇缘压糊（嘴部特写可见块状），q88 基本无损且编码
+        # 耗时相同（JPEG 在独立线程池流水，不占渲染预算）。
+        dec_size=64, jpeg_quality=_env_int("AVATAR_JPEG_QUALITY", 88),
+    )
+
+
 @app.on_event("startup")
 async def _startup():
     global ENGINE, IDLE_TASK
-    t0 = time.time()
-    from ditto_engine import DittoEngine
-
-    loop = asyncio.get_running_loop()
-    avatar = _current_avatar_path()
-    ENGINE = await loop.run_in_executor(
-        None, lambda: DittoEngine(
-            # max_dim/jpeg 是实时性的主杠杆：1920+q94 实测 ~65-70ms/帧（超 40ms
-            # 预算，播放必卡），768+q82 压回预算内。画质在聊天窗口尺寸下
-            # 无可感差异；要画质用 AVATAR_MAX_DIM=1280/1920 覆盖。
-            avatar, max_dim=_env_int("AVATAR_MAX_DIM", 768), steps=50,
-            pose_alpha=0.60, use_graph=True,
-            dec_size=64, jpeg_quality=_env_int("AVATAR_JPEG_QUALITY", 82),
-        )
-    )
-    await loop.run_in_executor(None, ENGINE.warmup)
-    print(f"[server] 引擎启动完成 {time.time() - t0:.1f}s", flush=True)
-
-    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    # 头像完全内存化（用户要求：磁盘不保存任何头像图片）：服务空载启动，
+    # 客户端上传头像后按需建引擎（_reload_avatar_job 的冷启动路径）。
+    ENGINE = None
+    print("[server] 空载启动，等待上传头像", flush=True)
     AUDIO_DIR.mkdir(parents=True, exist_ok=True)
     IDLE_TASK = asyncio.create_task(_idle_loop())
 
@@ -278,21 +275,59 @@ async def _broadcast(data: dict):
             CLIENT_LOCKS.pop(ws, None)
 
 
-async def _reload_avatar_job(job_id: str, path: str):
-    """后台热切换头像：独占 GPU → 重建 → 广播。"""
-    global _reload_busy
+UPLOAD_PENDING: dict[str, bytes] = {}   # job_id → 原图字节（仅存活到本次加载完成）
+
+
+def _materialize_avatar_temp(data: bytes) -> str:
+    """头像字节 → 临时文件（注册器按路径读图）。磁盘只有这一个瞬时文件，
+    加载完成后由调用方立即删除，不落任何持久头像。"""
+    import tempfile
+    tf = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+    try:
+        tf.write(data)
+        return tf.name
+    finally:
+        tf.close()
+
+
+async def _reload_avatar_job(job_id: str):
+    """后台热切换头像：独占 GPU → 重建 → 广播。冷启动（引擎未建）时直接建引擎。
+
+    头像完全内存化：原图字节取自 UPLOAD_PENDING，临时文件加载完即删；
+    磁盘不保存任何头像图片（用户要求），服务重启后空载、等重新上传。
+    """
+    global _reload_busy, ENGINE
     job = JOBS[job_id]
     loop = asyncio.get_running_loop()
-    prev = ENGINE.avatar_path
+    cold = ENGINE is None
+    prev_bytes = (None if cold
+                  else getattr(ENGINE, "avatar_source_bytes", None))
+    tmp_path = None
     try:
-        job.update(state="waiting", progress=20, message="等待当前语音结束…")
-        async with SPEECH_LOCK:          # 等正在进行的语音播完
-            async with GPU_LOCK:         # 等空闲帧渲染完
-                job.update(state="rebuilding", progress=40,
-                           message="重建引擎（注册人脸 + CUDA Graph）…")
-                info = await loop.run_in_executor(None, ENGINE.load_avatar, path)
+        raw = UPLOAD_PENDING.pop(job_id, None)
+        if not raw:
+            raise RuntimeError("上传数据丢失")
+        tmp_path = _materialize_avatar_temp(raw)
+        if cold:
+            job.update(state="rebuilding", progress=40,
+                       message="初始化引擎（首次加载头像）…")
+            # 空载无语音、无空闲帧渲染，只需 GPU_LOCK（锁序与热路径一致）
+            t_build = time.time()
+            async with GPU_LOCK:
+                ENGINE = await loop.run_in_executor(None, _new_engine, tmp_path)
+            await loop.run_in_executor(None, ENGINE.warmup)
+            info = {"elapsed_s": round(time.time() - t_build, 1),
+                    "size": ENGINE.avatar_size}
+        else:
+            job.update(state="waiting", progress=20, message="等待当前语音结束…")
+            async with SPEECH_LOCK:          # 等正在进行的语音播完
+                async with GPU_LOCK:         # 等空闲帧渲染完
+                    job.update(state="rebuilding", progress=40,
+                               message="重建引擎（注册人脸 + CUDA Graph）…")
+                    info = await loop.run_in_executor(
+                        None, ENGINE.load_avatar, tmp_path)
 
-        _write_avatar_state(path)
+        ENGINE.avatar_source_bytes = raw
         job.update(state="ready", progress=100, message="切换完成", info=info)
         _telemetry({"src": "server", "kind": "avatar_reload", "ok": True,
                     "elapsed_s": info["elapsed_s"], "size": info["size"]})
@@ -305,15 +340,28 @@ async def _reload_avatar_job(job_id: str, path: str):
     except Exception as exc:  # noqa: BLE001
         traceback.print_exc()
         # 回滚到旧头像，保证服务仍可用
+        prev_tmp = None
         try:
-            if prev:
-                await loop.run_in_executor(None, ENGINE.load_avatar, prev)
+            if prev_bytes:
+                prev_tmp = _materialize_avatar_temp(prev_bytes)
+                await loop.run_in_executor(None, ENGINE.load_avatar, prev_tmp)
         except Exception:  # noqa: BLE001
             traceback.print_exc()
+        finally:
+            if prev_tmp:
+                try:
+                    os.remove(prev_tmp)
+                except OSError:
+                    pass
         job.update(state="error", progress=100, message=f"切换失败：{exc}", ok=False)
         _telemetry({"src": "server", "kind": "avatar_reload", "ok": False,
                     "message": str(exc)})
     finally:
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
         RELOADING.clear()
         _reload_busy = False
 
@@ -419,27 +467,23 @@ def _render_worker(ev_loop, queue, wav_path: str, motion_fps: int, render_fps: i
 
             def emit_frame(frame, out_i):
                 nonlocal pending_jpeg
-                # pose 必须在渲染线程里、紧随该帧渲染之后读取（ENGINE.mask_pose
-                # 每帧被渲染调用刷新），否则会把下一帧的变换配到这一帧上。
-                pose = getattr(ENGINE, "mask_pose", None)
                 if pending_jpeg is not None:
-                    previous, previous_i, previous_pose = pending_jpeg
+                    previous, previous_i = pending_jpeg
                     jpeg = previous.result()
                     ts_ms = ts_base_ms + int(round(previous_i * 1000 / render_fps))
                     asyncio.run_coroutine_threadsafe(
-                        queue.put(("frame", idx_base + previous_i, ts_ms, jpeg,
-                                   previous_pose)), ev_loop
+                        queue.put(("frame", idx_base + previous_i, ts_ms, jpeg)), ev_loop
                     )
-                pending_jpeg = (jpeg_pool.submit(encode_frame, frame), out_i, pose)
+                pending_jpeg = (jpeg_pool.submit(encode_frame, frame), out_i)
 
             def flush_jpeg():
                 nonlocal pending_jpeg
                 if pending_jpeg is not None:
-                    future, out_i, pose = pending_jpeg
+                    future, out_i = pending_jpeg
                     jpeg = future.result()
                     ts_ms = ts_base_ms + int(round(out_i * 1000 / render_fps))
                     asyncio.run_coroutine_threadsafe(
-                        queue.put(("frame", idx_base + out_i, ts_ms, jpeg, pose)), ev_loop
+                        queue.put(("frame", idx_base + out_i, ts_ms, jpeg)), ev_loop
                     )
                     pending_jpeg = None
 
@@ -536,14 +580,14 @@ def _stream_motion_step(stream, pcm24: bytes | None, first: bool = False):
 def _stream_render_one(x_d_info, idx: int):
     """executor 内执行：单帧渲染 + JPEG 编码。逐帧下发用，不攒批。"""
     frame = ENGINE.render_frame(x_d_info, motion_idx=idx)
-    return idx, ENGINE.encode_jpeg(frame), _pose_json()
+    return idx, ENGINE.encode_jpeg(frame)
 
 
 def _stream_idle_one(n_out: int):
     """executor 内执行：收势帧一帧（空闲渲染器、全局时间基）。"""
     tt = time.monotonic() - IDLE_T0
     frame = ENGINE.render_idle(tt)
-    return n_out, ENGINE.encode_jpeg(frame), _pose_json()
+    return n_out, ENGINE.encode_jpeg(frame)
 
 
 async def _speak_streaming(sock: WebSocket, send_json, send_lock: asyncio.Lock,
@@ -641,11 +685,9 @@ async def _speak_streaming(sock: WebSocket, send_json, send_lock: asyncio.Lock,
                                 motion_ms = (time.monotonic() - _tm) * 1000
                                 _tr0 = time.monotonic()
                                 for idx, x_d_info in motions:
-                                    idx, jpeg, pose = await loop.run_in_executor(
+                                    idx, jpeg = await loop.run_in_executor(
                                         None, _stream_render_one, x_d_info, idx)
                                     n_frames += 1
-                                    if pose is not None:
-                                        await _try_send_json(sock, send_lock, pose)
                                     header = struct.pack(
                                         "<IH", idx,
                                         int(round(idx * 1000 / RENDER_FPS)) & 0xFFFF)
@@ -689,10 +731,8 @@ async def _speak_streaming(sock: WebSocket, send_json, send_lock: asyncio.Lock,
                             motions = await loop.run_in_executor(
                                 None, _stream_motion_step, stream, None, False)
                             for idx, x_d_info in motions:
-                                idx, jpeg, pose = await loop.run_in_executor(
+                                idx, jpeg = await loop.run_in_executor(
                                     None, _stream_render_one, x_d_info, idx)
-                                if pose is not None:
-                                    await _try_send_json(sock, send_lock, pose)
                                 header = struct.pack(
                                     "<IH", idx,
                                     int(round(idx * 1000 / RENDER_FPS)) & 0xFFFF)
@@ -701,10 +741,8 @@ async def _speak_streaming(sock: WebSocket, send_json, send_lock: asyncio.Lock,
                             await loop.run_in_executor(None, ENGINE.end_speech)
                             n_out = (motions[-1][0] + 1) if motions else 0
                             for k in range(TAIL_FRAMES):
-                                n_k, jpeg, pose = await loop.run_in_executor(
+                                n_k, jpeg = await loop.run_in_executor(
                                     None, _stream_idle_one, n_out + k)
-                                if pose is not None:
-                                    await _try_send_json(sock, send_lock, pose)
                                 header = struct.pack(
                                     "<IH", n_k,
                                     int(round(n_k * 1000 / RENDER_FPS)) & 0xFFFF)
@@ -762,32 +800,6 @@ async def _try_send_bytes(ws: WebSocket, lock: asyncio.Lock, payload: bytes,
         return False
 
 
-def _pose_json() -> dict | None:
-    """当前帧的蒙版随头相似变换（ENGINE.mask_pose，渲染时逐帧更新）。
-
-    必须紧跟在对应帧渲染之后读取、并在该帧二进制之前下发——客户端按
-    WS 顺序把 pose 与紧随的帧配对。没有蒙版（分割不可用）时不下发。
-    """
-    pose = getattr(ENGINE, "mask_pose", None)
-    if pose is None:
-        return None
-    a, b, tx, ty = pose
-    return {"type": "pose", "a": a, "b": b, "tx": tx, "ty": ty}
-
-
-async def _try_send_json(ws: WebSocket, lock: asyncio.Lock, data: dict,
-                         timeout: float = 1.0) -> bool:
-    async def _do():
-        async with lock:
-            await ws.send_text(json.dumps(data))
-
-    try:
-        await asyncio.wait_for(_do(), timeout)
-        return True
-    except Exception:  # noqa: BLE001
-        return False
-
-
 async def _idle_loop():
     """全局空闲推帧：呼吸 + 轻转头，只渲染一次并广播给所有连接。
 
@@ -801,11 +813,10 @@ async def _idle_loop():
     n_log = 0
     t_log = time.monotonic()
     prepared_jpeg = None
-    prepared_pose = None
 
     def render_idle_jpeg(tt):
         frame = ENGINE.render_idle(tt)
-        return ENGINE.encode_jpeg(frame), _pose_json()
+        return ENGINE.encode_jpeg(frame)
 
     while True:
         try:
@@ -818,36 +829,28 @@ async def _idle_loop():
             async with GPU_LOCK:
                 if RELOADING.is_set() or TALKING_ANY.is_set() or not CLIENTS:
                     prepared_jpeg = None
-                    prepared_pose = None
                     continue
                 try:
                     if prepared_jpeg is None:
-                        prepared_jpeg, prepared_pose = await loop.run_in_executor(
+                        prepared_jpeg = await loop.run_in_executor(
                             None, render_idle_jpeg, t_frame - IDLE_T0
                         )
                     # 下一帧在发送当前帧时并行渲染，隐藏网络与事件循环调度开销。
                     next_jpeg = loop.run_in_executor(
                         None, render_idle_jpeg, time.monotonic() - IDLE_T0
                     )
+                    payload = struct.pack("<IH", idx & 0x7FFFFFFF, IDLE_TS) + prepared_jpeg
                     for ws in list(CLIENTS):
                         lock = CLIENT_LOCKS.get(ws)
                         if lock is None:
                             continue
-                        # 蒙版随头变换在帧字节之前按序下发（WS 顺序保证配对）
-                        ok = (prepared_pose is None or
-                              await _try_send_json(ws, lock, prepared_pose))
-                        payload = (struct.pack(
-                            "<IH", idx & 0x7FFFFFFF, IDLE_TS) + prepared_jpeg)
-                        if ok and not await _try_send_bytes(ws, lock, payload):
-                            ok = False
-                        if not ok:
+                        if not await _try_send_bytes(ws, lock, payload):
                             print("[idle] 丢弃无响应的连接", flush=True)
                             CLIENTS.discard(ws)
                             CLIENT_LOCKS.pop(ws, None)
-                    prepared_jpeg, prepared_pose = await next_jpeg
+                    prepared_jpeg = await next_jpeg
                 except Exception:  # noqa: BLE001
                     prepared_jpeg = None
-                    prepared_pose = None
                     traceback.print_exc()
                     await asyncio.sleep(0.5)
                     continue
@@ -862,7 +865,6 @@ async def _idle_loop():
                 render_ms, n_log, t_log = 0.0, 0, now
         except Exception:  # noqa: BLE001
             prepared_jpeg = None
-            prepared_pose = None
             # 任何意外都不能让推帧循环退出
             traceback.print_exc()
             await asyncio.sleep(0.3)
@@ -1041,12 +1043,9 @@ async def ws_endpoint(sock: WebSocket):
                                     await send_json({"type": "speak_tail"})
                                     continue
 
-                                _, frame_idx, ts_ms, jpeg, pose = item
+                                _, frame_idx, ts_ms, jpeg = item
                                 header = struct.pack("<IH", frame_idx, ts_ms & 0xFFFF)
                                 async with send_lock:
-                                    # 蒙版随头变换紧贴在它的帧之前按序下发
-                                    if pose is not None:
-                                        await sock.send_text(json.dumps(pose))
                                     # 客户端卡住时必须超时退出，否则会一直占着 SPEECH_LOCK
                                     await asyncio.wait_for(
                                         sock.send_bytes(header + jpeg), timeout=3.0
@@ -1124,8 +1123,13 @@ async def telemetry_ingest(payload: dict):
 
 @app.get("/api/avatar")
 async def avatar_image():
-    path = ENGINE.avatar_path if ENGINE is not None else _current_avatar_path()
-    return FileResponse(path, headers={"Cache-Control": "no-store"})
+    """当前头像原图（内存字节）。头像完全内存化，无头像时 404。"""
+    data = (getattr(ENGINE, "avatar_source_bytes", None)
+            if ENGINE is not None else None)
+    if not data:
+        raise HTTPException(status_code=404, detail="avatar unavailable")
+    return Response(content=data, media_type="image/png",
+                    headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/avatar/mask")
@@ -1150,9 +1154,7 @@ async def upload_avatar(file: UploadFile = File(...)):
     """
     global _reload_busy
 
-    if ENGINE is None:
-        return JSONResponse({"ok": False, "message": "引擎未就绪，请稍候"},
-                            status_code=503)
+    cold = ENGINE is None          # 空载冷启动：没有现成引擎做预校验
     if _reload_busy:
         return JSONResponse({"ok": False, "message": "正在切换头像，请稍后再试"},
                             status_code=409)
@@ -1174,35 +1176,30 @@ async def upload_avatar(file: UploadFile = File(...)):
     RELOADING.set()
     started = False
     try:
-        # 校验要用人脸检测器（GPU），与空闲渲染互斥
-        async with GPU_LOCK:
-            ok, message, meta = await loop.run_in_executor(None, _face_checks, rgb)
-        if not ok:
-            _telemetry({"src": "server", "kind": "avatar_reject",
-                        "message": message, **meta})
-            return JSONResponse({"ok": False, "message": message, "meta": meta},
-                                status_code=400)
+        if cold:
+            # 冷启动没有引擎，人脸预校验用的检测器（ENGINE.registrar）也不存在；
+            # 跳过预校验，照片质量问题会在后台建引擎任务里以失败形式反馈。
+            meta = {}
+        else:
+            # 校验要用人脸检测器（GPU），与空闲渲染互斥
+            async with GPU_LOCK:
+                ok, message, meta = await loop.run_in_executor(None, _face_checks, rgb)
+            if not ok:
+                _telemetry({"src": "server", "kind": "avatar_reject",
+                            "message": message, **meta})
+                return JSONResponse({"ok": False, "message": message, "meta": meta},
+                                    status_code=400)
 
-        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-        path = UPLOAD_DIR / f"avatar_{int(time.time() * 1000)}.png"
-
-        def _save():
-            # 只保存用户上传的原图；抠像由引擎在加载时内存中完成
-            # （ditto_engine 的 load_source_frames 包装），磁盘不落任何处理图。
-            ok_enc, buf = cv2.imencode(".png", cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
-            if not ok_enc:
-                raise RuntimeError("图片编码失败")
-            path.write_bytes(buf.tobytes())
-
-        await loop.run_in_executor(None, _save)
-
+        # 磁盘不落任何头像文件（用户要求）：原图字节只在内存，
+        # 加载时写临时文件、加载完立即删除（见 _reload_avatar_job）。
         job_id = uuid.uuid4().hex[:12]
         JOBS[job_id] = {"state": "queued", "progress": 10,
                         "message": "已接收，准备重建", "ok": True}
+        UPLOAD_PENDING[job_id] = data
         if len(JOBS) > 32:                    # 只保留最近的进度记录
             for k in list(JOBS)[:-32]:
                 JOBS.pop(k, None)
-        asyncio.create_task(_reload_avatar_job(job_id, str(path)))
+        asyncio.create_task(_reload_avatar_job(job_id))
         started = True
         return {"ok": True, "job": job_id, "meta": meta}
     finally:

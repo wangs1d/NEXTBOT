@@ -8,7 +8,7 @@ import "package:flutter/services.dart";
 import "../config/api_config.dart";
 import "agent_sphere_mood_bridge.dart";
 
-/// Windows 桌宠启动器 — 默认 **PySide6 (sphere-overlay-py)** 或 **Flutter 内嵌 WebView**。
+/// Windows 桌宠启动器 — PySide6 (sphere-overlay-py) 独立进程承载。
 /// Runner 内不再链接第二套 WebView2（会与 webview_windows 冲突导致进程崩溃）。
 class SphereOverlayLauncher {
   SphereOverlayLauncher._();
@@ -25,11 +25,6 @@ class SphereOverlayLauncher {
   /// 上一次召唤失败的具体原因（成功或未尝试时为 null）。
   static String? lastLaunchError;
 
-  static const bool _useInProcessOverlay = bool.fromEnvironment(
-    "IN_PROCESS_SPHERE_OVERLAY",
-    defaultValue: false,
-  );
-
   static bool _created = false;
   static bool _visible = false;
   static Process? _overlayProcess;
@@ -37,20 +32,16 @@ class SphereOverlayLauncher {
   /// PySide6 桌宠是否已启动（UI 可据此隐藏内嵌 WebView 框）。
   static final ValueNotifier<bool> overlayActive = ValueNotifier<bool>(false);
 
-  /// 独立桌宠不可用时的降级标记（显示内嵌透明 WebView）。
-  static final ValueNotifier<bool> useEmbeddedFallback =
-      ValueNotifier<bool>(false);
-
   static bool get isRunning => _created && _visible;
   static bool get isCreated => _created;
   static bool get usesOverlayProcess =>
       _overlayProcess != null || overlayActive.value;
 
-  /// 进程内 Win32 WebView2 桌宠（非 PySide6、非内嵌 WebView）。
+  /// 进程内 Win32 WebView2 桌宠（非 PySide6）。
   static bool get isInProcessOverlayActive =>
-      _created && _overlayProcess == null && !useEmbeddedFallback.value;
+      _created && _overlayProcess == null;
 
-  /// PySide6 或进程内 overlay 任一就绪时，应隐藏 Flutter 内嵌 WebView。
+  /// PySide6 或进程内 overlay 任一就绪时，桌宠处于激活状态。
   static bool get isDeskPetActive =>
       overlayActive.value || isInProcessOverlayActive;
 
@@ -137,80 +128,6 @@ class SphereOverlayLauncher {
     return null;
   }
 
-  static Future<bool> isWebViewReady() async {
-    if (!_created) return false;
-    if (overlayActive.value || useEmbeddedFallback.value) return true;
-    if (_overlayProcess != null) return true;
-    try {
-      return await _channel.invokeMethod<bool>("isWebViewReady") ?? false;
-    } on PlatformException catch (e) {
-      debugPrint("[SphereOverlay] isWebViewReady failed: ${e.message}");
-      return false;
-    } on MissingPluginException catch (e) {
-      debugPrint("[SphereOverlay] isWebViewReady failed: $e");
-      return false;
-    }
-  }
-
-  static Future<bool> waitForWebViewReady({
-    Duration timeout = const Duration(seconds: 15),
-  }) async {
-    if (_overlayProcess != null) return true;
-    final Stopwatch sw = Stopwatch()..start();
-    while (sw.elapsed < timeout) {
-      if (await isWebViewReady()) return true;
-      await Future<void>.delayed(const Duration(milliseconds: 50));
-    }
-    return false;
-  }
-
-  static Future<bool> create({String? overlayUrl, bool electron = false}) async {
-    if (kIsWeb || !Platform.isWindows) return false;
-
-    await _resyncNativeOverlayState();
-    if (_created && !electron && useEmbeddedFallback.value) return true;
-    if (_created && electron && overlayActive.value) return true;
-
-    if (electron) {
-      return _launchPyOverlay();
-    }
-
-    if (_useInProcessOverlay) {
-      final bool native = await _createInProcess(overlayUrl: overlayUrl);
-      if (native) return true;
-    }
-
-    return _enableEmbeddedFallback();
-  }
-
-  /// 在应用内嵌 WebView 槽位显示桌宠（无独立 HWND）。
-  static bool _enableEmbeddedFallback() {
-    debugPrint(
-      "[SphereOverlay] Using embedded Flutter WebView fallback in chat slot.",
-    );
-    _created = true;
-    _visible = true;
-    overlayActive.value = false;
-    useEmbeddedFallback.value = true;
-    return true;
-  }
-
-  /// 热重启后 Dart 静态变量会清零，但原生 overlay 可能仍在；先对齐状态。
-  static Future<void> _resyncNativeOverlayState() async {
-    if (_overlayProcess != null) return;
-    try {
-      final bool nativeUp =
-          await _channel.invokeMethod<bool>("isCreated") ?? false;
-      if (nativeUp) {
-        _created = true;
-        _visible = true;
-        useEmbeddedFallback.value = false;
-      }
-    } catch (e) {
-      debugPrint("[SphereOverlay] resync failed: $e");
-    }
-  }
-
   /// AppBar 手动启动独立桌宠（PySide6，会先关闭 Win32 原生窗）。
   static Future<bool> launchOverlay() async {
     if (kIsWeb || !Platform.isWindows) return false;
@@ -222,7 +139,6 @@ class SphereOverlayLauncher {
         _created = true;
         _visible = true;
         overlayActive.value = true;
-        useEmbeddedFallback.value = false;
         return true;
       }
       // 标记还在但进程已经没了，清掉状态重新拉起
@@ -271,28 +187,6 @@ class SphereOverlayLauncher {
       return result.exitCode == 0;
     } catch (e) {
       debugPrint("[SphereOverlay] 单实例指令 $flag 失败: $e");
-      return false;
-    }
-  }
-
-  static Future<bool> _createInProcess({String? overlayUrl}) async {
-    try {
-      final String url = overlayUrl ?? _buildOverlayUrl();
-      debugPrint("[SphereOverlay] creating native overlay: $url");
-      final bool ok = await _channel.invokeMethod<bool>("create", <String, dynamic>{
-        "url": url,
-      }) ??
-          false;
-      if (ok) {
-        _created = true;
-        useEmbeddedFallback.value = false;
-        overlayActive.value = false;
-      } else {
-        debugPrint("[SphereOverlay] native create returned false");
-      }
-      return ok;
-    } catch (e) {
-      debugPrint("[SphereOverlay] in-process create failed: $e");
       return false;
     }
   }
@@ -408,7 +302,6 @@ class SphereOverlayLauncher {
       _created = true;
       _visible = true;
       overlayActive.value = true;
-      useEmbeddedFallback.value = false;
       return true;
     } catch (e) {
       debugPrint("[SphereOverlay] PySide6 overlay launch failed: $e");
@@ -480,26 +373,6 @@ class SphereOverlayLauncher {
     );
   }
 
-  static String _buildOverlayUrl() {
-    final String wsUrl = ApiConfig.wsUrl;
-    final String sessionId = ApiConfig.effectiveActorId;
-
-    final Uri base = Uri.parse(ApiConfig.httpBase);
-    final String path =
-        "${base.path}/chat/assets/avatar/overlay.html".replaceAll("//", "/");
-
-    return Uri(
-      scheme: base.scheme,
-      host: base.host,
-      port: base.port,
-      path: path,
-      queryParameters: <String, String>{
-        "ws": wsUrl,
-        if (sessionId.isNotEmpty) "sessionId": sessionId,
-      },
-    ).toString();
-  }
-
   static Future<void> show() async {
     if (!_created) return;
     if (_overlayProcess != null) return;
@@ -529,7 +402,6 @@ class SphereOverlayLauncher {
       _created = false;
       _visible = false;
       overlayActive.value = false;
-      useEmbeddedFallback.value = false;
       await _shutdownPyOverlay(proc);
       return;
     }
@@ -541,7 +413,6 @@ class SphereOverlayLauncher {
     }
     _created = false;
     _visible = false;
-    useEmbeddedFallback.value = false;
   }
 
   /// 关停已在跑的桌宠。先让它自己收尾（Qt 关窗、收 WS 线程），Chromium 子进程
@@ -680,38 +551,6 @@ class SphereOverlayLauncher {
       debugPrint("[SphereOverlay] getWorkArea failed: ${e.message}");
       return null;
     }
-  }
-
-  static Future<bool> launch({String? repoRoot, bool electron = false}) async {
-    if (kIsWeb || !Platform.isWindows) return false;
-    await _resyncNativeOverlayState();
-
-    if (_created && electron && overlayActive.value) return true;
-    if (_created && !electron && useEmbeddedFallback.value) return true;
-
-    // 旧版原生窗可能残留但 WebView2 已禁用，清掉后走内嵌降级。
-    if (_created && !electron && !useEmbeddedFallback.value && !overlayActive.value) {
-      await destroy();
-    }
-
-    if (electron) {
-      return _launchPyOverlay();
-    }
-
-    if (_useInProcessOverlay) {
-      final bool native = await _createInProcess(overlayUrl: repoRoot);
-      if (native) {
-        await show();
-        if (await waitForWebViewReady(
-          timeout: const Duration(seconds: 15),
-        )) {
-          return true;
-        }
-        await destroy();
-      }
-    }
-
-    return _enableEmbeddedFallback();
   }
 
   static Future<void> stop() => destroy();

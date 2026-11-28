@@ -3,7 +3,7 @@
 // 与 brain/brain-center.ts 对称：身体中心的统一外观与编排器。
 //
 // 持有：
-//  - BodyModule 引用（eye / ear / skin / vestibular / homeostasis / reflex /
+//  - BodyModule 引用（eye / ear / vestibular / homeostasis / reflex /
 //    rhythm），均可选，缺失时方法优雅降级
 //  - BodyBus 引用（身体内部消息总线）
 //  - BodyGateway 引用（大脑→身体下行网关）
@@ -52,8 +52,6 @@ export class BodyCenter {
   private eye: BodyModuleLike | null = null;
   /** 耳（听觉）：phone-bridge / voice-message 入站音频到达 */
   private ear: BodyModuleLike | null = null;
-  /** 皮肤（体感）：智能家居 / 设备传感器 */
-  private skin: BodyModuleLike | null = null;
   /** 前庭器（平衡）：3D 具身位置 / 多设备渲染状态 */
   private vestibular: BodyModuleLike | null = null;
   /** 稳态核心（内脏）：电量 / 位置 / 算力配额 / 负载 / 疲劳度 */
@@ -90,9 +88,6 @@ export class BodyCenter {
       case "ear":
         this.ear = module;
         break;
-      case "skin":
-        this.skin = module;
-        break;
       case "vestibular":
         this.vestibular = module;
         break;
@@ -126,13 +121,6 @@ export class BodyCenter {
     console.log("[BodyCenter] 已注入 Ear（耳/听觉）");
   }
 
-  /** 注入皮肤（体感） */
-  setSkin(m: BodyModuleLike): void {
-    this.skin = m;
-    this.bodyGateway.registerModule(m);
-    console.log("[BodyCenter] 已注入 Skin（皮肤/体感）");
-  }
-
   /** 注入前庭器（平衡） */
   setVestibularApparatus(m: BodyModuleLike): void {
     this.vestibular = m;
@@ -162,10 +150,6 @@ export class BodyCenter {
 
   getEar(): BodyModuleLike | null {
     return this.ear;
-  }
-
-  getSkin(): BodyModuleLike | null {
-    return this.skin;
   }
 
   getVestibularApparatus(): BodyModuleLike | null {
@@ -233,7 +217,6 @@ export class BodyCenter {
     await this.startModule("BodyBus", this.bodyBus);
     await this.startModule("Eye", this.eye);
     await this.startModule("Ear", this.ear);
-    await this.startModule("Skin", this.skin);
     await this.startModule("VestibularApparatus", this.vestibular);
     await this.startModule("HomeostasisCore", this.homeostasis);
     await this.startModule("ReflexArc", this.reflex);
@@ -257,7 +240,6 @@ export class BodyCenter {
     await this.stopModule("ReflexArc", this.reflex);
     await this.stopModule("HomeostasisCore", this.homeostasis);
     await this.stopModule("VestibularApparatus", this.vestibular);
-    await this.stopModule("Skin", this.skin);
     await this.stopModule("Ear", this.ear);
     await this.stopModule("Eye", this.eye);
     await this.stopModule("BodyBus", this.bodyBus);

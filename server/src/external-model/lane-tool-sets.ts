@@ -197,7 +197,7 @@ export function isToolRecallEnabled(): boolean {
 /**
  * 域信号预召回（2026-10-09 工具链根修，chat / task 车道共用原语；L1 增强）。
  *
- * 根因：车道 Core 是静态白名单，长尾工具（travel.* / media.* / smart_home 等）
+ * 根因：车道 Core 是静态白名单，长尾工具（travel.* / media.* 等）
  * 全在延迟目录，须 tool_discover 两波召回才能到手——而模型不知道自己看不见，
  * 「自认能办事」就手写答案静默失败（三次真机实证：profile.update 9/29「嘴硬说
  * 记了」、weather.get_local 10/7「嘴硬没接口」、travel.plan-itinerary 10/8 手写

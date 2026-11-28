@@ -16,7 +16,7 @@ export type DeviceKind =
   | "phone" // 手机（含桥接的真机）
   | "tablet" // 平板（复用 phone 协议）
   | "watch" // 手表 / 可穿戴
-  | "home" // 智能家居网关（HomeAssistant 等）
+  | "home" // 家居网关（保留的设备种类，当前无内置数据源）
   | "camera" // 网络摄像头 / IP Cam
   | "glasses" // 智能眼镜
   | "vehicle" // 车机
@@ -103,7 +103,7 @@ export interface DeviceDescriptor {
 export type DeviceConnectionKind =
   | "websocket" // 长连接设备（phone / desktop / glasses / tablet / watch 桥接）
   | "http" // HTTP 拉式设备（如 ONVIF 摄像头）
-  | "local_service" // server 进程内本地服务（如 smart-home-service 直接调 HA）
+  | "local_service" // server 进程内本地服务适配的设备（进程内直调，无 WS）
   | "mqtt" // MQTT 客户端（后续扩展）
   | "unknown";
 

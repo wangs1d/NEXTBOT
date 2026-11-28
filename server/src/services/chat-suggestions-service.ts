@@ -178,15 +178,6 @@ const SUGGESTION_POOL: SuggestionPoolEntry[] = [
     core: false,
   },
   {
-    id: "home-control",
-    capabilityId: "home_assistant",
-    tag: "家居",
-    prompt: "把客厅灯调暗一点，十点半自动关",
-    usedPrompt: "把家里灯光调成观影模式，十点半自动关",
-    toolSignals: ["smart_home.", "home_assistant."],
-    core: false,
-  },
-  {
     id: "image-gen",
     capabilityId: "image_gen",
     tag: "画图",

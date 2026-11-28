@@ -250,237 +250,6 @@ let agentProcessingUiActive = false;
 /** @type {Map<string, { el: HTMLElement, text: string }>} */
 const assistants = new Map();
 
-/** @type {HTMLIFrameElement | null} */
-let avatarFrame = null;
-let avatarReady = false;
-let avatarSpeakingEnergy = 0.45;
-let avatarSummoned = false;
-
-function getAvatarFrame() {
-  if (!avatarFrame) avatarFrame = document.getElementById("agent-avatar-frame");
-  return avatarFrame;
-}
-
-function updateAvatarSummonButton() {
-  const btn = document.getElementById("avatar-summon-btn");
-  if (!btn) return;
-  btn.title = avatarSummoned ? "收起桌宠" : "召唤桌宠";
-  btn.setAttribute("aria-pressed", avatarSummoned ? "true" : "false");
-}
-
-function summonAvatar() {
-  const frame = getAvatarFrame();
-  const host = document.getElementById("agent-avatar-float");
-  if (!frame || !host) return;
-  if (!avatarSummoned) {
-    const sid = sessionId();
-    frame.src = `/chat/assets/avatar/embed.html?wsOff=1&sessionId=${encodeURIComponent(sid)}`;
-  }
-  avatarSummoned = true;
-  host.hidden = false;
-  host.classList.remove("is-hidden");
-  updateAvatarSummonButton();
-}
-
-function dismissAvatar() {
-  const frame = getAvatarFrame();
-  const host = document.getElementById("agent-avatar-float");
-  if (!host) return;
-  avatarSummoned = false;
-  avatarReady = false;
-  host.hidden = true;
-  host.classList.add("is-hidden");
-  if (frame) frame.src = "about:blank";
-  updateAvatarSummonButton();
-}
-
-/** 桌宠拖动与可选召唤（默认隐藏，点击按钮后加载） */
-function initAvatarFrame() {
-  const frame = getAvatarFrame();
-  const host = document.getElementById("agent-avatar-float");
-  if (!frame || !host) return;
-
-  const summonBtn = document.getElementById("avatar-summon-btn");
-  summonBtn?.addEventListener("click", () => {
-    if (avatarSummoned) dismissAvatar();
-    else summonAvatar();
-  });
-  updateAvatarSummonButton();
-
-  let dragging = false;
-  let startX = 0;
-  let startY = 0;
-  let originLeft = 0;
-  let originTop = 0;
-
-  const onPointerDown = (ev) => {
-    if (ev.button !== undefined && ev.button !== 0) return;
-    // Shift/Alt + 拖动：移动悬浮窗位置（左键在 iframe 内旋转球体）
-    if (!ev.shiftKey && !ev.altKey) return;
-    dragging = true;
-    frame.style.pointerEvents = "none";
-    host.classList.add("is-dragging");
-    startX = ev.clientX;
-    startY = ev.clientY;
-    const rect = host.getBoundingClientRect();
-    originLeft = rect.left;
-    originTop = rect.top;
-    host.style.left = `${originLeft}px`;
-    host.style.top = `${originTop}px`;
-    host.style.right = "auto";
-    host.setPointerCapture?.(ev.pointerId);
-    ev.preventDefault();
-  };
-
-  const onPointerMove = (ev) => {
-    if (!dragging) return;
-    ev.preventDefault();
-    const dx = ev.clientX - startX;
-    const dy = ev.clientY - startY;
-    const w = host.offsetWidth;
-    const h = host.offsetHeight;
-    const maxLeft = Math.max(0, window.innerWidth - w);
-    const maxTop = Math.max(0, window.innerHeight - h);
-    const nextLeft = Math.min(maxLeft, Math.max(0, originLeft + dx));
-    const nextTop = Math.min(maxTop, Math.max(0, originTop + dy));
-    host.style.left = `${nextLeft}px`;
-    host.style.top = `${nextTop}px`;
-  };
-
-  const endDrag = (ev) => {
-    if (!dragging) return;
-    dragging = false;
-    frame.style.pointerEvents = "auto";
-    host.classList.remove("is-dragging");
-    host.releasePointerCapture?.(ev.pointerId);
-  };
-
-  host.addEventListener("pointerdown", onPointerDown);
-  window.addEventListener("pointermove", onPointerMove);
-  window.addEventListener("pointerup", endDrag);
-  window.addEventListener("pointercancel", endDrag);
-}
-
-/** 向嵌入的 3D Agent 形象同步状态（服务端 embodiment.patch 或聊天事件） */
-function patchAvatar(patch) {
-  const frame = getAvatarFrame();
-  if (!frame?.contentWindow || !avatarReady) return;
-  frame.contentWindow.postMessage({ type: "agent-sphere:patch", ...patch }, "*");
-}
-
-function applyEmbodimentPatch(p) {
-  patchAvatar({
-    mood: p.mood,
-    energy: p.energy,
-    caption: p.caption === null ? undefined : p.caption,
-    phase: p.phase,
-    subAgentType: p.subAgentType,
-    subAgentDisplayName: p.subAgentDisplayName,
-    source: p.source,
-  });
-  if (p.mood === "happy") {
-    setTimeout(() => patchAvatar({ mood: "idle", energy: 0.5, caption: undefined }), 1800);
-  }
-}
-
-window.addEventListener("message", (ev) => {
-  if (ev.data?.type === "agent-sphere:ready") {
-    avatarReady = true;
-    patchAvatar({ mood: "idle", energy: 0.5 });
-    return;
-  }
-  if (ev.data?.type === "agent-sphere:touch") {
-    const phase = ev.data.phase;
-    const spin = ev.data.spinStrength ?? 0;
-    if (phase === "start") {
-      patchAvatar({ mood: "listening", energy: 0.62, focused: true, caption: "嗯？" });
-      return;
-    }
-    if (phase === "end") {
-      if (spin > 0.45) {
-        patchAvatar({ mood: "happy", energy: 0.75, caption: "哈哈，别转了！" });
-        forwardEmbodimentCommand({ action: "excite", strength: 0.85 + spin * 0.5 });
-        setTimeout(() => patchAvatar({ mood: "idle", energy: 0.5, caption: undefined }), 1600);
-      } else if ((ev.data.totalRotationDeg ?? 0) > 25) {
-        patchAvatar({ mood: "alert", energy: 0.7, caption: "你在摸我？" });
-        setTimeout(() => patchAvatar({ mood: "idle", energy: 0.5, caption: undefined }), 1200);
-      }
-    }
-    return;
-  }
-  if (ev.data?.type === "agent-sphere:interact" && ev.data.action === "focus") {
-    inputEl?.focus();
-    inputEl?.scrollIntoView({ block: "nearest", behavior: "smooth" });
-    return;
-  }
-  if (ev.data?.type === "agent-sphere:boundary") {
-    const host = document.getElementById("agent-avatar-float");
-    if (host) {
-      const edge = ev.data.edge;
-      const rect = host.getBoundingClientRect();
-      const w = host.offsetWidth;
-      const h = host.offsetHeight;
-      const maxLeft = Math.max(0, window.innerWidth - w);
-      const maxTop = Math.max(0, window.innerHeight - h);
-      let left = rect.left;
-      let top = rect.top;
-      const nudge = 52;
-      if (edge === "left") left = Math.min(maxLeft, left + nudge);
-      else if (edge === "right") left = Math.max(0, left - nudge);
-      else if (edge === "top") top = Math.min(maxTop, top + nudge);
-      else if (edge === "bottom") top = Math.max(0, top - nudge);
-      else forwardEmbodimentCommand({ action: "window_roam" });
-      if (edge === "left" || edge === "right" || edge === "top" || edge === "bottom") {
-        host.style.left = `${left}px`;
-        host.style.top = `${top}px`;
-        host.style.right = "auto";
-        patchAvatar({ mood: "alert", energy: 0.82, caption: "哎哟，撞到了！" });
-        setTimeout(() => patchAvatar({ mood: "idle", energy: 0.5, caption: undefined }), 900);
-      }
-    }
-    return;
-  }
-  if (ev.data?.type === "agent-sphere:command" && ev.data.action === "window_roam") {
-    forwardEmbodimentCommand({ action: "window_roam" });
-    return;
-  }
-  if (ev.data?.type === "agent-sphere:send" && ws?.readyState === WebSocket.OPEN) {
-    const sid = sessionId();
-    const action = ev.data.action;
-    const text = ev.data.text;
-    ws.send(
-      JSON.stringify({
-        type: "agent.embodiment.interact",
-        payload: {
-          sessionId: sid,
-          userId: sid,
-          action,
-          ...(text ? { text } : {}),
-        },
-      }),
-    );
-    if (action === "wake" || action === "chat") {
-      patchAvatar({ mood: "listening", caption: "正在聆听…", energy: 0.65 });
-    }
-  }
-});
-
-function forwardEmbodimentCommand(p) {
-  const frame = getAvatarFrame();
-  if (!frame?.contentWindow || !avatarReady) return;
-  frame.contentWindow.postMessage(
-    {
-      type: "agent-sphere:command",
-      action: p.action,
-      x: p.x,
-      y: p.y,
-      z: p.z,
-      strength: p.strength,
-    },
-    "*",
-  );
-}
-
 function sessionId() {
   let id = localStorage.getItem(SESSION_KEY);
   if (!id) {
@@ -916,19 +685,8 @@ function handleWs(msg) {
   const type = msg.type;
   const p = msg.payload ?? {};
 
-  if (type === "agent.embodiment.patch") {
-    applyEmbodimentPatch(p);
-    return;
-  }
-
-  if (type === "agent.embodiment.command") {
-    forwardEmbodimentCommand(p);
-    return;
-  }
-
   if (type === "agent.phone.incoming") {
     showPhoneIncoming(p);
-    patchAvatar({ mood: "alert", caption: "来电", energy: 0.9 });
     return;
   }
 
@@ -996,7 +754,6 @@ function handleWs(msg) {
       .join("");
     scrollToLatest();
     syncAgentProcessingUi(true);
-    patchAvatar({ mood: "thinking", caption: line, energy: 0.72 });
     return;
   }
 
@@ -1045,15 +802,6 @@ function handleWs(msg) {
       .join("");
     scrollToLatest();
     syncAgentProcessingUi(true);
-    patchAvatar({ mood: "thinking", caption: line, energy: 0.6 });
-    return;
-  }
-
-  if (type === "tool.call") {
-    const line = String(p.userStatusLine ?? p.assistantPreamble ?? p.toolName ?? "").trim();
-    if (line) {
-      patchAvatar({ mood: "thinking", caption: line, energy: 0.68 });
-    }
     return;
   }
 
@@ -1063,8 +811,6 @@ function handleWs(msg) {
     appendAssistantChunkText(row, String(p.chunk ?? ""));
     paintAssistant(id);
     scrollToLatest();
-    avatarSpeakingEnergy = Math.min(1, avatarSpeakingEnergy + 0.025);
-    patchAvatar({ mood: "speaking", energy: avatarSpeakingEnergy });
     return;
   }
 
@@ -1078,9 +824,6 @@ function handleWs(msg) {
     prog?.remove();
     syncAgentProcessingUi(false);
     setStatus("已连接");
-    avatarSpeakingEnergy = 0.45;
-    patchAvatar({ mood: "happy", energy: 0.55 });
-    setTimeout(() => patchAvatar({ mood: "idle", energy: 0.5, caption: undefined }), 1800);
     const id = String(p.messageId ?? "assistant-final");
     const row = ensureAssistant(id);
     // 服务端已剥离 NEXT_UP 块；这里再兜一层，防旧服务端/错写变体把标记漏进气泡。
@@ -1104,26 +847,12 @@ function handleWs(msg) {
     document.getElementById("progress-bubble")?.remove();
     syncAgentProcessingUi(false);
     setStatus(String(p.message ?? "错误"));
-    patchAvatar({ mood: "alert", caption: String(p.message ?? "错误"), energy: 0.85 });
     return;
   }
 
   if (type === "schedule.reminder_fired") {
     const reminderMsg = String(p.message ?? p.title ?? "提醒").trim();
     pushFocus(`提醒：${reminderMsg}`);
-    patchAvatar({ mood: "alert", caption: reminderMsg, energy: 0.9 });
-    return;
-  }
-
-  if (type === "schedule.agent_task_fired") {
-    const title = String(p.title ?? "自动化任务").trim();
-    patchAvatar({ mood: "thinking", caption: title, energy: 0.75, phase: "agent_task" });
-    return;
-  }
-
-  if (type === "agent.peer_message") {
-    const preview = String(p.preview ?? p.text ?? "新消息").slice(0, 40);
-    patchAvatar({ mood: "alert", caption: preview, energy: 0.82 });
     return;
   }
 
@@ -1143,13 +872,7 @@ function handleWs(msg) {
     paintAssistant(id);
     dailyChatStorage.saveMessage("assistant", row.text, id);
     scrollToLatest();
-    const importance = String(p.importance ?? "");
     pushFocus(`${prefix || "Agent 主动找你："}${text.slice(0, 40)}`);
-    patchAvatar({
-      mood: importance === "high" ? "alert" : "happy",
-      caption: (prefix || text).slice(0, 24),
-      energy: importance === "high" ? 0.85 : 0.68,
-    });
     return;
   }
 }
@@ -1177,7 +900,6 @@ function sendUserMessage() {
   );
   setStatus("处理中…");
   syncAgentProcessingUi(true);
-  patchAvatar({ mood: "listening", caption: "正在聆听…", energy: 0.65 });
 }
 
 sendBtn.addEventListener("click", sendUserMessage);
@@ -1325,7 +1047,6 @@ function showPhoneDialer() {
   showPhoneCallWidget("ringing");
   appendBubble("system", "📞 正在呼叫你的 Agent…", "phone-status");
   scrollToLatest();
-  patchAvatar({ mood: "alert", caption: "通话中", energy: 0.8 });
 }
 
 let phoneCallWidgetState = null;
@@ -1407,7 +1128,6 @@ function hangUpPhoneCall() {
   closePhoneCallWidget();
   appendBubble("system", "📞 通话已结束", "phone-status");
   scrollToLatest();
-  patchAvatar({ mood: "idle", caption: undefined, energy: 0.5 });
 }
 
 function closePhoneCallWidget() {
@@ -1430,7 +1150,6 @@ phoneBtn.className = "phone-toggle-btn";
 document.querySelector(".composer").insertBefore(phoneBtn, sendBtn);
 phoneBtn.addEventListener("click", showPhoneDialer);
 
-initAvatarFrame();
 updateAgentNameDisplay();
 loadFromStorage();
 renderFocusPanel();

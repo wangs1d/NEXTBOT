@@ -119,7 +119,16 @@ function spawnService(): void {
     ["-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", String(PORT)],
     {
       cwd: SERVICE_DIR,
-      env: { ...process.env, PYTHONUNBUFFERED: "1" },
+      env: {
+        ...process.env,
+        PYTHONUNBUFFERED: "1",
+        // BLAS/OMP 线程钉死：torch 默认按核数起线程池，小核机上会与后端主进程
+        // 抢满 CPU。数字人链路是 CUDA 密集，CPU 侧并行收益可忽略（2C2G 优化）。
+        // 尊重调用方已有的同名设置（12-Factor：外部环境优先于代码默认）。
+        OMP_NUM_THREADS: process.env.OMP_NUM_THREADS?.trim() || "1",
+        MKL_NUM_THREADS: process.env.MKL_NUM_THREADS?.trim() || "1",
+        OPENBLAS_NUM_THREADS: process.env.OPENBLAS_NUM_THREADS?.trim() || "1",
+      },
       stdio: ["ignore", outFd, outFd],
       windowsHide: true,
       detached: true,
@@ -136,7 +145,16 @@ function spawnService(): void {
     respawnAttempts += 1;
     setTimeout(() => {
       if (stopping || child) return;
-      spawnService();
+      void (async () => {
+        // 退出后端口可能已被别的实例占住（serve_forever / 旧 detached 常驻）：
+        // 复用不抢占，否则两套守护会互相拉扯成死循环（2026-11-28 实测）。
+        if (await portInUse()) {
+          if (await engineReady()) respawnAttempts = 0;
+          return;
+        }
+        if (stopping || child) return;
+        spawnService();
+      })();
     }, delay).unref();
   });
   child.unref();

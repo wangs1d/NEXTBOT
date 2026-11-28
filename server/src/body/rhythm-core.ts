@@ -176,12 +176,7 @@ export class RhythmCore implements BodyModuleLike {
   async start(): Promise<void> {
     if (this.started) return;
     this.started = true;
-    // 订阅 body 既有信号作为活跃标记（设备变化 = 人在活动）
-    this.unsubs.push(
-      this.bodyBus.subscribe("body.skin.device_change", (signal) => {
-        if (signal.actorId) this.noteActivity(signal.actorId, "device_change");
-      }),
-    );
+    // 订阅 body 既有信号作为活跃标记（设备切换 = 人在活动）
     this.unsubs.push(
       this.bodyBus.subscribe("body.vestibular.device_switch", (signal) => {
         if (signal.actorId) this.noteActivity(signal.actorId, "device_switch");

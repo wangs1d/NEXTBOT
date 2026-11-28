@@ -51,7 +51,7 @@ const container = document.getElementById("root");
 if (container) {
   createRoot(container).render(
     <div style={{ width: "100%", height: "100%", background: "#0a0d13" }}>
-      <SphereAgentScene state={DEFAULT_AGENT_STATE} mode="overlay" physics={false} />
+      <SphereAgentScene state={DEFAULT_AGENT_STATE} physics={false} />
     </div>,
   );
 }

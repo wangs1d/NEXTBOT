@@ -1045,7 +1045,6 @@ function inferDomainGroups(domains: string[], resourceType: ResourceType): strin
         groups.add("commerce");
         break;
       case "device":
-      case "smart_home":
         groups.add("execution");
         break;
       case "weather":
@@ -1218,7 +1217,6 @@ function namespaceToDomain(namespace: string): string {
     wallet: "wallet",
     weather: "weather",
     world: "world",
-    smart: "smart_home",
     device: "device",
     voice: "voice",
   };

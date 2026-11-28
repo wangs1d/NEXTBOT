@@ -63,7 +63,34 @@ IDLE_LIP_KP = (6, 12, 14, 17, 19, 20)     # exp 里属于嘴部的关键点
 IDLE_BANK_SEC = 0                         # 静音 LMDM 运动库：0=关闭（实测会带来循环感和面部拉扯）
 IDLE_EXPR_EMOS = (("happy", 3), ("surprise", 6), ("sad", 5))   # 官方情绪索引
 IDLE_EXPR_BASE_EMO = 4                    # 中性
-IDLE_EXPR_MAX_DELTA = 0.004              # 限制空闲表情在关键点空间的最大形变量，避免腮部轮廓伸缩
+IDLE_EXPR_MAX_DELTA = 0.006              # 限制空闲表情在关键点空间的最大形变量，避免腮部轮廓伸缩
+
+# ── 说话运动增强：放大 LMDM 自身的运动 ──
+# 设计原则（2026-11-28 二次返工）：LMDM 是真实说话视频训练的联合模型，
+# 头姿/口型/平移/前伸(scale)天然耦合自然。此前在此之上手搓逐轴轨迹
+# （yaw 游走、点头弹簧、roll 跟随等固定参数波形）与模型自身节奏打架，
+# 观感"硬编码/晃动不自然"，已全部移除。
+# 现在只做一件事：音量越大，模型自己的运动（头姿 + 平移 t + 前伸 scale）
+# 按同一倍数均匀放大——放大已有自然运动，不发明新运动。
+# 能量在产出端挂在 x_d_info 私有键 "_ges"=(energy, motion_time)，私有键
+# 必须在进 stitch 前弹出（_mix_s_d_info 按 d0 逐键相对运算会 KeyError）。
+# ctrl_motion 里 delta 先加后乘 alpha，base delta_pitch 按 /alpha 预除。
+GESTURE_ALPHA_GAIN = 0.35    # 音量对 LMDM 运动的放大：mult = 1 + gain * e
+GESTURE_ALPHA_MAX = 1.35     # 放大倍数上限
+GESTURE_TAIL_SEC = 0.35      # 句尾收零时长（收势帧回中性不跳变）
+
+# ── 空闲/倾听微动增强 ──
+# 情绪基的嘴部分量比例：0 = 情绪表情（眉眼颊）不动嘴。旧值 0.15 会让
+# happy 基的微笑分量慢速淡入，被用户感知为"眨眼时嘴角上扬"（实测眨眼
+# 波形对唇 kp 位移仅 ~0.0003，与眨眼无关）；嘴部动态由中性唇姿漂移承担。
+IDLE_LIP_MASK_RATIO = 0.0
+IDLE_LIP_POSTURE_MAX = 0.0015   # 中性唇姿微漂移上限（微张/抿嘴，不含微笑方向）
+IDLE_CARRY_TAU = 1.2            # 说话→空闲姿态接力衰减时间常数（秒）
+IDLE_SACC_MIN_DEG = 2.5         # 微扫视幅度（°等效视线偏移）
+IDLE_SACC_MAX_DEG = 13.0        # 注视转移扫视幅度（°）
+IDLE_SACC_GAIN = 1.0            # 扫视 exp 注入总增益
+IDLE_BREATH_SCALE = 0.004       # 呼吸的 scale 起伏（胸廓/整体轻微起伏）
+IDLE_BLINK_LONG_EVERY = (6, 12) # 平均每 6-12 次眨眼掺一次长眨眼（闭眼 ~1s）
 
 
 def _log(msg):
@@ -168,85 +195,118 @@ class _GraphLMDM:
         return x.float().cpu().numpy()
 
 
-# ── 人物分割（背景透明化）──
-_SEGMENTER = None
-_SEGMENTER_TRIED = False
-_SEGMENTER_MULTICLASS = False
+# ── 人物抠像与蒙版（MODNet 真 alpha matting）──
+# 二值分割只给硬边界（发丝间隙的原图背景像素无法清理，白边反复复发），
+# matting 给逐像素真透明度：发丝半透明、间隙 alpha≈0，白边从机制上消失。
+AVATAR_BG_FILL_RGB = (14, 14, 16)   # 背景填充色（RGB），与客户端面板深底同款
+
+_MODNET = None
+_MODNET_TRIED = False
 
 
-def _person_segmenter():
-    """懒加载 mediapipe 分割器（一次性）；包/模型不可用时返回 None。
-
-    优先 multiclass 模型（按类别输出 hair/body_skin/face_skin/clothes，
-    紧脸裁剪下发丝轮廓准）；缺文件时回退旧 coarse 模型——后者把「人物 vs
-    背景」置信度在人脸占满画面时整片饱和，蒙版会连背景一起保住（残留根因），
-    仅作保底。
-    """
-    global _SEGMENTER, _SEGMENTER_TRIED, _SEGMENTER_MULTICLASS
-    if _SEGMENTER_TRIED:
-        return _SEGMENTER
-    _SEGMENTER_TRIED = True
+def _modnet_session():
+    """懒加载 MODNet ONNX（一次性）；缺文件/onnxruntime 不可用返回 None。"""
+    global _MODNET, _MODNET_TRIED
+    if _MODNET_TRIED:
+        return _MODNET
+    _MODNET_TRIED = True
     try:
-        import mediapipe as mp
-        from mediapipe.tasks import python as mp_python
-        from mediapipe.tasks.python import vision
+        import onnxruntime as ort
 
-        model_dir = os.path.join(
+        path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "models")
-        multiclass = os.path.join(model_dir, "selfie_multiclass_256x256.tflite")
-        coarse = os.path.join(model_dir, "selfie_segmenter.tflite")
-        use_multiclass = os.path.exists(multiclass)
-        if not use_multiclass and not os.path.exists(coarse):
-            _log(f"分割模型缺失，背景透明化停用: {coarse}")
+            "models", "modnet.onnx")
+        if not os.path.exists(path):
+            _log(f"MODNet 模型缺失，抠像/蒙版停用: {path}")
             return None
-        if not use_multiclass:
-            _log("multiclass 分割模型缺失，回退 coarse 模型（蒙版偏大）")
-        _SEGMENTER_MULTICLASS = use_multiclass
-        opts = vision.ImageSegmenterOptions(
-            base_options=mp_python.BaseOptions(
-                model_asset_path=multiclass if use_multiclass else coarse),
-            output_category_mask=use_multiclass,
-            output_confidence_masks=not use_multiclass)
-        _SEGMENTER = vision.ImageSegmenter.create_from_options(opts)
+        _MODNET = ort.InferenceSession(
+            path, providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+        _log("MODNet matting 就绪")
     except Exception as exc:  # noqa: BLE001
-        _log(f"分割器初始化失败，背景透明化停用: {exc}")
-        _SEGMENTER = None
-    return _SEGMENTER
+        _log(f"MODNet 初始化失败，抠像/蒙版停用: {exc}")
+        _MODNET = None
+    return _MODNET
+
+
+def _matte_modnet_alpha(rgb_u8: np.ndarray) -> np.ndarray | None:
+    """MODNet 推理：返回原尺寸 [0,1] float alpha；失败返回 None。"""
+    sess = _modnet_session()
+    if sess is None:
+        return None
+    h, w = rgb_u8.shape[:2]
+    inp = cv2.resize(rgb_u8, (512, 512), interpolation=cv2.INTER_AREA)
+    x = (inp.astype(np.float32) / 127.5 - 1.0).transpose(2, 0, 1)[None]
+    out = sess.run(None, {sess.get_inputs()[0].name: x})[0]
+    alpha = np.clip(np.squeeze(out), 0.0, 1.0)
+    if alpha.ndim != 2:
+        return None
+    return cv2.resize(alpha, (w, h), interpolation=cv2.INTER_LINEAR)
+
+
+def matte_avatar_photo(rgb: np.ndarray) -> np.ndarray:
+    """上传照片预处理：MODNet 真 alpha 抠像 + 背景去污染（despill），
+    背景替换为中性填充色。MODNet 不可用/失败时原样返回（绝不挡上传）。
+
+    半透明像素 C = F·α + B0·(1-α)（B0=原图背景色），直接合成会保留
+    B0 的亮色成分 → 头发外圈浅色描边。去污染闭式解（无 α 除法，低 alpha
+    稳定）：最终 = C + (fill - B0)·(1-α)——背景像素精确变填充色，边缘
+    残留的背景色成分被完全扣除，白边/彩边根治。
+    """
+    try:
+        rgb_u8 = np.ascontiguousarray(
+            np.clip(rgb, 0, 255).astype(np.uint8)) if rgb.dtype != np.uint8 \
+            else np.ascontiguousarray(rgb)
+        mod_alpha = _matte_modnet_alpha(rgb_u8)
+        if mod_alpha is None:
+            _log("MODNet 不可用，跳过抠像，保留原图背景")
+            return rgb_u8
+        # 低 alpha 抑制：发丝外围的软光晕密度压低（连续曲线避免分层；
+        # alpha>0.35 的实体发丝不受影响）
+        a = mod_alpha
+        alpha_s = a * (0.45 + 0.55 * np.clip(a / 0.35, 0.0, 1.0))
+        alpha_s = cv2.GaussianBlur(alpha_s, (3, 3), 0)
+        # B0 = 确信背景像素（α<0.05）的中位色；不足则退回图像边框采样
+        bg_mask = a < 0.05
+        if float(bg_mask.sum()) >= 100:
+            b0 = np.median(rgb_u8[bg_mask].astype(np.float32), axis=0)
+        else:
+            border = np.concatenate([
+                rgb_u8[:, :4].reshape(-1, 3), rgb_u8[:, -4:].reshape(-1, 3),
+                rgb_u8[:4, :].reshape(-1, 3), rgb_u8[-4:, :].reshape(-1, 3)])
+            b0 = np.median(border.astype(np.float32), axis=0)
+        shift = (np.array(AVATAR_BG_FILL_RGB, dtype=np.float32) - b0)
+        decont = rgb_u8.astype(np.float32) \
+            + shift[None, None, :] * (1.0 - alpha_s[..., None])
+        # 低 alpha 区硬替换为填充色（despill 公式假设纯色背景；对复杂
+        # 背景的场景画/渐变底，α≈0 区域直接换底，过渡带平滑混合）
+        fill = np.zeros_like(rgb_u8, dtype=np.float32)
+        fill[..., 0] = AVATAR_BG_FILL_RGB[0]
+        fill[..., 1] = AVATAR_BG_FILL_RGB[1]
+        fill[..., 2] = AVATAR_BG_FILL_RGB[2]
+        w_keep = np.clip((alpha_s - 0.02) / 0.23, 0.0, 1.0)[..., None]
+        out = decont * w_keep + fill * (1.0 - w_keep)
+        return np.clip(out, 0, 255).astype(np.uint8)
+    except Exception as exc:  # noqa: BLE001
+        _log(f"上传照片抠像失败，保留原图: {exc}")
+        return rgb if rgb.dtype == np.uint8 else np.clip(rgb, 0, 255
+                                                         ).astype(np.uint8)
 
 
 def _compute_person_mask(rgb: np.ndarray) -> np.ndarray:
-    """人物 alpha 蒙版（uint8 H×W，255=人物）。失败回退全 255（行为同旧版不透明）。
-
-    multiclass 按类别取人物（类别 0=背景，1-5=人物）；coarse 走 0.5 置信度
-    阈值。分割一次 ~130ms（注册期调用，不占帧预算）；形态学清理 + 向内
-    收边羽化（背景像素零保留，见下方注释）。
+    """客户端合成蒙版（uint8 H×W，255=人物）：渲染中性帧的 MODNet alpha
+    + 轻外扩羽化。头动位移多带住的像素是抠像后的中性色，与面板底
+    融为一体不可见。失败回退全 255（不透明，同旧行为）。注册期调用
+    一次，不占帧预算。
     """
-    import mediapipe as mp
-
     rgb_u8 = np.ascontiguousarray(
         np.clip(rgb, 0, 255).astype(np.uint8)) if rgb.dtype != np.uint8 \
         else np.ascontiguousarray(rgb)
-    seg = _person_segmenter()
-    if seg is None:
+    alpha = _matte_modnet_alpha(rgb_u8)
+    if alpha is None:
         return np.full(rgb_u8.shape[:2], 255, dtype=np.uint8)
-    mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_u8)
-    res = seg.segment(mp_img)
-    if _SEGMENTER_MULTICLASS:
-        cat = np.asarray(res.category_mask.numpy_view()).squeeze()
-        if cat.ndim != 2:
-            raise RuntimeError(f"category mask 形状异常: {cat.shape}")
-        m = (cat > 0).astype(np.uint8) * 255
-    else:
-        mask = np.asarray(res.confidence_masks[0].numpy_view())[:, :, 0].copy()
-        m = (mask > 0.5).astype(np.uint8) * 255
-    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
-    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
-    # 边缘只向内收（erode）+ 小幅羽化：羽化过渡必须压在人物像素上，
-    # 上传照片的背景像素一个都不保留——之前向外 dilate 留一圈原背景
-    # 给转头位移兜底，深色面板下显出背景色白描边（用户明确不要）。
-    m = cv2.erode(m, np.ones((9, 9), np.uint8))
-    m = cv2.GaussianBlur(m, (7, 7), 0)
+    m = (alpha * 255.0 + 0.5).astype(np.uint8)
+    m = cv2.dilate(m, np.ones((9, 9), np.uint8))
+    m = cv2.GaussianBlur(m, (13, 13), 0)
     return m
 
 
@@ -261,53 +321,41 @@ def _mask_png_bytes(mask: np.ndarray) -> bytes:
     return buf.tobytes()
 
 
-# 上传照片的背景填充色（RGB）：与客户端面板深底同款近黑。
-# 模型（decoder）会忠实重建源图背景——照片什么背景渲染帧就什么背景，
-# 头一动静态蒙版必然漏它。源头治理：加载时在内存里抠出人物、背景填这个
-# 中性色（不落盘），之后所有帧露出的边缘带都是同色，与面板融为一体。
-AVATAR_BG_FILL_RGB = (14, 14, 16)
+def _frame_energy(audio_16k: np.ndarray, total: int, apply_tail: bool = True) -> np.ndarray:
+    """25fps 运动帧的音频能量（说话手势层输入）：逐帧 RMS → 快攻慢释包络
+    → 按句内 90 分位归一化到 [0,1]。
 
-
-def matte_avatar_photo(rgb: np.ndarray) -> np.ndarray:
-    """上传照片预处理：分割人物，背景整体替换为 AVATAR_BG_FILL_RGB 纯色。
-
-    分割不可用/失败时原样返回（同旧行为，绝不因预处理挡上传）。
-    边缘用 5×5 高光羽化过渡，发丝与填充色平滑衔接、无硬边光晕。
+    offline（整段音频已知）apply_tail=True 直接把句尾收零烧进数组；
+    流式（音频陆续到达、句尾未知）传 False，由 emit 端在 finish 后补收零。
     """
-    try:
-        import mediapipe as mp
-
-        rgb_u8 = np.ascontiguousarray(
-            np.clip(rgb, 0, 255).astype(np.uint8)) if rgb.dtype != np.uint8 \
-            else np.ascontiguousarray(rgb)
-        seg = _person_segmenter()
-        if seg is None:
-            return rgb_u8
-        mp_img = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_u8)
-        res = seg.segment(mp_img)
-        if _SEGMENTER_MULTICLASS:
-            cat = np.asarray(res.category_mask.numpy_view()).squeeze()
-            if cat.ndim != 2:
-                return rgb_u8
-            m = (cat > 0).astype(np.uint8) * 255   # 0=背景，1-5=人物
-        else:
-            conf = np.asarray(
-                res.confidence_masks[0].numpy_view())[:, :, 0].copy()
-            m = (conf > 0.5).astype(np.uint8) * 255
-        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
-        m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
-        alpha = cv2.GaussianBlur(m, (5, 5), 0).astype(np.float32) / 255.0
-        fill = np.zeros_like(rgb_u8)
-        fill[..., 0] = AVATAR_BG_FILL_RGB[0]
-        fill[..., 1] = AVATAR_BG_FILL_RGB[1]
-        fill[..., 2] = AVATAR_BG_FILL_RGB[2]
-        out = (rgb_u8.astype(np.float32) * alpha[..., None]
-               + fill.astype(np.float32) * (1.0 - alpha[..., None]))
-        return np.clip(out, 0, 255).astype(np.uint8)
-    except Exception as exc:  # noqa: BLE001
-        _log(f"上传照片抠像失败，保留原图: {exc}")
-        return rgb if rgb.dtype == np.uint8 else np.clip(rgb, 0, 255
-                                                         ).astype(np.uint8)
+    if total <= 0:
+        return np.zeros(0, dtype=np.float32)
+    win = SAMPLE_RATE // MOTION_FPS          # 640 采样 = 40ms
+    audio = np.asarray(audio_16k, dtype=np.float32)
+    need = total * win
+    if len(audio) >= need:
+        frames = audio[:need].reshape(total, win)
+    else:
+        pad = np.zeros(need - len(audio), dtype=np.float32)
+        frames = np.concatenate([audio, pad]).reshape(total, win)
+    rms = np.sqrt((frames * frames).mean(axis=1) + 1e-9)
+    a_att = 1.0 - math.exp(-1.0 / (0.08 * MOTION_FPS))   # 快攻 ~80ms：跟上音节
+    a_rel = 1.0 - math.exp(-1.0 / (0.25 * MOTION_FPS))   # 慢释 ~250ms：不抖
+    env = np.empty(total, dtype=np.float32)
+    prev = 0.0
+    for i, v in enumerate(rms):
+        prev += (float(v) - prev) * (a_att if v > prev else a_rel)
+        env[i] = prev
+    hot = env[env > 1e-4]
+    ref = float(np.percentile(hot, 90)) if hot.size else 0.0
+    if ref <= 0.0:
+        return np.zeros(total, dtype=np.float32)
+    e = np.clip(env / ref, 0.0, 1.0)
+    if apply_tail:
+        tail = int(GESTURE_TAIL_SEC * MOTION_FPS)
+        if tail > 0 and total > tail:
+            e[total - tail:] *= np.linspace(1.0, 0.0, tail, dtype=np.float32)
+    return e
 
 
 class DittoEngine:
@@ -317,6 +365,7 @@ class DittoEngine:
         max_dim: int = 1920,
         steps: int = 50,
         pose_alpha: float = 1.0,
+        gesture_gain: float = 1.0,
         smooth_k: int = 1,
         emo=4,               # 中性为底；实际使用官方 cfg 的情绪序列
         use_graph: bool = True,
@@ -356,6 +405,7 @@ class DittoEngine:
         self.max_dim = max_dim
         self.steps = steps
         self.pose_alpha = pose_alpha
+        self.gesture_gain = float(gesture_gain)
         self.smooth_k = smooth_k
         # 说话/空闲共用的常量头姿基准（官方 delta_pitch=2），两边必须一致
         self.base_ctrl = {}
@@ -404,6 +454,25 @@ class DittoEngine:
         self._look_next = 0.0
         # 每个人偏好某一侧（约 65%），避免左右对称的机械感
         self._look_side_bias = random.choice((-1.0, 1.0))
+        # 眼球扫视：眼睛先动、头后跟（真实注视转移的眼-头时序）
+        self._sacc_now = [0.0, 0.0]      # 当前视线偏移（°等效 yaw/pitch）
+        self._sacc_from = [0.0, 0.0]
+        self._sacc_to = [0.0, 0.0]
+        self._sacc_t0 = -1.0
+        self._sacc_dur = 0.1
+        self._sacc_next = 0.0
+        self._force_blink_at = None      # 扫视后强排一次眨眼的时间点
+        # 中性唇姿微漂移：微张/抿嘴（不含微笑方向，微笑由说话负责）
+        self._lip_part_vec = None        # 唇部"张合方向"单位向量（来自 surprise 唇部差）
+        self._lip_p = 0.0
+        self._lip_p_from = 0.0
+        self._lip_p_to = 0.0
+        self._lip_p_t0 = 0.0
+        self._lip_p_dur = 2.0
+        self._lip_p_next = 0.0
+        # 说话→空闲姿态接力：从上一句实际显示姿态出发衰减回中性
+        self._idle_carry = None          # [yaw, pitch, roll]（°）
+        self._idle_carry_t0 = 0.0
         # 静音 LMDM 生成的微表情库（IDLE_BANK_SEC=0 时不生成）
         self._idle_bank = None
         self._idle_bank_pose = None
@@ -430,6 +499,9 @@ class DittoEngine:
         self._nod_t0 = 0.0
         self._nod_dur = 0.6
         self._nod_next = 0.0
+        self._nod_half = 1              # 1=单点头，2=双点头（backchannel 多样性）
+        # 倾听用户能量钩子（0~1；客户端暂未下发时为 None，节拍纯随机）
+        self._listen_energy = None
         # 倾听侧倾：偶尔的小幅度 roll，缓慢收放
         self._tilt_now = 0.0
         self._tilt_from = 0.0
@@ -454,15 +526,11 @@ class DittoEngine:
 
         # 人物 alpha 蒙版（背景透明化）：load_avatar 时分割一次，
         # /api/avatar/mask 下发给客户端做 dstIn 合成；mask_rev 供增量拉取。
-        # 蒙版是中性帧的静态图，人物一动轮廓就离开蒙版覆盖区（歪头必露背景），
-        # 所以每帧还要算「中性→当前」的相似变换（_update_mask_pose），
-        # 随帧下发给客户端让蒙版跟着头走。
+        # 静态蒙版 + 轻外扩容差：源图背景已在内存抠像时替换为中性色，
+        # 头动时蒙版带住的只是同色像素，与面板底融为一体。
         self.person_mask = None
         self.mask_png = None
         self.mask_rev = 0
-        self._mask_kp = None    # 蒙版对应帧的驱动关键点 (63,2)，load_avatar 时锚定
-        self.mask_pose = None   # (a,b,tx,ty)：512 帧像素空间的相似变换；None=不跟
-        self._last_xd = None    # 最近一帧 stitch 输出的驱动关键点
 
         # 与官方输出平均差低于 0.01/255，用于守住实时帧率。
         # 先触发官方 SpectralNorm 前向钩子生成归一化权重，再静态折叠。
@@ -538,6 +606,11 @@ class DittoEngine:
                 "alpha_roll": self.pose_alpha,
             },
         )
+        # 眨眼多样化：在官方波形表上扩展长眨眼并重排节奏表（说话/空闲共用）
+        try:
+            self._install_blink_tables()
+        except Exception as exc:  # noqa: BLE001
+            _log(f"眨眼多样化表安装失败，沿用官方节奏: {exc}")
 
         if self.use_graph:
             try:
@@ -553,14 +626,9 @@ class DittoEngine:
         # 人物分割蒙版（背景透明化）：渲染管线就绪后渲一帧中性帧做分割。
         # 关键：渲染输出是 decoder 的固定方形裁剪区（512×512），不是整张源图，
         # 所以蒙版必须对「渲染出的中性帧」分割——天然与所有帧同坐标系。
-        # 蒙版锚定帧的驱动关键点一并记录（_mask_kp），逐帧相似变换以此为基准。
         # 失败时置 None → /api/avatar/mask 404 → 客户端保持不透明（同旧行为）。
         try:
             probe = self.render_frame(self._neutral_motion())
-            last_xd = self._last_xd
-            self._mask_kp = (
-                np.asarray(last_xd, dtype=np.float64).reshape(-1, 3)[:, :2].copy()
-                if last_xd is not None else None)
             self.person_mask = _compute_person_mask(probe)
             self.mask_png = _mask_png_bytes(self.person_mask)
             self.mask_rev += 1
@@ -569,7 +637,6 @@ class DittoEngine:
         except Exception as exc:  # noqa: BLE001
             self.person_mask = None
             self.mask_png = None
-            self._mask_kp = None
             _log(f"人物蒙版计算失败，背景保持不透明: {exc}")
 
         self._last_motion = None
@@ -579,6 +646,34 @@ class DittoEngine:
         return {"elapsed_s": round(elapsed, 2), "size": [w0, h0]}
 
     # ── 图捕获 ──
+    def _install_blink_tables(self):
+        """眨眼多样化：官方只有固定 15 帧（0.6s）眨眼 + 60-100 帧随机睁眼；
+        扩展一张长眨眼波形（~26 帧，闭眼更久、幅度略柔）并重排节奏表，
+        平均每 6-12 次眨眼掺一次长眨眼。说话/空闲共用同一套表。"""
+        arr = np.asarray(self.stitch.delta_eye_arr, dtype=np.float32)   # (15, 63)
+        n_long = 26
+        # np.interp 产出 float64——必须 cast 回 float32，否则眨眼增量把
+        # stitch 的关键点矩阵污染成 Double，官方 Float 权重直接报 dtype 错
+        long_wave = np.stack(
+            [np.interp(np.linspace(0, 14, n_long), np.arange(15), arr[:, d])
+             for d in range(arr.shape[1])], axis=1).astype(np.float32) * np.float32(0.9)
+        ext = np.concatenate([arr, long_wave], axis=0).astype(np.float32)
+        normal = list(range(0, 15))
+        long_run = list(range(15, 15 + n_long))
+        n = 3000
+        lst: list[int] = []
+        long_every = random.randint(*IDLE_BLINK_LONG_EVERY)
+        count = 0
+        while len(lst) < n:
+            lst.extend([0] * random.randint(60, 100))
+            count += 1
+            lst.extend(long_run if count % long_every == 0 else normal)
+            if count % long_every == 0:
+                long_every = random.randint(*IDLE_BLINK_LONG_EVERY)
+        self.stitch.delta_eye_arr = ext
+        self.stitch.delta_eye_idx_list = lst[:n]
+        _log(f"眨眼多样化表就绪（长眨眼比例 1/{long_every}±，总帧 {n}）")
+
     def _setup_a2m(self):
         """按官方 cfg 初始化 LMDM 条件（fix_kp_cond / 输出裁剪 / 平滑）。
 
@@ -678,6 +773,10 @@ class DittoEngine:
 
         motion_idx: 该帧在 25fps 运动时间轴上的全局序号，用于同步官方眨眼序列。
         """
+        # 说话手势层输入由产出端挂在私有键 "_ges"=(energy, motion_time) 上，
+        # 必须在进 stitch 前弹出——stitch 的 _mix_s_d_info 会按 d0 对逐键做
+        # 相对运算，私有键会 KeyError（同 MOTION_KEYS 的教训）。
+        ges = x_d_info.pop("_ges", None)
         if self._speech_continuation_pending:
             neutral = self._neutral_motion()
             previous = self._last_motion
@@ -689,6 +788,19 @@ class DittoEngine:
             self.stitch.d0 = d0
             self.stitch.fade_dst = None
             self._speech_continuation_pending = False
+
+        # 说话运动增强：能量 → 同一倍数放大 LMDM 自身的运动（官方 ctrl 通路
+        # 放大头姿；相对平移 t 与前伸 scale 按句首锚点 d0 同倍数放大）。
+        if ges is not None and motion_idx is not None and self.gesture_gain > 0.0:
+            e, tm = ges
+            mult = self._gesture_mult(e)
+            ctrl_kwargs = {**self._speech_gesture_ctrl(e, tm), **ctrl_kwargs}
+            d0 = self.stitch.d0
+            if d0 is not None:
+                for key in ("t", "scale"):
+                    if key in d0 and key in x_d_info:
+                        t0 = d0[key]
+                        x_d_info[key] = t0 + (x_d_info[key] - t0) * mult
 
         # 记下「这一帧实际显示的运动」：stitch 内部算的是 src + (pred - d0)，
         # 所以这里反推出「以中性为 d0 时应传入的 v」= pred - d0 + neutral。
@@ -730,50 +842,33 @@ class DittoEngine:
         xs, xd = self.stitch(
             self.source_info["x_s_info_lst"][0], x_d_info, **ctrl_kwargs
         )
-        self._last_xd = xd
-        self._update_mask_pose(xd)
         return self._render_hi(xs, xd)
 
-    def _update_mask_pose(self, xd):
-        """由当前驱动关键点更新「蒙版随头」相似变换（每帧一次，微秒级）。
+    def _gesture_mult(self, e: float) -> float:
+        """音量 → 运动放大倍数（对 LMDM 自身头姿/平移/前伸均匀放大）。
 
-        蒙版是中性帧算的静态图，人物一动轮廓就离开蒙版（歪头必露原背景）。
-        这里对 63 个驱动关键点做 Umeyama 闭式相似拟合（中性→当前，复数域
-        最小二乘），得到旋转+缩放+平移，随帧下发给客户端对蒙版做同样变换——
-        蒙版始终贴住人物轮廓，照片背景像素零暴露。残差只剩表情导致的
-        非刚性形变（发际边缘 1-3px），由蒙版向内羽化带吸收。
-
-        kp 在 256 裁剪空间，渲染输出是 512 帧（2×），平移×2 即到像素空间。
+        gesture_gain<=0 返回 0（调用方据此跳过整层）；否则上限封顶防大角度变形。
         """
-        ref = self._mask_kp
-        if ref is None:
-            self.mask_pose = None
-            return
-        kp = np.asarray(xd, dtype=np.float64).reshape(-1, 3)[:, :2]
-        if kp.shape != ref.shape:
-            self.mask_pose = None
-            return
-        mu1, mu2 = ref.mean(axis=0), kp.mean(axis=0)
-        z1 = ref - mu1
-        z2 = kp - mu2
-        c1 = z1[:, 0] + 1j * z1[:, 1]
-        c2 = z2[:, 0] + 1j * z2[:, 1]
-        denom = float(np.sum(np.abs(c1) ** 2))
-        if denom <= 1e-6:
-            self.mask_pose = None
-            return
-        alpha = np.sum(np.conj(c1) * c2) / denom   # 复数相似系数 a+bi
-        t = complex(float(mu2[0]), float(mu2[1])) \
-            - alpha * complex(float(mu1[0]), float(mu1[1]))
-        s = float(abs(alpha))
-        # LMDM 异常值 / 极端帧保护：超界不跟（客户端沿用上一帧变换）
-        if not (0.7 <= s <= 1.3) or abs(t) > 60:
-            self.mask_pose = None
-            return
-        self.mask_pose = (
-            round(float(alpha.real), 5), round(float(alpha.imag), 5),
-            round(float(t.real) * 2.0, 2), round(float(t.imag) * 2.0, 2),
-        )
+        if self.gesture_gain <= 0.0:
+            return 0.0
+        return min(1.0 + GESTURE_ALPHA_GAIN * e, GESTURE_ALPHA_MAX) * self.gesture_gain
+
+    def _speech_gesture_ctrl(self, e: float, tm: float) -> dict:
+        """说话运动增强（走官方 ctrl_motion 通路）：只放大 LMDM 自身的头动。
+
+        e ∈ [0,1] 是本帧音频能量。不再注入任何手搓轨迹——此前逐轴叠加
+        的游走/弹簧波形与模型自身节奏打架（观感硬编码、晃动不自然），
+        已整体移除；现在音量越大，模型自己的运动放大越多。
+        """
+        actl = max(1e-3, self.pose_alpha * self._gesture_mult(e))
+        return {
+            "delta_pitch": self.base_ctrl.get("delta_pitch", 2.0) / actl,
+            "delta_yaw": 0.0,
+            "delta_roll": 0.0,
+            "alpha_pitch": actl,
+            "alpha_yaw": actl,
+            "alpha_roll": actl,
+        }
 
     # ── 空闲微动调度 ──
     def _idle_ensure(self, t: float):
@@ -798,7 +893,7 @@ class DittoEngine:
             self._pose_fast_next = t + random.uniform(0.5, 2.0)
             self._breath_phase = 0.0    # 从 0 振幅起步：收句接手的第一帧不会突然多出半个呼吸幅度
             self._breath_period = random.uniform(4.8, 5.8)
-            self._breath_amp = random.uniform(0.25, 0.38)
+            self._breath_amp = random.uniform(0.30, 0.50)
             self._breath_reseed = t + random.uniform(10.0, 20.0)
             self._look_head_now = [0.0, 0.0, 0.0]
             self._look_head_from = [0.0, 0.0, 0.0]
@@ -815,9 +910,22 @@ class DittoEngine:
             # 倾听调度一并重置（_nod_next=0 会让下一次渲染重新抽节拍）
             self._nod_now = 0.0
             self._nod_next = 0.0
+            self._nod_half = 1
             self._tilt_now = 0.0
             self._tilt_from = 0.0
             self._tilt_next = 0.0
+            # 扫视与唇姿漂移一并重置（姿态接力 _idle_carry 不在这里清：
+            # 它由 end_speech 设置、按自身时间常数衰减，跨过这个 reset）
+            self._sacc_now = [0.0, 0.0]
+            self._sacc_from = [0.0, 0.0]
+            self._sacc_to = [0.0, 0.0]
+            self._sacc_t0 = -1.0
+            self._sacc_next = 0.0
+            self._force_blink_at = None
+            self._lip_p = 0.0
+            self._lip_p_from = 0.0
+            self._lip_p_to = 0.0
+            self._lip_p_next = 0.0
             self._lis_expr_w = {k: 0.0 for k in (self._expr_basis or {})}
             self._lis_expr_from = dict(self._lis_expr_w)
             self._lis_expr_to = dict(self._lis_expr_w)
@@ -830,7 +938,7 @@ class DittoEngine:
             self._breath_phase += 2.0 * math.pi * dt / self._breath_period
             if t >= self._breath_reseed:
                 self._breath_period = random.uniform(4.6, 6.4)
-                self._breath_amp = random.uniform(0.22, 0.40)
+                self._breath_amp = random.uniform(0.28, 0.52)
                 self._breath_reseed = t + random.uniform(10.0, 22.0)
         self._idle_last_t = t
 
@@ -844,9 +952,9 @@ class DittoEngine:
         if t >= self._pose_slow_next:
             self._pose_slow_from = list(self._pose_slow_now)
             self._pose_slow_to = [
-                random.uniform(-1.0, 1.0),      # yaw：模型对 yaw 很敏感，保持很小
-                random.uniform(-1.0, 1.0),      # pitch
-                random.uniform(-1.5, 1.5),      # roll：歪头承担主要的姿态变化
+                random.uniform(-1.8, 1.8),      # yaw：模型对 yaw 敏感，保持小幅度但不再贴死
+                random.uniform(-1.4, 1.4),      # pitch
+                random.uniform(-2.2, 2.2),      # roll：歪头承担主要的姿态变化
             ]
             self._pose_slow_t0 = t
             self._pose_slow_dur = random.uniform(2.0, 4.0)
@@ -859,9 +967,9 @@ class DittoEngine:
         if t >= self._pose_fast_next:
             self._pose_fast_from = list(self._pose_fast_now)
             self._pose_fast_to = [
-                random.uniform(-0.60, 0.60),
-                random.uniform(-0.30, 0.30),
-                random.uniform(-0.32, 0.32),
+                random.uniform(-0.90, 0.90),
+                random.uniform(-0.45, 0.45),
+                random.uniform(-0.50, 0.50),
             ]
             self._pose_fast_t0 = t
             self._pose_fast_dur = random.uniform(1.0, 2.0)
@@ -872,6 +980,30 @@ class DittoEngine:
                                for f, n in zip(self._pose_fast_from, self._pose_fast_to)]
 
         breath = self._breath_amp * math.sin(self._breath_phase)
+
+        # 说话→空闲姿态接力：从上一句实际显示姿态出发指数衰减回中性，
+        # 消除句界跳变（旧实现空闲层直接归零重抽，收势帧会把头"拽回"中性）。
+        carry = [0.0, 0.0, 0.0]
+        if self._idle_carry is not None:
+            k = math.exp(-max(0.0, time.monotonic() - self._idle_carry_t0) / IDLE_CARRY_TAU)
+            if k < 0.05:
+                self._idle_carry = None
+            else:
+                carry = [c * k for c in self._idle_carry]
+
+        # 眼球扫视：真实注视转移是眼睛 ~100ms 先跳到位、头随后跟上。
+        # 大扫视（伴随 look 转移）与微扫视（闲时眼球乱动）共用一套状态，
+        # 视线目标一直保持到下一次转移。
+        if t >= self._sacc_next:
+            micro = random.uniform(IDLE_SACC_MIN_DEG,
+                                   IDLE_SACC_MIN_DEG * 1.8) * (0.6 if self.listening else 1.0)
+            if random.random() < 0.5:
+                to = [random.uniform(-micro, micro),
+                      random.uniform(-micro * 0.6, micro * 0.6)]
+            else:
+                to = [0.0, 0.0]
+            self._start_saccade(to, t, random.uniform(0.05, 0.10))
+            self._sacc_next = t + random.uniform(1.2, 3.5)
 
         # 随机注视转移只体现在头部。
         # 刚说完话的几秒更倾向看回镜头，空闲越久越容易看向别处。
@@ -888,18 +1020,27 @@ class DittoEngine:
             self._look_head_from = list(self._look_head_now)
             if random.random() > p_camera:
                 side = self._look_side_bias if random.random() < 0.65 else -self._look_side_bias
-                to_y = side * random.uniform(0.8, 1.4)
-                to_p = random.uniform(-0.6, 1.0)
-                roll = -side * random.uniform(1.5, 3.0)
+                to_y = side * random.uniform(1.0, 2.2)
+                to_p = random.uniform(-1.2, 1.2)   # 俯仰对称：避免"总在低头看"的偏置
+                roll = -side * random.uniform(2.0, 3.5)
                 hold = random.uniform(1.2, 3.5)
+                # 大扫视：眼睛先跳到注视方向（满幅），头延迟跟随（share 部分）
+                self._start_saccade(
+                    [max(-IDLE_SACC_MAX_DEG, min(IDLE_SACC_MAX_DEG, to_y * 6.0)),
+                     max(-IDLE_SACC_MAX_DEG * 0.7,
+                         min(IDLE_SACC_MAX_DEG * 0.7, to_p * 6.0))],
+                    t, random.uniform(0.06, 0.12))
+                self._force_blink_at = time.monotonic() + random.uniform(0.15, 0.30)
             else:
                 to_y = to_p = 0.0
                 roll = 0.0
                 hold = random.uniform(0.8, 2.5)
+                self._start_saccade([0.0, 0.0], t, random.uniform(0.06, 0.12))
+                self._force_blink_at = time.monotonic() + random.uniform(0.15, 0.30)
             amp = max(abs(to_y), abs(to_p))
-            share = random.uniform(0.35, 0.60)
+            share = random.uniform(0.45, 0.70)
             self._look_head_to = [to_y * share, to_p * share, roll]
-            self._look_head_t0 = t + random.uniform(0.08, 0.20)
+            self._look_head_t0 = t + random.uniform(0.12, 0.28)   # 眼先动，头后跟
             self._look_head_dur = 0.45 + 0.05 * amp
             self._look_next = self._look_head_t0 + self._look_head_dur + hold
 
@@ -914,17 +1055,78 @@ class DittoEngine:
         sy, sp, sr = self._pose_slow_now
         fy, fp, fr = self._pose_fast_now
         return {
-            "delta_yaw": sy + fy + self._look_head_now[0],
-            "delta_pitch": sp + fp + breath + self._look_head_now[1],
-            "delta_roll": sr + fr + self._look_head_now[2],
+            "delta_yaw": sy + fy + self._look_head_now[0] + carry[0],
+            "delta_pitch": sp + fp + breath + self._look_head_now[1] + carry[1],
+            "delta_roll": sr + fr + self._look_head_now[2] + carry[2],
         }
+
+    def _start_saccade(self, to_deg, t: float, dur: float):
+        """发起一次眼球扫视（°等效视线偏移），眼睛先于头部移动。"""
+        self._sacc_from = list(self._sacc_now)
+        self._sacc_to = [max(-20.0, min(20.0, to_deg[0])),
+                         max(-14.0, min(14.0, to_deg[1]))]
+        self._sacc_t0 = t
+        self._sacc_dur = max(0.05, dur)
+
+    def _saccade_exp(self) -> np.ndarray | None:
+        """当前视线偏移 → exp 眼区增量（kp11/15 的 x/y，同官方 _fix_gaze 系数）。"""
+        dy, dp = self._sacc_now
+        if abs(dy) < 0.05 and abs(dp) < 0.05:
+            return None
+        v = np.zeros((21, 3), dtype=np.float32)
+        dx = dy * 0.26
+        dyp = dp * 0.28
+        v[11][0] += dx * 0.0007 * IDLE_SACC_GAIN
+        v[15][0] += dx * 0.001 * IDLE_SACC_GAIN
+        v[11][1] += dyp * -0.001 * IDLE_SACC_GAIN
+        v[15][1] += dyp * -0.001 * IDLE_SACC_GAIN
+        return v.reshape(1, 63)
+
+    def _advance_saccade(self, t: float):
+        u = min(1.0, max(0.0, (t - self._sacc_t0) / max(self._sacc_dur, 1e-3))) \
+            if self._sacc_t0 >= 0 else 1.0
+        a = u * u * (3 - 2 * u)
+        self._sacc_now = [f + (n - f) * a
+                          for f, n in zip(self._sacc_from, self._sacc_to)]
+
+    def _lip_posture(self, t: float) -> np.ndarray | None:
+        """中性唇姿微漂移：微张/抿嘴的慢随机游走（不产生微笑方向）。"""
+        vec = self._lip_part_vec
+        if vec is None:
+            return None
+        if t >= self._lip_p_next:
+            self._lip_p_from = self._lip_p
+            if random.random() < 0.5:
+                self._lip_p_to = random.uniform(0.0, 1.0)      # 微张
+            else:
+                self._lip_p_to = random.uniform(-0.6, 0.0)     # 轻抿
+            self._lip_p_t0 = t
+            self._lip_p_dur = random.uniform(1.0, 2.5)
+            self._lip_p_next = t + self._lip_p_dur + random.uniform(1.5, 5.0)
+        u = min(1.0, max(0.0, (t - self._lip_p_t0) / max(self._lip_p_dur, 1e-3)))
+        a = u * u * (3 - 2 * u)
+        self._lip_p = self._lip_p_from + (self._lip_p_to - self._lip_p_from) * a
+        return vec.reshape(1, 63) * (self._lip_p * IDLE_LIP_POSTURE_MAX)
+
+    def _jump_to_next_blink(self):
+        """把眨眼时钟跳到下一次眨眼起点前 ~120ms（扫视后常伴随眨眼）。"""
+        lst = getattr(self.stitch, "delta_eye_idx_list", None)
+        if not lst:
+            return
+        cur = int(self._eye_current_idx)
+        for i in range(cur + 2, min(cur + 200, len(lst))):
+            if lst[i] > 0 and lst[i - 1] == 0:
+                self._eye_anchor_idx = max(0, i - 2)
+                self._eye_anchor_at = time.monotonic()
+                self._eye_current_idx = self._eye_anchor_idx
+                return
 
     def _build_expr_basis(self):
         """用静音 + 不同情绪条件各跑一窗 LMDM，提取「表情方向」向量。
 
-        取情绪窗口相对中性窗口的 exp 差异，只保留眉眼颊等区域，
-        嘴部只留 15%，再夹紧幅度。空闲时按随机权重混合这些方向，
-        表情是连续变化的，不是一段固定视频循环。
+        取情绪窗口相对中性窗口的 exp 差异，只保留眉眼颊等区域（嘴部分量
+        清零，嘴部动态由中性唇姿漂移承担），再夹紧幅度。空闲时按随机权重
+        混合这些方向，表情是连续变化的，不是一段固定视频循环。
         """
         self._expr_basis = None
         if not getattr(self.cond_handler, "use_emo", False):
@@ -959,8 +1161,20 @@ class DittoEngine:
                 )
 
             base = means.pop("neutral")
+            # 情绪表情只管眉眼颊：嘴部分量清零——happy 基的微笑分量慢速淡入
+            # 曾被感知为"眨眼时嘴角上扬"（实测眨眼波形对唇 kp 位移仅 ~0.0003，
+            # 与眨眼无关）；嘴部动态由 _lip_posture 的中性漂移承担。
             mask = np.ones(63, dtype=np.float32)
-            mask[[k * 3 + i for k in IDLE_LIP_KP for i in range(3)]] = 0.15
+            mask[[k * 3 + i for k in IDLE_LIP_KP for i in range(3)]] = IDLE_LIP_MASK_RATIO
+            lip_only = np.zeros(63, dtype=np.float32)
+            lip_only[[k * 3 + i for k in IDLE_LIP_KP for i in range(3)]] = 1.0
+            # 唇部"张合方向"取 surprise（张嘴）的唇部分量并单位化，供中性唇姿漂移
+            self._lip_part_vec = None
+            if "surprise" in means:
+                part = (means["surprise"] - base) * lip_only
+                peak = float(np.abs(part).max())
+                if peak > 1e-5:
+                    self._lip_part_vec = (part / peak).astype(np.float32)
             basis = {}
             for name, exp in means.items():
                 v = np.clip(exp - base, -0.02, 0.02) * mask
@@ -1031,14 +1245,22 @@ class DittoEngine:
         pose = self._idle_pose(t)
 
         if self._nod_next <= 0.0 or t >= self._nod_next:
-            # 20% 的空节拍：只有节拍没有动作，避免可辨认的点头规律
-            self._nod_to = random.uniform(1.2, 2.4) if random.random() < 0.8 else 0.0
+            # 节拍概率可由用户侧语音能量调制（set_listening_energy；未下发时
+            # 纯随机）——"你说到重点我才点头"。20~35% 空节拍避免规律感。
+            lvl = self._listen_energy
+            p_nod = 0.80 if lvl is None else min(0.95, 0.35 + 0.6 * lvl)
+            if random.random() < p_nod:
+                self._nod_to = random.uniform(1.2, 2.4)
+                self._nod_half = 2 if random.random() < 0.25 else 1   # 偶发双点头
+            else:
+                self._nod_to = 0.0
+                self._nod_half = 1
             self._nod_t0 = t
-            self._nod_dur = random.uniform(0.5, 0.8)
+            self._nod_dur = random.uniform(0.5, 0.8) * (1.6 if self._nod_half == 2 else 1.0)
             self._nod_next = t + self._nod_dur + random.uniform(1.8, 5.0)
         u = min(1.0, max(0.0, (t - self._nod_t0) / self._nod_dur))
-        # sin 半波：下去再回来，首尾都归零，节拍之间无缝衔接
-        self._nod_now = self._nod_to * math.sin(u * math.pi)
+        # 单点头 = sin 半波（下去再回来，首尾归零）；双点头 = 两个半波连发
+        self._nod_now = self._nod_to * abs(math.sin(u * math.pi * self._nod_half))
 
         if self._tilt_next <= 0.0 or t >= self._tilt_next:
             side = self._look_side_bias if random.random() < 0.65 else -self._look_side_bias
@@ -1222,23 +1444,39 @@ class DittoEngine:
         # 不补的话空闲是 0°、说话是 +2°，一切换整张脸就会上下错开。
         for _k, _v in self.base_ctrl.items():
             pose[_k] = pose.get(_k, 0.0) + _v
+
+        # delta_exp 三层叠加：情绪基（眉眼颊，不动嘴）+ 中性唇姿漂移 + 眼球扫视
         delta_exp = np.zeros((1, 63), dtype=np.float32)
         expr = self._listening_expr(t) if self.listening else self._idle_expr(t)
         if expr is not None:
             delta_exp = delta_exp + expr
+        extra = self._lip_posture(t)
+        if extra is not None:
+            delta_exp = delta_exp + extra
+        self._advance_saccade(t)
+        sacc = self._saccade_exp()
+        if sacc is not None:
+            delta_exp = delta_exp + sacc
+
+        # 扫视后强排眨眼：把眨眼时钟跳到下一次眨眼起点前 ~120ms
+        if self._force_blink_at is not None and time.monotonic() >= self._force_blink_at:
+            self._force_blink_at = None
+            self._jump_to_next_blink()
 
         # 空闲帧的相对基准必须是「中性运动」：d0 若还留着上一句首帧，
         # 整段空闲都会带着一个常量偏移（脸一直歪着/僵着），直到下一句才被覆盖。
         if self.stitch.d0 is None:
             self.stitch.d0 = self._neutral_motion()
 
+        neutral = self._neutral_motion()
+        # 呼吸进 scale：胸廓/整体轻微起伏（与说话端"前伸后缩"同通道）
+        neutral["scale"] = neutral["scale"] + IDLE_BREATH_SCALE * math.sin(self._breath_phase)
+
         x_s_info = self.source_info["x_s_info_lst"][0]
         self._eye_current_idx = self._idle_eye_idx()
         self._sync_eye_clock()
-        xs, xd = self.stitch(x_s_info, self._neutral_motion(),
+        xs, xd = self.stitch(x_s_info, neutral,
                              delta_exp=delta_exp, **pose)
-        self._last_xd = xd
-        self._update_mask_pose(xd)
         return self._render_hi(xs, xd)
 
     def _render_hi(self, xs, xd) -> np.ndarray:
@@ -1271,6 +1509,34 @@ class DittoEngine:
         self.stitch.d0 = None
         self.stitch.fade_dst = None
         self._speech_continuation_pending = False
+        # 姿态接力：把本句实际显示的头姿（bin66→度 + base 偏移）作为空闲层
+        # 的出发点，空闲/收势帧按 IDLE_CARRY_TAU 指数衰减回中性——消除句界
+        # "头被一帧拽回中性"的跳变。能量在句尾已收零，alpha≈pose_alpha，
+        # 这里按 (bin66度 + base) 近似即可。
+        self._idle_carry = None
+        last = self._last_motion
+        if last:
+            try:
+                self._idle_carry = [
+                    float(bin66_to_degree(
+                        np.asarray(last[k], dtype=np.float32).reshape(1, -1)
+                    ).reshape(-1)[0]) + float(self.base_ctrl.get(f"delta_{k}", 0.0))
+                    for k in ("yaw", "pitch", "roll")
+                ]
+                self._idle_carry_t0 = time.monotonic()
+            except Exception:  # noqa: BLE001
+                self._idle_carry = None
+
+    def set_listening_energy(self, level) -> None:
+        """接收用户侧语音能量（0~1），调制倾听点头节拍。
+
+        客户端暂未下发（当前只有 listening 布尔），下发后点头概率/幅度
+        会跟随"用户说到重点"——无需改引擎结构。
+        """
+        if level is None:
+            self._listen_energy = None
+        else:
+            self._listen_energy = max(0.0, min(1.0, float(level)))
 
     def continue_speech(self):
         """下一句首帧到达时，按上一句实际显示帧反算相对锚点。"""
@@ -1308,6 +1574,8 @@ class DittoEngine:
         total = int(np.ceil(len(audio_16k) / SAMPLE_RATE * fps))
         if total <= 0:
             return
+        # 说话手势层输入：整段音频已知，句尾收零直接烧进能量数组
+        ges_energy = _frame_energy(audio_16k, total)
         t_feat = time.monotonic()
         feat = self.wav2feat.wav2feat(audio_16k.astype(np.float32))
         feat_ms = (time.monotonic() - t_feat) * 1000
@@ -1349,11 +1617,13 @@ class DittoEngine:
             final_end = min(final_end, total)
             if final_end > emitted:
                 for x_d_info in self.a2m.cvt_fmt(res[:, emitted:final_end]):
+                    x_d_info["_ges"] = (float(ges_energy[emitted]), emitted / fps)
                     yield emitted, x_d_info
                     emitted += 1
 
         if emitted < total:
             for x_d_info in self.a2m.cvt_fmt(res[:, emitted:total]):
+                x_d_info["_ges"] = (float(ges_energy[emitted]), emitted / fps)
                 yield emitted, x_d_info
                 emitted += 1
 
@@ -1422,6 +1692,18 @@ class MotionStream:
     def _total_frames(self) -> int:
         return int(np.ceil(len(self._audio) / SAMPLE_RATE * MOTION_FPS))
 
+    def _attach_ges(self, x_d_info, energy, total: int, tail_frames: int) -> None:
+        """挂说话手势层输入 (energy, motion_time)；音频结束后句尾收零。"""
+        k = self._emitted
+        if energy is None or k >= len(energy):
+            return
+        e = float(energy[k])
+        if self._finished and total > tail_frames:
+            rem = total - 1 - k
+            if rem < tail_frames:
+                e *= max(0.0, rem / max(tail_frames - 1, 1))
+        x_d_info["_ges"] = (e, k / MOTION_FPS)
+
     def pop_frames(self):
         """产出已定稿的运动帧 [(idx, x_d_info)]；无可产出时返回 []。
 
@@ -1433,6 +1715,12 @@ class MotionStream:
         overlap = eng.a2m.overlap_v2
 
         out = []
+        # 说话手势层输入：按当前累计音频算能量（本调用内音频不变，句尾未知
+        # 时不收零，finish 后由 _attach_ges 补收零）
+        total0 = self._total_frames()
+        energy = (_frame_energy(self._audio.astype(np.float32), total0, apply_tail=False)
+                  if total0 > 0 else None)
+        tail_frames = int(GESTURE_TAIL_SEC * MOTION_FPS)
         while True:
             total = self._total_frames()
             idx = self._n_windows * valid
@@ -1475,6 +1763,7 @@ class MotionStream:
             final_end = min(final_end, total)
             if final_end > self._emitted:
                 for x_d_info in eng.a2m.cvt_fmt(self._res[:, self._emitted:final_end]):
+                    self._attach_ges(x_d_info, energy, total, tail_frames)
                     out.append((self._emitted, x_d_info))
                     self._emitted += 1
 
@@ -1488,6 +1777,7 @@ class MotionStream:
             total = self._total_frames()
             if self._emitted < total:
                 for x_d_info in eng.a2m.cvt_fmt(self._res[:, self._emitted:total]):
+                    self._attach_ges(x_d_info, energy, total, tail_frames)
                     out.append((self._emitted, x_d_info))
                     self._emitted += 1
         return out

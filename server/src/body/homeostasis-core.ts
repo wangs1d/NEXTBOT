@@ -7,7 +7,7 @@
 //  - fatigue 基于活动量（近期 LLM 调用 + 信号密度），不再纯线性时间模型
 //  - mood 维度迁回 HomeostasisCore（权威源），VestibularApparatus 保留 mood 作为渲染态
 //  - 新增 hunger 维度（算力/能量消耗率），>0.8 发布 hunger_high 信号
-//  - 订阅 BodyBus 信号（body.action.executed / body.skin.*）估算活动量
+//  - 订阅 BodyBus 信号（body.action.executed/failed）估算活动量
 //
 // 与其他 BodyModule 不同：纯聚合服务，tools=[]，不直接接受动作。
 // BrainCenter 通过 BodyCenter.state() 读取 BodyState，HomeostasisCore 是其权威数据源。
@@ -220,7 +220,7 @@ export class HomeostasisCore implements BodyModuleLike {
    * 定时器调用 unref() 避免阻塞进程退出。首次启动立即轮询一次，
    * 避免等一个完整 interval 才有数据。
    *
-   * P0-3：订阅 body.action.executed / body.action.failed / body.skin.* 信号，
+   * P0-3：订阅 body.action.executed / body.action.failed 信号，
    * 用于估算活动量（fatigue/hunger 依赖）。
    * 订阅失败不阻断启动（降级到纯轮询模式，活动量估算回退到 0）。
    */
@@ -771,7 +771,6 @@ export class HomeostasisCore implements BodyModuleLike {
    * 订阅的信号 kind：
    *  - body.action.executed → recentActionCount++，hunger 微增，记录信号时间
    *  - body.action.failed → 记录信号时间（失败也消耗能量）
-   *  - body.skin.* → 记录信号时间（环境感知联动）
    *
    * 订阅失败不阻断启动（降级到纯轮询）。
    * 所有 handler fire-and-forget，异常静默吞掉。
@@ -808,14 +807,8 @@ export class HomeostasisCore implements BodyModuleLike {
       );
       this.unsubscribers.push(unsubFailed);
 
-      // body.skin.* → 环境感知联动（仅记录信号密度）
-      const unsubSkin = this.bodyBus.subscribe("body.skin.*", () => {
-        recordSignal();
-      });
-      this.unsubscribers.push(unsubSkin);
-
       console.log(
-        `[HomeostasisCore] 已订阅 BodyBus 信号（action.executed/action.failed/skin.*）`,
+        `[HomeostasisCore] 已订阅 BodyBus 信号（action.executed/action.failed）`,
       );
     } catch (err) {
       // 订阅失败不阻断启动，降级到纯轮询模式

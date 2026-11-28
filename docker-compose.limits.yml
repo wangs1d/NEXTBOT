@@ -10,7 +10,10 @@
 # 要留给 nginx / qdrant / redis / 其他容器与系统。堆 768MB ≈ 54%，剩余给 embedding
 # 子进程（onnxruntime）、sharp 解码缓冲与 native 内存。
 #
-# 如果同时启用了 homeassistant / qdrant 且内存吃紧，优先停用未使用的服务；
+# 2026-11-28 内存预算（HA 服务已从 compose 移除）：
+#   OS+dockerd ~200m / api 1400m / redis ~120m / qdrant 256m / nginx ~30m ≈ 2.0G
+# qdrant 上限 256m：小规模向量集合足够；若集合涨到超限会被 OOM kill 后重启
+# （存储在卷里不丢），届时需要更大机器或把向量检索迁到 sqlite-vec 拆容器。
 # 实在要压，把 API_MEM_LIMIT 降到 1100m 并将 Dockerfile 堆改到 600MB 左右（≈55%）。
 #
 # 如果机器更大，需要同时改本文件的 mem_limit 与 server/Dockerfile 的堆参数
@@ -25,4 +28,18 @@ services:
     mem_limit: ${API_MEM_LIMIT:-1400m}
     memswap_limit: ${API_MEM_LIMIT:-1400m}
     cpus: ${API_CPUS:-2.0}
+    # onnxruntime 在容器里读到的是宿主机核数而非配额，代码内的 CPU 自适应兜底会
+    # 失真；基础设施知道真实配额，在这里显式钉死（主流做法：infra 传参 + 代码兜底）。
+    # embedding 是 24MB 小模型单条推理，1 线程足够；reranker 模型不进镜像，
+    # 裸机/桌面部署时用 AGENT_LOCAL_RERANKER_INTRA_THREADS 控制（默认 min(4,核数-1)）。
+    environment:
+      AGENT_LOCAL_EMBEDDING_INTRA_THREADS: ${AGENT_LOCAL_EMBEDDING_INTRA_THREADS:-1}
+      SQLITE_BUSY_TIMEOUT_MS: ${SQLITE_BUSY_TIMEOUT_MS:-2000}
+  qdrant:
+    mem_limit: ${QDRANT_MEM_LIMIT:-256m}
+    memswap_limit: ${QDRANT_MEM_LIMIT:-256m}
+  redis:
+    # 与 docker-compose.yml 里 --maxmemory 96mb 对齐，防止 Redis 自身元数据开销逃逸
+    mem_limit: ${REDIS_MEM_LIMIT:-160m}
+    memswap_limit: ${REDIS_MEM_LIMIT:-160m}
 

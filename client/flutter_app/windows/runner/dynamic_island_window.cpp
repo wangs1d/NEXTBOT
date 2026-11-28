@@ -1993,7 +1993,7 @@ void DynamicIslandWindow::Render() {
             g.DrawString(head.c_str(), -1, &head_font,
                          SnapText(text_x, block_y), &head_brush);
 
-            // 歌词行与展开卡共用 music_roll_pos_ 位相，整行滑动裁剪在行框内。
+            // 紧凑胶囊只露一行歌词；换行直接整行替换，不与展开卡滚动位相联动。
             const float ly_y = block_y + m_head.Height + gap;
             const int cur = MusicCurrentLine();
             const double sung_sec = MusicPositionSec();
@@ -2007,51 +2007,22 @@ void DynamicIslandWindow::Render() {
               g.DrawString(t0.c_str(), -1, &lyric_font, SnapText(text_x, ly_y),
                            &dim_brush);
             } else {
-              const float roll = static_cast<float>(
-                  music_roll_pos_ >= 0.0 ? music_roll_pos_ : cur);
-              int ia = static_cast<int>(std::floor(roll));
-              float f = roll - static_cast<float>(ia);
-              ia = std::max(0, std::min(ia,
-                  static_cast<int>(music_lines_.size()) - 1));
-              const int ib = std::min(ia + 1,
-                  static_cast<int>(music_lines_.size()) - 1);
-              Gdiplus::RectF clip_rect(text_x, ly_y - 2.0f * s,
-                  cap_x + cur_w - 12.0f * s - text_x, lyric_h + 4.0f * s);
-              g.SetClip(clip_rect);
-              if (ia >= 0 && ia < static_cast<int>(music_lines_.size())) {
-                const std::wstring full_a = Utf8ToWide(music_lines_[ia].text);
-                const std::wstring ta =
-                    FitText(g, full_a, lyric_font, text_max);
-                Gdiplus::RectF ma;
-                g.MeasureString(ta.c_str(), -1, &lyric_font,
-                                Gdiplus::PointF(0, 0), &ma);
-                const Gdiplus::PointF oa = SnapText(text_x, ly_y - f * lyric_h);
-                const std::vector<LyricChar>* chars_a =
-                    ta == full_a && !music_lines_[ia].chars.empty()
-                        ? &music_lines_[ia].chars
-                        : nullptr;
-                DrawKaraokeText(g, lyric_font, ta, chars_a, oa.X, oa.Y,
-                                ma.Width, ma.Height, ea, sung_sec,
-                                MusicLineProgress(ia));
-              }
-              if (ib != ia && f > 0.0f) {
-                const std::wstring full_b = Utf8ToWide(music_lines_[ib].text);
-                const std::wstring tb =
-                    FitText(g, full_b, lyric_font, text_max);
-                Gdiplus::RectF mb;
-                g.MeasureString(tb.c_str(), -1, &lyric_font,
-                                Gdiplus::PointF(0, 0), &mb);
-                const Gdiplus::PointF ob =
-                    SnapText(text_x, ly_y + (1.0f - f) * lyric_h);
-                const std::vector<LyricChar>* chars_b =
-                    tb == full_b && !music_lines_[ib].chars.empty()
-                        ? &music_lines_[ib].chars
-                        : nullptr;
-                DrawKaraokeText(g, lyric_font, tb, chars_b, ob.X, ob.Y,
-                                mb.Width, mb.Height, ea, sung_sec,
-                                MusicLineProgress(ib));
-              }
-              g.ResetClip();
+              // 单行直显：换到下一句就原地换成新文本，不做上一行上滑 /
+              // 下一行下补的滚动动画；卡拉OK高亮进度照常推进。
+              const int idx = std::max(
+                  0, std::min(cur, static_cast<int>(music_lines_.size()) - 1));
+              const std::wstring full = Utf8ToWide(music_lines_[idx].text);
+              const std::wstring t = FitText(g, full, lyric_font, text_max);
+              Gdiplus::RectF m;
+              g.MeasureString(t.c_str(), -1, &lyric_font,
+                              Gdiplus::PointF(0, 0), &m);
+              const Gdiplus::PointF o = SnapText(text_x, ly_y);
+              const std::vector<LyricChar>* chars =
+                  t == full && !music_lines_[idx].chars.empty()
+                      ? &music_lines_[idx].chars
+                      : nullptr;
+              DrawKaraokeText(g, lyric_font, t, chars, o.X, o.Y, m.Width,
+                              m.Height, ea, sung_sec, MusicLineProgress(idx));
             }
           }
         }

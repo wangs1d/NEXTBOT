@@ -158,18 +158,19 @@ test("域卡：空语料安全降级为空串", () => {
 });
 
 test("域拉取：确定性（两次调用字节相同）+ 族完整 + 前3名瘦身 schema", async () => {
-  const r1 = await executeToolSearchBridge("tool_discover", { domain: "smart_home" }, catalog);
-  const r2 = await executeToolSearchBridge("tool_discover", { domain: "smart_home" }, catalog);
+  const r1 = await executeToolSearchBridge("tool_discover", { domain: "calendar" }, catalog);
+  const r2 = await executeToolSearchBridge("tool_discover", { domain: "calendar" }, catalog);
   assert.equal(r1.ok, true);
   assert.equal(JSON.stringify(r1.result), JSON.stringify(r2.result));
   const result = r1.result as { mode: string; domain: string; matches: Array<{ name: string; parameters?: Record<string, unknown> }> };
   assert.equal(result.mode, "domain");
-  assert.equal(result.domain, "smart_home");
-  const smartHomeNames = catalog.entries
+  assert.equal(result.domain, "calendar");
+  const calendarNames = catalog.entries
     .map((e) => e.registryName)
-    .filter((n) => domainsForTool(n).includes("smart_home"));
-  assert.equal(result.matches.length, Math.min(12, smartHomeNames.length));
-  for (const m of result.matches) assert.ok(smartHomeNames.includes(m.name));
+    .filter((n) => domainsForTool(n).includes("calendar"));
+  assert.ok(calendarNames.length > 0, "calendar 域语料为空（测试语料失真）");
+  assert.equal(result.matches.length, Math.min(12, calendarNames.length));
+  for (const m of result.matches) assert.ok(calendarNames.includes(m.name));
   // 前 3 名带 schema 且瘦身（字段 description 被剥）
   const withSchema = result.matches.filter((m) => m.parameters);
   assert.ok(withSchema.length > 0 && withSchema.length <= 3);

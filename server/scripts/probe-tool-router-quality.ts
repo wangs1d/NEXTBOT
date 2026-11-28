@@ -46,7 +46,6 @@ const GOLDEN: GoldenCase[] = [
   { query: "今天有什么热搜", expect: ["hot_rankings"] },
   { query: "我钱包还有多少钱", expect: ["wallet.get_balance"] },
   { query: "找个教做红烧肉的视频", expect: ["search_videos"] },
-  { query: "把客厅的灯打开", expect: ["smart_home.control_device"] },
   { query: "打开抖音", expect: ["desktop.open"] },
   { query: "打开网易云 播放影月", expect: ["desktop.open"] },
   { query: "比特币现在什么价", expect: ["search_web", "internet.research", "deep_search", "internet.live_check"], topK: 3 },

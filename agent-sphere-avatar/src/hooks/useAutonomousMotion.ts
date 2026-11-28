@@ -8,8 +8,6 @@ interface UseAutonomousMotionOptions {
   enabled?: boolean;
   bounds?: number;
   strength?: number;
-  /** 每帧将物理体位置钳制在 bounds 内（embed 小视口） */
-  hardClamp?: boolean;
 }
 
 /** Cannon 物理体自主漫游 — 随机目标点 + 缓动推力 */
@@ -18,17 +16,14 @@ export function useAutonomousMotion({
   enabled = true,
   bounds = 2.2,
   strength = 1,
-  hardClamp = false,
 }: UseAutonomousMotionOptions) {
   const target = useRef(new THREE.Vector3(0, 1.6, 0));
   const position = useRef(new THREE.Vector3(0, 1.6, 0));
   const nextRetargetAt = useRef(0);
   const enabledRef = useRef(enabled);
   const strengthRef = useRef(strength);
-  const hardClampRef = useRef(hardClamp);
   enabledRef.current = enabled;
   strengthRef.current = strength;
-  hardClampRef.current = hardClamp;
 
   const pickRandomTarget = useCallback(() => {
     target.current.set(
@@ -70,18 +65,6 @@ export function useAutonomousMotion({
   }, [api, pickRandomTarget]);
 
   useFrame(({ clock }) => {
-    if (hardClampRef.current) {
-      const { x, y, z } = position.current;
-      const cx = Math.max(-bounds, Math.min(bounds, x));
-      const cy = Math.max(0.9, Math.min(2.6, y));
-      const cz = Math.max(-bounds, Math.min(bounds, z));
-      if (cx !== x || cy !== y || cz !== z) {
-        api.position.set(cx, cy, cz);
-        api.velocity.set(0, 0, 0);
-        position.current.set(cx, cy, cz);
-      }
-    }
-
     if (!enabledRef.current) return;
     const t = clock.elapsedTime;
 

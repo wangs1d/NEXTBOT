@@ -69,7 +69,6 @@ const RULES: ClassRule[] = [
   // ── home 居家 ──
   { prefix: "home_service.", domain: "home" },
   { exact: "home_service.book", domain: "home", action: "book", risk: "spend" },
-  { prefix: "smart_home", domain: "home", action: "execute", risk: "write" },
   { prefix: "device.", domain: "home" },
   // ── finance 财务 ──
   { exact: "alipay.submit-payment", domain: "finance", action: "book", risk: "spend" },
@@ -236,7 +235,7 @@ function matchRule(name: string): ClassRule | null {
 const DOMAIN_SEARCH_HINTS: Record<LifeDomain, string[]> = {
   travel: ["travel", "trip", "flight", "train", "hotel", "出行", "旅游", "行程", "订票", "机票", "高铁", "酒店", "接站", "接机", "打车", "天气"],
   dining: ["restaurant", "takeout", "errand", "餐厅", "订座", "外卖", "跑腿", "美食"],
-  home: ["home service", "smart home", "device", "家政", "保洁", "维修", "智能家居", "设备", "灯光", "空调"],
+  home: ["home service", "device", "家政", "保洁", "维修", "设备"],
   finance: ["pay", "payment", "wallet", "billing", "shopping", "支付", "付款", "钱包", "转账", "记账", "账单", "购物", "下单", "比价"],
   health: ["health", "fitness", "健康", "运动", "体重", "睡眠", "体检"],
   social: ["email", "message", "social post", "邮件", "短信", "发消息", "朋友圈", "发帖", "微博"],

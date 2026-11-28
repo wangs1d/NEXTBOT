@@ -223,7 +223,7 @@
   }
   clearStage();
 
-  function drawBitmap(bmp, pose) {
+  function drawBitmap(bmp) {
     // cover：保持原比例、居中裁剪到画布（避免非 3:4 素材被拉伸变形）
     const iw = bmp.width || 0;
     const ih = bmp.height || 0;
@@ -235,21 +235,11 @@
     const dy = (SH - dh) / 2;
     ctx.drawImage(bmp, dx, dy, dw, dh);
     // 人物蒙版（背景透明化）：destination-in 抠掉人物羽化边缘外的一切。
-    // 蒙版是中性帧的静态图，服务端随帧下发「中性→当前」相似变换（pose），
-    // 让蒙版跟着头动——歪头/转头时轮廓始终贴住人物，照片背景零暴露。
+    // 源图背景已在服务端内存抠像时替换为中性色，头动的位移容差带
+    // 露出的也是同色，与底色融为一体。
     if (maskImg) {
       ctx.globalCompositeOperation = 'destination-in';
-      ctx.save();
-      ctx.translate(dx, dy);
-      ctx.scale(dw / 512, dh / 512);
-      if (pose) {
-        ctx.translate(pose.tx, pose.ty);
-        ctx.rotate(Math.atan2(pose.b, pose.a));
-        const ps = Math.hypot(pose.a, pose.b);
-        ctx.scale(ps, ps);
-      }
-      ctx.drawImage(maskImg, 0, 0, maskImg.width, maskImg.height, 0, 0, 512, 512);
-      ctx.restore();
+      ctx.drawImage(maskImg, dx, dy, dw, dh);
       ctx.globalCompositeOperation = 'source-over';
     }
   }
@@ -257,8 +247,6 @@
   // 人物 alpha 蒙版：按 ready/avatar_changed 的 mask_rev 增量拉一次
   let maskImg = null;
   let maskRev = -1;
-  // 每帧前的蒙版随头变换（服务端 pose JSON），与紧随的二进制帧配对
-  let pendingPose = null;
   async function fetchMask(rev) {
     try {
       const res = await fetch('/api/avatar/mask', { cache: 'no-store' });
@@ -270,8 +258,8 @@
     } catch (e) { /* 蒙版不可用：保持不透明 */ }
   }
 
-  function drawFrame(bmp, pose) {
-    drawBitmap(bmp, pose);
+  function drawFrame(bmp) {
+    drawBitmap(bmp);
   }
 
   // ── 帧调度：按 WebAudio 统一时间轴取帧 ──
@@ -348,7 +336,7 @@
     if (pick >= 0 && pick !== lastDrawn) {
       lastDrawn = pick;
       const fr = frames.get(pick);
-      drawFrame(fr.bmp, fr.pose);
+      drawFrame(fr.bmp);
       // 埋点：本帧对应时刻与播放时钟的偏差（正=画面落后音频）
       if (playing) {
         const drift = tms - fr.ts;
@@ -549,9 +537,6 @@
           // 服务端热切换完成：清掉旧头像残留帧，等待下一帧模型输出
           resetSpeech();
           clearStage();
-        } else if (msg.type === 'pose') {
-          // 蒙版随头相似变换：与紧随的二进制帧配对（见二进制分支）
-          pendingPose = msg;
         } else if (msg.type === 'speak_end') {
           // 整段回复的帧（含收势帧）已经全部发完
           allReceived = true;
@@ -572,10 +557,6 @@
       }
 
       // 二进制帧：<uint32 idx><uint16 ts> + jpeg
-      // 每帧前的 pose JSON（蒙版随头变换）按 WS 顺序与该帧配对；
-      // 快照必须先于任何 await——下一条 pose 可能在 arrayBuffer 期间先到
-      const pose = pendingPose;
-      pendingPose = null;
       inflightFrames++;
       const buf = await ev.data.arrayBuffer();
       const dv = new DataView(buf);
@@ -591,13 +572,13 @@
       // 空闲微动帧：直接显示，不进同步队列
       if (ts === 0xFFFF) {
         if (!playing) {
-          drawFrame(bmp, pose);
+          drawFrame(bmp);
         }
         if (bmp.close) bmp.close();
         return;
       }
 
-      frames.set(idx, { ts, bmp, pose });
+      frames.set(idx, { ts, bmp });
       frameOrder.push(idx);
       const frameMs = 1000 / (SERVER_FPS || 14);
       if (ts + frameMs > bufferedUntilMs) bufferedUntilMs = ts + frameMs;

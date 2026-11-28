@@ -27,7 +27,6 @@ export default defineConfig(({ mode }) => {
       chunkSizeWarningLimit: 2000, // 项目级共用 Three.js 场景，禁用 chunk 大小警告
       rollupOptions: {
         input: {
-          embed: resolve(__dirname, "embed.html"),
           "face-debug": resolve(__dirname, "face-debug.html"),
           overlay: resolve(__dirname, "overlay.html"),
           "schedule-floating": resolve(__dirname, "schedule-floating.html"),

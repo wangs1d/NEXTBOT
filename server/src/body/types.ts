@@ -9,7 +9,6 @@
  * 与人体器官对照：
  *  - eye         眼（视觉）：截屏 / 摄像头 / VLM 描述
  *  - ear         耳（听觉）：phone-bridge / voice-message 入站音频到达
- *  - skin        皮肤（体感）：智能家居 / 设备传感器（纯感知，无下行工具）
  *  - vestibular  前庭器（平衡）：多设备渲染状态（纯感知，无下行工具）
  *  - homeostasis 稳态（内脏）：电量 / 位置 / 算力配额 / 负载 / 疲劳度
  *  - reflex      反射弧（脊髓反射）：硬安全门，rm -rf / format 等直接 DENY
@@ -21,7 +20,6 @@
 export type BodyModuleKind =
   | "eye"         // 眼（原 visual）
   | "ear"         // 耳（原 auditory）
-  | "skin"        // 皮肤（原 somato）
   | "vestibular"  // 前庭器（保留）
   | "homeostasis" // 内脏（保留）
   | "reflex"      // 反射弧（保留）
@@ -80,7 +78,6 @@ export interface BodyActionResult {
  *  - body.action.executed / body.action.failed            — ActionExecutor 工具执行反馈（brain→body 闭环）
  *  - body.homeostasis.battery_low / quota_low / hunger_high — 稳态阈值告警
  *  - body.vestibular.device_switch                        — 前庭器设备切换
- *  - body.skin.device_change / sensor_reading / ...        — 皮肤感知
  *  - body.eye.frame / body.ear.transcript                 — 感官通路
  */
 export interface BodySignal {

@@ -31,7 +31,6 @@ export interface DeviceAdapterInit {
  * 实现可以是：
  *  - WS 远程适配器（phone/desktop/glasses）：通过 connection.send 下发 invoke，监听 result
  *  - HTTP 适配器（camera/ONVIF）：每次 invoke 走 HTTP 请求
- *  - 本地服务适配器（home）：直接调用 SmartHomeService 的方法，无 connection
  */
 export interface DeviceAdapter {
   /** 适配器实例对应的 deviceId（与 descriptor.deviceId 一致）。 */

@@ -20,7 +20,6 @@ test("工具分档：外部副作用前缀 → act_external", () => {
     "email.send",
     "phone.dial",
     "phone.call_user",
-    "smart_home",
     "alipay.submit-payment",
     "alipay.proxy-trade",
   ]) {
@@ -35,9 +34,10 @@ test("工具分档：alipay 只读/查询族不升档", () => {
 });
 
 test("工具分档：复合工具按 action 分化（读类不升档）", () => {
-  assert.equal(classifyToolSensitivity("smart_home", { action: "list_devices" }), "read");
-  assert.equal(classifyToolSensitivity("smart_home", { action: "control_device" }), "act_external");
-  assert.equal(classifyToolSensitivity("smart_home", { action: "scene" }), "act_external");
+  assert.equal(classifyToolSensitivity("phone", { action: "number" }), "read");
+  assert.equal(classifyToolSensitivity("phone", { action: "call" }), "act_external");
+  assert.equal(classifyToolSensitivity("world.link", { action: "list_friends" }), "read");
+  assert.equal(classifyToolSensitivity("world.link", { action: "send_message" }), "act_external");
 });
 
 test("工具分档：只读前缀 → read；未知工具 → act_internal", () => {

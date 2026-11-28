@@ -51,7 +51,6 @@ const DOMAIN_TOOL_PATTERNS: Record<string, string[]> = {
   // entertainment 暂无对应工具
   social_feed: ["world.social."],
   world: ["world."],
-  smart_home: ["smart_home."],
   image_gen: ["image."],
   file_doc: ["file."],
   email_sms: ["email.", "sms."],

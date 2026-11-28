@@ -4,11 +4,8 @@
   "version": "0.1.0",
   "type": "module",
   "description": "可独立移植的球形 3D Agent 形象（Three.js + R3F + Cannon）",
-  "main": "./src/public-api.ts",
   "exports": {
-    ".": "./src/public-api.ts",
     "./protocol": "./src/embed-protocol.ts",
-    "./host-sdk": "./src/host-sdk.ts",
     "./ws-mapper": "./src/bridge/ws-agent-mapper.ts"
   },
   "files": [

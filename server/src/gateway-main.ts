@@ -39,7 +39,13 @@ const runtimeWsOrigin = `ws://127.0.0.1:${topology.runtimeHttpPort}/ws`;
 
 const app = Fastify({
   logger: false,
-  bodyLimit: 128 * 1024 * 1024,
+  // 请求体上限可配置（MB）。默认 64MB：覆盖 phone-bridge 录屏上传的上限
+  // （routes/http/phone-bridge-captures.ts 的 MAX_UPLOAD_BYTES）即可。原 128MB
+  // 会让每个请求的原始字节缓冲在 2C2G 机器上放大成 OOM 向量。
+  // 主流做法（12-Factor）：部署相关的边界值走环境变量，代码只留合理默认。
+  bodyLimit:
+    Number.parseInt(process.env.GATEWAY_BODY_LIMIT_MB ?? "", 10) * 1024 * 1024 ||
+    64 * 1024 * 1024,
   requestTimeout: 0,
 });
 await app.register(websocket);

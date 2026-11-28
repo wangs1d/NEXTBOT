@@ -20,7 +20,6 @@ export const CAPABILITY_DOMAINS = [
   "social_feed",
   "agent_account",
   "world",
-  "smart_home",
   "system",
   "image_gen",
   "file_doc",
@@ -56,7 +55,6 @@ export const DOMAIN_LABELS: Record<CapabilityDomain, string> = {
   social_feed: "社交推文站（发帖/评论/点赞/浏览动态）",
   agent_account: "Agent账号注册",
   world: "Agent World（世界状态/社交/市场）",
-  smart_home: "智能家居（HomeAssistant：设备列表/开关/调温/灯控/场景）",
   system: "系统管理（记忆和上下文、系统配置）",
   image_gen: "图像生成（text-to-image，OpenAI 兼容图像模型）",
   file_doc: "文件/文档处理（read/write/parse_pdf/parse_office/export_format）",
@@ -139,15 +137,6 @@ function buildStaticSections(): CapabilitySection[] {
         "9️⃣ Web浏览：web_search（复合工具，必填 action：web=网页检索 / deep=深读检索 / images=找图并转存本地 PNG / images_batch=多主题并行找图 / videos=找视频 / hot=热搜榜 / weather=天气 / quote=行情；完整分支以工具 schema 为准）；web_fetch（action=read 抓正文 / inspect 看页面结构 / navigate 站内导航 / raw 直接 HTTP）",
         "9️⃣b 图片意图：**当前轮**用户明确表达了想看/找图/照片/实拍图/长什么样/配图/壁纸/风景照等视觉诉求时，调用 web_search（action=\"images\"）直接出图，不要建议用户去其他平台；同时可再调 web_search（action=\"web\"）获取来源信息。若本轮用户并未索图（只是普通提及、或不含图片诉求），**不要**用 images 分支，避免无关照片刷屏——宁缺勿滥。",
         "9️⃣c 找图数量与排版（web_search action=images）：用户没明确要几张时固定返回 4 张（不传 limit 或传 4），**不要默认传 8**；只有用户明确说要更多张（如「来 8 张」）时才传更大值，最多 8 张。**不要追求数量**，宁可少而精。多个地点/多个主题请**按主题各发一次 query 并行搜**（景物/场景用完整具体的描述，如「平潭岛蓝眼泪荧光海 夜景实拍」「黄山云海日出 云海翻涌」，不要把单个主题截成碎片短词；**人物/明星照片反过来：query 只写人名本身**，加「照片/图片/高清/最近」会搜出完全无关的图，确要某类图才加具体类型词如 壁纸/头像/写真/舞台）；不要一次性塞 20+ 张图，也不要把多个不同主题的图全堆在一张图墙里。每张照片会由视觉模型自动附带真实画面描述，正文不要逐张描述照片或用「第几张图」指代；只搜到图（没有文字检索结果）时，正文一两句话引入即可，**不要**分节盘点或写「已确认的/能说的/没查到的」式小节。",
-      ],
-    },
-    {
-      domain: "smart_home",
-      lines: [
-        "🏠 智能家居（HomeAssistant，需用户已部署 HA 并配置 HA_BASE_URL / HA_TOKEN）：",
-        "   smart_home — 统一入口：action=list_devices 列设备（灯/开关/空调/窗帘/传感器）；action=control_device 控制设备（开灯/关灯、调亮度/色温、开关插座、设空调温度/模式、开关窗帘）；action=scene 列/激活 HA 场景（回家/离家/晚安等）",
-        "   用户说「开灯」「关空调」「窗帘打开」「灯调暗」「温度调到26」时自动调用 action=control_device。",
-        "   操作前先 action=list_devices 了解有哪些设备；勿猜 entity_id。",
       ],
     },
     {

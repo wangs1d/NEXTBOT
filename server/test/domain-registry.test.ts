@@ -31,7 +31,7 @@ const LEGACY_PREFIXES: Record<string, string[]> = {
   media: ["search_images", "search_videos", "photo", "media", "image"],
   write: [
     "calendar.", "reminder", "voice.", "phone.", "shopping.", "commitment.",
-    "wallet.", "agent.", "surface.", "smart_home.",
+    "wallet.", "agent.", "surface.",
   ],
 };
 
@@ -63,9 +63,9 @@ test("束投影等价性：域投影 ⊇ 旧前缀表；media/write 精确等价
       // 复合工具面（2026-11）：search_web/fetch_web 收编为 web_search/web_fetch，
       // 两者仍归检索域，属同一「有意识超集」。
       search: ["internet.", "web_search", "web_fetch"],
-      // 复合工具面（2026-11）：calendar/voice/phone/smart_home 由整族收编为裸名，
+      // 复合工具面（2026-11）：calendar/voice/phone 由整族收编为裸名，
       // 旧前缀表只认带点号的细名，故裸名同样记为有意识超集。
-      write: ["calendar", "voice", "phone", "smart_home", "finance", "payment"],
+      write: ["calendar", "voice", "phone", "finance", "payment"],
       // media 束：复合后图片/视频检索统一走 web_search，属有意识超集。
       media: ["video.grab", "web_search"],
     };

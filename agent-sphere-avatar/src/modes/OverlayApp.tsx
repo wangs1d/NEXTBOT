@@ -485,7 +485,6 @@ export function OverlayApp() {
       <div className="overlay-pet-pane">
         <SphereAgentScene
           state={state}
-          mode="overlay"
           physics={false}
           autonomous={false}
           onEyeFocus={setFocused}

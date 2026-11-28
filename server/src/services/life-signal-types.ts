@@ -6,7 +6,6 @@ export type LifeSignalSource =
   | "market"
   | "social"
   | "location"
-  | "smart_home"
   | "system"
   | "agent_inference";
 

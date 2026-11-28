@@ -20,20 +20,6 @@ x-logging: &default-logging
     max-file: "3"
 
 services:
-  homeassistant:
-    image: ghcr.io/home-assistant/home-assistant:stable
-    container_name: homeassistant
-    ports:
-      - "8123:8123"
-    volumes:
-      - ha-config:/config
-      - /etc/localtime:/etc/localtime:ro
-    restart: unless-stopped
-    privileged: true
-    logging: *default-logging
-    environment:
-      TZ: Asia/Shanghai
-
   qdrant:
     image: qdrant/qdrant:v1.12.4
     expose:
@@ -83,7 +69,7 @@ services:
       DOWNLOADS_DIR: /app/downloads
       # ── LLM / 外部服务凭据透传（取值写在仓库根目录 .env）──
       # 镜像内没有 server/.env（.dockerignore 排除），不透传则容器健康但外部模型不可用。
-      # 长尾变量（社交平台 token、HA_TOKEN 等）按需自行追加；
+      # 长尾变量（社交平台 token 等）按需自行追加；
       # Compose ≥ v2.24 也可改用 env_file 的 required:false 整体注入 server/.env。
       EXTERNAL_MODEL_PROVIDER: ${EXTERNAL_MODEL_PROVIDER:-}
       MOONSHOT_API_KEY: ${MOONSHOT_API_KEY:-}
@@ -152,4 +138,3 @@ volumes:
   qdrant-data:
   redis-data:
   downloads:
-  ha-config:

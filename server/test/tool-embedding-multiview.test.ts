@@ -44,19 +44,19 @@ test("工具语义输入包含定义、参数和口语例句独立视图", () =>
   const views = buildEmbeddingViews({
     type: "function",
     function: {
-      name: "smart_home",
-      description: "控制智能家居设备",
+      name: "geofence",
+      description: "位置围栏提醒",
       parameters: {
         type: "object",
         properties: {
-          action: { type: "string", description: "要执行的设备动作", enum: ["turn_on", "turn_off"] },
+          action: { type: "string", description: "要执行的围栏动作", enum: ["create", "list", "delete"] },
         },
       },
     },
   });
 
   assert.equal(views[0]?.kind, "definition");
-  assert.ok(views.some((view) => view.kind === "parameters" && view.text.includes("turn_on")));
-  assert.ok(views.some((view) => view.kind === "exemplar" && view.text.includes("把客厅的灯打开")));
+  assert.ok(views.some((view) => view.kind === "parameters" && view.text.includes("create")));
+  assert.ok(views.some((view) => view.kind === "exemplar" && view.text.includes("到家的时候提醒我拿快递")));
   assert.equal(new Set(views.map((view) => view.key)).size, views.length);
 });

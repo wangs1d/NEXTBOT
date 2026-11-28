@@ -16,7 +16,7 @@ export const TOOL_RECALL_GOLDEN: ToolRecallGoldenCase[] = [
   { id: "place_search", query: "帮我搜一下附近的星巴克", expected: ["geo.place_search"], group: "location_place", topK: 3 },
   { id: "place_distance", query: "公司和家相距多远", expected: ["geo.distance"], group: "location_place", topK: 3 },
 
-  { id: "weather_cold", query: "外头冷不冷", expected: ["weather.get_local"], forbidden: ["smart_home", "device"], group: "weather_web", topK: 3 },
+  { id: "weather_cold", query: "外头冷不冷", expected: ["weather.get_local"], forbidden: ["device"], group: "weather_web", topK: 3 },
   { id: "weather_rain", query: "明天北京会下雨吗", expected: ["weather.get_local"], forbidden: ["web_search"], group: "weather_web", topK: 3 },
   { id: "weather_umbrella", query: "今天出门要不要带伞", expected: ["weather.get_local"], group: "weather_web", topK: 3 },
   { id: "web_hot", query: "今天有什么热搜", expected: ["web_search"], forbidden: ["commitment.list", "calendar"], group: "weather_web", topK: 3 },
@@ -49,9 +49,6 @@ export const TOOL_RECALL_GOLDEN: ToolRecallGoldenCase[] = [
   { id: "ride_airport", query: "打车去机场", expected: ["ride_hailing"], forbidden: ["geo.distance"], group: "finance_payment_shopping_ride", topK: 3 },
   { id: "ride_order", query: "查一下我的打车订单", expected: ["ride_hailing"], group: "finance_payment_shopping_ride", topK: 3 },
 
-  { id: "home_light", query: "把客厅灯打开", expected: ["smart_home"], forbidden: ["device"], group: "home_device_phone", topK: 3 },
-  { id: "home_dim", query: "客厅有点暗，把灯调亮一点", expected: ["smart_home"], group: "home_device_phone", topK: 3 },
-  { id: "home_ac", query: "空调温度调到二十六度", expected: ["smart_home"], forbidden: ["weather.get_local"], group: "home_device_phone", topK: 3 },
   { id: "device_camera", query: "看一下门口摄像头", expected: ["device"], forbidden: ["phone.camera_capture"], group: "home_device_phone", topK: 3 },
   { id: "device_status", query: "我的设备现在是什么状态", expected: ["device"], group: "home_device_phone", topK: 3 },
   { id: "phone_battery", query: "我手机还有多少电", expected: ["phone.battery"], forbidden: ["device"], group: "home_device_phone", topK: 3 },

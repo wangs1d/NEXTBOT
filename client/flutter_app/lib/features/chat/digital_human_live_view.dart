@@ -2,31 +2,12 @@ import "dart:async";
 import "dart:convert";
 import "dart:io"
     show HttpClient, HttpClientRequest, HttpClientResponse, WebSocket;
-import "dart:math" as math;
 import "dart:typed_data";
 import "dart:ui" as ui;
 
 import "package:flutter/material.dart";
 
 import "../../core/config/api_config.dart";
-
-/// 蒙版随头相似变换（服务端逐帧下发，512 帧像素空间）：
-/// 当前点 = [a,-b; b,a]·中性点 + (tx,ty)。中性蒙版经此变换后始终贴住人物。
-class _MaskPose {
-  const _MaskPose({
-    required this.a,
-    required this.b,
-    required this.tx,
-    required this.ty,
-  });
-
-  final double a;
-  final double b;
-  final double tx;
-  final double ty;
-
-  bool get isIdentity => a == 1.0 && b == 0.0 && tx == 0.0 && ty == 0.0;
-}
 
 /// 数字人实时画面：直连本地 avatar-talk-service 的 WebSocket 逐帧推流。
 ///
@@ -75,9 +56,6 @@ class _DigitalHumanLiveViewState extends State<DigitalHumanLiveView> {
   // 人物 alpha 蒙版（背景透明化）：按 mask_rev 增量拉取一次，逐帧 dstIn 合成
   ui.Image? _mask;
   int _maskRev = -1;
-  // 蒙版随头变换：服务端在每帧二进制之前按序推送 pose JSON，
-  // WS 顺序保证与紧随的帧配对；无 pose（旧服务/无蒙版）时按静态蒙版渲染。
-  _MaskPose? _pose;
 
   String get _wsUrl {
     final String base = ApiConfig.digitalHumanBase;
@@ -182,19 +160,6 @@ class _DigitalHumanLiveViewState extends State<DigitalHumanLiveView> {
         _maybeFetchMask(msg["mask_rev"]);
       } else if (type == "ready") {
         _maybeFetchMask(msg["mask_rev"]);
-      } else if (type == "pose") {
-        final num? a = msg["a"] as num?;
-        final num? b = msg["b"] as num?;
-        final num? tx = msg["tx"] as num?;
-        final num? ty = msg["ty"] as num?;
-        if (a != null && b != null && tx != null && ty != null) {
-          _pose = _MaskPose(
-            a: a.toDouble(),
-            b: b.toDouble(),
-            tx: tx.toDouble(),
-            ty: ty.toDouble(),
-          );
-        }
       }
     } catch (_) {
       /* 非 JSON 控制消息，忽略 */
@@ -286,7 +251,6 @@ class _DigitalHumanLiveViewState extends State<DigitalHumanLiveView> {
       painter: _MatteFramePainter(
         frame: frame,
         mask: _mask,
-        pose: _pose,
         fit: widget.fit,
         alignment: widget.alignment,
       ),
@@ -296,20 +260,18 @@ class _DigitalHumanLiveViewState extends State<DigitalHumanLiveView> {
 
 /// 帧绘制 + 人物蒙版合成：saveLayer 后帧在上、蒙版以 dstIn 写入 alpha，
 /// 人物边缘外全部透明（蒙版为空时等于不透明直绘，同旧行为）。
-/// 蒙版经 pose 相似变换随头移动（服务端逐帧下发），歪头/转头时
-/// 轮廓始终贴住人物，上传照片的背景像素零暴露。
+/// 源图背景已在服务端内存抠像时替换为中性色，蒙版位移容差带
+/// 露出的也是同色，与面板底融为一体。
 class _MatteFramePainter extends CustomPainter {
   _MatteFramePainter({
     required this.frame,
     required this.mask,
-    required this.pose,
     required this.fit,
     required this.alignment,
   });
 
   final ui.Image frame;
   final ui.Image? mask;
-  final _MaskPose? pose;
   final BoxFit fit;
   final Alignment alignment;
 
@@ -331,41 +293,20 @@ class _MatteFramePainter extends CustomPainter {
       final ui.Rect maskSrc = ui.Rect.fromLTWH(
         0, 0, mask.width.toDouble(), mask.height.toDouble(),
       );
-      final _MaskPose? pose = this.pose;
-      final ui.Rect maskDst = ui.Rect.fromLTWH(
-        0, 0, _frameNativeSize, _frameNativeSize,
-      );
-      canvas.save();
-      // 帧与蒙版都解码自服务端方形帧（原生 _frameNativeSize，解码放大不
-      // 改变相对几何）：先映射到原生 512 空间，再施加相似变换。
-      canvas.translate(dst.left, dst.top);
-      canvas.scale(dst.width / _frameNativeSize, dst.height / _frameNativeSize);
-      if (pose != null && !pose.isIdentity) {
-        canvas.translate(pose.tx, pose.ty);
-        canvas.rotate(math.atan2(pose.b, pose.a));
-        final double s = math.sqrt(pose.a * pose.a + pose.b * pose.b);
-        canvas.scale(s, s);
-      }
       canvas.drawImageRect(
         mask,
         maskSrc,
-        maskDst,
+        dst,
         Paint()
           ..blendMode = BlendMode.dstIn
           ..filterQuality = FilterQuality.medium,
       );
-      canvas.restore();
     }
     canvas.restore();
   }
 
   @override
   bool shouldRepaint(covariant _MatteFramePainter oldDelegate) {
-    return oldDelegate.frame != frame ||
-        oldDelegate.mask != mask ||
-        oldDelegate.pose != pose;
+    return oldDelegate.frame != frame || oldDelegate.mask != mask;
   }
 }
-
-/// 服务端渲染帧的原生边长（decoder 输出方形区），pose 平移量的参考空间。
-const double _frameNativeSize = 512.0;

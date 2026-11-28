@@ -313,12 +313,9 @@ import { registerWorldStatusTools } from "../tools/agent-link-tools.js";
 import { formatNextRunAtLocal, registerCalendarTools } from "../tools/calendar-tools.js";
 import { registerClockTools } from "../tools/clock-tools.js";
 import { registerLifeTools } from "../tools/life-tools.js";
-import { registerSmartHomeTools } from "../tools/smart-home-tools.js";
 import { registerDeviceTools } from "../tools/device-tools.js";
 import { registerCompositeTools } from "../external-model/composite-chat-tools.js";
-import { SmartHomeService } from "../services/smart-home-service.js";
 import { DeviceRegistry } from "../device-bus/device-registry.js";
-import { createHomeAdapterFactory } from "../device-bus/adapters/home-adapter.js";
 import { createPhoneAdapterFactory } from "../device-bus/adapters/phone-adapter.js";
 import { createTabletAdapterFactory } from "../device-bus/adapters/tablet-adapter.js";
 import { createGlassesAdapterFactory } from "../device-bus/adapters/glasses-adapter.js";
@@ -483,7 +480,6 @@ import {
   setConversationTimelineService,
 } from "../services/conversation-timeline.js";
 import { Ear } from "../body/ear.js";
-import { Skin, type SmartHomeLike } from "../body/skin.js";
 import { VestibularApparatus } from "../body/vestibular-apparatus.js";
 import { HomeostasisCore } from "../body/homeostasis-core.js";
 import { registerBodyTools, BODY_CHAT_TOOLS } from "../tools/body-tools.js";
@@ -3296,38 +3292,15 @@ export async function createAppServices(
     defaultPlatform: "taobao",
   });
   registerWatchBoardTools(toolRegistry, watchBoard);
-  const smartHomeService = new SmartHomeService();
-  registerSmartHomeTools(toolRegistry, smartHomeService);
-  // 启动智能家居设备状态轮询（若 HA 已配置），将状态变化发布为 smart_home 信号
-  if (smartHomeService.isEnabled()) {
-    smartHomeService.startStatePolling(lifeSignalHubService);
-  }
 
   // ========== 终端互连平台 device-bus ==========
-  // 统一抽象手机 / 桌面 / 家居 / 摄像头 / 眼镜等终端，按 deviceId 多设备并存。
+  // 统一抽象手机 / 桌面 / 摄像头 / 眼镜等终端，按 deviceId 多设备并存。
   // 与现有 wsConnectionRegistry（单 session 单连接）共存，互不依赖。
   const deviceRegistry = new DeviceRegistry();
-  deviceRegistry.registerFactory(createHomeAdapterFactory(smartHomeService));
   deviceRegistry.registerFactory(createPhoneAdapterFactory());
   deviceRegistry.registerFactory(createTabletAdapterFactory());
   deviceRegistry.registerFactory(createGlassesAdapterFactory());
   deviceRegistry.registerFactory(createCameraAdapterFactory());
-  // 家居是本地服务（无 WS），若 HA 已配置则主动注册一个全局 home 设备
-  if (smartHomeService.isEnabled()) {
-    void deviceRegistry.register({
-      deviceId: "home:default",
-      kind: "home",
-      name: "HomeAssistant",
-      ownerUserId: "system",
-      capabilities: [],
-      status: "online",
-      lastSeenAt: Date.now(),
-      connectionKind: "local_service",
-      metadata: { baseUrl: process.env.HA_BASE_URL },
-    }).catch((err) => {
-      app.log.warn({ err }, "[DeviceBus] home:default 注册失败");
-    });
-  }
   app.log.info(
     `[DeviceBus] 已注册适配器工厂: ${deviceRegistry.getRegisteredKinds().join(", ")}`,
   );
@@ -4361,7 +4334,7 @@ export async function createAppServices(
   );
 
   // ─── Body Center 装配 ───
-  // 启用 body 时：实例化 BodyModule（Eye/Ear/Skin/Vestibular/Homeostasis/Rhythm）+ BodyBus + ReflexArc + BodyGateway + BodyCenter
+  // 启用 body 时：实例化 BodyModule（Eye/Ear/Vestibular/Homeostasis/Rhythm）+ BodyBus + ReflexArc + BodyGateway + BodyCenter
   // 关闭 body 时（BODY_CENTER_ENABLED=0）：整个 body/ 模块不实例化、不启动，
   //   BrainCenter.registerBodyGateway 内部会因 isBodyCenterEnabled() 返回 false 而忽略注入
   let bodyCenter: BodyCenter | null = null;
@@ -4434,55 +4407,6 @@ export async function createAppServices(
       },
     };
 
-    // 3.3 SmartHomeService → SmartHomeLike（Skin 用）
-    //     真实 SmartHomeService.getState 返回 HADeviceState {entity_id, state: string, attributes, ...}
-    //     期望 getState 返回 {state: Record<string, unknown>} | null
-    //     真实控制走 callService(domain, service, data)
-    const smartHomeAdapter = {
-      async controlDevice(opts: {
-        deviceId?: string;
-        entityType?: string;
-        entityId?: string;
-        action?: string;
-        params?: Record<string, unknown>;
-      }): Promise<{ ok: boolean; state?: Record<string, unknown> }> {
-        // action 形如 "light.turn_off" → domain=light, service=turn_off
-        const action = String(opts.action ?? "");
-        const [domain, service] = action.split(".");
-        if (!domain || !service) return { ok: false };
-        try {
-          await smartHomeService.callService(
-            domain,
-            service,
-            opts.params ?? {},
-          );
-          return { ok: true };
-        } catch {
-          return { ok: false };
-        }
-      },
-      async getState(entityId: string): Promise<{ state: Record<string, unknown> } | null> {
-        try {
-          const r = await smartHomeService.getState(entityId);
-          return { state: { ...(r.attributes ?? {}), value: r.state } };
-        } catch {
-          return null;
-        }
-      },
-      async getAllStates(): Promise<Record<string, Record<string, unknown>>> {
-        try {
-          const list = await smartHomeService.getAllStates();
-          const out: Record<string, Record<string, unknown>> = {};
-          for (const s of list) {
-            out[s.entity_id] = { ...(s.attributes ?? {}), value: s.state };
-          }
-          return out;
-        } catch {
-          return {};
-        }
-      },
-    };
-
     // 3.4 ComputeQuotaService → ComputeQuotaLike（HomeostasisCore 用）
     //     真实 ComputeQuotaService.getState(sessionId) 返回 {limit, reserved, consumed, available}
     //     期望 getQuota() → number 0-1（配额剩余比例）
@@ -4503,13 +4427,6 @@ export async function createAppServices(
 
     const ear = new Ear({
       bodyBus,
-    });
-
-    // SmartHomeService 目前未提供状态变化订阅（无 onStateChange），
-    // Skin 的 device_change 信号处于休眠；待 SmartHomeService 补充事件后自动生效。
-    const skin = new Skin({
-      bodyBus,
-      smartHomeService: smartHomeAdapter as SmartHomeLike,
     });
 
     const vestibularApparatus = new VestibularApparatus({
@@ -4559,7 +4476,6 @@ export async function createAppServices(
     bodyCenter = new BodyCenter(bodyGateway, bodyBus);
     bodyCenter.setEye(eye);
     bodyCenter.setEar(ear);
-    bodyCenter.setSkin(skin);
     bodyCenter.setVestibularApparatus(vestibularApparatus);
     bodyCenter.setHomeostasis(homeostasisCore);
     bodyCenter.setReflex(reflexModuleAdapter);
@@ -4589,7 +4505,7 @@ export async function createAppServices(
     // bodyCenterEnabled=false 时本分支不进入，BODY_CHAT_TOOLS 不注入，保持原 getBuiltinAgentChatTools 行为。
     setBodyChatTools(BODY_CHAT_TOOLS);
 
-    app.log.info(`[BodyCenter] 已装配 BodyModule（Eye/Ear/Skin/Vestibular/Homeostasis/Reflex/Rhythm）`);
+    app.log.info(`[BodyCenter] 已装配 BodyModule（Eye/Ear/Vestibular/Homeostasis/Reflex/Rhythm）`);
     app.log.info(`[BodyCenter] 已下沉工具到 ToolRegistry（body.* 工具已注册）`);
     app.log.info(`[BodyCenter] ReflexArc 已加载 ${reflexArc.listPatterns().length} 条内置危险模式`);
   }
@@ -4625,7 +4541,7 @@ export async function createAppServices(
     if (bodyCenter) {
       const bodyBus = bodyCenter.getBus();
       bodyBus.bridgeToSynapse(synapseBus);
-      // AwarenessCortex 订阅 body.homeostasis.battery_low / body.skin.device_change / body.vestibular.device_switch
+      // AwarenessCortex 订阅 body.homeostasis.battery_low / body.vestibular.device_switch
       awarenessCortex?.attachBodyBus(bodyBus);
     }
 
@@ -5322,7 +5238,7 @@ export async function createAppServices(
   // 多元触发（对话关怀/任务恭喜/待办闭环/过劳干预/问候）+ 全局频控
   // （FrequencyGovernor：每日预算 + 分 kind 冷却）+ 两种行为模式：
   //   speak → LifeSignalHub 发布 → BrainCenter.decide → ProactionCortex 既有闭环
-  //   act   → 白名单工具静默后台执行（media/calendar/smart_home，无删除类）
+  //   act   → 白名单工具静默后台执行（media/calendar，无删除类）
   // （advise 模式已随 AdviceStore 死代码一并移除：advise 请求统一改道 speak）
   //
   // 负反馈抑制表（Task 20 统一频控框架）：用户「别再提醒我这个」类负反馈的

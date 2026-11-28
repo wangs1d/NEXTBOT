@@ -195,9 +195,6 @@ export function renderToolStatusLine(
   if (hasPrefix(tool, ["desktop.open", "desktop_open"])) {
     return app ? `我打开${app}` : null;
   }
-  if (hasPrefix(tool, ["smart_home"])) {
-    return device ? `我调一下${device}` : null;
-  }
   if (hasPrefix(tool, ["file.parse", "file.read"])) {
     return file ? `我在读「${file}」` : null;
   }

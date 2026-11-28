@@ -8,14 +8,12 @@ import {
   type SuggestionUsageObservation,
 } from "../src/services/chat-suggestions-service.js";
 
-/** 与能力就绪注册表相关的 env 组：设置后 12 条推荐池全部就绪 */
+/** 与能力就绪注册表相关的 env 组：设置后推荐池全部就绪 */
 const ALL_READY_ENV: Record<string, string> = {
   SEARCH_API_KEY: "test-key",
   OPENAI_API_KEY: "test-key",
   LUCKIN_MCP_TOKEN: "test-token",
   DIDI_MCP_KEY: "test-key",
-  HA_BASE_URL: "http://ha.test",
-  HA_TOKEN: "test-token",
   JUHE_TRAIN_KEY: "test-key",
   VARIFLIGHT_APP_ID: "test-id",
   VARIFLIGHT_APP_SECRET: "test-secret",

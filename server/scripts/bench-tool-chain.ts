@@ -20,7 +20,7 @@ import { reportChatToolDrift } from "../src/tools/chat-tool-drift.js";
 import { tryRepairTruncatedJsonObject } from "../src/external-model/openai-compatible-tool-loop.js";
 
 // ---------- 合成工具目录（≈150 个，跨 8 个域） ----------
-const DOMAINS = ["calendar", "weather", "web", "wallet", "phone", "desktop", "memory", "smart_home"];
+const DOMAINS = ["calendar", "weather", "web", "wallet", "phone", "desktop", "memory", "travel"];
 const VERBS = ["create", "list", "search", "delete", "update", "get", "send", "sync"];
 
 function buildSyntheticSchemas(count: number): ChatCompletionTool[] {

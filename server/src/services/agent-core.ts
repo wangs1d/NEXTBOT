@@ -2044,8 +2044,8 @@ if (route.plane === "task") {
       this.isChatLane(mode) && isForegroundDispatchMode() && isForegroundTagProtocolEnabled();
     const dispatchFilter = foregroundTagMode ? new DispatchTagStreamFilter() : null;
     // chat 车道 explicit 轮可见集（2026-10-09 工具链根修）：Core 常驻 ∪ 域信号
-    // 预召回。此前可见集是纯静态白名单，长尾工具（travel.* / media.* /
-    // smart_home 等）藏在延迟目录，模型不知道自己看不见、不主动 discover 就
+    // 预召回。此前可见集是纯静态白名单，长尾工具（travel.* / media.* 等）
+    // 藏在延迟目录，模型不知道自己看不见、不主动 discover 就
     // 手写答案（travel 手写行程 → 旅游卡缺席；profile.update / weather.get_local
     // 同款教训）。预召回与任务面 router-first 共用同一原语，把「用户这句话涉及
     // 的域」的工具确定性拉进本轮可见集；纯闲聊零工具隔离分支在其上游，不受影响。

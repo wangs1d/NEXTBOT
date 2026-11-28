@@ -27,7 +27,6 @@
     { "id": "travel_xingyi", "category": "travel", "text": "帮我规划一个周末去兴义玩的行程", "expectToolGroups": [["travel.plan-itinerary"]], "allowTools": ["weather.get_local", "travel.search-poi", "travel.destination-info", "travel.compute-route", "search_web"], "forbidTools": [] },
     { "id": "profile_child", "category": "profile", "text": "记一下，我女儿叫小雨，今年三岁", "expectToolGroups": [["profile.update"]], "forbidTools": ["search_web"] },
     { "id": "memory_recall", "category": "memory", "text": "帮我回忆一下我之前说过喜欢喝什么", "expectToolGroups": [["brain.recall", "memory.recall_episodic"]], "allowTools": ["memory.recall_history"], "forbidTools": ["search_web"] },
-    { "id": "smart_home_light", "category": "smart_home", "text": "把客厅的灯打开", "expectToolGroups": [["smart_home"]], "allowTools": ["tool_discover", "device.list"], "forbidTools": ["search_web"] },
     {
       "id": "multi_step_weather_reminder",
       "category": "multi_step",

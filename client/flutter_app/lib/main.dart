@@ -58,7 +58,6 @@ import "core/services/client_location_service.dart";
 import "core/services/agent_sphere_mood_bridge.dart";
 import "core/services/agent_sphere_embodiment_mapper.dart";
 import "core/services/sphere_embodiment_motion_bridge.dart";
-import "core/services/agent_sphere_interact_bridge.dart";
 import "core/services/phone_bridge_service.dart";
 import "core/services/agent_location_responder.dart";
 import "core/services/schedule_tool_result_sync.dart";
@@ -120,7 +119,6 @@ import "features/chat/travel_web_panel_host.dart";
 import "features/chat/right_side_panel.dart";
 import "core/services/split_ratio_preference.dart";
 import "features/chat/sidebar_user_menu.dart";
-import "features/chat/floating_agent_sphere.dart";
 import "features/chat/morning_briefing_card.dart";
 import "core/services/agent_sphere_voice_controller.dart";
 import "core/services/connected_call_launcher.dart";
@@ -1487,19 +1485,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     // 通知权限申请已挪到 _completeWebAuth 进主壳后：手机端冷启动还在登录门禁页，
     // 此时弹系统框既突兀又常被系统丢弃（原 bootstrap 处无脑申请已移除）。
     unawaited(_tryShowMobileLaunchBriefing());
-
-    AgentSphereInteractBridge.instance.bind((String action, {String? text}) {
-      if (!_ws.isConnected) return;
-      _ws.sendEvent("agent.embodiment.interact", <String, dynamic>{
-        "sessionId": ApiConfig.effectiveActorId,
-        "userId": ApiConfig.effectiveActorId,
-        "action": action,
-        if (text != null && text.trim().isNotEmpty) "text": text.trim(),
-      });
-      if (action == "wake" || action == "chat") {
-        AgentSphereMoodBridge.instance.listening();
-      }
-    });
 
     AgentSphereMoodBridge.instance.addFocusListener(() {
       if (_tabIndex != 0) {
@@ -6564,7 +6549,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                         ),
                       ],
                     ),
-                    const FloatingAgentSphere(),
                     // 右侧面板：顶到自绘标题栏下沿（Stack 顶端），
                     // 在面板宽度范围内覆盖 AppBar / 主内容。
                     // side 模式 288px，split 模式动态宽度。

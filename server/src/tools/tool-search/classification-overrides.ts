@@ -79,12 +79,6 @@ export const TOOL_CLASSIFICATION_OVERRIDES: Record<string, ToolClassificationOve
     ],
     reason: "Agent 自身/用户档案入口；与 world 的接入状态意图区分（仅负向护栏）",
   },
-  device: {
-    recallBoost: [
-      { pattern: "开灯|关灯|窗帘|空调|插座", weight: -0.15 },
-    ],
-    reason: "已绑定设备入口；与 smart_home 的家居控制区分（仅负向护栏）",
-  },
   aip: {
     recallBoost: [
       // 用户对「提议」拍板属于 proactivity，不是跨 Agent 协议。

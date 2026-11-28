@@ -19,7 +19,6 @@ import "package:nextbot/features/chat/chat_page.dart";
 import "package:nextbot/features/chat/desktop_digital_human_header.dart";
 import "package:nextbot/features/chat/digital_human_avatar_visual.dart";
 import "package:nextbot/features/chat/digital_human_panel.dart";
-import "package:nextbot/features/chat/agent_sphere_webview.dart";
 import "package:nextbot/features/chat/digital_human_view.dart";
 import "package:nextbot/features/chat/digital_human_live_view.dart";
 
@@ -74,10 +73,6 @@ void main() {
       of: find.byType(DesktopDigitalHumanHeader),
       matching: find.byType(DigitalHumanView),
     ), findsNothing);
-    expect(find.descendant(
-      of: find.byType(DesktopDigitalHumanHeader),
-      matching: find.byType(AgentSphereWebView),
-    ), findsNothing);
 
     await tester.tap(find.byType(DesktopDigitalHumanHeader));
     await tester.pump();
@@ -118,7 +113,6 @@ void main() {
       matching: find.byType(ClipOval),
     ), findsNothing);
     expect(find.byType(DigitalHumanView), findsNothing);
-    expect(find.byType(AgentSphereWebView), findsNothing);
   });
 
   testWidgets("名字为空时头部仍渲染数字人形象但隐藏名字",

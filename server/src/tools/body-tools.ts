@@ -96,7 +96,6 @@ export const BODY_CHAT_TOOLS: ChatCompletionTool[] = [
 const VALID_CALIBRATE_MODULES: ReadonlySet<BodyModuleKind> = new Set<BodyModuleKind>([
   "eye",
   "ear",
-  "skin",
   "vestibular",
   "homeostasis",
 ]);

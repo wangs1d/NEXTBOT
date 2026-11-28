@@ -135,12 +135,6 @@ export const DOMAIN_REGISTRY: DomainDef[] = [
     secondaryTools: [],
   },
   {
-    name: "smart_home",
-    summary: "智能家居控制（灯/空调/窗帘/插座）",
-    prefixes: ["smart_home", "smart_home."],
-    secondaryTools: [],
-  },
-  {
     name: "device",
     summary: "设备状态与控制",
     prefixes: ["device.", "device"],
@@ -331,7 +325,6 @@ export const ROUTE_BEAM_DOMAINS: Record<string, string[]> = {
     "wallet",
     "agent",
     "surface",
-    "smart_home",
   ],
   full: [],
 };

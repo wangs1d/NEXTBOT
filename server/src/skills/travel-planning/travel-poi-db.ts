@@ -77,6 +77,10 @@ class TravelPoiDb {
     this.db = new DatabaseSync(this.dbPath);
     this.db.exec('PRAGMA journal_mode = WAL;');
     this.db.exec('PRAGMA synchronous = NORMAL;');
+    // 写锁冲突时等待而非立刻抛 SQLITE_BUSY（与 storage/sqlite.ts 同策略；
+    // SQLITE_BUSY_TIMEOUT_MS 可覆盖，0 = 关闭）
+    const busyMs = Number.parseInt(process.env.SQLITE_BUSY_TIMEOUT_MS ?? '', 10);
+    this.db.exec(`PRAGMA busy_timeout = ${Number.isFinite(busyMs) ? Math.max(0, Math.min(60000, busyMs)) : 2000};`);
     this.migrateSchema();
     this.migrateLegacyJson();
   }

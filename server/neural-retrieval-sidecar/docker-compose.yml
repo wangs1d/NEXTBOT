@@ -17,6 +17,13 @@ services:
       - AGNEURAL_RERANK_MODEL=${AGNEURAL_RERANK_MODEL:-BAAI/bge-reranker-base}
       - AGNEURAL_MODEL_REVISION=${AGNEURAL_MODEL_REVISION:-}
       - AGNEURAL_MAX_BATCH=${AGNEURAL_MAX_BATCH:-64}
+      # torch/sentence-transformers 线程钉死：默认按**宿主机**核数起 OMP 线程池，
+      # 容器配额下严重超订，小核机上会抢满 CPU 拖垮同机服务。可在部署机 .env 覆盖。
+      # 注意：本 sidecar（torch FP32 reranker ≈1.2GB）不适合部署在 2核2G 服务器
+      # ——小机请走 Node 侧 ONNX 量化路径。
+      - OMP_NUM_THREADS=${OMP_NUM_THREADS:-1}
+      - MKL_NUM_THREADS=${MKL_NUM_THREADS:-1}
+      - OPENBLAS_NUM_THREADS=${OPENBLAS_NUM_THREADS:-1}
     restart: unless-stopped
     healthcheck:
       test:

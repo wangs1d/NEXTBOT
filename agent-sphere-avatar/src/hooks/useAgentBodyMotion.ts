@@ -2,7 +2,7 @@ import { useFrame } from "@react-three/fiber";
 import { useCallback, useEffect, useRef, type RefObject } from "react";
 import * as THREE from "three";
 import type { PublicApi } from "@react-three/cannon";
-import { EMBED_BODY_ANCHOR } from "../constants/model-proportions";
+import { OVERLAY_BODY_ANCHOR } from "../constants/model-proportions";
 import type { AgentMood } from "../types/agent";
 import type { TaskEvent } from "../types/agent";
 
@@ -106,7 +106,7 @@ export function useAgentBodyMotion({
   taskEvents,
   onBoundaryHit,
   verticalStable = false,
-  seedPosition = EMBED_BODY_ANCHOR,
+  seedPosition = OVERLAY_BODY_ANCHOR,
 }: UseAgentBodyMotionOptions) {
   const pos = useRef(new THREE.Vector3(...seedPosition));
   const vel = useRef(new THREE.Vector3());

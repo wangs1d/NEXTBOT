@@ -148,18 +148,6 @@ const CAPABILITY_ENTRIES: CapabilityEntry[] = [
     ],
   },
   {
-    id: "home_assistant",
-    label: "智能家居",
-    description: "通过 Home Assistant 控制家中设备",
-    groups: [
-      {
-        allOf: ["HA_BASE_URL", "HA_TOKEN"],
-        required: true,
-        hint: "配置 HA_BASE_URL 与 HA_TOKEN（Home Assistant 长期访问令牌）",
-      },
-    ],
-  },
-  {
     id: "voice_chat",
     label: "语音对话",
     description: "语音播报（TTS）与实时语音对话",

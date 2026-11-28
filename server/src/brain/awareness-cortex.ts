@@ -162,8 +162,6 @@ export class AwarenessCortex {
   /** SemanticAwarenessInferrer（可选，注入后 observeWithMental 产出 UserMentalState） */
   private semanticInferrer: SemanticAwarenessInferrer | null = null;
 
-  /** 最近设备状态变化事件（来自 body.skin.device_change） */
-  private recentDeviceChangeEvents: Array<{ at: string; payload: unknown }> = [];
   /** 最近设备切换事件（来自 body.vestibular.device_switch） */
   private recentDeviceSwitchEvents: Array<{ at: string; payload: unknown }> = [];
   /** BodyBus 订阅取消函数（attachBodyBus 注入后设置，stop 时清理） */
@@ -357,7 +355,6 @@ export class AwarenessCortex {
    *
    * 订阅主题：
    *  - body.homeostasis.battery_low → 触发用户活动推断（用户可能去充电了，状态变化）
-   *  - body.skin.device_change → 记录最近设备状态变化事件（供 inferActivity 参考）
    *  - body.vestibular.device_switch → 记录设备切换事件
    *
    * 返回取消订阅函数（调用后移除所有 BodyBus 订阅）。
@@ -382,25 +379,6 @@ export class AwarenessCortex {
           }
         } catch (err) {
           console.log(`[AwarenessCortex] battery_low 信号处理失败（忽略）: ${err}`);
-        }
-      }),
-    );
-
-    // body.skin.device_change → 记录最近设备状态变化事件
-    unsubs.push(
-      bodyBus.subscribe("body.skin.device_change", (signal) => {
-        try {
-          const s = signal as { payload?: Record<string, unknown>; timestamp?: string };
-          this.recentDeviceChangeEvents.push({
-            at: s?.timestamp ?? new Date().toISOString(),
-            payload: s?.payload,
-          });
-          // 仅保留最近 20 条，避免无限增长
-          if (this.recentDeviceChangeEvents.length > 20) {
-            this.recentDeviceChangeEvents.shift();
-          }
-        } catch {
-          /* ignore */
         }
       }),
     );

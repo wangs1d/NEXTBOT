@@ -57,7 +57,6 @@ const GOLDEN: Array<{ query: string; expect: string[]; topK: number }> = [
   { query: "我在哪个城市", expect: ["clock.get_user_location"], topK: 1 },
   { query: "今天有什么热搜", expect: ["hot_rankings"], topK: 1 },
   { query: "找个教做红烧肉的视频", expect: ["search_videos"], topK: 1 },
-  { query: "把客厅的灯打开", expect: ["smart_home"], topK: 1 },
   { query: "比特币现在什么价", expect: ["search_web", "deep_search"], topK: 3 },
   { query: "帮我搜一下刘浩存最近的消息", expect: ["search_web", "deep_search"], topK: 3 },
   { query: "读一下这个网页 https://example.com 说了什么", expect: ["fetch_web", "info.inspect_webpage"], topK: 3 },
@@ -77,7 +76,6 @@ const PARAPHRASE: Array<{ query: string; expect: string[]; topK: number }> = [
   { query: "外头冷不冷", expect: ["weather.get_local"], topK: 3 },
   { query: "我现在在哪儿", expect: ["clock.get_user_location"], topK: 3 },
   { query: "帮我定个明早七点的闹钟", expect: ["calendar"], topK: 3 },
-  { query: "客厅有点暗", expect: ["smart_home"], topK: 3 },
   { query: "下午三点记得喊我去拿快递", expect: ["calendar"], topK: 3 },
 ];
 

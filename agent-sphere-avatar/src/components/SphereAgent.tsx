@@ -3,8 +3,7 @@ import { Suspense, useCallback, useEffect, useRef, type Ref, type RefObject } fr
 import * as THREE from "three";
 import { bindEmbodimentCommand } from "../bridge/agent-bridge";
 import { triggerOverlayRoam } from "../utils/overlay-roam-bridge";
-import { EMBED_BODY_ANCHOR, MODEL } from "../constants/model-proportions";
-import { postToHost, SPHERE_MSG } from "../embed-protocol";
+import { MODEL, OVERLAY_BODY_ANCHOR } from "../constants/model-proportions";
 import { useAgentBodyMotion } from "../hooks/useAgentBodyMotion";
 import { useAutonomousMotion } from "../hooks/useAutonomousMotion";
 import { useSphereUserDrag, type SphereTouchEvent } from "../hooks/useSphereUserDrag";
@@ -19,7 +18,6 @@ interface SphereAgentProps {
   physics?: boolean;
   autonomous?: boolean;
   motionBounds?: number;
-  hardMotionClamp?: boolean;
   /** 覆盖默认刚体/视觉中心（桌宠固定机位） */
   bodyPosition?: [number, number, number];
   /** 关闭 DG2 待机呼吸位移（桌宠保持尺寸稳定） */
@@ -31,7 +29,6 @@ interface SphereAgentProps {
   userDragRotate?: boolean;
   onUserTouch?: (event: SphereTouchEvent) => void;
   onBodyHover?: (active: boolean) => void;
-  registerDragBridge?: boolean;
   canvasCaptureLenient?: boolean;
   onPanDelta?: (dx: number, dy: number) => void;
   onPanEnd?: () => void;
@@ -47,11 +44,6 @@ interface SphereAgentProps {
   verticalStable?: boolean;
   /** DG2 模型首次画完回调（桌宠用它向宿主报就绪） */
   onModelPainted?: () => void;
-}
-
-function relayBoundaryToParent(edge: string) {
-  if (window.parent === window) return;
-  postToHost({ type: SPHERE_MSG.boundary, edge: edge as "left" | "right" | "top" | "bottom" });
 }
 
 /** 挂在 Suspense 子树里 —— 只有模型真的解析完并画出两帧后才触发一次 */
@@ -78,7 +70,6 @@ export function SphereAgent({
   physics = true,
   autonomous = true,
   motionBounds = 2.4,
-  hardMotionClamp = false,
   bodyPosition,
   idleBodyMotion = true,
   modelScale = 1,
@@ -86,7 +77,6 @@ export function SphereAgent({
   userDragRotate = true,
   onUserTouch,
   onBodyHover,
-  registerDragBridge = false,
   canvasCaptureLenient = false,
   onPanDelta,
   onPanEnd,
@@ -99,7 +89,7 @@ export function SphereAgent({
 }: SphereAgentProps) {
   const visualRef = useRef<THREE.Group>(null);
   const userRotRef = useRef<THREE.Group>(null);
-  const seedPosition = bodyPosition ?? EMBED_BODY_ANCHOR;
+  const seedPosition = bodyPosition ?? OVERLAY_BODY_ANCHOR;
 
   const [ref, api] = useSphere(() => ({
     mass: physics ? 1.2 : 0,
@@ -129,7 +119,6 @@ export function SphereAgent({
     source: state.source,
     attentionTarget: state.attentionTarget,
     taskEvents: state.taskEvents,
-    onBoundaryHit: (edge) => relayBoundaryToParent(edge),
     verticalStable,
     seedPosition,
   });
@@ -139,7 +128,6 @@ export function SphereAgent({
     enabled: physics && autonomous,
     bounds: motionBounds,
     strength: motionStrength,
-    hardClamp: hardMotionClamp,
   });
 
   const motion = kinematic ? bodyMotion : physicsMotion;
@@ -163,29 +151,14 @@ export function SphereAgent({
     };
   }, [onShakeRequest, triggerShake]);
 
-  const relayTouchToParent = useCallback(
-    (event: SphereTouchEvent) => {
-      onUserTouch?.(event);
-      if (window.parent === window) return;
-      postToHost({
-        type: SPHERE_MSG.touch,
-        phase: event.phase,
-        spinStrength: event.spinStrength,
-        totalRotationDeg: event.totalRotationDeg,
-      });
-    },
-    [onUserTouch],
-  );
-
   const dragHandlers = useSphereUserDrag({
     userRotRef,
     bodyRef: ref as unknown as RefObject<THREE.Object3D | null>,
     enabled: userDragRotate,
     canvasCapture: false,
     canvasCaptureLenient,
-    registerBridge: registerDragBridge,
     api: physics ? api : undefined,
-    onTouch: relayTouchToParent,
+    onTouch: onUserTouch,
     onEyeClick,
     onPanDelta,
     onPanEnd,
@@ -237,12 +210,6 @@ export function SphereAgent({
           } else if (physics) {
             motion.resumeMotion();
             motion.pickRandomTarget();
-          } else {
-            postToHost({
-              type: SPHERE_MSG.command,
-              action: "excite",
-              strength: cmd.strength ?? 1.4,
-            });
           }
           break;
         case "move":
@@ -258,9 +225,6 @@ export function SphereAgent({
           break;
         case "window_roam":
           triggerOverlayRoam();
-          if (window.parent !== window) {
-            postToHost({ type: SPHERE_MSG.command, action: "window_roam" });
-          }
           break;
         default:
           break;

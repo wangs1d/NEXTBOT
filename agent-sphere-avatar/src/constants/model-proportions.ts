@@ -46,11 +46,6 @@ export const MODEL = {
   seamEmissive: "#a8b8cc",
 } as const;
 
-export type SceneMode = "embed" | "overlay";
-
-/** embed 网页机体锚点 —— 刚体创建位置与运动积分初值共用，否则首帧会掉 0.15 */
-export const EMBED_BODY_ANCHOR: [number, number, number] = [0, 1.45, 0];
-
 /** 桌宠机体锚点 —— 与相机 lookAt(1.26) 同一构图基准，改动会让桌宠整体上下移位 */
 export const OVERLAY_BODY_ANCHOR: [number, number, number] = [0, 1.24, 0];
 
@@ -61,13 +56,6 @@ export const OVERLAY_SCENE = {
   lookAt: [0, 1.26, 0] as const,
   bodyPosition: OVERLAY_BODY_ANCHOR,
   modelScale: 0.88,
-} as const;
-
-/** 网页 embed — 相对桌宠缩小展示，DOM 漫游边界与 modelScale 对齐 */
-export const EMBED_SCENE = {
-  modelScale: 0.25,
-  containerW: 110,
-  containerH: 110,
 } as const;
 
 export function dg2Scale(bodyRadius = MODEL.bodyRadius): number {

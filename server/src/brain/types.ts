@@ -96,7 +96,7 @@ export type BrainDecisionOutcome = "speak" | "silent" | "shadow";
 
 /** 决策建议的主动动作（环境控制类） */
 export interface BrainDecisionAction {
-  /** 工具名，如 smart_home.set_state / desktop.open / schedule.create_task */
+  /** 工具名，如 calendar.create / desktop.open / schedule.create_task */
   tool: string;
   /** 工具参数 */
   args: Record<string, unknown>;

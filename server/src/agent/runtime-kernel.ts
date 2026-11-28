@@ -176,17 +176,6 @@ const KEYWORDS = {
     "\u62cd\u7167",
     "\u622a\u56fe",
   ],
-  smartHome: [
-    "homeassistant",
-    "smart home",
-    "light",
-    "climate",
-    "\u5f00\u706f",
-    "\u5173\u706f",
-    "\u7a7a\u8c03",
-    "\u7a97\u5e18",
-    "\u667a\u80fd\u5bb6\u5c45",
-  ],
   phone: [
     "phone",
     "call",
@@ -486,9 +475,6 @@ export class RuntimeKernel {
 
     if (hasAnyKeyword(text, KEYWORDS.device)) {
       pins.push("device");
-    }
-    if (hasAnyKeyword(text, KEYWORDS.smartHome)) {
-      pins.push("smart_home");
     }
     if (hasAnyKeyword(text, KEYWORDS.phone)) {
       pins.push("phone", "voice");

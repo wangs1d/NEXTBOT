@@ -57,9 +57,6 @@ registry.register("search_web", async (input: any) => {
     ],
   };
 });
-registry.register("smart_home.control_device", async (input: any) => ({
-  ok: true, deviceId: "livingroom_ac", action: input?.action ?? "set", temperature: input?.temperature ?? 26,
-}));
 registry.register("weather.get_local", async () => ({ city: "上海", condition: "多云", tempC: 24 }));
 registry.register("reminder.plan", async (input: any) => ({
   ok: true, nextRunAtLocal: "2026-09-20T09:00:00+08:00", echo: input ?? {},
@@ -254,53 +251,6 @@ originalConsoleInfo(`\n=== 工具调用架构 E2E：mode=${MODE} 全量语料=${
   originalConsoleInfo("");
 }
 
-// 场景 B：白名单外能力（智能家居）——请求卡转正
-{
-  originalConsoleInfo("【B】白名单外能力 smart_home.control_device（chat 车道）userText=把客厅空调调到26度");
-  const script: LoopScriptStep[] = [
-    { kind: "text", text: "<tool_request>把客厅空调调到26度</tool_request>" },
-    { kind: "tool", id: "c1", name: "smart_home_control_device", args: { deviceId: "livingroom_ac", temperature: 26 } },
-    { kind: "text", text: "好了，客厅空调已经调到 26 度了。" },
-  ];
-  const staticRun = await runLoop({ name: "B-static-chat", lane: "chat", script, plan: chatLanePlanStatic(), userText: "把客厅空调调到26度" });
-  check("B-static：请求卡触发", staticRun.trace?.requestCard?.fired === true, JSON.stringify(staticRun.trace?.requestCard));
-  const reachableViaCard =
-    staticRun.trace?.requestCard?.loaded?.includes("smart_home.control_device") === true ||
-    staticRun.trace?.requestCard?.alreadyVisible?.includes("smart_home.control_device") === true;
-  check(
-    "B-static：top-1=smart_home.control_device 可达（预召回已注入→指回；未注入→加载）",
-    reachableViaCard,
-    `requestCard=${JSON.stringify(staticRun.trace?.requestCard)}`,
-  );
-  check("B-static：转正后真实调用 ok", staticRun.trace?.toolCalls?.[0]?.ok === true, JSON.stringify(staticRun.trace?.toolCalls));
-  check("B-static：请求标记不漏进最终回复", !staticRun.finalText.includes("<tool_request>"), staticRun.finalText.slice(0, 80));
-  check("B-static：3 次 LLM 调用完成（卡→调→答）", staticRun.llmCalls === 3, `actual=${staticRun.llmCalls}`);
-
-  // B2：预召回未命中（模糊 userText top-1 分数低）→ 请求卡以具体意图真正加载
-  const b2Script: LoopScriptStep[] = [
-    { kind: "text", text: "<tool_request>把客厅空调调到26度 制冷</tool_request>" },
-    { kind: "tool", id: "c1", name: "smart_home_control_device", args: { deviceId: "livingroom_ac", temperature: 26 } },
-    { kind: "text", text: "好了，客厅空调已经调到 26 度了。" },
-  ];
-  const b2Run = await runLoop({ name: "B2-static-chat", lane: "chat", script: b2Script, plan: chatLanePlanStatic(), userText: "把客厅那个调一下" });
-  check(
-    "B2：预召回未命中时请求卡真正加载工具",
-    b2Run.trace?.requestCard?.loaded?.includes("smart_home.control_device") === true,
-    `requestCard=${JSON.stringify(b2Run.trace?.requestCard)}`,
-  );
-  check("B2：加载后调用 ok", b2Run.trace?.toolCalls?.[0]?.ok === true, JSON.stringify(b2Run.trace?.toolCalls));
-
-  const legacyScript: LoopScriptStep[] = [
-    { kind: "text", text: "这个我现在的工具办不到，你需要在空调 App 里手动设置一下。" },
-  ];
-  const legacyRun = await runLoop({ name: "B-legacy-chat", lane: "chat", script: legacyScript, plan: chatLanePlanLegacy("把客厅空调调到26度"), userText: "把客厅空调调到26度" });
-  check("B-legacy：零工具调用（对照：白名单外能力不可达）", legacyRun.trace?.toolCalls?.length === 0, `toolCalls=${JSON.stringify(legacyRun.trace?.toolCalls)}`);
-
-  const staticTask = await runLoop({ name: "B-static-task", lane: "task", script, plan: taskLanePlanStatic(["write"]), userText: "把客厅空调调到26度" });
-  check("B-static-task：能力可达且调用 ok", staticTask.trace?.toolCalls?.[0]?.ok === true, JSON.stringify(staticTask.trace));
-  originalConsoleInfo("");
-}
-
 // 场景 C：出口对账闸已删除（2026-11-08）——尝试全败 → 如实收尾，不再打回续波
 {
   originalConsoleInfo("【C】出口闸已删除（task 车道，capabilities=[search]）首轮全败 → 如实收尾");
@@ -351,7 +301,7 @@ originalConsoleInfo(`\n=== 工具调用架构 E2E：mode=${MODE} 全量语料=${
 {
   originalConsoleInfo("【E】暴露稳定性：同车道多轮可见集一致性");
   const texts = [
-    "现在几点了", "明天早上九点提醒我开会", "把客厅空调调到26度", "找几张猫的照片",
+    "现在几点了", "明天早上九点提醒我开会", "取消明天那个提醒", "找几张猫的照片",
     "我钱包还有多少钱", "北京今天天气怎么样", "比特币现在什么价", "给妈妈发个消息",
   ];
   const staticSets = texts.map(() => toolNamesOf(chatLanePlanStatic()).join(","));
@@ -366,7 +316,7 @@ originalConsoleInfo(`\n=== 工具调用架构 E2E：mode=${MODE} 全量语料=${
     `  ℹ legacy 对照（诚实记录）：台架环境未装配 capability modules（_capabilityModuleDeps 为空），` +
       `能力域关键词注入无源 → 8 条文本产生 ${legacyDistinct} 个不同可见集；` +
       `生产环境该注入存在（见 selectForegroundCapabilityToolAdditions），每轮可见集随文本变化。` +
-      `legacy 的可达性缺陷由场景 A/B 直接证明（幻觉调用失败 / 白名单外不可达）。`,
+      `legacy 的可达性缺陷由场景 A 直接证明（白名单外工具幻觉调用失败）。`,
   );
 
   const taskSets = [["search"], ["write"], ["media"], undefined].map((caps) => toolNamesOf(taskLanePlanStatic(caps)).join(","));
@@ -381,7 +331,7 @@ originalConsoleInfo(`\n=== 工具调用架构 E2E：mode=${MODE} 全量语料=${
 {
   originalConsoleInfo("【F】schema token 成本（estimateToolsSchemaTokens，真实清单）");
   const staticChat = chatLanePlanStatic();
-  const legacyChat = chatLanePlanLegacy("把客厅空调调到26度");
+  const legacyChat = chatLanePlanLegacy("明天早上九点提醒我开会");
   const staticTokens = estimateToolsSchemaTokens(staticChat.visibleTools);
   const legacyTokens = estimateToolsSchemaTokens(legacyChat.visibleTools);
   originalConsoleInfo(`  chat 车道：static 可见 ${staticChat.visibleTools.length} 个 = ${staticTokens} tok | legacy 可见 ${legacyChat.visibleTools.length} 个 = ${legacyTokens} tok`);

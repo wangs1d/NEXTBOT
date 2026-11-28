@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { availableParallelism } from "node:os";
 
 import type { InferenceSession, Tensor } from "onnxruntime-node";
 
@@ -77,9 +78,23 @@ async function doInit(): Promise<LocalRerankerEngine | null> {
     const configuredMax = tokenizerConfig.model_max_length ?? 512;
     const maxSequenceLength = envInt("AGENT_LOCAL_RERANKER_MAX_SEQ_LEN", Math.min(224, configuredMax), 64, 512);
     const maxQueryTokens = envInt("AGENT_LOCAL_RERANKER_MAX_QUERY_TOKENS", 96, 16, 256);
+    // 线程数动态自适应（2C2G 服务器优化）：onnxruntime 默认按**宿主机**核数起
+    // intra-op 线程池（容器配额下会严重超订），小核机上与主进程/其他 fork 抢满
+    // CPU，交互请求出现延迟尖刺。主流做法（onnxruntime threading 文档）：容器/
+    // 共享 CPU 环境显式钉到配额；推理本身已由下方 promise 链串行化。
+    // 默认 min(4, 核数-1)：2C2G→1，8 核桌面→4；AGENT_LOCAL_RERANKER_INTRA_THREADS 可覆盖。
+    const intraOpThreads = envInt(
+      "AGENT_LOCAL_RERANKER_INTRA_THREADS",
+      Math.max(1, Math.min(4, availableParallelism() - 1)),
+      1,
+      8,
+    );
     const session = await ort.InferenceSession.create(join(dir, "model_quantized.onnx"), {
       executionProviders: ["cpu"],
       graphOptimizationLevel: "all",
+      intraOpNumThreads: intraOpThreads,
+      interOpNumThreads: 1,
+      executionMode: "sequential",
     });
     console.info(
       `[local-reranker] 交叉编码引擎就绪 model=${LOCAL_RERANKER_MODEL_ID} ` +

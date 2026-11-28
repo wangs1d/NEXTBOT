@@ -343,6 +343,43 @@ def _trim_leading_silence(audio: AudioSegment) -> AudioSegment:
     return audio
 
 
+# 清扫参数可用环境变量覆盖（12-Factor：部署相关边界值走环境配置）
+_PRUNE_INTERVAL_S = float(os.getenv("TTS_PRUNE_INTERVAL_S", "600"))       # 节流：默认 10 分钟一次
+_PRUNE_MAX_AGE_S = float(os.getenv("TTS_PRUNE_MAX_AGE_S", "3600"))        # 默认保留 1 小时（引擎整段语音渲染期间还要读它）
+_prune_last_ts = 0.0
+
+
+def _prune_tts_wavs(out_dir: str):
+    """周期性清扫历史 TTS wav。
+
+    每句落盘一个 tts_*.wav，原来从不删除，目录只增不减（2C2G 小盘会被吃满）。
+    引擎只在本次语音渲染期间读取该文件，保留期远超最长语音；按
+    TTS_PRUNE_INTERVAL_S（默认 10 分钟）节流 listdir，摊薄开销。
+    """
+    global _prune_last_ts
+    now = time.monotonic()
+    if now - _prune_last_ts < _PRUNE_INTERVAL_S:
+        return
+    _prune_last_ts = now
+    try:
+        cutoff = time.time() - _PRUNE_MAX_AGE_S
+        removed = 0
+        for name in os.listdir(out_dir):
+            if not (name.startswith("tts_") or name.startswith("tmp_")):
+                continue
+            path = os.path.join(out_dir, name)
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+                    removed += 1
+            except OSError:
+                continue  # 文件正在被引擎读取等情况，下轮再清
+        if removed:
+            print(f"[tts] 清扫历史 wav：删除 {removed} 个", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[tts] wav 清扫失败: {exc}", flush=True)
+
+
 async def synth_sentence(text: str, out_dir: str, voice: str = DEFAULT_VOICE,
                          tag: str | None = None) -> dict:
     """合成一句，返回 {"wav", "pcm", "sample_rate", "dur_ms", "text", "provider"}。
@@ -351,6 +388,7 @@ async def synth_sentence(text: str, out_dir: str, voice: str = DEFAULT_VOICE,
     provider 是实际使用的引擎（"breeze" / "edge"）；Breeze 生效时音色固定用
     BREEZE_TTS_VOICE，voice 参数只对 edge-tts 回退生效。
     """
+    _prune_tts_wavs(out_dir)
     os.makedirs(out_dir, exist_ok=True)
     tag = tag or f"{int(time.time() * 1000)}_{uuid.uuid4().hex[:6]}"
     tmp_mp3 = os.path.join(out_dir, f"tmp_{tag}.mp3")

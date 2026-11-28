@@ -60,7 +60,6 @@ const GOLDEN: GoldenCase[] = [
   { query: "我在哪个城市", expect: ["clock.get_user_location"] },
   { query: "今天有什么热搜", expect: ["web_search"], topK: 3 },
   { query: "找个教做红烧肉的视频", expect: ["web_search"] },
-  { query: "把客厅的灯打开", expect: ["smart_home"] },
   // ── 需外部信息（search 族，允许同义）──
   { query: "比特币现在什么价", expect: ["web_search"], topK: 3 },
   { query: "帮我搜一下刘浩存最近的消息", expect: ["web_search"], topK: 3 },

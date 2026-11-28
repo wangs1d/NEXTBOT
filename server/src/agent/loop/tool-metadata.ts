@@ -25,7 +25,6 @@ export type ToolCategory =
   | "programming"
   | "world"
   | "aip"
-  | "smart_home"
   | "mcp"
   | "image"
   | string;
@@ -84,8 +83,6 @@ const TOOL_TO_CATEGORY: Record<string, ToolCategory> = {
   "shopping.order.cancel": "life",
   // ride（复合：quote/book/status/cancel）
   "ride_hailing": "life",
-  // smart_home
-  "smart_home": "smart_home",
   // 复合工具（细分入口已收编进各自 action）
   agent: "agent",
   "world.link": "world",
@@ -189,7 +186,7 @@ function inferRiskLevel(toolName: string): ToolMetadata["riskLevel"] {
   if (/shopping\.order\.place|ride_hailing\.book|home_service\.book|restaurant\.book|phone\.call/.test(toolName)) {
     return "high";
   }
-  if (/agent_browser|smart_home\.control/.test(toolName)) {
+  if (/agent_browser/.test(toolName)) {
     return "medium";
   }
   return "low";

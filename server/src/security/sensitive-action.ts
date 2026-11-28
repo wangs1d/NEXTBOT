@@ -26,7 +26,6 @@ const EXTERNAL_TOOL_PREFIXES: string[] = [
   "phone.call_user", // 代拨电话给用户联系人
   "message.send", // 代发消息（旧族）
   "world.link.send_message", // 站内消息直达他人
-  "smart_home", // 物理世界设备控制 / 场景一键执行（2026-11-11 复合为单入口）
   "wallet.pay", // 资金支出
   "payment.", // 支付族
   // alipay 支付/绑卡族（query-payment / check-wallet / merchant-list 是只读，不列）
@@ -59,9 +58,7 @@ export function classifyToolSensitivity(
 ): ActionSensitivity {
   const name = String(toolName ?? "").trim().toLowerCase();
   // 复合工具（单入口 + action 分流）：读类 action 不因族名前缀被误升 external。
-  // 2026-11-11 smart_home 合并后，list_devices 也命中族前缀，需按 action 放行。
   const action = String(args?.action ?? "").trim().toLowerCase();
-  if (name === "smart_home" && action === "list_devices") return "read";
   // 复合族裸名化后前缀规则失效，按 action 逐分支判定（2026-11-11）。
   if (name === "phone") {
     if (action === "call") return "act_external";

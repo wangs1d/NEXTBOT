@@ -88,17 +88,6 @@ test("L1 多域：主域强信号 + 子句切分（长多意图 query 整句投�
   );
 });
 
-test("L1 多域（双非 Core 域）：空调 + 壁纸 → smart_home 域注入", () => {
-  const coreNames = new Set(laneSets.CHAT_LANE_CORE_NAMES);
-  const names = laneSets
-    .buildDomainPreloadTools("把空调调到26度，另外找几张海边壁纸", corpus, coreNames)
-    .map(toolName);
-  assert.ok(
-    names.some((n) => n.startsWith("smart_home")),
-    `smart_home 域应注入: ${names.join(",")}`,
-  );
-});
-
 test("L1 次域纪律：top-1 只有 2 票（无强信号）→ 整组不注入走兜底", () => {
   // "找个猫咪视频"：media 2 票 / device 1 / misc 1 —— top-1 弱信号
   // 不应有域全族灌入（media 全族 N 个），兜底双闸下相关工具按分数进
@@ -111,17 +100,6 @@ test("L1 次域纪律：top-1 只有 2 票（无强信号）→ 整组不注入�
 });
 
 // ── L1：top-K 弱信号兜底 ──
-
-test("L1 兜底：无强域但明确工具意图 → BM25 top-K 命中目标工具", () => {
-  // 智能家居语料意图先验强（control_device 1.7），top-K 应带上 control_device
-  const names = laneSets
-    .buildDomainPreloadTools("把客厅的灯打开", corpus)
-    .map(toolName);
-  assert.ok(
-    names.some((n) => n.startsWith("smart_home") || n.startsWith("device")),
-    `兜底应命中家居/设备域工具: ${names.join(",")}`,
-  );
-});
 
 test("L1 兜底噪声闸：纯寒暄零注入（错误预载比不预载更糟）", () => {
   assert.deepEqual(laneSets.buildDomainPreloadTools("嗯嗯好的", corpus), []);
@@ -147,7 +125,6 @@ test("L1 点信号：BM25 命中先于域族注入，不被假强域整族顶掉
 test("L1 点信号：别名/例句只作检索文本，经 BM25 命中后注入", () => {
   const cases: Array<[string, string]> = [
     ["帮我一直盯着这个话题有新消息就告诉我", "interest.manage"],
-    ["帮我打开回家模式", "smart_home"],
     ["双十一买什么耳机性价比高帮我看看", "shopping.suggest"],
   ];
   for (const [query, expected] of cases) {

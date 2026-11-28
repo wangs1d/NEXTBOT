@@ -1,14 +1,3 @@
-/* 嵌入聊天 / Flutter：仅球体实体，无页面底框 */
-html.embed-root,
-html.embed-root body,
-html.embed-root #root {
-  margin: 0;
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
-  background: transparent !important;
-}
-
 /* ── 换肤主题变量（托盘切换 data-theme） ── */
 :root,
 :root[data-theme="default"] {
@@ -43,53 +32,6 @@ html.embed-root #root {
   height: 100%;
   position: relative;
   overflow: hidden;
-}
-
-.mode-embed {
-  background: transparent !important;
-  overflow: hidden;
-  min-width: 100px;
-  min-height: 140px;
-  cursor: grab;
-  border-radius: 24px;
-  isolation: isolate;
-}
-
-.mode-embed:active {
-  cursor: grabbing;
-}
-
-.mode-embed canvas {
-  display: block;
-  width: 100% !important;
-  height: 100% !important;
-  touch-action: none;
-  background: transparent !important;
-}
-
-.embed-drag-surface {
-  position: absolute;
-  inset: 0;
-  z-index: 8;
-  touch-action: none;
-  cursor: grab;
-  background: transparent;
-}
-
-.embed-drag-surface:active {
-  cursor: grabbing;
-}
-
-.mode-embed-hint {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 6px;
-  text-align: center;
-  font-size: 0.58rem;
-  color: rgba(200, 220, 255, 0.45);
-  pointer-events: none;
-  letter-spacing: 0.04em;
 }
 
 /* 桌宠主窗：常态即 flex row —— 顺序 [附加面板槽位][球体 pane][快捷菜单]

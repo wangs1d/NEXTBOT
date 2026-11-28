@@ -65,24 +65,6 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
       negativeExamples: ["compare the price of a phone"],
     },
   },
-  // 设备控制入口没有专属词面前缀（工具名 smart_home 推不出灯/空调），
-  // 用别名补足检索文本；这些词只进索引，不再触发任何直取。
-  {
-    exact: "smart_home",
-    metadata: {
-      aliases: [
-        "灯", "客厅的灯", "开灯", "关灯", "灯光", "调亮", "调暗", "色温",
-        "空调", "窗帘", "插座", "开关", "回家模式", "离家模式", "晚安模式",
-        "智能家居", "智能设备", "家里设备",
-      ],
-      negativeAliases: [
-        "打开应用", "打开软件", "打开程序", "截图", "截屏",
-        "监控画面", "实时画面",
-      ],
-      examples: ["把客厅的灯打开", "空调调到26度", "打开回家模式", "把窗帘拉上"],
-      negativeExamples: ["打开抖音", "帮我截个图", "看看家里的摄像头"],
-    },
-  },
   {
     prefix: "wallet.",
     metadata: {
@@ -252,7 +234,6 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
     metadata: {
       aliases: ["设备", "设备列表", "有哪些设备", "摄像头", "监控画面", "实时画面", "直播画面", "看家里"],
       examples: ["我有哪些绑定的设备", "打开客厅的摄像头看看", "看一下家里的实时画面"],
-      negativeAliases: ["开灯", "关灯", "窗帘", "空调", "插座"],
     },
   },
   {
@@ -269,14 +250,6 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
       aliases: ["世界状态", "在线状态", "我的世界", "Agent 世界", "接入状态", "开房间", "建房间", "创建房间", "注册挑战", "开放注册"],
       examples: ["我在 Agent 世界的状态怎么样", "给我开个房间", "帮我拿一下开放注册的挑战题"],
       negativeAliases: ["好友消息", "加好友", "发消息"],
-    },
-  },
-  {
-    exact: "smart_home",
-    metadata: {
-      aliases: ["开灯", "关灯", "灯光", "空调", "窗帘", "插座", "智能设备", "回家模式", "离家模式", "观影模式", "睡眠场景", "场景模式", "一键场景", "灯光场景"],
-      examples: ["把客厅的灯打开", "空调调到26度", "帮我打开回家模式"],
-      negativeAliases: ["打开软件", "打开应用", "启动应用", "运行软件"],
     },
   },
   {

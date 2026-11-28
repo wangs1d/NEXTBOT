@@ -3,8 +3,6 @@ import { useCallback, useEffect, useRef, type RefObject } from "react";
 import * as THREE from "three";
 import type { PublicApi } from "@react-three/cannon";
 import { MODEL } from "../constants/model-proportions";
-import { registerSphereDrag, type SphereDragApi } from "../bridge/sphere-drag-bridge";
-import { postToHost, SPHERE_MSG } from "../embed-protocol";
 import { pointerHitsSphere } from "../utils/sphere-hit";
 
 export type SphereTouchPhase = "start" | "drag" | "end";
@@ -24,8 +22,6 @@ interface UseSphereUserDragOptions {
   canvasCapture?: boolean;
   /** 任意 Canvas 点击即拖拽（demo 页） */
   canvasCaptureLenient?: boolean;
-  /** 注册到 DOM 拖拽桥（embed 网页层） */
-  registerBridge?: boolean;
   api?: PublicApi;
   onTouch?: (event: SphereTouchEvent) => void;
   onBodyHover?: (active: boolean) => void;
@@ -64,7 +60,6 @@ export function useSphereUserDrag({
   enabled = true,
   canvasCapture = true,
   canvasCaptureLenient = false,
-  registerBridge = false,
   api,
   onTouch,
   onBodyHover,
@@ -141,8 +136,6 @@ export function useSphereUserDrag({
           }
         } else if (onPanDelta) {
           onPanDelta(dx, dy);
-        } else if (window.parent !== window) {
-          postToHost({ type: SPHERE_MSG.pan, dx, dy });
         }
 
         // 实时反应：拖动也累计强度，到达阈值触发晃动（带冷却限流）
@@ -470,17 +463,6 @@ export function useSphereUserDrag({
     dom.addEventListener("contextmenu", onContextMenu);
     return () => dom.removeEventListener("contextmenu", onContextMenu);
   }, [gl]);
-
-  useEffect(() => {
-    if (!registerBridge) return;
-    const bridgeApi: SphereDragApi = {
-      beginDrag: (x, y, id) => beginDrag(x, y, x, y, id, "rotate", 2),
-      moveBy: (dx, dy) => applyDragDelta(dx, dy),
-      endDrag: () => finishDrag(),
-    };
-    registerSphereDrag(bridgeApi);
-    return () => registerSphereDrag(null);
-  }, [registerBridge, beginDrag, applyDragDelta, finishDrag]);
 
   useEffect(() => {
     if (!canvasCapture) return;

@@ -528,7 +528,6 @@ function expandSearchQueries(query: string): string[] {
     // 归一化成 fetch 语义信号并消除噪声源。
     [/https?:\/\/\S+/gi, "fetch_web 网页 url page read 读取 内容"],
     [/摄像头|监控画面|看家|门口/gi, "摄像头 画面 监控 看一眼"],
-    [/(?:开|关|调)(?:一下)?灯|灯光|调亮|调暗|空调|窗帘|插座/gi, "smart_home 设备 开关 灯 空调 窗帘 control"],
     [/到家|回到家|离家|出门|离开公司|到达/gi, "geofence 位置 围栏 到达 离开 提醒"],
     [/每天提醒|定期提醒|天天提醒|周期提醒/gi, "每天 定时 提醒 rhythm 周期 reminder"],
     [/照片|图片|找图|壁纸|头像|表情包/gi, "图片 照片 search_images image photo 找图"],

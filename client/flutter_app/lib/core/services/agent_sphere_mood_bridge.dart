@@ -9,7 +9,7 @@ typedef AgentSpherePatchListener = void Function(AgentSpherePatch patch);
 typedef AgentSphereFocusListener = void Function();
 typedef AgentSphereMessageListener = void Function(Map<String, dynamic> message);
 
-/// Agent 3D 形象状态 — 与 embed.html / overlay / agent.embodiment.patch 对齐
+/// Agent 3D 形象状态 — 与 overlay 桌宠 / agent.embodiment.patch 对齐
 class AgentSpherePatch {
   const AgentSpherePatch({
     this.mood,

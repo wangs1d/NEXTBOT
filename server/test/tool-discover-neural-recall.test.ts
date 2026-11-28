@@ -46,7 +46,6 @@ const NEURAL_GOLDEN: Array<{ query: string; expect: string[]; topK?: number }> =
   { query: "外头冷不冷", expect: ["weather.get_local"], topK: 3 },
   { query: "我现在在哪儿", expect: ["clock.get_user_location"], topK: 3 },
   { query: "帮我定个明早七点的闹钟", expect: ["calendar"], topK: 3 },
-  { query: "客厅有点暗", expect: ["smart_home"], topK: 3 },
 ];
 
 type DiscoverMatch = { name: string; routing?: { confidence?: number } };
@@ -74,7 +73,8 @@ async function main(): Promise<void> {
     registryName: e.registryName,
     embeddingViews: e.embeddingViews,
   }));
-  assert.ok(items.length >= 30, `工具目录规模应至少为 30，实际=${items.length}`);
+  // smart_home 工具族已随 HA 集成移除（2026-11-28），目录规模下修到 29
+  assert.ok(items.length >= 29, `工具目录规模应至少为 29，实际=${items.length}`);
   const stats = await ensureToolEmbeddings(items);
   assert.equal(stats.computed + stats.reused, items.length);
   assert.equal(stats.failed, 0);

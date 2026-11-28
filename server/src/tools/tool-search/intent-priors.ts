@@ -57,12 +57,6 @@ const RULES: IntentRule[] = [
     read_only: true,
   },
   {
-    intent: "智能家居控制",
-    pattern: /(灯|空调|窗帘|插座).*(开|关|调|拉|设置)|打开.*(灯|空调)|把.*(灯|空调)/,
-    domains: { smart_home: 1 },
-    confidence: 0.96,
-  },
-  {
     intent: "本地天气查询",
     pattern: /天气|下雨|下雪|冷不冷|热不热|带伞|气温|室外温度|外边.*(冷|热)/,
     domains: { weather: 1 },

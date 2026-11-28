@@ -156,7 +156,7 @@ export function topToolMatchesForQuery(
 
 /** top-K 兜底绝对闸：RRF 分下限。实测校准（2026-10-09，全量语料 186 工具）：
  *  纯噪声簇（"嗯嗯好的"→voice 0.049、"找个X"→0.045-0.049）≤ ~0.05；同域二档
- *  （browser.session.list / smart_home.list_devices）≈0.08+；意图先验命中 0.4-1.7。
+ *  （browser.session.list / shopping.order.track）≈0.08+；意图先验命中 0.4-1.7。
  *  取 0.075 = 噪声天花板之上、二档之下——宁缺勿滥，错误预载比不预载更糟。 */
 const BM25_TOPK_MIN_SCORE = 0.075;
 /** top-K 兜底相对闸：候选分须 ≥ top1 的 35%（RRF 序列衰减快，尾巴即噪声）。 */

@@ -13,6 +13,19 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { availableParallelism } from "node:os";
+
+/**
+ * intra-op 线程数动态自适应：onnxruntime 默认按**宿主机**核数起线程池（容器配额
+ * 下严重超订），小核机上会抢满 CPU。小模型单条推理仅 15~40ms 且已串行化——主流
+ * 建议（onnxruntime threading 文档）对这类场景直接 1~2 线程。
+ * AGENT_LOCAL_EMBEDDING_INTRA_THREADS 可覆盖；compose 覆盖层会按容器配额显式钉死。
+ */
+function embeddingIntraThreads(): number {
+  const value = Number.parseInt(process.env.AGENT_LOCAL_EMBEDDING_INTRA_THREADS ?? "", 10);
+  if (Number.isFinite(value)) return Math.max(1, Math.min(8, value));
+  return Math.max(1, Math.min(2, availableParallelism() - 1));
+}
 import { serverRoot } from "../../config/paths.js";
 
 import type { InferenceSession, Tensor } from "onnxruntime-node";
@@ -148,9 +161,13 @@ async function doInit(): Promise<LocalEmbeddingEngine | null> {
   let session: InferenceSession;
   const tokenizer = new BertTokenizer(join(dir, "vocab.txt"));
   try {
+    // 见 embeddingIntraThreads() 注释：动态自适应 + 环境变量可覆盖
     session = await ort.InferenceSession.create(join(dir, "model_quantized.onnx"), {
       executionProviders: ["cpu"],
       graphOptimizationLevel: "all",
+      intraOpNumThreads: embeddingIntraThreads(),
+      interOpNumThreads: 1,
+      executionMode: "sequential",
     });
   } catch (err) {
     console.warn(

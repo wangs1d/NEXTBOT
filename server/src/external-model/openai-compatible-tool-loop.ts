@@ -66,7 +66,6 @@ import { GEO_CHAT_TOOLS } from "../tools/geo-tools.js";
 import { BILL_PARCEL_CHAT_TOOLS } from "../tools/bill-parcel-tools.js";
 import { WATCH_TRACK_CHAT_TOOLS } from "../tools/watch-board-tools.js";
 import { PROFILE_QUERY_CHAT_TOOLS } from "../tools/profile-query-tool.js";
-import { SMART_HOME_CHAT_TOOLS } from "../tools/smart-home-tools.js";
 import { DEVICE_CHAT_TOOLS } from "../tools/device-tools.js";
 import { openAiUserContentFromTurn } from "./build-user-message-content.js";
 import { stripAllTimestampFrameLines } from "../utils/timestamp-frame.js";
@@ -841,7 +840,7 @@ export function prepareToolsForChatApi(tools: ChatCompletionTool[]): {
    * 请求卡转正通道：把延迟目录工具转为 API 命名形态并登记映射。
    * 必须用它而不是局部 prepareToolsForChatApi——API→注册表名映射表在循环
    * 启动时由本闭包持有，旁路转换的工具调用回写时解析不回注册表名
-   * （E2E 台架 B2 场景实锤：卡加载的 smart_home.control_device 调用报未知工具）。
+   * （E2E 台架 B2 场景实锤：卡加载的工具调用报未知工具）。
    */
   registerApiTool: (tool: ChatCompletionTool) => ChatCompletionTool | undefined;
 } {
@@ -1166,7 +1165,6 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
       ...GEO_CHAT_TOOLS,
       ...BILL_PARCEL_CHAT_TOOLS,
       ...AGENT_CAPABILITY_QUERY_CHAT_TOOLS,
-      ...SMART_HOME_CHAT_TOOLS,
       ...DEVICE_CHAT_TOOLS,
       ...getPhoneBridgeChatTools(),
       ...MAIL_WATCH_CHAT_TOOLS,
@@ -1967,7 +1965,7 @@ export async function streamCompletionWithTools(
           "6. 如果此前（含更早轮次）就任务细节向用户追问过（目的地/时间/选项/偏好等），而用户本轮给出了答案、确认或补充（哪怕只有几个字如「先去A吧」「就这个」）：不要只回一句「好的/收到/不错」——立即调用对应工具把任务真正完成，拿到结果后再回复用户。只确认不兑现 = 任务失败。\n" +
           "7. 实数只认真值：价格/报价/库存/时刻/天气这类数字，只能来自本轮当场取到的数据。工具回执里出现「体验模式/脱敏/需登录/超时/0 条结果」时，不要把二手搜索结果当实时价，也不要自己估一个数——回执若写明了可取数的替代路径，照它当场再取一次；仍取不到就如实说这项没取到。" +
           (toolSearchPrepared.toolSearchActive
-            ? "\n8. 当可见工具不足以完成任务时，在回复中输出 <tool_request>一句话描述你需要的能力</tool_request>（如 <tool_request>把客厅空调调到26度</tool_request>），系统会从延迟工具目录检索并加载对应工具供你下一轮直接调用（每轮最多一次）。拿到加载的工具后继续完成任务，不要只输出请求标记就停。"
+            ? "\n8. 当可见工具不足以完成任务时，在回复中输出 <tool_request>一句话描述你需要的能力</tool_request>（如 <tool_request>查一下下周三杭州的天气</tool_request>），系统会从延迟工具目录检索并加载对应工具供你下一轮直接调用（每轮最多一次）。拿到加载的工具后继续完成任务，不要只输出请求标记就停。"
             : ""),
       }),
     );

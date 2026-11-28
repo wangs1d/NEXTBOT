@@ -225,7 +225,7 @@ export interface EndToEndDecisionContext {
  *    整体认知过程产出，不再切片式（先判相关性 → 再决策 → 再生成话术）。
  *  - value/disturb 数值作为 LLM 的参考输入，而非硬性数值闸门。
  *  - inferActions LLM 化：在同一次 LLM 调用中通过 function calling 风格的
- *    JSON 输出决定调用哪些环境控制工具（calendar/smart_home），不单独调一次 LLM。
+   *    JSON 输出决定调用哪些环境控制工具（calendar），不单独调一次 LLM。
  *    返回的 actions 供 ProactionCortex 直接执行；LLM 不可用/未返回时回退到 inferActions 硬编码规则。
  */
 export interface EndToEndDecisionMaker {
@@ -336,7 +336,7 @@ export class ProactionCortex {
     console.log("[ProactionCortex] 已注册 LegacyProactiveLifeRuntime");
   }
 
-  /** 注册 ActionExecutor：让决策后能直接执行环境控制类动作（关窗/调空调/创建日程等） */
+  /** 注册 ActionExecutor：让决策后能直接执行环境控制类动作（创建日程等） */
   registerActionExecutor(executor: ActionExecutorLike): void {
     this.actionExecutor = executor;
     console.log("[ProactionCortex] 已注册 ActionExecutor");
@@ -506,7 +506,7 @@ export class ProactionCortex {
 
     // 环境控制：outcome=speak 时，产出建议动作并直接执行。
     // inferActions LLM 化：优先使用端到端决策返回的 e2eActions（LLM function calling 风格），
-    // 缺失或无效时回退到 inferActions 硬编码规则（travel→calendar / late_night→smart_home 等）。
+    // 缺失或无效时回退到 inferActions 硬编码规则（travel→calendar 等）。
     // 注意：此处不影响 speak/silent 决策（speak/silent 已由端到端 LLM 完成）。
     // 风险点4：LLM 返回的 actions 需经过白名单+信号场景双重过滤，防止幻觉导致非预期工具调用。
     let actions: BrainDecisionAction[] | undefined;
@@ -530,7 +530,7 @@ export class ProactionCortex {
         }
       }
       if (actions && actions.length > 0) {
-        // 直接执行动作（环境控制类，如关窗/调空调/创建日程）
+        // 直接执行动作（环境控制类，如创建日程）
         await this.executeActions(actions, actorId);
       }
     }
@@ -562,7 +562,6 @@ export class ProactionCortex {
    * 规则驱动（非 LLM），确保关键场景能直接动手做事：
    *  - 出行信号 → 创建日程提醒（calendar.create）
    *  - 截止日期信号 → 创建待办（calendar.create）
-   *  - 深夜活动信号 → 调暗灯光（smart_home.control_device，若设备可用）
    *  - 市场异动信号 → 不直接操作（仅通知，金融操作需用户确认）
    */
   private inferActions(signal: BrainSignalInput): BrainDecisionAction[] {
@@ -595,14 +594,7 @@ export class ProactionCortex {
       });
     }
 
-    if (/late_night|深夜|熬夜/.test(kind) || /late_night|深夜/.test(title)) {
-      // 深夜活动 → 激活"晚安"场景（若设备可用）
-      actions.push({
-        tool: "smart_home",
-        args: { action: "scene", scene_action: "activate", scene_name: "晚安" },
-        reason: "深夜活动触发晚安场景",
-      });
-    }
+    // 深夜活动信号不再触发设备场景类动作，仅保留日程/待办等提醒类动作。
 
     return actions;
   }
@@ -612,7 +604,6 @@ export class ProactionCortex {
   /** 允许 LLM 调用的环境控制工具白名单 */
   private static readonly ACTION_TOOL_WHITELIST = new Set([
     "calendar",
-    "smart_home",
     // ProactivityHub act 模式：过劳干预放音乐等场景
     "media.search",
     "media.play",
@@ -625,15 +616,13 @@ export class ProactionCortex {
    */
   private static readonly SIGNAL_TOOL_MAP: Array<{ keywords: RegExp; tools: Set<string> }> = [
     { keywords: /travel|出行|出差|旅游|出发|trip|flight|deadline|截止|到期|due|schedule|日程|待办|todo/, tools: new Set(["calendar"]) },
-    { keywords: /late_night|深夜|熬夜|night|晚安|sleep|休息/, tools: new Set(["smart_home"]) },
-    { keywords: /weather|天气|温度|temperature|hot|cold|热|冷/, tools: new Set(["smart_home"]) },
   ];
 
   /**
    * 过滤 LLM 返回的 actions：白名单 + 信号场景双重校验。
    *
    * 过滤规则：
-   *  1. 工具必须在 ACTION_TOOL_WHITELIST 内（拒绝 calendar.delete / smart_home.delete 等危险操作）
+   *  1. 工具必须在 ACTION_TOOL_WHITELIST 内（拒绝 calendar.delete 等危险操作）
    *  2. 信号场景匹配时，工具必须在对应 SIGNAL_TOOL_MAP 的允许集合内
    *  3. 信号场景未匹配任何映射 → 保守放行白名单工具（避免过度过滤合法动作）
    *
