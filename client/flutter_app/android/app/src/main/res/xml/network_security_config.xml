@@ -20,6 +20,8 @@
         <domain includeSubdomains="false">192.168.10.2</domain>
         <!-- 当前开发机 WLAN IP（2026-11-05 探测） -->
         <domain includeSubdomains="false">192.168.10.12</domain>
+        <!-- 当前 GPU 联调机 WLAN IP（2026-11-27 探测） -->
+        <domain includeSubdomains="false">192.168.10.20</domain>
         <!-- 旧部署机 IP 兼容 -->
         <domain includeSubdomains="false">192.168.10.3</domain>
         <!-- Android 模拟器访问宿主机的地址 -->

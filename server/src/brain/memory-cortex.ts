@@ -49,9 +49,13 @@ import {
 } from "../agentic-memory/env.js";
 import { memoryDecayFactor, semanticFingerprint } from "../services/memory-record-utils.js";
 import { sanitizeMemoryLinesForPrompt } from "../agent/memory-line-hygiene.js";
+import { createMemoryRecord, type MemoryRecord } from "../agentic-memory/memory-record.js";
+import { planMemoryRecall, type MemoryRecallPlan } from "../agent/recall-planner.js";
 import {
   classifyMemorySourceRole,
   isAssistantVoiceQuery,
+  normalizeMemorySourceRole,
+  type MemorySourceRole,
 } from "../services/memory-source-role.js";
 import {
   emotionalSalience,
@@ -124,7 +128,12 @@ interface AgenticMemoryLike {
       actorId: string,
       sourceId: string,
       text: string,
-      opts?: { highSignal?: boolean; context?: "main" | "notes" },
+      opts?: {
+        highSignal?: boolean;
+        context?: "main" | "notes";
+        sourceRole?: MemorySourceRole;
+        record?: MemoryRecord;
+      },
     ): Promise<void>;
   };
   retrieval: {
@@ -144,7 +153,12 @@ interface MemoryBridgeLike {
     actorId: string,
     sourceId: string,
     text: string,
-    opts: { context: "main" | "notes"; highSignal: boolean },
+    opts: {
+      context: "main" | "notes";
+      highSignal: boolean;
+      sourceRole?: MemorySourceRole;
+      record?: MemoryRecord;
+    },
   ): Promise<unknown>;
   searchFused(
     actorId: string,
@@ -254,7 +268,12 @@ interface NarrativeMemoryLike {
     actorId: string,
     text: string,
     source: string,
-    opts?: { highSignal?: boolean; context?: "main" | "notes" },
+    opts?: {
+      highSignal?: boolean;
+      context?: "main" | "notes";
+      sourceRole?: MemorySourceRole;
+      record?: MemoryRecord;
+    },
   ): Promise<void>;
   buildNarrativeRecall(actorId: string, query: string): Promise<string>;
   buildCrossContextRecall(actorId: string, query: string): Promise<string>;
@@ -1176,6 +1195,14 @@ export class MemoryCortex {
     // 写长期记忆：高信号或非工作记忆
     const shouldPersistLongTerm = highSignal || domain !== "working";
     if (!shouldPersistLongTerm) return;
+    const record = createMemoryRecord({
+      actorId,
+      sourceRef: sourceId,
+      text: effectiveContent,
+      sourceRole: normalizeMemorySourceRole(item.metadata?.sourceRole) ?? undefined,
+      kind: item.kind === "fact" || item.kind === "preference" ? item.kind : "event",
+      createdAt: item.timestamp,
+    });
 
     // 优先 narrative（其内部会同时写 humanLike + agentic）
     if (this.narrative) {
@@ -1183,6 +1210,8 @@ export class MemoryCortex {
         await this.narrative.ingest(actorId, effectiveContent, sourceId, {
           highSignal,
           context: "main",
+          sourceRole: record.sourceRole,
+          record,
         });
         try {
           this.synapseBus?.fire(
@@ -1212,6 +1241,8 @@ export class MemoryCortex {
         await this.bridge.writeUnified(actorId, sourceId, effectiveContent, {
           context: "main",
           highSignal,
+          sourceRole: record.sourceRole,
+          record,
         });
         try {
           this.synapseBus?.fire(
@@ -1237,6 +1268,8 @@ export class MemoryCortex {
         await this.agentic.ingest.ingestText(actorId, sourceId, effectiveContent, {
           highSignal,
           context: "main",
+          sourceRole: record.sourceRole,
+          record,
         });
         try {
           this.synapseBus?.fire(
@@ -1281,9 +1314,12 @@ export class MemoryCortex {
        * 避免"A 和 B 对比"类 query 的 embedding 被两个主题平均稀释。
        */
       subQueries?: string[];
+      recallPlan?: MemoryRecallPlan;
     },
   ): Promise<MemoryRecallResult> {
     const domain = opts?.domain;
+    const recallPlan = opts?.recallPlan ?? planMemoryRecall({ text: query, force: true });
+    const allows = (channel: MemoryRecallPlan["channels"][number]) => recallPlan.channels.includes(channel);
     const now = new Date().toISOString();
 
     try {
@@ -1418,7 +1454,10 @@ export class MemoryCortex {
       if (this.bridge) {
         const fused =
           (await this.safeRecall(() =>
-            this.bridge!.searchFused(actorId, query, { context: "main", topK: opts?.limit }),
+            this.bridge!.searchFused(actorId, query, {
+              context: "main",
+              topK: recallPlan.candidateK.agentic ?? opts?.limit,
+            }),
           )) ?? [];
         this.triggerReawakenForFadedHits(actorId, {
           recalledNodeIds: fused.map((f) => f.graphNodeId).filter((v): v is string => Boolean(v)),
@@ -1516,7 +1555,7 @@ export class MemoryCortex {
     //    P2-2 多意图并行召回：subQueries 存在时对每个子 query 并行检索，
     //    fuseRankLists 做 RRF 共识融合，单一 query 时保持原逻辑（单列表融合=恒等）。
     let agenticItems: MemoryRecallItem[] = [];
-    if (this.bridge) {
+    if (allows("agentic") && this.bridge) {
       // P1-7 统一召回：bridge 融合（Mem0×认知图×FTS RRF + 跨通道去重）作为单一候选源。
       // 此前 agentic 通道查 Mem0、narrative 通道再取一遍融合文本，同源内容双重计入。
       const subQueries = (opts?.subQueries ?? [query])
@@ -1526,13 +1565,16 @@ export class MemoryCortex {
       const allQueries = [query, ...subQueries];
       const candidateLists = await Promise.all(
         allQueries.map((q) =>
-          this.safeRecall(() => this.bridge!.searchFused(actorId, q, { context: "main" })),
+          this.safeRecall(() => this.bridge!.searchFused(actorId, q, {
+            context: "main",
+            topK: recallPlan.candidateK.agentic,
+          })),
         ),
       );
       agenticItems = fuseSubQueryLists(
         candidateLists.map((candidates) => this.fusedCandidatesToItems(candidates ?? [])),
       );
-    } else if (this.agentic) {
+    } else if (allows("agentic") && this.agentic) {
       const subQueries = (opts?.subQueries ?? [query])
         .map((q) => (q ?? "").trim())
         .filter((q) => q.length > 0 && q !== query)
@@ -1566,18 +1608,18 @@ export class MemoryCortex {
 
     // 生活模型通道（第 ④ 层建模）：用户问句命中的人/宠物/组织实体及其关系边。
     // 确定性建模来源，与其余通道同走仲裁（归一化/去重/配权重排），不新增旁路。
-    const lifeModelItems = this.buildLifeModelRecallItems(actorId, query);
+    const lifeModelItems = allows("lifeModel") ? this.buildLifeModelRecallItems(actorId, query) : [];
     if (lifeModelItems.length > 0) {
       channels.push({ channel: "lifeModel", items: lifeModelItems });
     }
 
     const learningPromise = (async (): Promise<MemoryRecallItem[]> => {
-      if (!this.experienceLearningLoop) return [];
+      if (!this.experienceLearningLoop || !allows("experienceLearning")) return [];
       try {
         return this.experienceLearningLoop.recallLearningContext(
           actorId,
           query,
-          Math.max(1, Math.min(3, opts?.limit ?? 3)),
+          Math.max(1, Math.min(recallPlan.candidateK.experienceLearning ?? 3, opts?.limit ?? 3)),
         );
       } catch (err) {
         console.log(`[MemoryCortex] experienceLearningLoop recall failed: ${err}`);
@@ -1588,13 +1630,13 @@ export class MemoryCortex {
     const [narrativeText, associationItems, relSummary, learningItems] =
       await Promise.all([
         // bridge 存在时 narrative 文本与融合候选同源（Mem0+图），跳过避免重复计入
-        this.narrative && !this.bridge
+        this.narrative && !this.bridge && allows("narrative")
           ? this.safeRecall(() => this.narrative!.buildNarrativeRecall(actorId, query))
           : Promise.resolve<string | null>(null),
-        this.buildAssociationRecallItems(actorId, query),
+        allows("association") ? this.buildAssociationRecallItems(actorId, query) : Promise.resolve([]),
         // relationship：与 query 无关的环境性关系摘要（单条通道 → 归一化保留原始分，
         // 不会被 min-max 抬升），统一纳入仲裁参与去重/配额/阈值。
-        this.relationshipGraph
+        this.relationshipGraph && allows("relationship")
           ? this.safeRecall(() => this.relationshipGraph!.getRelationshipSummary(actorId))
           : Promise.resolve<string | null>(null),
         learningPromise,
@@ -1632,7 +1674,11 @@ export class MemoryCortex {
       // 强度模型作为一等因子参与统一排序：原实现在仲裁后由 finalizeRecallItems
       // 二次按强度重排，会破坏仲裁器的 domain 配额多样性保证（两次排序互相覆盖）。
       const strengthBoost = this.buildStrengthBoostMap(actorId, channels);
-      mergedItems = arbitrateMemories(channels, this.arbitratorConfig, { query, strengthBoost });
+      mergedItems = arbitrateMemories(channels, this.arbitratorConfig, {
+        query,
+        strengthBoost,
+        conflictPolicy: recallPlan.conflictPolicy,
+      });
       strengthBoostApplied = strengthBoost !== undefined;
 
       // 5) 仲裁降级：仲裁无结果但 agentic 有结果时回退（保护可用性）
@@ -1654,7 +1700,7 @@ export class MemoryCortex {
     // recall 命中 downranked/cold 节点的再唤醒反弹由 triggerReawakenForFadedHits
     // 在 buildRecall 返回后触发（遗忘控制器 Phase 2 接线）；BrainStem 45s 心跳 →
     // forgettingController.continuousScore 负责反方向的衰减/剪枝（见 Phase 4 装配）。
-    if (this.associativeGraph && this.humanLike && mergedItems.length > 0) {
+    if (allows("association") && this.associativeGraph && this.humanLike && mergedItems.length > 0) {
       try {
         const seedNodeIds =
           this.humanLike.findNodeIdsByContent?.(
@@ -2055,7 +2101,8 @@ export class MemoryCortex {
     return items.filter((item) => {
       const content = typeof item.content === "string" ? item.content : "";
       if (!content.trim()) return false;
-      return classifyMemorySourceRole(content) !== "assistant";
+      const role = normalizeMemorySourceRole(item.sourceRole) ?? classifyMemorySourceRole(content);
+      return role !== "assistant";
     });
   }
 
@@ -2363,7 +2410,7 @@ export class MemoryCortex {
   async recallWithProvenance(
     actorId: string,
     query: string,
-    opts?: { domain?: MemoryDomainKind; limit?: number; subQueries?: string[] },
+    opts?: { domain?: MemoryDomainKind; limit?: number; subQueries?: string[]; recallPlan?: MemoryRecallPlan },
   ): Promise<MemoryRecallResult> {
     if (this.metacognitionBridge) {
       try {
@@ -2372,6 +2419,7 @@ export class MemoryCortex {
           domain: opts?.domain,
           limit: opts?.limit,
           subQueries: opts?.subQueries,
+          recallPlan: opts?.recallPlan,
         });
       } catch (err) {
         console.log(`[MemoryCortex] recallWithProvenance 失败（降级到 recall）: ${err}`);
@@ -2524,6 +2572,7 @@ export class MemoryCortex {
         source: c.source ?? "agentic",
         score: c.score,
         ...(c.timestamp ? { timestamp: c.timestamp } : {}),
+        ...(c.sourceRole ? { sourceRole: c.sourceRole } : {}),
       }));
   }
 
@@ -2535,6 +2584,7 @@ export class MemoryCortex {
       channels: string[];
       mem0Score?: number;
       timestamp?: string;
+      sourceRole?: import("../services/memory-source-role.js").MemorySourceRole;
     }>,
     domain: MemoryDomainKind = "semantic",
   ): MemoryRecallItem[] {
@@ -2552,6 +2602,7 @@ export class MemoryCortex {
               : "graph",
         score: c.mem0Score ?? c.fusedScore,
         ...(c.timestamp ? { timestamp: c.timestamp } : {}),
+        ...(c.sourceRole ? { sourceRole: c.sourceRole } : {}),
       }));
   }
 
@@ -2613,9 +2664,16 @@ export class MemoryCortex {
     }
     return factLines.map((line, index) => {
       const parsed = line.match(/^\d+\.\s*\[([^/\]]+)\/[^\]]+\]\s*(.+)$/);
+      const content = (parsed?.[2] ?? line).trim();
+      const sourceRole = line.includes("助手当时说的")
+        ? "assistant"
+        : line.includes("用户说的")
+          ? "user"
+          : classifyMemorySourceRole(content);
       return {
-        content: (parsed?.[2] ?? line).trim(),
+        content,
         domain: this.asMemoryDomainKind(parsed?.[1]) ?? domain,
+        sourceRole,
         // 重构结果只给整体置信度：按原排序轻微递减，保持条目只做相对排序用。
         score: Math.max(0, result.confidence - index * 0.01),
       };

@@ -5,7 +5,6 @@ import "package:flutter/material.dart";
 import "package:url_launcher/url_launcher.dart";
 
 import "../../core/config/api_config.dart";
-import "../../core/services/agent_sphere_voice_controller.dart";
 import "../../core/services/app_auto_start.dart";
 import "../../core/services/local_runtime_config.dart";
 import "../../core/services/local_runtime_manager.dart";
@@ -14,26 +13,26 @@ import "../../core/services/model_api_tester.dart";
 import "../../core/services/ongoing_status_service.dart";
 import "../../core/services/phone_bridge_service.dart";
 import "../../core/services/phone_capture_service.dart";
+import "../../core/services/profile_manage_api.dart";
 import "../../core/services/keep_alive_service.dart";
 import "../../core/services/sms_access_service.dart";
 import "../../core/services/user_preferences_api.dart";
 import "../../core/services/ws_chat_service.dart";
 import "../../core/theme/app_theme.dart";
-import "../chat/voiceprint_registration_page.dart";
 import "access_pairing_card.dart";
 import "../model_config/model_provider_card.dart";
 import "../model_config/model_provider_catalog.dart";
 import "../../widgets/app_window_titlebar.dart";
 
 /// 设置分区（左侧侧栏一项对应右侧一块内容）。
-enum _SettingsSection { general, model, serviceAccess, pairing, phoneBridge, keepAlive, proactive }
+enum _SettingsSection { general, model, serviceAccess, pairing, phoneBridge, keepAlive, proactive, memory }
 
 /// 「设置」页 —— 全屏独立页（类似扣子的设置布局）：
 /// 左侧分区侧栏 + 右侧内容区，顶部铺自绘标题栏保证窗口可拖拽/可关闭。
 ///
 /// 分区：
 ///  - 通用（仅 Windows）：开机自动启动（本地注册表，不依赖服务器）
-///  - 模型与声纹（仅 Windows）：主对话模型接入 + 声纹注册
+///  - 模型（仅 Windows）：主对话模型接入
 ///  - 服务接入（仅 Windows）：需用户自行接入的外部服务，一样一个胶囊组件
 ///  - 手机桥接（仅 Android）：Agent 远程访问本机 / 消息捕捉 / 定位回传
 /// （「它眼里的你」2026-09-30 迁往 Agent 主页。）
@@ -73,7 +72,7 @@ class _SettingsPageState extends State<SettingsPage>
   bool _smsGranted = false;
   bool _smsPermanentlyDenied = false;
 
-  // —— 模型与声纹分区 ——
+  // —— 模型分区 ——
   // 模型接入 UI/收集/测试全部在 ModelProviderCard（与首启向导共用），这里只存
   // 预填值与落盘回调。
   String _modelInitialKey = "";
@@ -85,8 +84,6 @@ class _SettingsPageState extends State<SettingsPage>
   // 状态与落盘回调。
   String? _cloudMsg;
   bool _cloudConfigured = false;
-  Map<String, dynamic>? _vpStatus;
-  bool _vpClearing = false;
 
   // —— 邮箱接入（邮箱盯梢授权码） ——
   final TextEditingController _mailPassCtrl = TextEditingController();
@@ -94,6 +91,8 @@ class _SettingsPageState extends State<SettingsPage>
   bool _mailSaving = false;
   String? _mailSaveMsg;
   bool _obscureMailPass = true;
+  final TextEditingController _memoryForgetCtrl = TextEditingController();
+  bool _memoryForgetting = false;
 
   @override
   void initState() {
@@ -107,13 +106,13 @@ class _SettingsPageState extends State<SettingsPage>
     _refreshKeepAliveState();
     _loadModelConfig();
     _loadCloudModelConfig();
-    _refreshVoiceprintStatus();
     _refreshMailStatus();
     _loadFrequencyTier();
   }
 
   @override
   void dispose() {
+    _memoryForgetCtrl.dispose();
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -206,7 +205,7 @@ class _SettingsPageState extends State<SettingsPage>
       if (_isWindows)
         (_SettingsSection.general, Icons.tune_outlined, "通用"),
       if (_isWindows)
-        (_SettingsSection.model, Icons.graphic_eq_outlined, "模型与声纹"),
+        (_SettingsSection.model, Icons.graphic_eq_outlined, "模型"),
       if (_isWindows)
         (_SettingsSection.serviceAccess, Icons.hub_outlined, "服务接入"),
       if (_isWindows)
@@ -218,6 +217,8 @@ class _SettingsPageState extends State<SettingsPage>
       // 主动性（§3.10）：手机与桌面都要能调，不受 Windows 分区闸限制
       if (!kIsWeb)
         (_SettingsSection.proactive, Icons.campaign_outlined, "主动性"),
+      if (!kIsWeb)
+        (_SettingsSection.memory, Icons.psychology_outlined, "记忆管理"),
     ];
     return ColoredBox(
       color: bg,
@@ -317,12 +318,13 @@ class _SettingsPageState extends State<SettingsPage>
   Widget _buildSectionContent() {
     final String title = switch (_section) {
       _SettingsSection.general => "通用",
-      _SettingsSection.model => "模型与声纹",
+      _SettingsSection.model => "模型",
       _SettingsSection.serviceAccess => "服务接入",
       _SettingsSection.pairing => "设备配对",
       _SettingsSection.phoneBridge => "手机桥接",
       _SettingsSection.keepAlive => "后台保活",
       _SettingsSection.proactive => "主动性",
+      _SettingsSection.memory => "记忆管理",
     };
     final Widget card = switch (_section) {
       _SettingsSection.general => _buildGeneralCard(),
@@ -332,6 +334,7 @@ class _SettingsPageState extends State<SettingsPage>
       _SettingsSection.phoneBridge => _buildPhoneBridgeCard(),
       _SettingsSection.keepAlive => _buildKeepAliveCard(),
       _SettingsSection.proactive => _buildProactiveCard(),
+      _SettingsSection.memory => _buildMemoryCard(),
     };
     return SingleChildScrollView(
       // key 随分区变化：切换分区时滚动位置复位到顶部。
@@ -361,7 +364,7 @@ class _SettingsPageState extends State<SettingsPage>
   }
 
   // ------------------------------------------------------------------ //
-  // 模型与声纹
+  // 模型
   // ------------------------------------------------------------------ //
 
   Future<void> _loadModelConfig() async {
@@ -458,12 +461,6 @@ class _SettingsPageState extends State<SettingsPage>
     });
   }
 
-  Future<void> _refreshVoiceprintStatus() async {
-    final Map<String, dynamic> status = await VoiceprintApi.status();
-    if (!mounted) return;
-    setState(() => _vpStatus = status);
-  }
-
   Future<void> _refreshMailStatus() async {
     final Map<String, dynamic> res = await MailWatchApi.status();
     if (!mounted) return;
@@ -528,44 +525,82 @@ class _SettingsPageState extends State<SettingsPage>
     }
   }
 
-  /// 直达声纹注册页（无需经语音模式触发）。注册完成同步语音球状态并刷新本卡。
-  Future<void> _openVoiceprintRegistration() async {
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (BuildContext ctx) => VoiceprintRegistrationPage(
-          userId: ApiConfig.effectiveActorId,
-          onRegistrationComplete: () {
-            Navigator.of(ctx).pop();
-            AgentSphereVoiceController.instance.markVoiceprintRegistered();
-          },
+  Widget _buildMemoryCard() {
+    return Card(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text("忘掉一段记忆", style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 6),
+            const Text(
+              "输入人物、地点或事件关键词。会同时清除相关的档案事实、理解、语义记忆与关键词索引；聊天原文保留，但不会再被主动引用。",
+              style: TextStyle(fontSize: 12.5, height: 1.5),
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: _memoryForgetCtrl,
+              minLines: 1,
+              maxLines: 3,
+              decoration: const InputDecoration(
+                hintText: "例如：望京科技园",
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+            ),
+            const SizedBox(height: 12),
+            FilledButton.tonalIcon(
+              onPressed: _memoryForgetting ? null : () async {
+                final String target = _memoryForgetCtrl.text.trim();
+                if (target.length < 2) {
+                  _snack("请至少输入 2 个字符");
+                  return;
+                }
+                final bool? confirmed = await showDialog<bool>(
+                  context: context,
+                  builder: (BuildContext ctx) => AlertDialog(
+                    title: const Text("确认遗忘"),
+                    content: Text("忘掉与「$target」相关的长期记忆？此操作不会删除聊天原文。"),
+                    actions: <Widget>[
+                      TextButton(
+                        onPressed: () => Navigator.of(ctx).pop(false),
+                        child: const Text("取消"),
+                      ),
+                      FilledButton(
+                        onPressed: () => Navigator.of(ctx).pop(true),
+                        child: const Text("确认遗忘"),
+                      ),
+                    ],
+                  ),
+                );
+                if (confirmed != true || !mounted || _memoryForgetting) return;
+                setState(() => _memoryForgetting = true);
+                final Map<String, dynamic>? result =
+                    await ProfileManageApi().forget(target);
+                if (!mounted) return;
+                setState(() => _memoryForgetting = false);
+                if (result == null) {
+                  _snack("遗忘失败，请稍后重试");
+                  return;
+                }
+                final int total = <String>[
+                  "facts", "understandings", "memories", "graphNodes",
+                ].fold<int>(0, (int sum, String key) => sum + ((result[key] as num?)?.toInt() ?? 0));
+                _memoryForgetCtrl.clear();
+                _snack(total > 0 ? "已忘掉相关长期记忆" : "没有找到相关长期记忆");
+              },
+              icon: const Icon(Icons.delete_outline, size: 18),
+              label: const Text("遗忘"),
+            ),
+          ],
         ),
       ),
     );
-    if (mounted) await _refreshVoiceprintStatus();
   }
 
-  Future<void> _clearVoiceprint() async {
-    if (_vpClearing) return;
-    setState(() => _vpClearing = true);
-    final bool ok = await VoiceprintApi.unregister();
-    if (!mounted) return;
-    setState(() => _vpClearing = false);
-    await _refreshVoiceprintStatus();
-    if (!mounted) return;
-    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-      SnackBar(content: Text(ok ? "声纹已清除" : "清除失败（本地 runtime 不可达？）"), duration: const Duration(seconds: 2)),
-    );
-  }
-
-  Widget _buildModelSection() {
-    return Column(
-      children: <Widget>[
-        _buildModelCard(),
-        const SizedBox(height: 16),
-        _buildVoiceprintCard(),
-      ],
-    );
-  }
+  Widget _buildModelSection() => _buildModelCard();
 
   /// 「服务接入」分区：每个需要用户自行接入的外部服务一块胶囊组件
   /// （邮箱盯梢 → 填 IMAP 授权码；后续新增接入方在此追加胶囊）。
@@ -841,57 +876,6 @@ class _SettingsPageState extends State<SettingsPage>
               const SizedBox(height: 8),
               Text(_cloudMsg!, style: const TextStyle(fontSize: 12)),
             ],
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildVoiceprintCard() {
-    final ColorScheme cs = Theme.of(context).colorScheme;
-    final bool registered = _vpStatus?["registered"] == true;
-    return Card(
-      margin: EdgeInsets.zero,
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Row(
-              children: <Widget>[
-                const Icon(Icons.graphic_eq_outlined, size: 18),
-                const SizedBox(width: 8),
-                Text("声纹", style: Theme.of(context).textTheme.titleMedium),
-                const Spacer(),
-                Text(
-                  registered ? "已录入" : "未录入",
-                  style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
-                ),
-              ],
-            ),
-            const SizedBox(height: 6),
-            Text(
-              registered
-                  ? "语音对话与语音控制只响应你录入的声音。清除后需重新录入。"
-                  : "录入声纹后，语音对话与控制只响应你的声音。",
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-            const SizedBox(height: 12),
-            Row(
-              children: <Widget>[
-                FilledButton(
-                  onPressed: _openVoiceprintRegistration,
-                  child: Text(registered ? "重新录入" : "录入声纹", style: const TextStyle(fontSize: 13)),
-                ),
-                const SizedBox(width: 8),
-                OutlinedButton(
-                  onPressed: _vpClearing ? null : (registered ? _clearVoiceprint : _refreshVoiceprintStatus),
-                  child: _vpClearing
-                      ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2))
-                      : Text(registered ? "清除声纹" : "刷新状态", style: const TextStyle(fontSize: 13)),
-                ),
-              ],
-            ),
           ],
         ),
       ),

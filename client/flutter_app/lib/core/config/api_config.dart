@@ -11,6 +11,23 @@ class ApiConfig {
   ApiConfig._();
 
   static const String _httpBaseFromEnv = String.fromEnvironment("HTTP_BASE");
+  static const String _digitalHumanBaseFromEnv =
+      String.fromEnvironment("DIGITAL_HUMAN_BASE_URL");
+
+  /// 数字人独立服务根地址；不能用手机上的 127.0.0.1 访问电脑 GPU 服务。
+  static String get digitalHumanBase {
+    final String configured = _normalizeBase(_digitalHumanBaseFromEnv) ?? "";
+    if (configured.isNotEmpty) return configured;
+    if (!kIsWeb && Platform.isAndroid && kReleaseMode) {
+      throw StateError(
+        "APK 未烤入 DIGITAL_HUMAN_BASE_URL。"
+        "请用 client/flutter_app/build_apk.ps1 -Lan 打包，"
+        "或显式传 --dart-define=DIGITAL_HUMAN_BASE_URL=http://<数字人地址>:8765。",
+      );
+    }
+    if (!kIsWeb && Platform.isAndroid) return "http://10.0.2.2:8765";
+    return "http://127.0.0.1:8765";
+  }
 
   /// 主服务 HTTP 根地址。
   ///
@@ -70,8 +87,20 @@ class ApiConfig {
   /// 当前生效的运行通道（埋点上报用）。
   static String get runtimeChannel => _runtimeChannel;
 
+  /// 桌面端一律走本机 runtime（2026-11-27 产品决策）：电脑端后端由本地拉起、
+  /// 本地服务，不再连云端 API。判断与 [wsDevicePlatform] 的 desktop 口径一致：
+  /// 非 web、非 Android/iOS 即桌面。
+  ///
+  /// 这一位是 [httpBase] 的最高优先级闸门——凌驾于远程配置覆盖、platform
+  /// channel 收回、烤入的 HTTP_BASE 三者之上。手机端不受影响：Android/iOS
+  /// 继续用云端/烤入地址（broker 浏览器走云端，保持不变）。
+  static bool get _isDesktopLocalBackend =>
+      !kIsWeb && !Platform.isAndroid && !Platform.isIOS;
+
   static bool get usesPlatformChannel =>
-      _runtimeChannel == "platform" && _controlPlaneFromEnv.isNotEmpty;
+      !_isDesktopLocalBackend &&
+      _runtimeChannel == "platform" &&
+      _controlPlaneFromEnv.isNotEmpty;
 
   /// 应用启动期读到的 channel；未烤入 CONTROL_PLANE_URL 时忽略 platform
   /// （没有可切去的服务器，保持本机 runtime 是唯一正确行为）。
@@ -87,6 +116,10 @@ class ApiConfig {
   }
 
   static String get httpBase {
+    // P0（2026-11-27）：桌面端强制本地后端。放在所有覆盖之前，远程配置缓存、
+    // platform channel、烤入的云端 HTTP_BASE 都无权把电脑端劫持回云端。
+    // 本机 runtime（LocalRuntimeManager）监听 127.0.0.1:3000，与探测/回落同址。
+    if (_isDesktopLocalBackend) return "http://127.0.0.1:3000";
     // 远程配置覆盖（运维最新决定）优先于一切烤入值；null = 从未下发/下发为空。
     final String? remote = _remoteHttpBase;
     if (remote != null) return remote;
@@ -256,6 +289,9 @@ class ApiConfig {
   /// https 源默认 443（wss 走 nginx 反代），http 源维持 3000（云端裸端口直连
   /// 与本地 runtime 同语义）；带显式端口的 httpBase 原样保留。
   static String get wsUrl {
+    // WS 必须跟 httpBase 同源：桌面端 httpBase 被强制到本机 runtime，
+    // 若仍用烤入的云端 WS_URL，会出现「HTTP 打本地、WS 打云端」的裂脑。
+    if (_isDesktopLocalBackend) return "ws://127.0.0.1:3000/ws";
     if (_wsUrlFromEnv.isNotEmpty) {
       return _wsUrlFromEnv;
     }

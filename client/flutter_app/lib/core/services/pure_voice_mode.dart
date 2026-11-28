@@ -10,7 +10,6 @@ import "agent_sphere_voice_controller.dart";
 import "briefing_tts_api.dart";
 import "tts_player.dart";
 import "voice_duplex_service.dart";
-import "../config/api_config.dart";
 import "ws_event_router.dart"
     show WsEventRouter, WsSubscribeScope, WsEventCatalog, wsEventPayload;
 
@@ -24,23 +23,22 @@ enum PureVoicePhase { ambient, thinking, speaking }
 ///      投递节奏切到语音档，per-actor 内存态，见 server voice-mode-state.ts）；
 ///   2. 唤醒待命：进入即武装唤醒词监听（小助手/嘿 agent…），岛保持原态
 ///      （无条目无文案）；只有明确喊了 agent 才开始对话——
-///      唤醒命中 → 声纹验证聆听（只有注册声纹才回复）→ 思考中 → 播报中；
+///      唤醒命中 → 聆听 → 思考中 → 播报中；
 ///      不出现「已唤醒」提示，唤醒命中直接进入聆听；
 ///   3. 播报收尾：原生玻璃卡简洁弹窗 + TTS 播报，播完开 10 秒追问窗口
-///      （窗口内开口免唤醒，同样过声纹），超时回唤醒待命；
+///      （窗口内开口免唤醒），超时回唤醒待命；
 ///   4. 语音指令「打开界面」退出回完整界面；对话记录照常落聊天流。
 ///
 /// 对话通路（2026-09-28 起）：
 ///   - 默认优先 MiniMax 实时语音通道（VoiceDuplexService，/ws/voice-duplex）：
 ///     识别文本经 `text.turn` 喂服务端端到端 realtime，回复语音整轮回流直接播，
 ///     会话期内上下文延续；回复**不落聊天流**，文字经播报弹窗呈现。
-///     麦克风仍归本地唤醒/声纹/识别所有，无抢麦冲突。
+///     麦克风仍归本地唤醒/识别所有，无抢麦冲突。
 ///   - 通道不可用（服务端无 MINIMAX_API_KEY / 连接失败 / 中途断开）时
 ///     静默回落既有聊天链路（识别文本转交原回调 → 回复落流 → notifyReply 播报）。
 ///
-/// 能力栈全部复用既有服务：唤醒 VoiceWakeService、声纹 ASR
-/// MultimodalRecognitionService（经 AgentSphereVoiceController 编排，
-/// 验证通过才回调识别文本）、播报 TtsPlayer。
+/// 能力栈全部复用既有服务：唤醒 VoiceWakeService、ASR SpeechService
+/// （经 AgentSphereVoiceController 编排）、播报 TtsPlayer。
 /// 3D 球体/桌宠悬浮球/球上字幕不受影响。
 class PureVoiceModeController {
   PureVoiceModeController._();
@@ -118,19 +116,10 @@ class PureVoiceModeController {
 
   /// 进入纯语音模式（侧边栏用户菜单「纯语音模式」）。
   ///
-  /// 声纹未注册时先现身主窗走注册页（不进语音模式，注册完再进）；
-  /// 已注册则隐藏主窗并武装唤醒监听——岛保持原态，喊了才对话。
+  /// 隐藏主窗并武装唤醒监听——岛保持原态，喊了才对话。
   Future<void> enter() async {
     if (isActive.value) return;
     await _voice.bootstrap(); // 幂等：聊天页可能已初始化过
-    if (!_voice.state.value.isVoiceprintRegistered) {
-      // 声纹未注册：主窗现身走既有注册页流程（隐藏窗口里弹页看不见），
-      // 注册完成 markVoiceprintRegistered 会自动武装唤醒监听，再进本模式。
-      unawaited(windowManager.show());
-      unawaited(windowManager.focus());
-      _voice.startVoiceSession(); // 未注册分支 → onRequestVoiceprintRegistration
-      return;
-    }
 
     isActive.value = true;
     _phase = PureVoicePhase.ambient;
@@ -157,10 +146,8 @@ class PureVoiceModeController {
     await _voice.startWakeListening();
 
     // MiniMax 实时语音通道：连上后对话改走 text.turn → 语音整轮回流。
-    // 麦克风仍归本地唤醒/声纹/识别；连不上静默回落聊天链路。
-    final bool duplexOk = await VoiceDuplexService.instance.start(
-      actorId: ApiConfig.effectiveActorId,
-    );
+    // 麦克风仍归本地唤醒/识别；连不上静默回落聊天链路。
+    final bool duplexOk = await VoiceDuplexService.instance.start();
     if (duplexOk) {
       _duplexActive = true;
       _wireDuplexCallbacks();
@@ -394,7 +381,7 @@ class PureVoiceModeController {
 
   // ── 内部 ──
 
-  /// 识别文本接管（声纹验证通过才会回调）：退出指令截胡；其余置「思考中」
+  /// 识别文本接管：退出指令截胡；其余置「思考中」
   /// 并转交原回调（填输入框 + 发送，对话记录照常落聊天流）。
   void _onVoiceText(String text) {
     _resetSpeechTurn();
@@ -458,7 +445,7 @@ class PureVoiceModeController {
   ///
   /// 语音唤醒语义：唤醒命中不出现「已唤醒」提示，直接以「正在聆听」呈现；
   /// 等待唤醒（会话收束）回原态——唤醒监听由共享控制器自动恢复；
-  /// 声纹拒绝上岛明示「不回复」并退回唤醒待命。
+  /// 识别错误上岛明示并退回唤醒待命。
   void _onVoiceStateChanged() {
     if (!isActive.value || _phase != PureVoicePhase.ambient) return;
     final AgentSphereVoiceState s = _voice.state.value;
@@ -473,11 +460,11 @@ class PureVoiceModeController {
     } else if (s.statusText.contains("失败") ||
         s.statusText.contains("错误") ||
         s.statusText.contains("拒绝")) {
-      // 声纹未通过/识别错误：明示不回复，停会话退回唤醒待命
+      // 识别错误：明示，停会话退回唤醒待命
       // （toggleVoiceSession 内部自动恢复唤醒监听）。
       IslandRealFeeds.setVoiceEntry(
         title: s.statusText,
-        trailing: "仅注册声纹可对话",
+        trailing: "请检查麦克风或再说一遍",
       );
       if (s.isSpeaking) {
         _voice.toggleVoiceSession();
@@ -492,7 +479,7 @@ class PureVoiceModeController {
     // 「已唤醒」「验证通过」不加提示：唤醒命中直接进入聆听状态条目。
   }
 
-  /// 追问窗口：播完立即重开声纹聆听（窗口内开口免唤醒词，同样过声纹），
+  /// 追问窗口：播完立即重开聆听（窗口内开口免唤醒词），
   /// 10 秒无人接话自动收起回唤醒待命。
   void _startFollowUpWindow() {
     _followUpTimer?.cancel();

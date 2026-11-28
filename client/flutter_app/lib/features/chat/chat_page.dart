@@ -19,6 +19,7 @@ import "agent_home_page.dart";
 import "agent_profile_page.dart" show AgentProfileData;
 import "media_disk_cache.dart";
 import "image_preview_panel.dart";
+import "desktop_digital_human_header.dart";
 import "voice_message_bubble.dart";
 import "message_body_renderer.dart";
 import "followup_bubbles.dart";
@@ -100,6 +101,10 @@ class ChatPage extends StatefulWidget {
     /// null 时退化为全屏路由页，供移动端/未接线调用方兜底）
     this.onOpenAgentHome,
 
+    /// 桌面数字人头像单击 → 打开右侧数字人专属面板。
+    /// null 时不渲染桌面头像头部（手机端走 MobileChatPage，不传此回调）。
+    this.onOpenDigitalHuman,
+
     /// 后台进行中的任务数（任务面回执聚合，状态带展示「N 个任务后台进行中」）
     this.backgroundTaskCount = 0,
 
@@ -162,6 +167,9 @@ class ChatPage extends StatefulWidget {
   /// 光球头像单击 → 打开 Agent 主页（桌面宽屏走右侧双栏面板；
   /// null 时退化为全屏路由页，供移动端/未接线调用方兜底）。
   final VoidCallback? onOpenAgentHome;
+
+  /// 桌面数字人头像单击 → 打开右侧数字人专属面板；null 时不渲染头像头部。
+  final VoidCallback? onOpenDigitalHuman;
 
   /// 已选相册图（待发）的字节：输入框上方渲染缩略图，让用户确认到底选了哪些图。
   final List<Uint8List> galleryPendingImages;
@@ -496,9 +504,7 @@ class _ChatPageState extends State<ChatPage>
   void initState() {
     super.initState();
     // 麦克风权限不在进聊天页时申请：语音输入走 Agent 球的 VoiceWakeService /
-    // MultimodalRecognitionService，用户真正点语音/开启唤醒时才按需 request。
-    // 旧实现在这里 initialize() SpeechService（内部直接 Permission.microphone.request）
-    // 会导致一进主壳就弹麦克风，与其他权限「按需弹」策略冲突，已移除。
+    // SpeechService，用户真正点语音/开启唤醒时才按需 request。
     // 空态问候语的称呼：取首启向导存的画像事实（field=称呼），进程内只查一次
     _loadAppellation();
     // 初始化呼吸动画：agent 工作中输入框的白色光晕靠这个 0~1 的脉动驱动，
@@ -1836,6 +1842,22 @@ class _ChatPageState extends State<ChatPage>
                     },
                   ),
                 ),
+                // 桌面端数字人入口：独立浮层直接叠在对话区最上方（不再是
+                // 占一整行的头部容器），圆形头像 + 名字悬于聊天历史上方，
+                // 消息从其背后正常滚动投射；点击头像外的区域不受遮挡。
+                // 仅桌面宽屏调用方传 onOpenDigitalHuman 时渲染；手机端无此回调。
+                if (widget.onOpenDigitalHuman != null)
+                  Positioned(
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    child: Center(
+                      child: DesktopDigitalHumanHeader(
+                        agentName: widget.agentName,
+                        onTap: widget.onOpenDigitalHuman,
+                      ),
+                    ),
+                  ),
               ],
             ),
           ),

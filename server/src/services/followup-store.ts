@@ -18,7 +18,12 @@
 import { createHash } from "node:crypto";
 
 import { openAgenticSqlite } from "../agentic-memory/sqlite-store.js";
-import { ensureCommitmentTable } from "./commitment-store.js";
+import {
+  ensureCommitmentTable,
+  insertFollowUpCommitment,
+  markFollowUpCommitmentSubmitted,
+  settleFollowUpCommitment,
+} from "./commitment-store.js";
 
 export type FollowUpSensitivity = "normal" | "private";
 export type FollowUpStatus = "active" | "fulfilled" | "cancelled";
@@ -101,45 +106,7 @@ function toRecord(row: Row): FollowUpRecord | null {
 
 /** 落一行跟进事件（幂等：同 id 只刷新措辞与置信度，绝不复活已取消的行）。 */
 export function insertFollowUp(dbPath: string | undefined, rec: FollowUpRecord): boolean {
-  const db = openAgenticSqlite(dbPath);
-  try {
-    ensureCommitmentTable(db);
-    const now = new Date().toISOString();
-    const notes = JSON.stringify({
-      event: rec.event,
-      eventAt: rec.eventAt,
-      followAt: rec.followAt,
-      sensitivity: rec.sensitivity,
-      sourceRef: rec.sourceRef,
-      category: rec.category,
-    });
-    const info = db
-      .prepare(
-        `INSERT INTO commitments (
-           id, actor_id, text, committed_by, status, deadline, dependencies,
-           escalation_policy, evidence_ledger_ids, source, confidence,
-           created_at, updated_at, category, kind, notes
-         ) VALUES (?, ?, ?, 'user', 'active', ?, '[]', '{}', '[]', 'follow_up', ?, ?, ?, ?, 'follow_up', ?)
-         ON CONFLICT(id) DO UPDATE SET
-           text = excluded.text,
-           confidence = excluded.confidence,
-           updated_at = excluded.updated_at`,
-      )
-      .run(
-        rec.id,
-        rec.actorId,
-        `跟进：${rec.event}`.slice(0, 200),
-        new Date(rec.followAt).toISOString(),
-        rec.confidence,
-        now,
-        now,
-        rec.category,
-        notes,
-      );
-    return info.changes > 0;
-  } finally {
-    db.close();
-  }
+  return insertFollowUpCommitment(dbPath, rec);
 }
 
 function query(dbPath: string | undefined, sql: string, ...args: unknown[]): FollowUpRecord[] {
@@ -201,16 +168,7 @@ export function listFollowUpsByCategory(
 
 /** 提交过跟进提案（写 reminder_sent_at）——「同一事件最多跟进 1 次」的落库依据 */
 export function markFollowUpSubmitted(dbPath: string | undefined, id: string, at: number): void {
-  const db = openAgenticSqlite(dbPath);
-  try {
-    ensureCommitmentTable(db);
-    db.prepare(
-      `UPDATE commitments SET reminder_sent_at = ?, updated_at = ?
-       WHERE id = ? AND kind = 'follow_up'`,
-    ).run(new Date(at).toISOString(), new Date(at).toISOString(), id);
-  } finally {
-    db.close();
-  }
+  markFollowUpCommitmentSubmitted(dbPath, id, at);
 }
 
 /** 状态收口：fulfilled=已经跟进过，cancelled=用户别再提/过期作废 */
@@ -220,25 +178,5 @@ export function settleFollowUp(
   outcome: "fulfilled" | "cancelled",
   at: number,
 ): boolean {
-  const db = openAgenticSqlite(dbPath);
-  try {
-    ensureCommitmentTable(db);
-    const iso = new Date(at).toISOString();
-    const info = db
-      .prepare(
-        `UPDATE commitments
-         SET status = ?, updated_at = ?, fulfilled_at = ?, cancelled_at = ?
-         WHERE id = ? AND kind = 'follow_up' AND status = 'active'`,
-      )
-      .run(
-        outcome,
-        iso,
-        outcome === "fulfilled" ? iso : null,
-        outcome === "cancelled" ? iso : null,
-        id,
-      );
-    return info.changes > 0;
-  } finally {
-    db.close();
-  }
+  return settleFollowUpCommitment(dbPath, id, outcome, at);
 }

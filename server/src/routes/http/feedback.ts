@@ -9,6 +9,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
 import { ANONYMOUS_ACTOR_ID, resolveActorId } from "../../agent/actor-id.js";
+import { openSqlite } from "../../storage/sqlite.js";
 import { adminAudit, isAdminRequest } from "./admin-auth.js";
 import type { InboxService } from "../../services/inbox-service.js";
 
@@ -120,9 +121,7 @@ class FeedbackStoreManager {
     if (this.db) return this.db;
     try {
       const file = feedbackDbPath();
-      mkdirSync(dirname(file), { recursive: true });
-      const db = new Database(file);
-      db.pragma("journal_mode = WAL");
+      const db = openSqlite(file);
       db.exec(`
         CREATE TABLE IF NOT EXISTS feedback (
           id             TEXT PRIMARY KEY,

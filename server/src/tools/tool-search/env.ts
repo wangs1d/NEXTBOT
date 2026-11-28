@@ -97,31 +97,28 @@ function buildToolSearchConfig() {
 
     /**
      * Embedding provider 链（N1）：
-     *   - auto/local：本地 sidecar 优先，失败回落 openai，再失败回落 hash 向量；
-     *   - openai：跳过 sidecar，维持 OpenAI API 路径（回滚开关）。
+     *   - local：仅本地 BGE，失败回落 BM25；
+     *   - auto：本地优先，失败回落 OpenAI API；
+     *   - openai：仅远端，显式回滚开关。
      */
     embeddingProvider: parseEmbeddingProvider(process.env.AGENT_TOOL_EMBEDDING_PROVIDER),
     /** 神经 sidecar 基地址（FastAPI 常驻） */
     neuralSidecarUrl:
       (process.env.AGENT_NEURAL_SIDECAR_URL?.trim() || "http://127.0.0.1:8790").replace(/\/+$/, ""),
-    /** 本地 embedding 模型名（缓存键用；以 sidecar /embed 返回为准，此值仅作首查前提示） */
-    neuralEmbedModel: process.env.AGENT_NEURAL_EMBED_MODEL?.trim() || "BAAI/bge-small-zh-v1.5",
+    /** 本地 embedding 模型名（缓存键用；以本地端点返回为准，此值仅作首查前提示） */
+    neuralEmbedModel: process.env.AGENT_NEURAL_EMBED_MODEL?.trim() || "bge-small-zh-v1.5",
     /** N1/N2/N3 各自独立开关（off = 注入点直接不挂载，回滚用） */
     neuralEmbedEnabled: parseNeuralFeatureMode(process.env.AGENT_NEURAL_EMBED_ENABLED),
     neuralRerankEnabled: parseNeuralFeatureMode(process.env.AGENT_NEURAL_RERANK_ENABLED),
-    /** 各端点独立超时预算（方案 §1/§2：embed 300ms、rerank 400ms、intent 300ms） */
+    /** 各端点独立超时预算；rerank 仅对歧义候选触发 */
     neuralEmbedTimeoutMs: clampInt(process.env.AGENT_NEURAL_EMBED_TIMEOUT_MS, 300, 50, 5_000),
     /**
      * 批量工具向量补全的超时预算：与查询热路径分开——单块 ≤32 条长文本，
      * 且可能是 sidecar 冷启动后第一个请求（含模型懒加载），需要秒级预算。
      */
     neuralEmbedBulkTimeoutMs: clampInt(process.env.AGENT_NEURAL_EMBED_BULK_TIMEOUT_MS, 10_000, 100, 120_000),
-    /**
-     * rerank 预算：本机 CPU 实测 10 对 × 160 字符 ≈ 300-400ms（bge-reranker-base），
-     * 方案原定 400ms 会因抖动频繁打穿 → 熔断把增强静默关掉，放宽到 600ms 兜底
-     * （预算是保险丝不是目标；换 GPU/更小模型后可调回）。
-     */
-    neuralRerankTimeoutMs: clampInt(process.env.AGENT_NEURAL_RERANK_TIMEOUT_MS, 600, 50, 5_000),
+    /** CPU 上 6 个长候选仍有秒级长尾，2.5s 预算避免一次抖动触发熔断。 */
+    neuralRerankTimeoutMs: clampInt(process.env.AGENT_NEURAL_RERANK_TIMEOUT_MS, 2_500, 50, 5_000),
     /** 熔断：连续失败 N 次开闸、冷却 M ms（沿用 router-endpoint-guard 数值经验） */
     neuralBreakerThreshold: clampInt(process.env.AGENT_NEURAL_BREAKER_THRESHOLD, 2, 1, 10),
     neuralBreakerCooldownMs: clampInt(process.env.AGENT_NEURAL_BREAKER_COOLDOWN_MS, 60_000, 1_000, 600_000),

@@ -1,60 +1,45 @@
 import "dart:async";
 
-import "package:flutter/foundation.dart" show ValueNotifier, VoidCallback, debugPrint;
+import "package:flutter/foundation.dart" show ValueNotifier;
 
-import "../config/api_config.dart";
 import "agent_sphere_mood_bridge.dart";
-import "multimodal_recognition_service.dart";
+import "speech_service.dart";
 import "voice_command_processor.dart";
 import "voice_wake_service.dart";
-import "dart:typed_data";
 
-import "mic_clip_recorder.dart";
-import "model_api_tester.dart" show VoiceprintApi;
-import "voice_duplex_service.dart";
-import "voiceprint_service.dart";
-
-/// 3D Agent 语音交互状态（唤醒 + 声纹 ASR）
+/// 3D Agent 语音交互状态（唤醒 + ASR）
 class AgentSphereVoiceState {
   const AgentSphereVoiceState({
     this.wakeEnabled = true,
     this.isWaitingWake = false,
     this.isSpeaking = false,
     this.statusText = "正在启动…",
-    this.verificationStatus = "",
+    this.statusDetail = "",
     this.wakeHint = "",
-    this.confidence = 0.0,
-    this.isVoiceprintRegistered = false,
   });
 
   final bool wakeEnabled;
   final bool isWaitingWake;
   final bool isSpeaking;
   final String statusText;
-  final String verificationStatus;
+  final String statusDetail;
   final String wakeHint;
-  final double confidence;
-  final bool isVoiceprintRegistered;
 
   AgentSphereVoiceState copyWith({
     bool? wakeEnabled,
     bool? isWaitingWake,
     bool? isSpeaking,
     String? statusText,
-    String? verificationStatus,
+    String? statusDetail,
     String? wakeHint,
-    double? confidence,
-    bool? isVoiceprintRegistered,
   }) {
     return AgentSphereVoiceState(
       wakeEnabled: wakeEnabled ?? this.wakeEnabled,
       isWaitingWake: isWaitingWake ?? this.isWaitingWake,
       isSpeaking: isSpeaking ?? this.isSpeaking,
       statusText: statusText ?? this.statusText,
-      verificationStatus: verificationStatus ?? this.verificationStatus,
+      statusDetail: statusDetail ?? this.statusDetail,
       wakeHint: wakeHint ?? this.wakeHint,
-      confidence: confidence ?? this.confidence,
-      isVoiceprintRegistered: isVoiceprintRegistered ?? this.isVoiceprintRegistered,
     );
   }
 }
@@ -63,23 +48,20 @@ class AgentSphereVoiceState {
 class AgentSphereVoiceController {
   AgentSphereVoiceController._();
 
-  static final AgentSphereVoiceController instance = AgentSphereVoiceController._();
+  static final AgentSphereVoiceController instance =
+      AgentSphereVoiceController._();
 
   final ValueNotifier<AgentSphereVoiceState> state =
       ValueNotifier<AgentSphereVoiceState>(const AgentSphereVoiceState());
 
-  final MultimodalRecognitionService _recognitionService = MultimodalRecognitionService();
   final VoiceCommandProcessor _commandProcessor = VoiceCommandProcessor();
   final VoiceWakeService _wakeService = VoiceWakeService.instance;
+  final SpeechService _speechService = SpeechService();
 
-  StreamSubscription<VoiceprintEvent>? _voiceprintSubscription;
   bool _bootstrapped = false;
 
   /// 识别到文本后回调（由 main 注入：填入输入框并发送）
   void Function(String text)? onRecognizedText;
-
-  /// 需要打开声纹注册页
-  VoidCallback? onRequestVoiceprintRegistration;
 
   AgentSphereVoiceState get _s => state.value;
 
@@ -91,15 +73,6 @@ class AgentSphereVoiceController {
     _commandProcessor.initializeDefaultCommands();
     AgentSphereMoodBridge.instance.idle();
 
-    try {
-      await _recognitionService.initialize(userId: ApiConfig.effectiveActorId);
-    } catch (e) {
-      debugPrint("[AgentSphereVoice] init failed: $e");
-    }
-
-    // 声纹注册态以服务端为准（向导/设置页录入后跨进程持久）
-    unawaited(_refreshVoiceprintRegistration());
-
     if (_s.wakeEnabled) {
       await startWakeListening();
     } else {
@@ -109,14 +82,14 @@ class AgentSphereVoiceController {
 
   Future<void> dispose() async {
     await _wakeService.stop();
-    _stopVoiceprintListening(resumeWake: false);
+    await _speechService.cancel();
     _bootstrapped = false;
   }
 
   /// 离开聊天页时暂停监听
   Future<void> pauseForBackground() async {
     await _stopWakeListening();
-    _stopVoiceprintListening(resumeWake: false);
+    await _stopListening(resumeWake: false);
   }
 
   /// 回到聊天页时恢复唤醒
@@ -138,10 +111,10 @@ class AgentSphereVoiceController {
         isWaitingWake: false,
         wakeHint: "",
         statusText: _s.isSpeaking ? _s.statusText : "点击 Agent 开始说话",
-        verificationStatus: _s.isSpeaking ? _s.verificationStatus : "语音唤醒已关闭",
+        statusDetail: _s.isSpeaking ? _s.statusDetail : "语音唤醒已关闭",
       ));
     } else {
-      _emit(_s.copyWith(wakeEnabled: true, verificationStatus: ""));
+      _emit(_s.copyWith(wakeEnabled: true, statusDetail: ""));
       if (!_s.isSpeaking) await startWakeListening();
     }
   }
@@ -160,7 +133,7 @@ class AgentSphereVoiceController {
     _emit(_s.copyWith(
       isWaitingWake: ok,
       statusText: ok ? "等待唤醒" : "语音唤醒不可用",
-      verificationStatus: ok
+      statusDetail: ok
           ? "说「${VoiceWakeService.displayWakePhrase}」开始对话"
           : "请检查麦克风权限，或点击 Agent 说话",
       wakeHint: "",
@@ -178,198 +151,77 @@ class AgentSphereVoiceController {
       isWaitingWake: false,
       wakeHint: "",
       statusText: "已唤醒",
-      verificationStatus: "",
+      statusDetail: "",
     ));
     AgentSphereMoodBridge.instance.listening(caption: "唤醒成功");
-    startVoiceSession(fromWake: true);
+    unawaited(startVoiceSession(fromWake: true));
   }
 
   void toggleVoiceSession() {
     if (_s.isSpeaking) {
-      _stopVoiceprintListening();
+      unawaited(_stopListening());
     } else {
       unawaited(_stopWakeListening());
-      startVoiceSession();
+      unawaited(startVoiceSession());
     }
   }
 
-  void startVoiceSession({bool fromWake = false}) {
-    if (!_recognitionService.isInitialized) {
-      _emit(_s.copyWith(statusText: "服务未初始化"));
-      if (_s.wakeEnabled) unawaited(startWakeListening());
-      return;
+  Future<void> startVoiceSession({bool fromWake = false}) async {
+    if (_s.isSpeaking) return;
+    await _stopWakeListening();
+    if (!_s.isSpeaking) {
+      unawaited(_beginListening(fromWake: fromWake));
     }
-
-    if (!_s.isVoiceprintRegistered) {
-      _emit(_s.copyWith(
-        statusText: fromWake ? "已唤醒 · 请先注册声纹" : "请先注册声纹",
-        verificationStatus: "点击右上角注册声纹",
-      ));
-      onRequestVoiceprintRegistration?.call();
-      if (_s.wakeEnabled) unawaited(startWakeListening());
-      return;
-    }
-
-    unawaited(_stopWakeListening());
-
-    // 真声纹闸：先录一小段验证说话人，非录入者不进入聆听（即不响应）。
-    // 通过后才走既有聆听流（识别文本 → 响应），验证由服务端本地 ONNX 引擎完成。
-    unawaited(_verifySpeakerThenListen(fromWake: fromWake));
   }
 
-  /// 服务端声纹状态回填（bootstrap 与注册完成回调后调用）。
-  Future<void> _refreshVoiceprintRegistration() async {
-    try {
-      final Map<String, dynamic> status = await VoiceprintApi.status();
-      if (status["registered"] == true && !_s.isVoiceprintRegistered) {
-        markVoiceprintRegistered();
-      }
-    } catch (_) {/* 本地 runtime 未就绪时静默 */}
-  }
-
-  Future<void> _verifySpeakerThenListen({required bool fromWake}) async {
+  Future<void> _beginListening({required bool fromWake}) async {
     _emit(_s.copyWith(
-      statusText: fromWake ? "已唤醒 · 验证声纹中…" : "验证声纹中…",
-      verificationStatus: "请自然地说一句话",
+      isSpeaking: true,
+      statusText: "正在聆听…",
+      statusDetail: fromWake ? "请讲" : "",
+      wakeHint: "",
     ));
-    AgentSphereMoodBridge.instance.listening(caption: "声纹验证");
+    AgentSphereMoodBridge.instance.listening();
 
-    final MicClipRecorder recorder = MicClipRecorder();
-    String failReason;
-    try {
-      final bool started = await recorder.start();
-      if (!started) {
-        failReason = "无法访问麦克风";
-      } else {
-        await Future<void>.delayed(const Duration(milliseconds: 2600));
-        final Uint8List clip = await recorder.stop();
-        if (clip.length < 16000) {
-          failReason = "没有听清，请再试";
-        } else {
-          final Map<String, dynamic> res = await VoiceprintApi.verify(clip);
-          if (res["ok"] == true && res["match"] == true) {
-            _emit(_s.copyWith(
-              statusText: "验证通过",
-              verificationStatus: "✓ 声纹匹配",
-            ));
-            // 向实时语音通道上报一次性说话人令牌（服务端放行本连接对话帧）
-            final String? token = res["speakerToken"]?.toString();
-            if (token != null && token.isNotEmpty) {
-              VoiceDuplexService.instance.sendSpeakerVerify(token);
-            }
-            _beginVoiceprintListening(fromWake: fromWake);
-            return;
-          }
-          failReason = res["ok"] == true
-              ? "✗ 非授权用户"
-              : (res["error"]?.toString() ?? "声纹服务不可用");
-        }
-      }
-    } catch (e) {
-      failReason = "声纹验证失败：$e";
-    } finally {
-      recorder.dispose();
-    }
+    final bool started = await _speechService.startListening(
+      onResult: (String text) {
+        if (!_s.isSpeaking) return;
+        onRecognizedText?.call(text);
+        _commandProcessor.processCommand(text);
+      },
+      onDone: () {
+        if (_s.isSpeaking) unawaited(_stopListening());
+      },
+      onError: (String message) {
+        _emit(_s.copyWith(statusText: "识别失败", statusDetail: message));
+        AgentSphereMoodBridge.instance.alert(caption: "识别失败");
+        unawaited(_stopListening());
+      },
+    );
 
-    _emit(_s.copyWith(
-      statusText: "声纹未通过",
-      verificationStatus: failReason,
-      isSpeaking: false,
-    ));
-    AgentSphereMoodBridge.instance.alert(caption: "声纹未通过");
-    if (_s.wakeEnabled) {
-      unawaited(startWakeListening());
-    }
-  }
-
-  void _beginVoiceprintListening({required bool fromWake}) {
-    try {
-      final Stream<VoiceprintEvent>? stream = _recognitionService.startVoiceprintListening(
-        onResult: (String text) {
-          onRecognizedText?.call(text);
-          _commandProcessor.processCommand(text);
-        },
-      );
-
-      if (stream == null) return;
-
-      _voiceprintSubscription = stream.listen((VoiceprintEvent event) {
-        switch (event.type) {
-          case VoiceprintEventType.listening:
-            _emit(_s.copyWith(
-              statusText: "正在聆听…",
-              verificationStatus: "",
-            ));
-            AgentSphereMoodBridge.instance.listening();
-            break;
-          case VoiceprintEventType.verified:
-            _emit(_s.copyWith(
-              statusText: "验证通过",
-              verificationStatus: "✓ 声纹匹配",
-              confidence: event.verificationResult?.confidence ?? 0.0,
-            ));
-            break;
-          case VoiceprintEventType.rejected:
-            _emit(_s.copyWith(
-              statusText: "验证失败",
-              verificationStatus: "✗ 非授权用户",
-              confidence: event.verificationResult?.confidence ?? 0.0,
-            ));
-            AgentSphereMoodBridge.instance.alert(caption: "声纹未通过");
-            break;
-          case VoiceprintEventType.error:
-            _emit(_s.copyWith(
-              statusText: "识别错误",
-              verificationStatus: event.error ?? "未知错误",
-            ));
-            AgentSphereMoodBridge.instance.alert(caption: event.error ?? "识别错误");
-            break;
-          default:
-            break;
-        }
-      });
-
+    if (!started && _s.isSpeaking) {
       _emit(_s.copyWith(
-        isSpeaking: true,
-        statusText: fromWake ? "唤醒聆听中…" : "正在聆听…",
+        statusText: "语音识别不可用",
+        statusDetail: "请检查麦克风权限和系统语音识别服务",
       ));
-      AgentSphereMoodBridge.instance.listening();
-    } catch (e) {
-      _emit(_s.copyWith(statusText: "启动失败", verificationStatus: e.toString()));
-      if (_s.wakeEnabled) unawaited(startWakeListening());
+      AgentSphereMoodBridge.instance.alert(caption: "语音识别不可用");
+      await _stopListening();
     }
   }
 
-  void _stopVoiceprintListening({bool resumeWake = true}) {
-    _voiceprintSubscription?.cancel();
-    _voiceprintSubscription = null;
-    _recognitionService.stopVoiceprintListening();
-
+  Future<void> _stopListening({bool resumeWake = true}) async {
+    await _speechService.cancel();
     _emit(_s.copyWith(
       isSpeaking: false,
-      confidence: 0.0,
       statusText: _s.wakeEnabled && resumeWake ? "等待唤醒" : "点击 Agent 开始说话",
-      verificationStatus: _s.wakeEnabled && resumeWake
+      statusDetail: _s.wakeEnabled && resumeWake
           ? "说「${VoiceWakeService.displayWakePhrase}」开始对话"
           : (_s.wakeEnabled ? "" : "语音唤醒已关闭"),
     ));
     AgentSphereMoodBridge.instance.idle();
 
     if (_s.wakeEnabled && resumeWake) {
-      unawaited(startWakeListening());
-    }
-  }
-
-  void markVoiceprintRegistered() {
-    _emit(_s.copyWith(
-      isVoiceprintRegistered: true,
-      statusText: _s.wakeEnabled ? "等待唤醒" : "点击 Agent 开始说话",
-      verificationStatus: _s.wakeEnabled
-          ? "说「${VoiceWakeService.displayWakePhrase}」开始对话"
-          : "",
-    ));
-    if (_s.wakeEnabled && !_s.isSpeaking) {
-      unawaited(startWakeListening());
+      await startWakeListening();
     }
   }
 }

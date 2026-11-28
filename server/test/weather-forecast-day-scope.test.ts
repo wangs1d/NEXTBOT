@@ -199,7 +199,7 @@ test("brief 出口：时段进正文摘要与穿衣建议", async () => {
     assert.ok(brief.rainWindow, "全天有雨应给出钟点段");
     const PERIOD = "(凌晨|早上|上午|中午|下午|晚上|深夜)";
     assert.match(brief.rainWindow.label, new RegExp(`^${PERIOD}(到${PERIOD})? \\d+–\\d+ 点$`));
-    assert.match(brief.summaryLine, new RegExp(`集中在 ${PERIOD}(到${PERIOD})? \\d+–\\d+ 点`));
+    assert.match(brief.clothingAdvice, new RegExp(`携带雨具（.*${PERIOD}(到${PERIOD})? \\d+–\\d+ 点.*最明显）`));
     assert.match(brief.clothingAdvice, /携带雨具（.*最明显）/);
   } finally {
     globalThis.fetch = original;

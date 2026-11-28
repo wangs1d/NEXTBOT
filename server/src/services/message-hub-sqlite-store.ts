@@ -17,8 +17,9 @@ import { getDataDir } from "../config/data-dir.js";
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import Database from "better-sqlite3";
 import type { Database as SqliteDatabase, Statement } from "better-sqlite3";
+
+import { openSqlite } from "../storage/sqlite.js";
 
 import type { MessageHubConversation, MessageHubMessage } from "./message-hub-service.js";
 
@@ -29,14 +30,10 @@ export function getMessageHubDbPath(): string {
   );
 }
 
-/** 打开（或创建）消息聚合库：WAL + 外键。 */
+/** 打开（或创建）消息聚合库：统一 opener，高频写热库档。 */
 export function openMessageHubSqlite(path?: string): SqliteDatabase {
   const file = path ?? getMessageHubDbPath();
-  mkdirSync(dirname(file), { recursive: true });
-  const db = new Database(file);
-  db.pragma("journal_mode = WAL");
-  db.pragma("foreign_keys = ON");
-  return db;
+  return openSqlite(file, { foreignKeys: true });
 }
 
 function toJsonColumn(value: unknown): string | null {
@@ -213,8 +210,7 @@ export class MessageHubSqliteStore {
   constructor(db?: SqliteDatabase | string) {
     // 支持传路径字符串（message-hub-service 持有 dbPath 配置）：按需打开，父目录不存在则创建
     if (typeof db === "string") {
-      mkdirSync(dirname(db), { recursive: true });
-      this.db = new Database(db);
+      this.db = openSqlite(db, { foreignKeys: true });
     } else {
       this.db = db ?? openMessageHubSqlite();
     }

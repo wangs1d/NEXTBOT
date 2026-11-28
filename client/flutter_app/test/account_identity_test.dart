@@ -110,4 +110,29 @@ void main() {
       expect(ApiConfig.runtimeUserId, isNull);
     });
   });
+
+  // 2026-11-27：电脑端后端本地化。这三条断言锁住「任何机制都无权把电脑端
+  // 劫持回云端」——远程配置缓存、platform channel 收回、烤入的云端地址。
+  // 手机端不受影响（Android/iOS 不在闸门内）。
+  group("桌面端本地后端闸门", () {
+    tearDown(() {
+      ApiConfig.applyRemoteOverrides(httpBase: "", controlPlaneUrl: "", updateManifestUrl: "");
+      ApiConfig.applyRuntimeChannel("byok");
+    });
+
+    test("httpBase 恒为本机 runtime，远程配置覆盖无效", () {
+      ApiConfig.applyRemoteOverrides(httpBase: "https://api.nextbot.top");
+      expect(ApiConfig.httpBase, "http://127.0.0.1:3000");
+    });
+
+    test("platform channel 收回不生效，本机 runtime 仍拉起", () {
+      ApiConfig.applyRuntimeChannel("platform");
+      expect(ApiConfig.usesPlatformChannel, isFalse);
+    });
+
+    test("wsUrl 跟本地 httpBase 同源，不吃烤入的云端 WS_URL", () {
+      ApiConfig.applyRemoteOverrides(httpBase: "https://api.nextbot.top");
+      expect(ApiConfig.wsUrl, "ws://127.0.0.1:3000/ws");
+    });
+  });
 }

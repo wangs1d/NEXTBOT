@@ -10,6 +10,7 @@ import {
 } from "./catalog.js";
 import { Bm25Index, tokenize } from "./bm25.js";
 import { DEFAULT_QUERY_CONSTRAINTS, type ParsedIntent, type QueryConstraints } from "./retrieval-intent.js";
+import { resolveRetrievalIntent } from "./intent-priors.js";
 import {
   getSkillDependencies,
   isRegisteredSkillChatToolName,
@@ -32,7 +33,7 @@ import {
   HybridRetrievalEngine,
   type HybridRetrievedResource,
 } from "./retrieval/hybrid-retrieval.js";
-import { AdaptiveTopPSelector } from "./top-p-selector/top-p-selector.js";
+import { AdaptiveTopPSelector, topPForConfidence } from "./top-p-selector/top-p-selector.js";
 import { ToolRerankingPipeline } from "./reranking/reranking-pipeline.js";
 import { firstSentence, slimJsonSchema } from "./schema-slim.js";
 import { createNeuralLlmReranker } from "./reranking/neural-reranker.js";
@@ -50,6 +51,8 @@ export type AdaptiveSearchRouting = {
   domain_groups: string[];
   domain_candidates: string[];
   primary_capability: string;
+  rerank_seen_count: number;
+  neural_applied: boolean;
 };
 
 export type AdaptiveDeferredToolSearchMatch = DeferredToolSearchMatch & {
@@ -98,9 +101,7 @@ const INTENT_CACHE_TTL_MS = 300_000; // 意图分解缓存 5 分钟
 const MAX_INDEX_CACHE = 32;
 /** 路由-召回融合时并入候选集的全量词面 top-N（99 个工具下 BM25 毫秒级，取 12 足够覆盖同义簇）。 */
 const GLOBAL_LEXICAL_FLOOR_N = 12;
-// 神经注入点（N2/N3）：重排钩子 = sidecar /rerank（失败管线自动回退词面序）；
-// 意图分类 = sidecar /classify-intent（低置信采纳，正则 fast-path 与降级路径保留）。
-// env 各自一键关闭（AGENT_NEURAL_RERANK_ENABLED / AGENT_NEURAL_INTENT_ENABLED=off）。
+// 意图后验与词面证据统一融合；交叉编码只处理歧义头部，失败完整回退基线。
 const retrievalEngine = new HybridRetrievalEngine({ historyStore: sharedHistoryStore });
 /** catalog 级挂载：最近一次检索的路由/评分视图（顶层单份，随 catalog 隔离并发）。 */
 type RoutingCarrier = DeferredToolCatalog & { lastSearchRouting?: AdaptiveSearchRouting | null };
@@ -222,10 +223,10 @@ export async function reinforceAdaptiveTopPForQuery(query: string): Promise<void
   hydrateFeedbackStateOnce();
   const trimmed = query.trim();
   if (!trimmed) return;
-  const intent = tryFastPathIntent(trimmed);
-  if (!intent) return;
+  const intent = resolveRetrievalIntent(trimmed, []);
+  if (intent.domain_candidates.length === 0) return;
   const key = topPIntentKey(intent);
-  const base = topPForIntent(intent);
+  const base = topPForConfidence(intent.confidence);
   const prev = topPIntentOverrides.get(key);
   const current = prev && prev.expiresAt > Date.now() ? prev.value : base;
   topPIntentOverrides.set(key, {
@@ -279,31 +280,11 @@ export async function adaptiveSearchDeferredTools(
   const index = getOrCreateAdaptiveCatalogIndex(catalog);
   const contextHash = options?.agentContextHash?.trim() || DEFAULT_CONTEXT_HASH;
 
-  // ── 单评分器（2026-10-01 分类归一）──
-  // 退役 IntentRouter 规则分解、域路由、17 类 embedding 类别路由三层——124 工具
-  // 规模下全量 BM25 毫秒级，"先分类再在子集里检索"是为不存在的规模付的复杂度，
-  // 且规则层判错域时正确工具根本不进候选（route-or-recall 并集补丁的根源）。
-  // 新流程：全量在线候选 → hybrid 单评分（词面+embedding+历史+负例）→ boost →
-  // top-p →（低置信才）图扩展+二次检索+神经重排。域先验从词面领先者自派生，
-  // 置信度从词面边际自派生；fast-path 正则保留为纯性能短路（策展置信仍享短路）。
-  const fastPathIntent = tryFastPathIntent(trimmedQuery);
-
   const candidates = allFilteredRecords(index, options?.tenantId);
   if (candidates.length === 0) return [];
 
   const lexicalLeaders = globalLexicalCandidates(index, catalog, trimmedQuery, GLOBAL_LEXICAL_FLOOR_N);
-  const derivedDomains = majorityDomains(lexicalLeaders);
-  const intent: ParsedIntent = fastPathIntent ?? {
-    intent: trimmedQuery,
-    domain_candidates: derivedDomains,
-    primary_capability: derivedDomains[0] ? `${derivedDomains[0]}.query` : "",
-    confidence: marginConfidence(lexicalLeaders),
-    query_constraints: DEFAULT_QUERY_CONSTRAINTS,
-    param_extract: {},
-    is_compound_task: false,
-    sub_intents: [],
-  };
-
+  const intent = resolveRetrievalIntent(trimmedQuery, lexicalLeaders);
   const retrieved = await retrievalEngine.search({
     query: trimmedQuery,
     candidates,
@@ -312,69 +293,63 @@ export async function adaptiveSearchDeferredTools(
     prebuiltIndex: index.bm25Index,
     aliasEntries: catalog.entries,
     intentDomains: intent.domain_candidates,
-    intentCapabilities: [],
+    intentCapabilities: Object.keys(intent.capability_scores),
+    intentDomainScores: intent.domain_scores,
+    intentCapabilityScores: intent.capability_scores,
     negativePhrasesById: index.negativePhrasesById,
   });
-  const boosted = applyAdaptiveIntentBoost(index, retrieved, trimmedQuery);
-  const topP = topPSelector.select(
-    boosted.map((item) => ({ item, score: item.final_score })),
-    { confidence: intent.confidence, topPOverride: getTopPOverride(intent) },
-  );
-  (catalog as RoutingCarrier).lastSearchRouting = {
-    intent: intent.intent,
-    confidence: intent.confidence,
-    top_p: topP.top_p,
-    domain_groups: derivedDomains,
-    domain_candidates: intent.domain_candidates,
-    primary_capability: intent.primary_capability,
-  };
+  let rerankCandidates = applyAdaptiveRecallGuards(retrieved, trimmedQuery);
 
-  // 高置信短路：跳过图扩展+二次检索+重排（省 40-60% discover 延迟）。
-  // fast-path 策展置信（0.85-0.95）与词面边际显著（top1 一眼领先）的轮直达。
-  if (intent.confidence >= 0.85) {
-    return topP.selected
-      .slice(0, Math.max(1, limit))
-      .map((s, rank) => matchFromCandidate(catalog, index, s.item, options, rank));
+  if (intent.confidence < 0.85) {
+    const expandedRecords = await expandWithKnowledgeGraph(
+      index,
+      rerankCandidates.slice(0, 8).map((candidate) => candidate.resource),
+      50,
+    );
+    const expandedRetrieved = await retrievalEngine.search({
+      query: trimmedQuery,
+      candidates: mergeCandidateRecords(
+        rerankCandidates.map((candidate) => candidate.resource),
+        expandedRecords,
+      ),
+      queryVector: options?.queryVector,
+      limit: 50,
+      prebuiltIndex: index.bm25Index,
+      aliasEntries: catalog.entries,
+      intentDomains: intent.domain_candidates,
+      intentCapabilities: Object.keys(intent.capability_scores),
+      intentDomainScores: intent.domain_scores,
+      intentCapabilityScores: intent.capability_scores,
+      negativePhrasesById: index.negativePhrasesById,
+    });
+    rerankCandidates = applyAdaptiveRecallGuards(expandedRetrieved, trimmedQuery);
   }
 
-  const expandedRecords = await expandWithKnowledgeGraph(
-    index,
-    topP.selected.map((s) => s.item.resource),
-    25,
-  );
-  const expandedRetrieved = await retrievalEngine.search({
-    query: trimmedQuery,
-    candidates: expandedRecords,
-    queryVector: options?.queryVector,
-    limit: 25,
-    prebuiltIndex: index.bm25Index,
-    aliasEntries: catalog.entries,
-    intentDomains: intent.domain_candidates,
-    intentCapabilities: [],
-    negativePhrasesById: index.negativePhrasesById,
-  });
   const reranked = await rerankingPipeline.rerank({
     raw_query: trimmedQuery,
     agent_context_hash: contextHash,
     previous_tool_result: options?.previousToolResult,
     query_constraints: intent.query_constraints,
-    candidates: expandedRetrieved,
+    candidates: rerankCandidates,
     blacklist_resource_ids: options?.blacklistResourceIds,
-    intent_domains: intent.domain_candidates,
-    intent_capabilities: [],
   });
-
-  // llm_seen_count > 0 = 神经重排已定序：boost 只校正展示分、不再重排（否则会
-  // 推翻神经顺序——2026-09-12 A/B 实证）；= 0 时维持基线行为（boost 排序）。
-  const finalBoosted = applyAdaptiveIntentBoost(
-    index,
-    reranked.candidates,
-    trimmedQuery,
-    reranked.llm_seen_count === 0,
+  const finalTopP = topPSelector.select(
+    reranked.candidates.map((candidate) => ({ item: candidate, score: candidate.final_score })),
+    { confidence: intent.confidence, topPOverride: getTopPOverride(intent) },
   );
-  return finalBoosted
+  (catalog as RoutingCarrier).lastSearchRouting = {
+    intent: intent.intent,
+    confidence: intent.confidence,
+    top_p: finalTopP.top_p,
+    domain_groups: intent.domain_candidates,
+    domain_candidates: intent.domain_candidates,
+    primary_capability: intent.primary_capability,
+    rerank_seen_count: reranked.llm_seen_count,
+    neural_applied: reranked.neural_applied,
+  };
+  return finalTopP.selected
     .slice(0, Math.max(1, limit))
-    .map((candidate, rank) => matchFromCandidate(catalog, index, candidate, options, rank));
+    .map((selected, rank) => matchFromCandidate(catalog, index, selected.item, options, rank));
 }
 
 /** 全量在线候选（online + 非限流 + 租户过滤，与原路由层出候选同口径）。 */
@@ -387,41 +362,6 @@ function allFilteredRecords(
     if (passesRouteFilters(record, DEFAULT_QUERY_CONSTRAINTS, tenantId)) out.push(record);
   }
   return out;
-}
-
-/**
- * 词面领先者的域多数票（频次 ≥2，最多 4 个），作为 hybrid 的 domain 先验——
- * 替代规则分类器的 domain_candidates：先验来自"词面已经很强的工具归属哪些域"，
- * 是评分的自我修正，不再依赖英文正则判域。
- */
-function majorityDomains(
-  leaders: Array<{ record: ResourceRecord; score: number }>,
-): string[] {
-  const counts = new Map<string, number>();
-  for (const { record } of leaders) {
-    for (const domain of record.level1.domain) {
-      counts.set(domain, (counts.get(domain) ?? 0) + 1);
-    }
-  }
-  return [...counts.entries()]
-    .filter(([, n]) => n >= 2)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 4)
-    .map(([domain]) => domain);
-}
-
-/**
- * 词面边际置信：top1 与 top2 的归一分差映射到 0.5~0.97。词面一眼领先（边际
- * ≥0.744）才达高置信短路门槛——短路资格由检索结果自证，不再由规则分类器颁证。
- */
-function marginConfidence(
-  leaders: Array<{ record: ResourceRecord; score: number }>,
-): number {
-  const s1 = leaders[0]?.score ?? 0;
-  const s2 = leaders[1]?.score ?? 0;
-  if (s1 <= 0) return 0.5;
-  const margin = Math.max(0, (s1 - s2) / s1);
-  return Math.min(0.97, 0.5 + margin * 0.47);
 }
 
 export function summarizeAdaptiveCatalog(
@@ -698,70 +638,28 @@ async function seedGraphEdges(
   }
 }
 
-function applyAdaptiveIntentBoost(
-  index: AdaptiveCatalogIndex,
+function applyAdaptiveRecallGuards(
   candidates: HybridRetrievedResource[],
   query: string,
   resort = true,
 ): HybridRetrievedResource[] {
   const q = query.toLowerCase();
-  const qTokens = new Set(tokenize(q));
   const mapped = candidates
     .map((candidate) => {
       const id = candidate.resource.level1.resource_id;
-      const entry = index.entriesById.get(id);
-      // 召回校准已声明化（classification-overrides.recallBoost）：校准词条跟着
-      // 工具声明走，不再堆在本函数的硬编码 switch 里
-      let boost = lexicalToolBoost(id, q, qTokens, entry);
+      let penalty = 0;
       for (const rule of getCompiledRecallBoosts(id)) {
-        if (rule.regex.test(q)) boost += rule.weight;
+        if (rule.regex.test(q)) penalty += rule.weight;
       }
-      boost = clamp(boost, -0.25, 0.45);
-      if (boost === 0) return candidate;
+      penalty = clamp(penalty, -0.25, 0);
+      if (penalty === 0) return candidate;
       return {
         ...candidate,
-        final_score: round4(clamp(candidate.final_score + boost, 0, 1)),
+        final_score: round4(clamp(candidate.final_score + penalty, 0, 1)),
       };
     });
   if (!resort) return mapped;
   return mapped.sort((a, b) => b.final_score - a.final_score);
-}
-
-function lexicalToolBoost(
-  resourceId: string,
-  query: string,
-  queryTokens: Set<string>,
-  entry?: DeferredToolEntry,
-): number {
-  const nameTokens = tokenize(resourceId.replace(/[._-]+/g, " "));
-  let boost = 0;
-  for (const token of nameTokens) {
-    if (token.length < 3) continue;
-    if (queryTokens.has(token) || query.includes(token)) {
-      boost += token.length >= 5 ? 0.055 : 0.025;
-    }
-  }
-  if (entry) {
-    const positives = [...entry.searchAliases, ...entry.examples];
-    for (const phrase of positives) {
-      const overlap = tokenize(phrase).filter((token) => queryTokens.has(token)).length;
-      if (overlap > 0) boost += Math.min(0.08, overlap * 0.025);
-    }
-    // 负例口径与 hybrid 的 negativeMatch 对齐：整串出现，或 ≥2 token 重合。
-    // 单 token 重合不算（「取消提醒」里的「提醒」是 calendar.create 的正向核心词，
-    // 否则正面例句会被自己的负例表反噬）。
-    const negatives = [...entry.negativeAliases, ...entry.negativeExamples];
-    for (const phrase of negatives) {
-      const p = phrase.trim().toLowerCase();
-      const tokens = tokenize(phrase);
-      if (!p || tokens.length === 0) continue;
-      const direct = p.length >= 2 && query.includes(p);
-      const overlap = tokens.filter((token) => queryTokens.has(token)).length;
-      const effective = direct ? Math.max(overlap, 2) : overlap;
-      if (effective >= 2) boost -= Math.min(0.12, effective * 0.04);
-    }
-  }
-  return boost;
 }
 
 const DISCOVER_WIRE_DESC_CHARS = 90;
@@ -803,7 +701,7 @@ function matchFromCandidate(
 
 function resourceRecordFromEntry(
   entry: DeferredToolEntry,
-  cachedEmbedding?: number[],
+  cachedEmbeddings?: number[][],
 ): ResourceRecord {
   const fn = getFunction(entry.tool);
   const name = entry.registryName;
@@ -825,7 +723,10 @@ function resourceRecordFromEntry(
       version: "1.0.0",
       status: ResourceStatus.Online,
       base_score: resourceType === ResourceType.McpServer ? 0.5 : 0.55,
-      embedding: cachedEmbedding ?? hashTextToVector(entry.embeddingInput || entry.searchText, 64),
+      embeddings:
+        cachedEmbeddings && cachedEmbeddings.length > 0
+          ? cachedEmbeddings
+          : [hashTextToVector(entry.embeddingInput || entry.searchText, 64)],
       latency_ms: inferLatencyMs(domains[0] ?? "misc", resourceType),
     },
     level2: {
@@ -1252,57 +1153,6 @@ function getFunction(tool: ChatCompletionTool): FunctionToolDefinition | null {
   return maybeFunction?.name ? maybeFunction : null;
 }
 
-/**
- * Fast path：常见 query 跳过 IntentRouter（同步 regex 匹配，0 async cost）。
- * 覆盖高频查询：天气、时间、搜索、余额、日程等。
- */
-function tryFastPathIntent(query: string): ParsedIntent | null {
-  const q = query.toLowerCase().trim();
-  const ro: QueryConstraints = { max_latency_ms: 200, read_only: true, file_type: null, auth_level: "guest" };
-  const rw: QueryConstraints = { max_latency_ms: 200, read_only: false, file_type: null, auth_level: "default" };
-
-  if (/\bweather\b|\b天气\b|\bforecast\b|\b温度\b|\btemperature\b/.test(q)) {
-    return { intent: "天气查询", domain_candidates: ["weather"], primary_capability: "weather.query", confidence: 0.95, query_constraints: ro, param_extract: {}, is_compound_task: false, sub_intents: [] };
-  }
-  // 热搜/热点：BM25 类别表对这类词弱（"热搜"不在任何 prefix/alias 强信号里），
-  // 曾被路由到 clock/shopping——意图层显式收编（2026-09-11 golden 实证）
-  if (/热搜|热点|热榜| trending|\btrending\b|大家都在看/.test(q)) {
-    return { intent: "热搜查询", domain_candidates: ["search"], primary_capability: "search.query", confidence: 0.9, query_constraints: ro, param_extract: {}, is_compound_task: false, sub_intents: [] };
-  }
-  if (/\btime\b|\bdate\b|\b时间\b|\b日期\b|\bclock\b/.test(q)) {
-    return { intent: "时间查询", domain_candidates: ["clock"], primary_capability: "clock.query", confidence: 0.95, query_constraints: ro, param_extract: {}, is_compound_task: false, sub_intents: [] };
-  }
-  if (/\bsearch\b|\b搜索\b|\b查找\b|\bfind\b|\bgoogle\b/.test(q) && !/天气|weather/.test(q)) {
-    return { intent: "搜索", domain_candidates: ["search", "browser"], primary_capability: "search.query", confidence: 0.92, query_constraints: ro, param_extract: {}, is_compound_task: false, sub_intents: [] };
-  }
-  if (/\bcalendar\b|\bschedule\b|\bmeeting\b|\b日程\b|\b会议\b|\b日历\b/.test(q)) {
-    return { intent: "日程查询", domain_candidates: ["calendar"], primary_capability: "calendar.query", confidence: 0.9, query_constraints: ro, param_extract: {}, is_compound_task: false, sub_intents: [] };
-  }
-  if (/\bbalance\b|\b余额\b|\bwallet\b|\b钱包\b|\b账户\b/.test(q)) {
-    return { intent: "余额查询", domain_candidates: ["wallet"], primary_capability: "wallet.query", confidence: 0.92, query_constraints: ro, param_extract: {}, is_compound_task: false, sub_intents: [] };
-  }
-  if (/\bremind\b|\btodo\b|\btasks?\b|\b提醒\b|\b待办\b/.test(q)) {
-    return { intent: "待办查询", domain_candidates: ["calendar"], primary_capability: "calendar.query", confidence: 0.88, query_constraints: ro, param_extract: {}, is_compound_task: false, sub_intents: [] };
-  }
-  if (/\bphone\b|\bcall\b|\b打电话\b|\b电话\b|\b手机\b/.test(q)) {
-    return { intent: "电话查询", domain_candidates: ["phone"], primary_capability: "phone.query", confidence: 0.9, query_constraints: rw, param_extract: {}, is_compound_task: false, sub_intents: [] };
-  }
-  if (/\bmcp\b|\bintegration\b|\b服务器\b|\bserver\b/.test(q)) {
-    return { intent: "MCP 工具查询", domain_candidates: ["mcp", "misc"], primary_capability: "mcp.query", confidence: 0.85, query_constraints: ro, param_extract: {}, is_compound_task: false, sub_intents: [] };
-  }
-  if (/\bskill\b|\b技能\b|\bcapabilit(?:y|ies)\b|\b能力\b/.test(q)) {
-    return { intent: "技能查询", domain_candidates: ["agent"], primary_capability: "agent.query", confidence: 0.85, query_constraints: ro, param_extract: {}, is_compound_task: false, sub_intents: [] };
-  }
-
-  return null;
-}
-
-function topPForIntent(intent: ParsedIntent): number {
-  if (intent.confidence > 0.85) return 0.7;
-  if (intent.confidence > 0.6) return 0.9;
-  return 0.95;
-}
-
 // 目录签名按对象记忆化：deferred 目录每轮由全量目录派生（对象内容不可变），
 // 同一对象内的多次取签名（索引缓存/图服务/边强化各有 key）只算一次排序+sha1。
 // 每轮首次仍 O(N log N)——101 工具无感；数千工具时如成为热点，应由
@@ -1321,6 +1171,12 @@ function catalogSignature(catalog: DeferredToolCatalog): string {
     hash.update(String(entry.parameterNames.length));
     hash.update("\0");
     hash.update(String(entry.requiredParameters.length));
+    hash.update("\0");
+    hash.update(
+      JSON.stringify(
+        entry.embeddingViews.map((view) => [view.key, view.kind, view.text]),
+      ),
+    );
     hash.update("\0");
   }
   // embedding 缓存指纹：后台补全的向量落盘后 builtAt/模型变化 → 新目录对象

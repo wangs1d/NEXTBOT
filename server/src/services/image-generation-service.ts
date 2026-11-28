@@ -3,11 +3,50 @@ import { randomUUID } from "node:crypto";
 import { createReadStream, existsSync, readdirSync, statSync } from "node:fs";
 import { mkdir, writeFile, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { loadSharp } from "./sharp-lazy.js";
+import { loadSharp, withSharpDecodeSlot } from "./sharp-lazy.js";
 import { isMediaHidden, mediaEntryOf, recordMediaSession, type MediaTurnInfo } from "./library-meta.js";
 
 import type { ImageGenerationProvider, ImageGenerationResult, ImageGenerateInput } from "./image-generation-providers.js";
 import { OpenAICompatibleImageProvider, GeminiImageProvider } from "./image-generation-providers.js";
+
+/** 长边上限，默认 2048；0 / 负数表示不缩放。 */
+function resolveStoredImageMaxEdge(): number {
+  const n = Number.parseInt(process.env.AGENT_MEDIA_IMAGE_MAX_EDGE ?? "", 10);
+  if (!Number.isFinite(n)) return 2048;
+  return n <= 0 ? 0 : n;
+}
+
+function resolveStoredWebpQuality(): number {
+  const n = Number.parseInt(process.env.AGENT_MEDIA_IMAGE_WEBP_QUALITY ?? "", 10);
+  return Number.isFinite(n) ? Math.min(100, Math.max(40, n)) : 82;
+}
+
+/**
+ * 统一落盘编码：EXIF 归正 → 长边限幅 → WebP/PNG。
+ *
+ * 单张 4096² 的照片型 PNG 解码后位图 200MB+，落盘几十 MB；两三个并发就能把
+ * 容器内存顶穿。限幅 + WebP 后同样画面的落盘体积通常降到 1% 量级。
+ */
+async function encodeForStorage(buf: Buffer): Promise<{ data: Buffer; ext: "webp" }> {
+  const sharp = await loadSharp();
+  const maxEdge = resolveStoredImageMaxEdge();
+  // 解码并发闸：多张图同时进来时串到 2 路，避免位图峰值把容器内存顶穿。
+  const data = await withSharpDecodeSlot(async () => {
+    // sequentialRead 让 libvips 顺序读入，超大原图的内存占用更可控。
+    let pipeline = sharp(buf, { animated: false, sequentialRead: true }).rotate();
+    if (maxEdge > 0) {
+      pipeline = pipeline.resize({
+        width: maxEdge,
+        height: maxEdge,
+        fit: "inside",
+        withoutEnlargement: true,
+      });
+    }
+    // 照片类一律 WebP：体积约为 PNG 的 1/4，直接降低磁盘占用与解码内存峰值。
+    return pipeline.webp({ quality: resolveStoredWebpQuality() }).toBuffer();
+  });
+  return { data, ext: "webp" };
+}
 
 /**
  * 图像生成服务：调用 LLM 提供商的图像接口生成图片，
@@ -184,10 +223,9 @@ export class ImageGenerationService {
     const safeActorId = actorId.replace(/[^a-zA-Z0-9_-]/g, "_") || "anonymous";
     const dir = join(this.storageRoot, safeActorId);
     await mkdir(dir, { recursive: true });
-    const fileName = `${Date.now()}-${randomUUID().slice(0, 8)}.png`;
-    const sharp = await loadSharp();
-    const png = await sharp(buf, { animated: false }).rotate().png().toBuffer();
-    await writeFile(join(dir, fileName), png);
+    const { data, ext } = await encodeForStorage(buf);
+    const fileName = `${Date.now()}-${randomUUID().slice(0, 8)}.${ext}`;
+    await writeFile(join(dir, fileName), data);
     // libraryHidden=true：用户聊天照片是附件不是能力产物，不进资料库卡片流
     recordMediaSession(actorId, "images", fileName, sessionId, opts.libraryHidden === true, turn);
     return `/agent/images/${safeActorId}/${fileName}`;
@@ -235,22 +273,17 @@ export class ImageGenerationService {
     const dir = join(this.storageRoot, safeActorId);
     await mkdir(dir, { recursive: true });
 
-    const imageId = `${Date.now()}-${randomUUID().slice(0, 8)}`;
-    const fileName = `${imageId}.png`;
-    const fullPath = join(dir, fileName);
-
     // 拉远程图（上游返回公网 URL），可传入更短的预算；默认 30s 超时防止挂起
     const res = await fetch(remoteUrl, { signal: AbortSignal.timeout(timeoutMs) });
     if (!res.ok) {
       throw new Error(`下载图像失败：HTTP ${res.status} ${res.statusText}`);
     }
     const buf = Buffer.from(await res.arrayBuffer());
-    const sharp = await loadSharp();
-    const png = await sharp(buf, { animated: false })
-      .rotate()
-      .png()
-      .toBuffer();
-    await writeFile(fullPath, png);
+    const { data, ext } = await encodeForStorage(buf);
+    const imageId = `${Date.now()}-${randomUUID().slice(0, 8)}`;
+    const fileName = `${imageId}.${ext}`;
+    const fullPath = join(dir, fileName);
+    await writeFile(fullPath, data);
     recordMediaSession(actorId, "images", fileName, sessionId, opts.libraryHidden === true, opts.turn);
 
     // 返回相对路径，供客户端拼接 base URL 拉流
@@ -260,8 +293,8 @@ export class ImageGenerationService {
   /** 静态拉流时校验路径并返回绝对路径；不通过返回 null。 */
   resolveFilePath(actorId: string, fileName: string): string | null {
     const safeActorId = actorId.replace(/[^a-zA-Z0-9_-]/g, "_") || "anonymous";
-    // 文件名严格校验：时间戳-uuid8.png
-    if (!/^\d+-[a-f0-9]{8}\.png$/.test(fileName)) return null;
+    // 文件名严格校验：时间戳-uuid8.png|webp（webp 为 2026-11 起的新默认落盘格式）
+    if (!/^\d+-[a-f0-9]{8}\.(?:png|webp)$/.test(fileName)) return null;
     const full = join(this.storageRoot, safeActorId, fileName);
     // 路径穿越防护
     const normalized = full.normalize();
@@ -298,15 +331,18 @@ export class ImageGenerationService {
     if (!source) return null;
     const safeActorId = actorId.replace(/[^a-zA-Z0-9_-]/g, "_") || "anonymous";
     const dir = join(`${this.storageRoot}-thumbs`, safeActorId);
-    const target = join(dir, `${fileName.replace(/\.png$/i, "")}@${width}.webp`);
+    const target = join(dir, `${fileName.replace(/\.(?:png|webp)$/i, "")}@${width}.webp`);
     try {
       if (existsSync(target)) return target;
       await mkdir(dir, { recursive: true });
       const sharp = await loadSharp();
-      const buf = await sharp(source)
-        .resize({ width, withoutEnlargement: true })
-        .webp({ quality: 78 })
-        .toBuffer();
+      // 缩略图是"一屏几十张"的并发入口：同样走解码闸，防止历史大图把内存打爆。
+      const buf = await withSharpDecodeSlot(() =>
+        sharp(source, { sequentialRead: true })
+          .resize({ width, withoutEnlargement: true })
+          .webp({ quality: 78 })
+          .toBuffer(),
+      );
       await writeFile(target, buf);
       return target;
     } catch {
@@ -345,8 +381,8 @@ export class ImageGenerationService {
         turnTitle: string;
       }> = [];
       for (const name of readdirSync(dir)) {
-        // 与 resolveFilePath 校验一致：只收时间戳-uuid8.png，避免脏文件拉流 404。
-        if (!/^\d+-[a-f0-9]{8}\.png$/.test(name)) continue;
+        // 与 resolveFilePath 校验一致：只收时间戳-uuid8.{png,webp}，避免脏文件拉流 404。
+        if (!/^\d+-[a-f0-9]{8}\.(?:png|webp)$/.test(name)) continue;
         // 购物比价商品图、扫码截图等工具性图片不进资料库。
         if (isMediaHidden(actorId, "images", name)) continue;
         try {

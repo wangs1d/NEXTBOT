@@ -34,17 +34,16 @@ class PushTokenService : HmsMessageService() {
         val data = message?.data ?: return
         if (data.isBlank()) return
         try {
-            val obj = JSONObject(data)
-            val text = obj.optString("body").ifEmpty { obj.optString("title") }
-            if (text.isEmpty()) return
-            val record = JSONObject()
-                .put("title", obj.optString("title"))
-                .put("text", text)
-                .put("deliveryId", obj.optString("deliveryId"))
-                .put("intentId", obj.optString("intentId"))
-                .put("kind", obj.optString("kind"))
-                .put("stableKey", obj.optString("stableKey"))
-                .put("ts", obj.optLong("ts", System.currentTimeMillis()))
+            // 2026-11-26：整包透传，不再按字段白名单裁剪。服务端新加的
+            // type/wire/messageId/needHistory 等字段要靠同一条队列送到 Dart，
+            // 由 Dart 分派给聊天 / 卡片 / 看板既有 handler。
+            val record = JSONObject(data)
+            if (record.optString("body").isEmpty() && record.optString("title").isEmpty()) return
+            record.put("text", record.optString("body").ifEmpty { record.optString("title") })
+            if (record.optString("stableKey").isEmpty()) {
+                record.put("stableKey", record.optString("deliveryId"))
+            }
+            record.put("ts", record.optLong("ts", System.currentTimeMillis()))
             enqueue(this, record)
         } catch (_: Exception) {
             // 载荷解析失败：当作普通透传丢弃，不影响通知消息那条通路
@@ -81,6 +80,18 @@ class PushTokenService : HmsMessageService() {
             }
         }
 
+        /** JSONObject → Dart 可接收的 Map；整包透传，不再丢新字段。 */
+        private fun jsonObjectToMap(obj: JSONObject): Map<String, Any?> =
+            obj.keys().asSequence().associateWith { key -> jsonValue(obj.opt(key)) }
+
+        private fun jsonValue(value: Any?): Any? = when (value) {
+            is JSONObject -> jsonObjectToMap(value)
+            is JSONArray -> (0 until value.length()).map { i -> jsonValue(value.opt(i)) }
+            JSONObject.NULL -> null
+            is String, is Number, is Boolean -> value
+            else -> value.toString()
+        }
+
         /** 取走全部待写穿消息并清空队列（Dart 取件即消费） */
         fun takeAll(ctx: Context): List<Map<String, Any?>> {
             synchronized(LOCK) {
@@ -93,17 +104,7 @@ class PushTokenService : HmsMessageService() {
                 val out = ArrayList<Map<String, Any?>>(arr.length())
                 for (i in 0 until arr.length()) {
                     val o = arr.optJSONObject(i) ?: continue
-                    out.add(
-                        mapOf(
-                            "title" to o.optString("title"),
-                            "text" to o.optString("text"),
-                            "deliveryId" to o.optString("deliveryId"),
-                            "intentId" to o.optString("intentId"),
-                            "kind" to o.optString("kind"),
-                            "stableKey" to o.optString("stableKey"),
-                            "ts" to o.optLong("ts", System.currentTimeMillis()),
-                        ),
-                    )
+                    out.add(jsonObjectToMap(o))
                 }
                 prefs.edit().remove(KEY_PENDING).apply()
                 return out

@@ -44,16 +44,11 @@ export type DuplexClientMessage =
       sessionId?: string;
       /** 可选会话级 system prompt 覆盖 */
       systemPrompt?: string;
-      /** 声纹闸：会话归属身份；该身份已注册声纹时必须通过说话人验证才可对话 */
-      actorId?: string;
-      /** 声纹闸：HTTP /voiceprint/verify 命中时签发的一次性说话人令牌 */
-      speakerToken?: string;
     }
   | { type: "audio.chunk"; pcm: string }
   | { type: "audio.end" }
   | { type: "text.turn"; text: string }
   | { type: "interrupt" }
-  | { type: "speaker.verify"; token: string }
   | { type: "session.stop" };
 
 export type DuplexServerMessage =
@@ -109,7 +104,6 @@ export function parseClientMessage(raw: string): DuplexClientMessage | null {
       case "audio.end":
       case "text.turn":
       case "interrupt":
-      case "speaker.verify":
       case "session.stop":
         return parsed as DuplexClientMessage;
       default:

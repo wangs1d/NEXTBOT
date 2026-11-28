@@ -29,7 +29,6 @@ export type WeatherBrief = {
   rainWindow?: RainWindow;
   clothingAdvice: string;
   hourlyForecast: WeatherHourlyForecast[];
-  summaryLine: string;
   /** 次日预报（结构化；Task 15 晚间 digest"明日预告"与次日预警检测用） */
   tomorrow?: WeatherTomorrow;
   /**
@@ -741,22 +740,16 @@ time?: (string | null)[];
         ...(rainWindow ? { rainWindow } : {}),
       }),
       hourlyForecast,
-      summaryLine: "",
     };
     if (dailyItems.length > 0) {
       brief.daily = dailyItems;
     }
 
-    // 明天一句话摘要（用户常问"明天天气"）
+    // 结构化次日预报（Task 15 晚间 digest"明日预告"与次日预警检测）——
+    // 只留结构化字段，不再拼成整句文案（2026-11-26 用户定稿：服务端不出固定模板）。
     const tomorrow = dailyItems[1];
-    const tomorrowRainWindow = extractRainWindow({ probsByHour: tomorrowProbsByHour });
-    let tomorrowSummary = "";
     if (tomorrow) {
-      const rainInfo = tomorrow.rainPct > 0
-        ? `，降水概率 ${tomorrow.rainPct}%${tomorrowRainWindow ? `（${tomorrowRainWindow.label}）` : ""}`
-        : "";
-      tomorrowSummary = ` 明日${tomorrow.weatherText}，${tomorrow.minC.toFixed(0)}–${tomorrow.maxC.toFixed(0)}°C${rainInfo}。`;
-      // 结构化次日预报（Task 15 晚间 digest"明日预告"与次日预警检测）
+      const tomorrowRainWindow = extractRainWindow({ probsByHour: tomorrowProbsByHour });
       brief.tomorrow = {
         weatherCode: tomorrow.weatherCode,
         weatherText: tomorrow.weatherText,
@@ -767,9 +760,6 @@ time?: (string | null)[];
       };
     }
 
-    brief.summaryLine = `${brief.locationLabel ? `${brief.locationLabel} ` : ""}当前约 ${currentTempC.toFixed(0)}°C（体感 ${brief.apparentTempC.toFixed(0)}°C），${brief.weatherText}；今日约 ${tMin.toFixed(0)}–${tMax.toFixed(0)}°C${
-      rainWindow ? `，降水${rainWindow.alreadyPassed ? "主要落在" : "集中在"} ${rainWindow.label}` : ""
-    }。${tomorrowSummary}`.trim();
     if (this.briefCacheTtlMs > 0) {
       // 缓存副本，调用方修改返回值不会污染缓存；容量封顶防长跑进程无界增长
       if (this.briefCache.size >= 64) {

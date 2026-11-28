@@ -5,6 +5,7 @@ import { resolvePrimaryChatSessionId } from "../agent/master-chat-session.js";
 import { getHumanLikeMemoryService } from "./human-like-memory-service.js";
 import { getAgenticMemoryRuntime, getMemoryComponents } from "../agentic-memory/index.js";
 import { actorIdVariants } from "../agentic-memory/actor-key.js";
+import { getMemorySuppressionStore } from "../agentic-memory/memory-suppression.js";
 import { getMemoryReinforcementStore } from "../agentic-memory/memory-reinforcement.js";
 import { getDailyDigestService } from "./daily-digest-service.js";
 import { getShortTermMemoryGatewayService } from "./short-term-memory-gateway.js";
@@ -144,6 +145,7 @@ export async function clearAllMemoryForActor(
     // 召回强化/归档侧表行（含两阶段遗忘的 archived 行）：Mem0 记录上面第 4 步已删，
     // 侧表行不回收会变成孤儿且归档量统计失真。
     reinforcementCleared += getMemoryReinforcementStore()?.purgeActor(variant) ?? 0;
+    getMemorySuppressionStore()?.purgeActor(variant);
   }
   if (ledgerCleared + provenanceCleared + bridgeLinksCleared + understandingCleared + factsCleared + ftsCleared + reinforcementCleared + lifeModelCleared > 0) {
     console.info(

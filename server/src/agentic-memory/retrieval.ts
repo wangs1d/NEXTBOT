@@ -11,6 +11,12 @@ import {
 import { getMemoryReinforcementStore } from "./memory-reinforcement.js";
 import { dedupeMemoryLines, semanticFingerprint } from "../services/memory-record-utils.js";
 import {
+  classifyMemorySourceRole,
+  isAssistantVoiceQuery,
+  normalizeMemorySourceRole,
+  type MemorySourceRole,
+} from "../services/memory-source-role.js";
+import {
   extractTemporalIntent,
   temporalIntentFactorForItem,
 } from "../agent/memory-temporal-intent.js";
@@ -56,6 +62,11 @@ export interface AgenticMemoryCandidate {
   timestamp?: string;
   source?: string;
   context?: string;
+  sourceRole?: MemorySourceRole;
+}
+
+function itemSourceRole(item: Mem0SearchItem): MemorySourceRole {
+  return normalizeMemorySourceRole(item.metadata?.sourceRole) ?? classifyMemorySourceRole(item.memory);
 }
 
 function contextMatches(
@@ -315,7 +326,10 @@ export class AgenticMemoryRetrievalService {
       topK: searchTopK,
     })) as unknown as Mem0SearchResult;
 
-    const items = this.filterArchived(result.results ?? []);
+    const allowAssistant = isAssistantVoiceQuery(query);
+    const items = this.filterArchived(result.results ?? []).filter(
+      (item) => allowAssistant || itemSourceRole(item) !== "assistant",
+    );
     if (!items.length) return "";
 
     const now = Date.now();
@@ -440,8 +454,11 @@ export class AgenticMemoryRetrievalService {
       topK: searchTopK,
     })) as unknown as Mem0SearchResult;
 
-    const items = this.filterArchived(result.results ?? []).filter((item) =>
-      contextMatches(item.metadata?.context, context),
+    const allowAssistant = isAssistantVoiceQuery(query);
+    const items = this.filterArchived(result.results ?? []).filter(
+      (item) =>
+        contextMatches(item.metadata?.context, context) &&
+        (allowAssistant || itemSourceRole(item) !== "assistant"),
     );
     if (!items.length) return [];
 
@@ -481,6 +498,7 @@ export class AgenticMemoryRetrievalService {
         : {}),
       ...(typeof item.metadata?.source === "string" ? { source: item.metadata.source } : {}),
       ...(typeof item.metadata?.context === "string" ? { context: item.metadata.context } : {}),
+      sourceRole: itemSourceRole(item),
     }));
   }
 

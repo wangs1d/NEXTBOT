@@ -7,10 +7,13 @@
 // 持久化形态（2026-10-10 二次改造，对齐 Muse「扫进自己的库、随时可查」）：
 //  - 落盘 **按天分区**：`data/sensor-fabric/streams/<stream>/<YYYY-MM-DD>.ndjson`
 //    （单日超 4MB 追加序号分片 `.1.ndjson` / `.2.ndjson`，不再"单代轮转覆盖"）。
-//  - **保留 N 天**：`SENSOR_SOURCE_RETENTION_DAYS`（默认 30；0=永久保留）。
+//  - **保留 N 天**：`SENSOR_SOURCE_RETENTION_DAYS`（2026-11-26 由 30 缩到 3：
+//    扫描类数据流只需近几天可查，保留搜索能力即可；0=永久保留。流级可用
+//    `SENSOR_SOURCE_RETENTION_DAYS_<STREAM>` 覆盖，如通话记录）。
 //    写入时每日惰性清理 + 公开 `pruneExpired()`（可被定时任务/诊断调用）。
-//  - **启动分段加载**：`loadRecent()` 读最近 `SENSOR_SOURCE_LOAD_DAYS`（默认 7）天
-//    的日分区，重建内存窗口与实体倒排 → 重启后历史仍可跨源查询（不再"重启即失忆"）。
+//  - **启动分段加载**：`loadRecent()` 读最近 `SENSOR_SOURCE_LOAD_DAYS`（2026-11-26
+//    由 7 缩到 3，与保留期对齐）天的日分区，重建内存窗口与实体倒排 → 重启后历史
+//    仍可跨源查询（不再"重启即失忆"）。
 //  - 内存窗口（2000 条 FIFO）只服务于按 stream 的**热查询**；跨源实体检索走索引。
 //  - 实体索引满 `ENTITY_INDEX_MAX_KEYS` 时按 **LRU 淘汰最旧键**（不再"满则拒新"——
 //    拒新会让索引老化，新实体进不来、旧实体永久占位）。
@@ -45,9 +48,9 @@ const ENTITY_INDEX_MAX_KEYS = 5000;
 /** 单个实体桶命中上限（保留最近 N 条） */
 const ENTITY_BUCKET_MAX = 200;
 /** 保留天数缺省（0=永久保留） */
-const DEFAULT_RETENTION_DAYS = 30;
+const DEFAULT_RETENTION_DAYS = 3;
 /** 启动加载天数缺省（0=不加载历史） */
-const DEFAULT_LOAD_DAYS = 7;
+const DEFAULT_LOAD_DAYS = 3;
 /** 启动加载时单文件最多读的行数（尾部 N 行，防大文件拖慢启动） */
 const MAX_LINES_PER_FILE_ON_LOAD = 2000;
 /** 启动加载时跳过的超大文件阈值（异常增长的文件不解析） */
@@ -171,6 +174,20 @@ export class SourceStore {
   /** 保留天数（SENSOR_SOURCE_RETENTION_DAYS；0 或负=永久保留） */
   retentionDays(): number {
     return this.numEnv("SENSOR_SOURCE_RETENTION_DAYS", DEFAULT_RETENTION_DAYS);
+  }
+
+  /**
+   * 按流保留天数：流级 env `SENSOR_SOURCE_RETENTION_DAYS_<STREAM>`（如
+   * `..._CALL_LOG`）覆盖全局值，0=该流永久保留。通话记录只需近几天可查，
+   * 全局 30 天对它是浪费；邮件/消息等仍走全局。
+   */
+  retentionDaysFor(stream: string): number {
+    const raw = this.env[`SENSOR_SOURCE_RETENTION_DAYS_${stream.toUpperCase()}`];
+    if (raw !== undefined && String(raw).trim() !== "") {
+      const v = Number(String(raw).trim());
+      if (Number.isFinite(v) && v >= 0) return Math.trunc(v);
+    }
+    return this.retentionDays();
   }
 
   /** 启动加载天数（SENSOR_SOURCE_LOAD_DAYS；0=不加载历史） */
@@ -299,13 +316,10 @@ export class SourceStore {
 
   /**
    * 保留期清理：删除超过保留天数的日分区文件（以及旧式扁平文件/旧轮转文件，
-   * 按 mtime 判定）。返回删除文件数。`SENSOR_SOURCE_RETENTION_DAYS=0` 时不动。
+   * 按 mtime 判定）。返回删除文件数。保留天数可按流覆盖（retentionDaysFor），
+   * 全局 `SENSOR_SOURCE_RETENTION_DAYS=0` 且无流级覆盖时不动。
    */
   pruneExpired(now = this.nowFn()): number {
-    const days = this.retentionDays();
-    if (days <= 0) return 0;
-    const cutoffMs = now - days * DAY_MS;
-    const cutoffKey = dateKey(cutoffMs);
     let removed = 0;
     try {
       if (!existsSync(this.streamsDir)) return 0;
@@ -318,15 +332,21 @@ export class SourceStore {
           continue;
         }
         if (st.isDirectory()) {
+          // 流级保留期（call_log 等短保留流各自算 cutoff）
+          const streamDays = this.retentionDaysFor(entry);
+          if (streamDays <= 0) continue; // 该流永久保留
+          const streamCutoffKey = dateKey(now - streamDays * DAY_MS);
           for (const f of readdirSync(full)) {
             const path = join(full, f);
             const m = /^(\d{4}-\d{2}-\d{2})(?:\.\d+)?\.ndjson$/.exec(f);
-            const expired = m ? m[1] < cutoffKey : fileMtimeMs(path) < cutoffMs;
+            const expired = m ? m[1] < streamCutoffKey : fileMtimeMs(path) < now - streamDays * DAY_MS;
             if (expired && this.tryRemove(path)) removed += 1;
           }
-        } else if (fileMtimeMs(full) < cutoffMs) {
-          // 旧式扁平文件 streams/<stream>.ndjson 或轮转 .1：按 mtime
-          if (this.tryRemove(full)) removed += 1;
+        } else {
+          // 旧式扁平文件 streams/<stream>.ndjson 或轮转 .1：按全局保留期 + mtime
+          const days = this.retentionDays();
+          if (days <= 0) continue;
+          if (fileMtimeMs(full) < now - days * DAY_MS && this.tryRemove(full)) removed += 1;
         }
       }
     } catch {

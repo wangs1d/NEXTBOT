@@ -33,6 +33,8 @@ export type CardActionContext = {
   socket: WebSocket;
   boundActorId: string;
   sendUnifiedError: (code: string, message: string) => void;
+  /** socket 直投失败时把 card.update 交给离线镜像（2026-11-26） */
+  offlineMirror?: (data: string) => void;
 };
 
 export type CardActionDeps = {
@@ -448,15 +450,15 @@ export async function handleCardActionEvent(
   }
 
   const send = (body: Record<string, unknown>): void => {
+    const data = JSON.stringify({
+      type: ServerEventType.CardUpdate,
+      payload: { messageId: payload.messageId, cardId: payload.cardId, ...body },
+    });
     try {
-      ctx.socket.send(
-        JSON.stringify({
-          type: ServerEventType.CardUpdate,
-          payload: { messageId: payload.messageId, cardId: payload.cardId, ...body },
-        }),
-      );
+      ctx.socket.send(data);
     } catch {
-      /* 连接已断：卡片停在 loading，重连后按历史 payload 恢复，不影响一致性 */
+      // 连接已断：卡片状态仍需后台到达——交给离线镜像写穿，重连后按历史恢复。
+      ctx.offlineMirror?.(data);
     }
   };
 

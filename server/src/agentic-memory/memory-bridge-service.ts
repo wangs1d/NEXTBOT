@@ -44,6 +44,18 @@ import { createHash } from "node:crypto";
 import { openAgenticSqlite, fromJsonColumn, toJsonColumn } from "./sqlite-store.js";
 import { actorIdVariants } from "./actor-key.js";
 import { semanticFingerprint } from "../services/memory-record-utils.js";
+import {
+  classifyMemorySourceRole,
+  isAssistantVoiceQuery,
+  normalizeMemorySourceRole,
+  type MemorySourceRole,
+} from "../services/memory-source-role.js";
+import { backgroundScheduler } from "../services/background-scheduler.js";
+import {
+  createMemoryRecord,
+  memoryRecordMetadata,
+  type MemoryRecord,
+} from "./memory-record.js";
 
 // ============================================================
 // 结构化依赖接口（最小外观，便于单测注入 fake）
@@ -87,7 +99,7 @@ export interface BridgeGraphLike {
     actorId: string,
     nodeIds: string[],
     max?: number,
-  ): Array<{ id: string; summary: string }>;
+  ): Array<{ id: string; summary: string; sourceRole?: MemorySourceRole }>;
 }
 
 /** Mem0 ingest 侧外观（复用决策/裁剪/infer 抽取 + 写入钩子） */
@@ -146,6 +158,7 @@ export interface FusedMemoryCandidate {
   /** Mem0 侧原始创建时间（ISO），供仲裁器做 domain τ 时间衰减 */
   timestamp?: string;
   highSignal?: boolean;
+  sourceRole?: MemorySourceRole;
 }
 
 export interface BridgeWriteResult {
@@ -195,7 +208,7 @@ function bigramJaccard(a: string, b: string): number {
 
 export class MemoryBridgeService {
   private readonly db: SqliteDatabase;
-  private syncTimer: ReturnType<typeof setInterval> | null = null;
+  private cancelSyncTimer: (() => void) | null = null;
   /** link 行 id → 连续删除失败次数（>=3 封顶 tombstone，防永久重扫） */
   private deleteFailures = new Map<number, number>();
 
@@ -316,6 +329,8 @@ export class MemoryBridgeService {
       sourceEventId?: string;
       sourceEventIds?: string[];
       eventTime?: string;
+      sourceRole?: MemorySourceRole;
+      record?: MemoryRecord;
     },
     unified?: import("./unified-extractor.js").UnifiedExtraction,
   ): Promise<BridgeWriteResult> {
@@ -323,11 +338,20 @@ export class MemoryBridgeService {
     if (this.hasRecentWrite(actorId, text)) {
       return { graphNodeId: null, mem0Items: [], ok: true, deduped: true };
     }
+    const record = opts.record ?? createMemoryRecord({
+      actorId,
+      sourceRef: opts.sourceEventId ? `event:${opts.sourceEventId}` : sourceId,
+      text,
+      sourceRole: opts.sourceRole,
+      kind: opts.highSignal ? "fact" : "event",
+      sourceEventId: opts.sourceEventId,
+      eventTime: opts.eventTime,
+    });
     // 来源事件：认知图 metadata 与 Mem0 metadata 都带，结论可回溯到具体一轮
-    const provenance: Record<string, string> = {};
-    if (opts.sourceEventId) provenance.sourceEventId = opts.sourceEventId;
-    if (opts.sourceEventIds?.length) provenance.sourceEventIds = opts.sourceEventIds.join(",");
-    if (opts.eventTime) provenance.eventTime = opts.eventTime;
+    const provenance: Record<string, unknown> = {
+      ...memoryRecordMetadata(record),
+      ...(opts.sourceEventIds?.length ? { sourceEventIds: opts.sourceEventIds.join(",") } : {}),
+    };
     const baseMetadata = { highSignal: opts.highSignal, ...provenance };
     let graphNodeId: string | null = null;
     let graphFailed = false;
@@ -386,7 +410,7 @@ export class MemoryBridgeService {
       } catch (err) {
         console.error("[memory-bridge] 节点 metadata 回写失败:", err);
       }
-      this.insertLink(actorId, sourceId, graphNodeId, mem0Ids);
+      this.insertLink(actorId, record.sourceRef, graphNodeId, mem0Ids);
     }
 
     const ok = !(graphFailed && mem0Failed);
@@ -426,9 +450,20 @@ export class MemoryBridgeService {
     if (!query) return [];
 
     const context = opts?.context ?? "main";
+    const allowAssistant = isAssistantVoiceQuery(query);
     // 认知图 recall 的 limit 放宽到检索上限，保证两路候选池规模可比
     const [mem0Candidates, graphRecall] = await Promise.all([
-      this.retrieval.searchStructured(actorId, query, { context }).catch(() => [] as AgenticMemoryCandidate[]),
+      this.retrieval
+        .searchStructured(actorId, query, { context })
+        .then((candidates) =>
+          candidates.filter(
+            (candidate) =>
+              allowAssistant ||
+              (normalizeMemorySourceRole(candidate.sourceRole) ??
+                classifyMemorySourceRole(candidate.content)) !== "assistant",
+          ),
+        )
+        .catch(() => [] as AgenticMemoryCandidate[]),
       this.graph
         .buildRecall(actorId, query, { context, crossDomain: true, detailLevel: "summary" })
         .catch(() => ({ recalledNodeIds: [] as string[], confidence: 0, text: "" })),
@@ -439,17 +474,34 @@ export class MemoryBridgeService {
     let ftsCandidates: FtsMemoryCandidate[] = [];
     if (this.fts) {
       try {
-        ftsCandidates = this.fts.search(actorId, query, { context, topK: getMemoryFtsTopK() });
+        ftsCandidates = this.fts
+          .search(actorId, query, { context, topK: getMemoryFtsTopK() })
+          .filter(
+            (candidate) =>
+              allowAssistant ||
+              (normalizeMemorySourceRole(candidate.sourceRole) ??
+                classifyMemorySourceRole(candidate.content)) !== "assistant",
+          );
       } catch {
         ftsCandidates = [];
       }
     }
 
-    const nodeSummaries = new Map(
-      this.graph
-        .getNodeSummariesByIds(actorId, graphRecall.recalledNodeIds, graphRecall.recalledNodeIds.length || 1)
-        .map((n) => [n.id, n.summary]),
+    const nodeRows = this.graph.getNodeSummariesByIds(
+      actorId,
+      graphRecall.recalledNodeIds,
+      graphRecall.recalledNodeIds.length || 1,
     );
+    const nodeSummaries = new Map(nodeRows.map((n) => [n.id, n.summary]));
+    const nodeRoles = new Map<string, MemorySourceRole>(
+      nodeRows.map((n) => [
+        n.id,
+        normalizeMemorySourceRole(n.sourceRole) ?? classifyMemorySourceRole(n.summary),
+      ]),
+    );
+    const recalledNodeIds = allowAssistant
+      ? graphRecall.recalledNodeIds
+      : graphRecall.recalledNodeIds.filter((nodeId) => nodeRoles.get(nodeId) !== "assistant");
 
     // 跨通道合并：先语义指纹精确匹配，再做包含关系匹配——
     // Mem0 infer 抽取的断言通常是认知图原文的子串（"用户喜欢在周末爬山" vs
@@ -460,6 +512,7 @@ export class MemoryBridgeService {
       graphNodeId?: string;
       timestamp?: string;
       highSignal?: boolean;
+      sourceRole?: MemorySourceRole;
       ranks: { channel: BridgeRecallChannel; rank: number }[];
       representative: string;
     }
@@ -484,7 +537,13 @@ export class MemoryBridgeService {
       content: string,
       channel: BridgeRecallChannel,
       rank: number,
-      extra?: { mem0Score?: number; graphNodeId?: string; timestamp?: string; highSignal?: boolean },
+      extra?: {
+        mem0Score?: number;
+        graphNodeId?: string;
+        timestamp?: string;
+        highSignal?: boolean;
+        sourceRole?: MemorySourceRole;
+      },
     ): void => {
       const mergeKey = findMergeKey(content);
       // 键保持首次插入时的指纹（稳定），代表文本单独跟踪为更长一侧
@@ -496,6 +555,10 @@ export class MemoryBridgeService {
       if (extra?.graphNodeId) entry.graphNodeId = extra.graphNodeId;
       if (extra?.timestamp) entry.timestamp = extra.timestamp;
       if (extra?.highSignal !== undefined) entry.highSignal = extra.highSignal;
+      if (extra?.sourceRole) {
+        entry.sourceRole =
+          entry.sourceRole && entry.sourceRole !== extra.sourceRole ? "mixed" : extra.sourceRole;
+      }
       if (content.trim().length > entry.representative.trim().length) {
         entry.representative = content;
       }
@@ -507,12 +570,17 @@ export class MemoryBridgeService {
         mem0Score: cand.score,
         ...(cand.timestamp ? { timestamp: cand.timestamp } : {}),
         highSignal: cand.highSignal,
+        sourceRole:
+          normalizeMemorySourceRole(cand.sourceRole) ?? classifyMemorySourceRole(cand.content),
       });
     });
-    graphRecall.recalledNodeIds.forEach((nodeId, idx) => {
+    recalledNodeIds.forEach((nodeId, idx) => {
       const summary = nodeSummaries.get(nodeId);
       if (!summary) return;
-      upsert(summary, "graph", idx + 1, { graphNodeId: nodeId });
+      upsert(summary, "graph", idx + 1, {
+        graphNodeId: nodeId,
+        sourceRole: nodeRoles.get(nodeId) ?? classifyMemorySourceRole(summary),
+      });
     });
     ftsCandidates.forEach((cand, idx) => {
       if (!cand.content) return;
@@ -520,6 +588,8 @@ export class MemoryBridgeService {
         ...(cand.createdAt ? { timestamp: cand.createdAt } : {}),
         // 仅 true 时传入：FTS 行缺该标记时不得覆盖 mem0/graph 侧已写入的 true
         ...(cand.highSignal === true ? { highSignal: true } : {}),
+        sourceRole:
+          normalizeMemorySourceRole(cand.sourceRole) ?? classifyMemorySourceRole(cand.content),
       });
     });
 
@@ -534,6 +604,7 @@ export class MemoryBridgeService {
         ...(entry.graphNodeId ? { graphNodeId: entry.graphNodeId } : {}),
         ...(entry.timestamp ? { timestamp: entry.timestamp } : {}),
         ...(entry.highSignal !== undefined ? { highSignal: entry.highSignal } : {}),
+        ...(entry.sourceRole ? { sourceRole: entry.sourceRole } : {}),
       });
     }
 
@@ -835,20 +906,21 @@ export class MemoryBridgeService {
   startForgettingSync(): void {
     const intervalMin = getBridgeForgetSyncIntervalMin();
     if (intervalMin <= 0) return;
-    this.syncTimer = setInterval(() => {
-      void this.syncForgetting().catch((err) =>
-        console.error("[memory-bridge] 遗忘同步失败:", err instanceof Error ? err.message : err),
-      );
-    }, intervalMin * 60_000);
-    this.syncTimer.unref();
+    this.cancelSyncTimer = backgroundScheduler.schedule({
+      name: "memory-bridge.forgetting-sync",
+      intervalMs: intervalMin * 60_000,
+      run: async () => {
+        await this.syncForgetting().catch((err) =>
+          console.error("[memory-bridge] 遗忘同步失败:", err instanceof Error ? err.message : err),
+        );
+      },
+    });
     console.info(`[memory-bridge] 遗忘同步已启动（间隔 ${intervalMin}min）`);
   }
 
   stopForgettingSync(): void {
-    if (this.syncTimer) {
-      clearInterval(this.syncTimer);
-      this.syncTimer = null;
-    }
+    this.cancelSyncTimer?.();
+    this.cancelSyncTimer = null;
   }
 }
 

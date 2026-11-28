@@ -28,6 +28,7 @@ import type {
   MemoryProvenance,
   ConfidenceTier,
 } from "../types.js";
+import type { MemoryRecallPlan } from "../../agent/recall-planner.js";
 
 // ============================================================
 // 最小化外观接口（解耦具体实现，便于测试 mock）
@@ -164,7 +165,7 @@ export class MemoryMetacognitionBridge {
   async recallWithProvenance(
     actorId: string,
     query: string,
-    opts?: { domain?: string; limit?: number; subQueries?: string[] },
+    opts?: { domain?: string; limit?: number; subQueries?: string[]; recallPlan?: MemoryRecallPlan },
   ): Promise<MemoryRecallResult> {
     // 降级开关
     if (!this.isEnabled()) {

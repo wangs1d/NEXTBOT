@@ -19,6 +19,7 @@
  */
 
 import type { MemoryRecallItem } from "./types.js";
+import type { MemoryConflictPolicy } from "../agent/recall-planner.js";
 import {
   contentTokenSet,
   semanticFingerprint,
@@ -197,7 +198,10 @@ interface MergedEntry {
  * - 代表条目取归一化分最高者（保留其 content/domain/source 等元信息）。
  * - 记录所有命中通道与各自最高归一化分，供后续综合打分。
  */
-function dedupeAcrossChannels(channels: ChannelRecallResult[]): MergedEntry[] {
+function dedupeAcrossChannels(
+  channels: ChannelRecallResult[],
+  conflictPolicy: MemoryConflictPolicy = "authority_then_recency",
+): MergedEntry[] {
   const byFp = new Map<string, MergedEntry>();
 
   for (const ch of channels) {
@@ -220,7 +224,12 @@ function dedupeAcrossChannels(channels: ChannelRecallResult[]): MergedEntry[] {
       } else {
         existing.channels.add(ch.channel);
         const existingScore = existing.representative.score ?? 0;
-        if (normScore > existingScore) {
+        const existingTime = Date.parse(existing.representative.timestamp ?? "");
+        const itemTime = Date.parse(item.timestamp ?? "");
+        const preferItem = conflictPolicy === "latest_wins"
+          ? (Number.isFinite(itemTime) ? itemTime : 0) > (Number.isFinite(existingTime) ? existingTime : 0)
+          : normScore > existingScore;
+        if (preferItem) {
           // 更新代表（保留更高分的 content，但合并 source 信息）；旧代表降级为 variant，内容不丢
           const prevContent = existing.representative.content;
           existing.representative = {
@@ -358,7 +367,11 @@ function applyDomainQuota(scored: Array<{ item: MemoryRecallItem }>, topN: numbe
 export function arbitrateMemories(
   channels: ChannelRecallResult[],
   config: MemoryArbitratorConfig = DEFAULT_ARBITRATOR_CONFIG,
-  opts?: { query?: string; strengthBoost?: Map<string, number> },
+  opts?: {
+    query?: string;
+    strengthBoost?: Map<string, number>;
+    conflictPolicy?: MemoryConflictPolicy;
+  },
 ): MemoryRecallItem[] {
   if (!config.enabled) {
     // 关闭时简单拼接所有通道（保持向后兼容），不做去重/排序
@@ -375,7 +388,8 @@ export function arbitrateMemories(
   // P0/P1：query 情绪只推断一次；条目缺情绪标记时按内容补齐（统一出口保证每个
   // 返回条目都带 emotion，调用方无需再各自推断）。
   const queryEmotion = opts?.query ? inferEmotionFromText(opts.query) : null;
-  const merged = dedupeAcrossChannels(channels);
+  const conflictPolicy = opts?.conflictPolicy ?? "authority_then_recency";
+  const merged = dedupeAcrossChannels(channels, conflictPolicy);
   for (const entry of merged) {
     if (!entry.representative.emotion && entry.representative.content) {
       entry.representative.emotion = inferEmotionFromText(entry.representative.content);
@@ -401,6 +415,17 @@ export function arbitrateMemories(
     })
     .filter((s) => s.finalScore >= config.minScoreThreshold)
     .sort((a, b) => {
+      if (conflictPolicy === "latest_wins") {
+        const aTime = Date.parse(a.item.timestamp ?? "");
+        const bTime = Date.parse(b.item.timestamp ?? "");
+        const aRank = Number.isFinite(aTime) ? aTime : 0;
+        const bRank = Number.isFinite(bTime) ? bTime : 0;
+        if (bRank !== aRank) return bRank - aRank;
+      }
+      if (conflictPolicy === "single_source") {
+        const channelDelta = b.maxChannelWeight - a.maxChannelWeight;
+        if (Math.abs(channelDelta) > 0.0001) return channelDelta;
+      }
       // 主排序：综合分数降序
       if (Math.abs(b.finalScore - a.finalScore) > 0.0001) return b.finalScore - a.finalScore;
       // 同分 tiebreaker：高权重通道优先（agentic > narrative > kvSummary）

@@ -75,7 +75,7 @@ travelPlanStore.save(buildPlan());
 /** 最小桩：只带 signalWeather（返回非雨天），重排 no-op */
 function makeStubService(): PlanningService {
   return {
-    signalWeather: async () => ({ summaryLine: "晴 22°C", rainy: false }),
+    signalWeather: async () => ({ weatherText: "晴", rainy: false }),
     searchPois: async () => [
       {
         name: "马岭河峡谷",

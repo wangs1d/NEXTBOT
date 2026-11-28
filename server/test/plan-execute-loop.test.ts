@@ -17,6 +17,7 @@ import {
   shouldPlanExecute,
 } from "../src/agent/plan-execute-loop.js";
 import type { ExternalChatProvider, AgentStreamOptions } from "../src/external-model/types.js";
+import { getMemoryComponents, registerMemoryComponents } from "../src/agentic-memory/index.js";
 
 test("requiresExplicitPlan：简单直办与单步查询不触发", () => {
   assert.equal(requiresExplicitPlan("现在几点了"), false);
@@ -71,6 +72,7 @@ test("规划轮收敛：无工具/无全量 system，执行轮保留工具面，
     hasTools: boolean;
     opts: AgentStreamOptions | undefined;
     systemOverride: string | undefined;
+    turnText: string;
   }> = [];
   let clears = 0;
   const provider = {
@@ -80,7 +82,7 @@ test("规划轮收敛：无工具/无全量 system，执行轮保留工具面，
     },
     streamCompletion: async (
       _sid: string,
-      _turn: unknown,
+      turn: unknown,
       _onDelta: unknown,
       tools: unknown,
       opts: AgentStreamOptions | undefined,
@@ -89,6 +91,7 @@ test("规划轮收敛：无工具/无全量 system，执行轮保留工具面，
         hasTools: Boolean(tools),
         opts,
         systemOverride: opts?.systemPromptOverride,
+        turnText: String((turn as { text?: unknown } | undefined)?.text ?? ""),
       });
       return calls.length === 1
         ? '{"goal":"规划三日行程","steps":[{"id":"1","intent":"查天气"},{"id":"2","intent":"排行程"}]}'
@@ -113,13 +116,31 @@ test("规划轮收敛：无工具/无全量 system，执行轮保留工具面，
     maxThreadMessages: 20,
   };
 
+  const previousFactStore = getMemoryComponents().factStore;
+  registerMemoryComponents({
+    factStore: {
+      matchFactsInText: (_actorId: string, text: string) =>
+        text.includes("预算")
+          ? [{ field: "预算", value: "一万元", category: "spending" }]
+          : [],
+      getActiveFacts: () => [
+        { field: "称呼", value: "王哥", category: "identity" },
+        { field: "预算", value: "一万元", category: "spending" },
+        { field: "职业", value: "程序员", category: "identity" },
+        { field: "过敏", value: "花生", category: "health" },
+      ],
+    } as never,
+  });
+
   const result = await runPlanExecuteLoop({
     provider,
     planSessionId: "pe-test",
-    userText: "先查一下三亚的天气，然后帮我规划三天行程",
-    toolCtx: {} as never,
+    userText: "先查一下三亚的天气，然后帮我规划三天行程，预算一万元",
+    toolCtx: { actorId: "actor-plan" } as never,
     baseStreamOpts,
   });
+
+  registerMemoryComponents({ factStore: previousFactStore });
 
   assert.equal(calls.length, 2, "复杂任务 = 1 次计划 + 1 次执行");
   // 规划轮：无工具、紧凑 system、无画像记忆、独立审计 stage
@@ -127,6 +148,11 @@ test("规划轮收敛：无工具/无全量 system，执行轮保留工具面，
   assert.match(calls[0]?.systemOverride ?? "", /任务规划器/);
   assert.ok((calls[0]?.systemOverride ?? "").length < 1200, "规划 system 必须紧凑");
   assert.equal(calls[0]?.opts?.promptContext, undefined, "规划轮不注入全量画像/记忆");
+  assert.match(calls[0]?.turnText ?? "", /用户背景/);
+  assert.match(calls[0]?.turnText ?? "", /称呼：王哥/);
+  assert.match(calls[0]?.turnText ?? "", /预算：一万元/);
+  assert.doesNotMatch(calls[0]?.turnText ?? "", /职业：程序员|过敏：花生|喜欢海边/);
+  assert.ok((calls[0]?.turnText ?? "").length < 8600, "规划输入只增加最小画像，不带全量上下文");
   assert.deepEqual(calls[0]?.opts?.chatToolsBuiltin, []);
   assert.deepEqual(calls[0]?.opts?.chatToolsExtra, []);
   assert.equal(calls[0]?.opts?.auditStage, "task_plane_plan");

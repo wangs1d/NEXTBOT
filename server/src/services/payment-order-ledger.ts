@@ -2,7 +2,7 @@ import { getDataDir } from "../config/data-dir.js";
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import Database from "better-sqlite3";
+import { openSqlite } from "../storage/sqlite.js";
 import type { Database as SqliteDatabase } from "better-sqlite3";
 
 /**
@@ -57,9 +57,7 @@ export class PaymentOrderLedger {
     if (this.db) return this.db;
     try {
       const file = paymentLedgerDbPath();
-      mkdirSync(dirname(file), { recursive: true });
-      const db = new Database(file);
-      db.pragma("journal_mode = WAL");
+      const db = openSqlite(file);
       db.exec(`
         CREATE TABLE IF NOT EXISTS orders (
           out_trade_no TEXT PRIMARY KEY,

@@ -6,6 +6,7 @@ import {
   type PathRateLimitRule,
 } from "./path-rate-limit-rules.js";
 import { createRedisHttpRateLimiter, type RateLimitDecision } from "./redis-rate-limit.js";
+import { backgroundScheduler } from "../services/background-scheduler.js";
 
 export type { RateLimitDecision };
 
@@ -106,7 +107,7 @@ function requestPath(url: string): string {
 
 export class HttpRateLimitStore {
   private readonly clients = new Map<string, ClientState>();
-  private sweepTimer: ReturnType<typeof setInterval> | null = null;
+  private cancelSweep: (() => void) | null = null;
 
   constructor(
     private readonly maxTrackedClients: number,
@@ -142,26 +143,27 @@ export class HttpRateLimitStore {
   }
 
   startIdleSweep(): void {
-    if (this.sweepTimer !== null) return;
+    if (this.cancelSweep !== null) return;
     const idleMs = Math.max(this.maxSweepWindowMs * 3, 120_000);
-    this.sweepTimer = setInterval(() => {
-      const now = Date.now();
-      for (const [k, s] of this.clients) {
-        pruneWindow(s, now, s.slidingWindowMs);
-        const idle = now - s.lastTouchMs;
-        if (idle > idleMs && s.windowTimestamps.length === 0 && s.tokens >= s.bucketCapacity - 1e-6) {
-          this.clients.delete(k);
+    this.cancelSweep = backgroundScheduler.schedule({
+      name: "http-rate-limit.idle-sweep",
+      intervalMs: 60_000,
+      run: () => {
+        const now = Date.now();
+        for (const [k, s] of this.clients) {
+          pruneWindow(s, now, s.slidingWindowMs);
+          const idle = now - s.lastTouchMs;
+          if (idle > idleMs && s.windowTimestamps.length === 0 && s.tokens >= s.bucketCapacity - 1e-6) {
+            this.clients.delete(k);
+          }
         }
-      }
-    }, 60_000);
-    this.sweepTimer.unref?.();
+      },
+    });
   }
 
   stopIdleSweep(): void {
-    if (this.sweepTimer !== null) {
-      clearInterval(this.sweepTimer);
-      this.sweepTimer = null;
-    }
+    this.cancelSweep?.();
+    this.cancelSweep = null;
   }
 }
 

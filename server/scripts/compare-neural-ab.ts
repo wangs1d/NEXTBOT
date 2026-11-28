@@ -96,7 +96,7 @@ async function main(): Promise<void> {
   const stats = await ensureToolEmbeddings(
     p1.deferredCatalog.entries.map((e) => ({
       registryName: e.registryName,
-      searchText: e.embeddingInput || e.searchText,
+      embeddingViews: e.embeddingViews,
     })),
   );
   const embMs = performance.now() - embStart;

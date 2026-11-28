@@ -1,0 +1,801 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>实时数字人</title>
+<style>
+  :root {
+    --bg: #f5f5f7;
+    --bubble-bot: #ececf0;
+    --bubble-me: #d6e4ff;
+    --text: #1c1c1e;
+    --sub: #8a8a8e;
+    --accent: #3b82f6;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: flex; flex-direction: column;
+    background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  header {
+    display: flex; flex-direction: column; align-items: center;
+    padding: 2px 0 6px; gap: 6px;
+  }
+  .stage {
+    width: 300px; height: 400px; position: relative;
+    /* 椭圆裁切：整体位移/转头时不露出矩形边缘的背景 */
+    border-radius: 50%; overflow: hidden;
+    background: transparent;
+    box-shadow: 0 8px 28px rgba(0,0,0,.14);
+  }
+  .stage.speaking {
+    box-shadow: 0 8px 34px rgba(59,130,246,.28);
+  }
+  #view { width: 100%; height: 100%; display: block; }
+  .stage.wide { width: 360px; height: 480px; }
+  .nametag-row { margin-top: 8px; display: flex; align-items: center; gap: 8px; }
+  .nametag {
+    font-size: 13px; color: var(--sub);
+    padding: 3px 14px; background: #fff; border-radius: 999px;
+    box-shadow: 0 1px 4px rgba(0,0,0,.06);
+  }
+  .chip {
+    border: 0; background: #fff; color: var(--accent); font: inherit; font-size: 12px;
+    padding: 4px 12px; border-radius: 999px; cursor: pointer;
+    box-shadow: 0 1px 4px rgba(0,0,0,.06);
+  }
+  .chip:disabled { opacity: .45; cursor: not-allowed; }
+  /* 上传 / 重建进度浮层 */
+  .upload-overlay {
+    position: absolute; inset: 0; z-index: 3;
+    display: flex; align-items: center; justify-content: center;
+    background: rgba(255,255,255,.82);
+  }
+  .upload-overlay[hidden] { display: none; }
+  .upload-box { width: 74%; text-align: center; }
+  .upload-text {
+    font-size: 12px; color: var(--text); line-height: 1.4;
+    margin-bottom: 8px; min-height: 34px;
+  }
+  .upload-bar { height: 6px; border-radius: 3px; background: #e3e3e8; overflow: hidden; }
+  .upload-fill { height: 100%; width: 0%; background: var(--accent); transition: width .25s ease; }
+  .status { font-size: 12px; color: var(--sub); height: 16px; }
+  #chat {
+    flex: 1; overflow-y: auto; padding: 10px 16px 4px;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .msg {
+    max-width: 78%; padding: 9px 13px; border-radius: 16px;
+    word-break: break-word; animation: pop .18s ease-out;
+  }
+  @keyframes pop { from { opacity: 0; transform: translateY(6px); } }
+  .msg.bot  { background: var(--bubble-bot); align-self: flex-start; border-bottom-left-radius: 5px; }
+  .msg.me   { background: var(--bubble-me);  align-self: flex-end;   border-bottom-right-radius: 5px; }
+  .msg.sys  { background: transparent; color: var(--sub); font-size: 12px; align-self: center; }
+  footer {
+    display: flex; gap: 9px; padding: 10px 14px 16px;
+    background: var(--bg); border-top: 1px solid #e6e6ea;
+  }
+  #input {
+    flex: 1; resize: none; border: 1px solid #dcdce2; border-radius: 20px;
+    padding: 10px 15px; font: inherit; background: #fff; outline: none;
+    max-height: 96px;
+  }
+  #input:focus { border-color: var(--accent); }
+  #send {
+    width: 62px; border: 0; border-radius: 20px; background: var(--accent);
+    color: #fff; font: inherit; cursor: pointer;
+  }
+  #send:disabled { opacity: .45; cursor: not-allowed; }
+  .hint { text-align: center; font-size: 11px; color: var(--sub); padding-bottom: 4px; }
+
+  html.mini-mode, html.mini-mode body {
+    width: 100%; height: 100%; overflow: hidden; background: transparent;
+  }
+  .mini-mode header { position: absolute; inset: 0; display: block; padding: 0; }
+  .mini-mode .stage {
+    width: 100%; height: 100%; border-radius: 50%; box-shadow: none;
+  }
+  .mini-mode .nametag-row, .mini-mode #status, .mini-mode #chat,
+  .mini-mode .hint, .mini-mode footer, .mini-mode #avatarFile,
+  .mini-mode .upload-overlay { display: none !important; }
+  .detail-mode .nametag-row, .detail-mode #avatarFile { display: none !important; }
+</style>
+</head>
+<body>
+  <header>
+    <div class="stage idle" id="stage">
+      <canvas id="view" width="480" height="640"></canvas>
+      <div class="upload-overlay" id="uploadOverlay" hidden>
+        <div class="upload-box">
+          <div class="upload-text" id="uploadText">校验中…</div>
+          <div class="upload-bar"><div class="upload-fill" id="uploadFill"></div></div>
+        </div>
+      </div>
+    </div>
+    <div class="nametag-row">
+      <span class="nametag">数字人</span>
+      <button class="chip" id="avatarBtn">换头像</button>
+    </div>
+    <input type="file" id="avatarFile" accept="image/png,image/jpeg,image/webp" hidden />
+    <div class="status" id="status">连接中…</div>
+  </header>
+
+  <div id="chat"></div>
+
+  <div class="hint" id="fpsHint">本地 GPU 实时驱动</div>
+  <footer>
+    <textarea id="input" rows="1" placeholder="说点什么…"></textarea>
+    <button id="send">发送</button>
+  </footer>
+
+<script>
+(() => {
+  const params = new URLSearchParams(location.search);
+  const mode = params.get('mode');
+  const miniMode = mode === 'mini';
+  const detailMode = mode === 'detail';
+  if (miniMode) document.documentElement.classList.add('mini-mode');
+  if (detailMode) document.documentElement.classList.add('detail-mode');
+
+  const view = document.getElementById('view');
+  const ctx = view.getContext('2d', { alpha: false, desynchronized: true });
+  const stage = document.getElementById('stage');
+  const statusEl = document.getElementById('status');
+  const chat = document.getElementById('chat');
+  const input = document.getElementById('input');
+  const sendBtn = document.getElementById('send');
+  const avatarBtn = document.getElementById('avatarBtn');
+  const avatarFile = document.getElementById('avatarFile');
+  const uploadOverlay = document.getElementById('uploadOverlay');
+  const uploadText = document.getElementById('uploadText');
+  const uploadFill = document.getElementById('uploadFill');
+  const fpsHint = document.getElementById('fpsHint');
+
+  if (miniMode) {
+    view.width = 480;
+    view.height = 480;
+  }
+  const S = view.width;                 // 画布宽
+  const SH = view.height;               // 画布高
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  let SERVER_FPS = 15;
+  let prebufferN = 10;
+
+  let ws = null;
+  let paused = miniMode;
+  let listening = false;   // 倾听态：宿主（Flutter/页面）经 __avatar.setListening 控制
+  let reconnectTimer = 0;
+  let playing = false;
+  let speaking = false;
+  let frames = new Map();               // frameIdx -> {ts, bmp}
+  let frameOrder = [];                  // 按 ts 排序的 frameIdx
+  let lastDrawn = -1;
+  let inflightFrames = 0;               // 正在解码、还没进 frames 的帧数
+  let rafId = 0;
+
+  // ── 音频：WebAudio 统一时间轴 ──
+  // 服务端按句下发 PCM（每句带 offset_ms），这里按绝对时间背靠背调度，
+  // 所有句共用 baseAt 这一个时间原点，画面也用它取帧，句与句之间不会漂。
+  let actx = null;
+  let baseAt = 0;                       // 全局时间轴 0 对应的 actx.currentTime（0=未开始）
+  let chunks = [];                      // {index, offsetMs, buf, scheduled}
+  let sources = [];                     // 已调度的 BufferSource
+  let audioTotalMs = 0;
+  let firstChunkDurMs = 0;              // 首句音频时长（判断首句画面是否已烘够）
+  let bufferedUntilMs = 0;              // 已收到的说话帧覆盖到的时间点
+  let allReceived = false;
+  let audioBackpressure = false;
+  let audioPausePending = false;
+  let audioResumePending = false;
+  let avPauseStartedAt = 0;
+  const AV_LOW_BUFFER_MS = 220;
+  const AV_RESUME_BUFFER_MS = 700;
+
+  // ── 埋点 ──
+  const tele = {
+    sendAt: 0, speakAt: 0, firstFrameAt: 0, ttsMs: 0,
+    drawn: 0, driftSum: 0, maxDrift: 0, late: 0, lateAudio: 0,
+    avPauses: 0, avPausedMs: 0,
+  };
+  function sendTelemetry(kind, data) {
+    const rec = Object.assign({ src: 'client', kind, t: Date.now() }, data || {});
+    try {
+      fetch('/api/telemetry', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(rec),
+        keepalive: true,
+      }).catch(() => {});
+    } catch (e) { /* 埋点失败不影响主流程 */ }
+  }
+
+  // ── 基础绘制 ──
+  function clearStage() {
+    ctx.clearRect(0, 0, S, SH);
+    if (!miniMode) {
+      ctx.fillStyle = '#dcdce2';
+      ctx.fillRect(0, 0, S, SH);
+    }
+  }
+  clearStage();
+
+  function drawBitmap(bmp, pose) {
+    // cover：保持原比例、居中裁剪到画布（避免非 3:4 素材被拉伸变形）
+    const iw = bmp.width || 0;
+    const ih = bmp.height || 0;
+    if (!iw || !ih) return;
+    const scale = Math.max(S / iw, SH / ih);
+    const dw = iw * scale;
+    const dh = ih * scale;
+    const dx = (S - dw) / 2;
+    const dy = (SH - dh) / 2;
+    ctx.drawImage(bmp, dx, dy, dw, dh);
+    // 人物蒙版（背景透明化）：destination-in 抠掉人物羽化边缘外的一切。
+    // 蒙版是中性帧的静态图，服务端随帧下发「中性→当前」相似变换（pose），
+    // 让蒙版跟着头动——歪头/转头时轮廓始终贴住人物，照片背景零暴露。
+    if (maskImg) {
+      ctx.globalCompositeOperation = 'destination-in';
+      ctx.save();
+      ctx.translate(dx, dy);
+      ctx.scale(dw / 512, dh / 512);
+      if (pose) {
+        ctx.translate(pose.tx, pose.ty);
+        ctx.rotate(Math.atan2(pose.b, pose.a));
+        const ps = Math.hypot(pose.a, pose.b);
+        ctx.scale(ps, ps);
+      }
+      ctx.drawImage(maskImg, 0, 0, maskImg.width, maskImg.height, 0, 0, 512, 512);
+      ctx.restore();
+      ctx.globalCompositeOperation = 'source-over';
+    }
+  }
+
+  // 人物 alpha 蒙版：按 ready/avatar_changed 的 mask_rev 增量拉一次
+  let maskImg = null;
+  let maskRev = -1;
+  // 每帧前的蒙版随头变换（服务端 pose JSON），与紧随的二进制帧配对
+  let pendingPose = null;
+  async function fetchMask(rev) {
+    try {
+      const res = await fetch('/api/avatar/mask', { cache: 'no-store' });
+      if (!res.ok) return;
+      const blob = await res.blob();
+      const img = new Image();
+      img.onload = () => { maskImg = img; maskRev = rev; };
+      img.src = URL.createObjectURL(blob);
+    } catch (e) { /* 蒙版不可用：保持不透明 */ }
+  }
+
+  function drawFrame(bmp, pose) {
+    drawBitmap(bmp, pose);
+  }
+
+  // ── 帧调度：按 WebAudio 统一时间轴取帧 ──
+  function maxFrameIdx() {
+    let m = -1;
+    for (const k of frames.keys()) if (k > m) m = k;
+    return m;
+  }
+
+  function updateAudioBackpressure(tms) {
+    if (!playing || !actx || actx.state === 'closed') return;
+    const bufferMs = bufferedUntilMs - tms;
+    if (audioBackpressure) {
+      if (!audioResumePending && actx.state === 'suspended' &&
+          ((allReceived && inflightFrames === 0) || bufferMs >= AV_RESUME_BUFFER_MS)) {
+        audioResumePending = true;
+        actx.resume().then(() => {
+          if (audioBackpressure) {
+            const pausedMs = performance.now() - avPauseStartedAt;
+            tele.avPausedMs += pausedMs;
+            sendTelemetry('av_resume', {
+              audio_ms: Math.round((actx.currentTime - baseAt) * 1000),
+              paused_ms: Math.round(pausedMs),
+            });
+            audioBackpressure = false;
+          }
+          audioResumePending = false;
+        }).catch(() => { audioResumePending = false; });
+      }
+      return;
+    }
+    if (allReceived || audioPausePending || actx.state !== 'running' ||
+        bufferMs >= AV_LOW_BUFFER_MS) return;
+    audioPausePending = true;
+    actx.suspend().then(() => {
+      audioPausePending = false;
+      if (!playing) return;
+      if (allReceived && inflightFrames === 0) {
+        actx.resume().catch(() => {});
+        return;
+      }
+      audioBackpressure = true;
+      tele.avPauses++;
+      avPauseStartedAt = performance.now();
+      sendTelemetry('av_pause', {
+        audio_ms: Math.round(tms),
+        buffer_ms: Math.round(bufferMs),
+      });
+    }).catch(() => { audioPausePending = false; });
+  }
+
+  function tick() {
+    rafId = requestAnimationFrame(tick);
+    if (!playing || !baseAt || frameOrder.length === 0) return;
+
+    // 全局时间轴：所有分句的 PCM 都排在这条轴上，画面也按它取帧
+    const tms = (actx.currentTime - baseAt) * 1000;
+    updateAudioBackpressure(tms);
+
+    // 取时间戳最接近音频时钟的一帧；提前 tolerance 选下一帧会让口型系统性超前。
+    // 不用二分：createImageBitmap 是异步的，帧到达顺序可能乱序。
+    const tolerance = 1000 / (SERVER_FPS || 20) / 2 + 8;
+    let pick = -1;
+    let bestDist = Infinity;
+    for (let i = 0; i < frameOrder.length; i++) {
+      const f = frames.get(frameOrder[i]);
+      if (!f) continue;
+      const dist = Math.abs(f.ts - tms);
+      if (dist <= tolerance && dist < bestDist) {
+        bestDist = dist;
+        pick = frameOrder[i];
+      }
+    }
+    if (pick >= 0 && pick !== lastDrawn) {
+      lastDrawn = pick;
+      const fr = frames.get(pick);
+      drawFrame(fr.bmp, fr.pose);
+      // 埋点：本帧对应时刻与播放时钟的偏差（正=画面落后音频）
+      if (playing) {
+        const drift = tms - fr.ts;
+        tele.drawn++;
+        tele.driftSum += drift;
+        if (drift > tele.maxDrift) tele.maxDrift = drift;
+      }
+    }
+
+    // 收句完成：帧已收全（且没有还在解码的帧）并且画到最后一帧
+    if (allReceived && inflightFrames === 0 && lastDrawn >= maxFrameIdx()) {
+      finishPlayback(); return;
+    }
+    // 兜底：帧丢失时不要永远卡在说话态
+    if (allReceived && tms > audioTotalMs + 1500) finishPlayback();
+  }
+
+  function ensureAudio() {
+    if (!actx) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      actx = new AC();
+    }
+    if (actx.state === 'suspended') actx.resume().catch(() => {});
+    return actx;
+  }
+
+  // 一句 PCM → AudioBuffer → 按 offset 排进统一时间轴
+  function queuePcm(index, offsetMs, audio) {
+    if (!audio || !audio.data) return;
+    const sr = audio.sampleRate || 24000;
+    const bin = atob(audio.data);
+    const n = bin.length >> 1;
+    if (!n) return;
+    const buf = actx.createBuffer(1, n, sr);
+    const ch = buf.getChannelData(0);
+    for (let i = 0, j = 0; i < n; i++, j += 2) {
+      let v = bin.charCodeAt(j) | (bin.charCodeAt(j + 1) << 8);
+      if (v >= 0x8000) v -= 0x10000;
+      ch[i] = v / 32768;
+    }
+    chunks.push({ index, offsetMs, buf, scheduled: false });
+    audioTotalMs = Math.max(audioTotalMs, offsetMs + buf.duration * 1000);
+    scheduleAudio();
+  }
+
+  // 把还没排队的句子排进 WebAudio；统一时间原点在第一帧缓冲够时确定
+  function scheduleAudio(force) {
+    if (!actx) return;
+    if (!chunks.length) return;
+    if (!baseAt) {
+      const frameMs = 1000 / (SERVER_FPS || 14);
+      // 正常情况下凑够预缓冲再开播；但如果首句本身很短（帧数不到预缓冲），
+      // 只要首句画面已经全部渲染出来就直接开播，不然要等整段回复渲染完才出声。
+      const covered = firstChunkDurMs > 0 &&
+        bufferedUntilMs >= firstChunkDurMs - frameMs * 2;
+      const need = force ? 1 : prebufferN;
+      if (frames.size < need && !covered) return;
+      // 留 60ms 调度余量，保证第一句不是"已经迟了"才被 start
+      baseAt = actx.currentTime + 0.06;
+      playing = true;
+      beginRender();
+      sendTelemetry('playback_start', {
+        tts_ms: tele.ttsMs,
+        prebuffer: prebufferN,
+        audio_ms: Math.round(audioTotalMs),
+      });
+    }
+    for (const c of chunks) {
+      if (c.scheduled) continue;
+      const target = baseAt + c.offsetMs / 1000;
+      const when = Math.max(target, actx.currentTime + 0.01);
+      if (when - target > 0.06) tele.lateAudio++;
+      const src = actx.createBufferSource();
+      src.buffer = c.buf;
+      src.connect(actx.destination);
+      src.start(when);
+      c.scheduled = true;
+      sources.push(src);
+    }
+  }
+
+  // 音频已排上 + 帧缓冲足够，两个条件都满足才真正开始
+  // force=true：数据已经收全但帧数不足预缓冲（很短的句子），直接开播
+  function tryStart(force) {
+    if (!speaking) return;
+    scheduleAudio(force);
+  }
+
+  function beginRender() {
+    stage.classList.remove('idle');
+    stage.classList.add('speaking');
+    setStatus('说话中…');
+    if (!rafId) tick();
+  }
+
+  // ── 消息 ──
+  function addMsg(kind, text) {
+    const div = document.createElement('div');
+    div.className = 'msg ' + kind;
+    div.textContent = text;
+    chat.appendChild(div);
+    chat.scrollTop = chat.scrollHeight;
+  }
+
+  function setStatus(t) { statusEl.textContent = t; }
+
+  function resetSpeech() {
+    for (const s of sources) { try { s.stop(); } catch (e) { /* 已结束 */ } }
+    sources = [];
+    chunks = [];
+    baseAt = 0;
+    audioTotalMs = 0;
+    firstChunkDurMs = 0;
+    bufferedUntilMs = 0;
+    for (const v of frames.values()) v.bmp.close && v.bmp.close();
+    frames.clear();
+    frameOrder = [];
+    lastDrawn = -1;
+    playing = false;
+    speaking = false;
+    allReceived = false;
+    audioBackpressure = false;
+    audioPausePending = false;
+    audioResumePending = false;
+    avPauseStartedAt = 0;
+    cancelAnimationFrame(rafId); rafId = 0;
+  }
+
+  // ── WebSocket ──
+  function disconnect() {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = 0;
+    if (!ws) return;
+    const old = ws;
+    ws = null;
+    old.onclose = null;
+    old.close();
+  }
+
+  function connect() {
+    if (paused) return;
+    disconnect();
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const socket = new WebSocket(`${proto}://${location.host}/ws`);
+    ws = socket;
+
+    socket.onopen = () => {
+      setStatus('就绪');
+      // 重连后服务端状态会丢，重发当前倾听态
+      if (listening && ws) ws.send(JSON.stringify({ type: 'listening', active: true }));
+    };
+    socket.onclose = () => {
+      if (ws !== socket) return;
+      ws = null;
+      resetSpeech();
+      if (paused) return;
+      setStatus('连接断开，正在重连…');
+      reconnectTimer = setTimeout(connect, 1500);
+    };
+    socket.onerror = () => setStatus('连接异常');
+
+    socket.onmessage = async (ev) => {
+      if (paused || ws !== socket) return;
+      if (typeof ev.data === 'string') {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === 'ready') {
+          prebufferN = msg.prebuffer || 10;
+          if (msg.fps) {
+            SERVER_FPS = msg.fps;
+            fpsHint.textContent = `本地 GPU 实时驱动 · 约 ${msg.fps}fps`;
+          }
+          if (msg.mask_rev !== undefined && msg.mask_rev !== maskRev) {
+            fetchMask(msg.mask_rev);
+          }
+          setStatus('就绪');
+        } else if (msg.type === 'speak_start') {
+          resetSpeech();
+          speaking = true;
+          prebufferN = msg.prebuffer || 8;
+          // 重置埋点
+          tele.speakAt = performance.now();
+          tele.firstFrameAt = 0;
+          tele.ttsMs = msg.tts_ms || 0;
+          tele.drawn = 0; tele.driftSum = 0; tele.maxDrift = 0;
+          tele.late = 0; tele.lateAudio = 0;
+          tele.avPauses = 0; tele.avPausedMs = 0;
+          ensureAudio();
+          // 首句音频：合成完就下发，不等后面几句
+          firstChunkDurMs = msg.dur_ms || 0;
+          queuePcm(msg.index || 0, msg.offset_ms || 0, msg.audio);
+          setStatus(`首句合成完成 (${msg.tts_ms}ms)，缓冲中…`);
+        } else if (msg.type === 'speak_chunk') {
+          // 后续句子：播放期间陆续到达，直接排进同一条时间轴
+          if (!speaking) return;
+          queuePcm(msg.index || 0, msg.offset_ms || 0, msg.audio);
+        } else if (msg.type === 'avatar_changed') {
+          if (msg.mask_rev !== undefined) fetchMask(msg.mask_rev);
+          // 服务端热切换完成：清掉旧头像残留帧，等待下一帧模型输出
+          resetSpeech();
+          clearStage();
+        } else if (msg.type === 'pose') {
+          // 蒙版随头相似变换：与紧随的二进制帧配对（见二进制分支）
+          pendingPose = msg;
+        } else if (msg.type === 'speak_end') {
+          // 整段回复的帧（含收势帧）已经全部发完
+          allReceived = true;
+          setStatus(playing ? '说话中…' : '就绪');
+          // 很短的句子可能帧数不足预缓冲：数据已收全就直接开播
+          tryStart(true);
+          if (!playing && frames.size === 0) finishPlayback();
+        } else if (msg.type === 'error') {
+          addMsg('sys', msg.message);
+          setStatus('出错');
+          sendBtn.disabled = false;
+          speaking = false;
+          playing = false;
+          allReceived = false;
+          stage.classList.add('idle'); stage.classList.remove('speaking');
+        }
+        return;
+      }
+
+      // 二进制帧：<uint32 idx><uint16 ts> + jpeg
+      // 每帧前的 pose JSON（蒙版随头变换）按 WS 顺序与该帧配对；
+      // 快照必须先于任何 await——下一条 pose 可能在 arrayBuffer 期间先到
+      const pose = pendingPose;
+      pendingPose = null;
+      inflightFrames++;
+      const buf = await ev.data.arrayBuffer();
+      const dv = new DataView(buf);
+      const idx = dv.getUint32(0, true);
+      const ts = dv.getUint16(4, true);
+      const bmp = await createImageBitmap(new Blob([buf.slice(6)], { type: 'image/jpeg' }));
+      inflightFrames--;
+      if (paused || ws !== socket) {
+        if (bmp.close) bmp.close();
+        return;
+      }
+
+      // 空闲微动帧：直接显示，不进同步队列
+      if (ts === 0xFFFF) {
+        if (!playing) {
+          drawFrame(bmp, pose);
+        }
+        if (bmp.close) bmp.close();
+        return;
+      }
+
+      frames.set(idx, { ts, bmp, pose });
+      frameOrder.push(idx);
+      const frameMs = 1000 / (SERVER_FPS || 14);
+      if (ts + frameMs > bufferedUntilMs) bufferedUntilMs = ts + frameMs;
+
+      // 埋点：首个说话帧到达耗时 + 迟到帧（到达时音频已播过该时刻）
+      if (!tele.firstFrameAt) tele.firstFrameAt = performance.now();
+      if (playing && baseAt && actx) {
+        const tms = (actx.currentTime - baseAt) * 1000;
+        if (ts < tms - 120) tele.late++;
+      }
+
+      // 首帧不在到达时抢画，由播放时钟在 tick 中显示，避免预缓冲期间闪跳。
+
+      if (!playing) {
+        if (frames.size >= prebufferN) {
+          setStatus('说话中…');
+        }
+        tryStart();
+      }
+    };
+  }
+
+  // 收句完成：画面已经播到最后一帧，这时才切回空闲
+  function finishPlayback() {
+    if (!playing && !speaking) return;
+    playing = false;
+    allReceived = false;
+    speaking = false;          // 必须复位，否则之后一直判定为"还在说话"、发不出下一句
+    for (const s of sources) { try { s.stop(); } catch (e) { /* 已播完 */ } }
+    sources = [];
+    setStatus('就绪');
+    stage.classList.add('idle');
+    stage.classList.remove('speaking');
+    sendBtn.disabled = false;
+    if (audioBackpressure && avPauseStartedAt) {
+      tele.avPausedMs += performance.now() - avPauseStartedAt;
+      audioBackpressure = false;
+    }
+
+    // 埋点：本次播放的真实表现
+    const dur = audioTotalMs / 1000;
+    sendTelemetry('playback_end', {
+      tts_ms: tele.ttsMs,
+      audio_s: Math.round(audioTotalMs) / 1000,
+      send_to_first_ms: (tele.firstFrameAt && tele.sendAt)
+        ? Math.round(tele.firstFrameAt - tele.sendAt) : null,
+      first_frame_ms: (tele.firstFrameAt && tele.speakAt)
+        ? Math.round(tele.firstFrameAt - tele.speakAt) : null,
+      drawn: tele.drawn,
+      disp_fps: dur > 0 ? Math.round(tele.drawn / dur * 10) / 10 : null,
+      drift_avg_ms: tele.drawn ? Math.round(tele.driftSum / tele.drawn) : null,
+      drift_max_ms: Math.round(tele.maxDrift),
+      late_frames: tele.late,
+      late_audio_chunks: tele.lateAudio,
+      av_pauses: tele.avPauses,
+      av_paused_ms: Math.round(tele.avPausedMs),
+      prebuffer: prebufferN,
+      server_fps: SERVER_FPS,
+    });
+  }
+
+  // ── 发送 ──
+  function send() {
+    const text = input.value.trim();
+    if (!text) return;
+
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      addMsg('sys', '还没连上服务，请稍候再试');
+      return;
+    }
+    if (speaking || playing) {
+      addMsg('sys', '还在说话，等说完再发吧');
+      return;
+    }
+
+    addMsg('me', text);
+    tele.sendAt = performance.now();
+    ensureAudio();                 // 必须用户手势内解锁音频，否则首句会被浏览器拦
+    ws.send(JSON.stringify({ type: 'say', text }));
+    input.value = '';
+    input.style.height = 'auto';
+    sendBtn.disabled = true;
+    setStatus('合成语音中…');
+  }
+
+  sendBtn.addEventListener('click', send);
+
+  // ── 头像上传 / 热切换 ──
+  function showUpload(text, pct) {
+    uploadOverlay.hidden = false;
+    uploadText.textContent = text;
+    uploadFill.style.width = Math.max(0, Math.min(100, pct)) + '%';
+  }
+  function hideUpload() { uploadOverlay.hidden = true; }
+
+  async function uploadAvatar(file) {
+    if (!file) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      addMsg('sys', '还没连上服务，请稍候再试');
+      return;
+    }
+    if (speaking || playing) {
+      addMsg('sys', '还在说话，等说完再换头像');
+      return;
+    }
+
+    avatarBtn.disabled = true;
+    sendBtn.disabled = true;
+    showUpload('上传并校验中…', 8);
+
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const res = await fetch('/api/avatar', { method: 'POST', body: fd });
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok || !data.ok) {
+        const msg = data.message || (data.detail && String(data.detail)) || '上传失败';
+        showUpload(msg, 100);
+        setTimeout(hideUpload, 2600);
+        addMsg('sys', msg);
+        return;
+      }
+
+      showUpload('已接收，准备重建…', 15);
+      const job = data.job;
+      for (;;) {
+        await new Promise(r => setTimeout(r, 400));
+        const s = await (await fetch('/api/avatar/status/' + job, { cache: 'no-store' })).json();
+        showUpload(s.message || '处理中…', s.progress || 15);
+        if (s.state === 'ready') {
+          hideUpload();
+          addMsg('sys', '头像已切换');
+          clearStage();
+          break;
+        }
+        if (s.state === 'error') {
+          setTimeout(hideUpload, 2600);
+          addMsg('sys', s.message || '头像切换失败');
+          break;
+        }
+      }
+    } catch (e) {
+      showUpload('上传失败', 100);
+      setTimeout(hideUpload, 2200);
+      addMsg('sys', '上传失败：' + e.message);
+    } finally {
+      avatarBtn.disabled = false;
+      sendBtn.disabled = false;
+    }
+  }
+
+  avatarBtn.addEventListener('click', () => avatarFile.click());
+  avatarFile.addEventListener('change', () => {
+    const f = avatarFile.files && avatarFile.files[0];
+    avatarFile.value = '';       // 允许重复选择同一张
+    if (f) uploadAvatar(f);
+  });
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+  });
+  input.addEventListener('input', () => {
+    input.style.height = 'auto';
+    input.style.height = Math.min(input.scrollHeight, 96) + 'px';
+  });
+
+  // 点击头像切换大小
+  stage.addEventListener('click', () => stage.classList.toggle('wide'));
+
+  window.__avatar = {
+    setPaused(value) {
+      const next = !!value;
+      if (next === paused) return;
+      paused = next;
+      resetSpeech();
+      if (paused) {
+        disconnect();
+        return;
+      }
+      connect();
+    },
+    setListening(value) {
+      const next = !!value;
+      if (next === listening) return;
+      listening = next;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'listening', active: next }));
+      }
+    },
+    reloadAvatar() {
+      resetSpeech();
+      clearStage();
+    },
+  };
+
+  if (!miniMode) connect();
+})();
+</script>
+</body>
+</html>

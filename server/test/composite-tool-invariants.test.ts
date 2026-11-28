@@ -205,8 +205,8 @@ test("复合 action 声明透传的 params 必须在 schema properties 里有定
 
 test("天气复合分支必须暴露 focus（回执收窄参数，防今日/明日温度打架）", () => {
   // 2026-11-21 事故回归锁：问「明天天气」必须能把 focus=tomorrow 透传给 weather.get_local，
-  // 否则回执同时含今日区间与明日区间——卡片取今日 todayRangeC、正文读 summaryLine 里
-  // 的明日区间，用户看到「文字 9-16 / 卡片 9-14」自相矛盾。
+  // 否则回执同时含今日区间与明日区间——卡片取今日 todayRangeC、正文读明日字段，
+  // 用户看到「文字 9-16 / 卡片 9-14」自相矛盾。
   const weatherSpec = COMPOSITE_SPECS.find((s) => s.name === "web_search");
   assert.ok(weatherSpec, "web_search 复合工具应存在");
   const weatherAction = weatherSpec!.actions.weather;

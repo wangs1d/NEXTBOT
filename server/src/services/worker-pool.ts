@@ -1,13 +1,12 @@
 /**
  * Worker 线程池：基于 node:worker_threads 的通用任务分发器。
  *
- * 用于将慢能力（code.run / image.generate）放到独立 worker 线程执行，
+ * 用于将慢能力（image.generate）放到独立 worker 线程执行，
  * 实现故障隔离——worker 崩溃不影响主进程。
  *
  * 设计要点：
  *   - 每种任务类型对应一个 worker 池（默认 2 个实例，WORKER_POOL_SIZE_* 可调，
- *     2026-09-08 A3：由"每类型单 Worker + FIFO"改为真并行池——多后台任务并行时
- *     code.run/image.generate 不再在 worker 层串行排队，与 per-tool 信号量对齐）
+ *     出现排队且未达上限时扩容，避免在 worker 层串行排队）
  *   - 主进程通过 postMessage 提交任务，worker 执行后 postMessage 返回结果
  *   - 池按需扩容：首个任务起 1 个 worker，出现排队且未达上限时再扩
  *   - worker 崩溃后自动重启（下次 submit 时 ensureWorker）
@@ -27,7 +26,7 @@ import { getDataDir } from "../config/data-dir.js";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-export type WorkerTaskType = "code.run" | "image.generate";
+export type WorkerTaskType = "image.generate";
 
 export interface WorkerTaskRequest {
   id: string;
@@ -50,9 +49,8 @@ type PendingTask = {
   worker: Worker;
 };
 
-function poolSizeFor(type: WorkerTaskType): number {
-  const key = type === "code.run" ? "WORKER_POOL_SIZE_CODE" : "WORKER_POOL_SIZE_IMAGE";
-  const n = Number.parseInt(process.env[key] ?? "", 10);
+function poolSizeFor(): number {
+  const n = Number.parseInt(process.env.WORKER_POOL_SIZE_IMAGE ?? "", 10);
   return Number.isFinite(n) && n > 0 ? Math.min(n, 8) : 2;
 }
 
@@ -105,7 +103,7 @@ class WorkerPoolManager {
       this.ensureWorker(type);
       if (this.idleCount(type) > 0) {
         task();
-      } else if (this.poolSize(type) < poolSizeFor(type)) {
+      } else if (this.poolSize(type) < poolSizeFor()) {
         // 池未满：扩容一个新 worker 立即承接（真并行，不排队）
         this.ensureWorker(type, true);
         task();
@@ -210,7 +208,6 @@ class WorkerPoolManager {
   private resolveWorkerScript(type: WorkerTaskType): string {
     // Worker 脚本按类型映射到对应文件
     const scriptMap: Record<WorkerTaskType, string> = {
-      "code.run": join(__dirname, "workers", "code-worker.mjs"),
       "image.generate": join(__dirname, "workers", "image-worker.mjs"),
     };
     return scriptMap[type];

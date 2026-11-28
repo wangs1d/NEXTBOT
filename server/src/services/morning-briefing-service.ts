@@ -659,7 +659,7 @@ export class MorningBriefingService {
       return {
         temperature: brief.currentTempC,
         condition: brief.weatherText,
-        description: brief.summaryLine,
+        description: `${brief.weatherText}，当前 ${Math.round(brief.currentTempC)}°C，今日 ${Math.round(brief.todayMinC)}–${Math.round(brief.todayMaxC)}°C`,
         // Task 15 预警检测要素（weather-code / 温度极值 / 风速）
         weatherCode: brief.weatherCode,
         maxC: brief.todayMaxC,

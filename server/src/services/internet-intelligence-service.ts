@@ -712,7 +712,7 @@ function itemToEvidence(
 
 function weatherToEvidence(weather: WeatherBrief): InternetEvidence {
   const text = summarizeText(
-    `${weather.summaryLine} Rain peak ${weather.peakRainPct}%. Wind ${weather.windKmh} km/h. ${weather.clothingAdvice}`,
+    `${weather.locationLabel} ${weather.weatherText} ${weather.currentTempC.toFixed(0)}C (feels ${weather.apparentTempC.toFixed(0)}C), today ${weather.todayMinC.toFixed(0)}-${weather.todayMaxC.toFixed(0)}C. Rain peak ${weather.peakRainPct}%. Wind ${weather.windKmh} km/h. ${weather.clothingAdvice}`,
     300,
   );
   const evidence: InternetEvidence = {

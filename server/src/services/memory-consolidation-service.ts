@@ -26,7 +26,12 @@ import type { MemoryDecisionResult } from "./memory-decision-engine.js";
 import { decideMemoryWrite } from "./memory-decision-engine.js";
 import { isMemoryEcho } from "./memory-echo-guard.js";
 import { semanticFingerprint } from "./memory-record-utils.js";
+import {
+  classifyMemorySourceRole,
+  type MemorySourceRole,
+} from "./memory-source-role.js";
 import { writeJsonAtomic } from "../storage/atomic-json.js";
+import { createMemoryRecord, type MemoryRecord } from "../agentic-memory/memory-record.js";
 import {
   extractUnified,
   isMemoryUnifiedExtractEnabled,
@@ -48,6 +53,10 @@ export type MemoryCandidate = {
   source: string;
   context: "main" | "notes";
   highSignal: boolean;
+  /** 结构化来源角色；缺省按文本形态分类，下游不得再靠正文猜角色 */
+  sourceRole?: MemorySourceRole;
+  /** 写入边界生成的不可变来源信封；下游继承，不重新判定 */
+  record?: MemoryRecord;
   createdAt: string;
   /** KV summary 行的话题提示（沿用 inferMemoryTopic 产物） */
   topicHint?: string;
@@ -185,10 +194,22 @@ export class MemoryConsolidationService {
     );
     if (dup) return;
 
+    const record = candidate.record ?? createMemoryRecord({
+      actorId: candidate.actorId,
+      sourceRef: candidate.eventId ? `event:${candidate.eventId}` : candidate.source,
+      text,
+      sourceRole: candidate.sourceRole,
+      kind: candidate.highSignal ? "fact" : "event",
+      createdAt: candidate.createdAt,
+      sourceEventId: candidate.eventId,
+      eventTime: candidate.eventTime,
+    });
     this.queue.push({
       ...candidate,
       text: clampText(text),
-      createdAt: candidate.createdAt || new Date().toISOString(),
+      sourceRole: record.sourceRole,
+      record,
+      createdAt: candidate.createdAt || record.createdAt,
     });
     void this.persistQueue();
 
@@ -262,7 +283,21 @@ export class MemoryConsolidationService {
   }
 
   private async flushActor(actorId: string): Promise<void> {
-    const batch = this.queue.filter((c) => c.actorId === actorId);
+    const batch = this.queue
+      .filter((c) => c.actorId === actorId)
+      .map((c) => {
+        const record = c.record ?? createMemoryRecord({
+          actorId: c.actorId,
+          sourceRef: c.eventId ? `event:${c.eventId}` : c.source,
+          text: c.text,
+          sourceRole: c.sourceRole,
+          kind: c.highSignal ? "fact" : "event",
+          createdAt: c.createdAt,
+          sourceEventId: c.eventId,
+          eventTime: c.eventTime,
+        });
+        return { ...c, record, sourceRole: record.sourceRole };
+      });
     if (batch.length === 0) return;
     // 先出队再处理；失败按候选/桶粒度回灌（attempts 封顶），不再整批重跑已成功的 LLM 抽取
     this.queue = this.queue.filter((c) => c.actorId !== actorId);
@@ -282,6 +317,20 @@ export class MemoryConsolidationService {
     const high = accepted.filter((c) => c.highSignal);
     for (const candidate of high) {
       try {
+        if (candidate.sourceRole !== "user") {
+          decided.push({
+            candidate,
+            decision: {
+              decision: "remember",
+              confidence: 0.9,
+              semanticClass: "temporary_context",
+              reasons: ["non_user_source_timeline"],
+              importance: 0.3,
+            },
+            text: candidate.text,
+          });
+          continue;
+        }
         const profileContext = isMemoryUnifiedExtractEnabled()
           ? await this.resolveProfileContext(actorId, candidate.text, true)
           : undefined;
@@ -317,13 +366,16 @@ export class MemoryConsolidationService {
     }
 
     const low = accepted.filter((c) => !c.highSignal);
-    const lowByContext = new Map<"main" | "notes", MemoryCandidate[]>();
+    const lowByContext = new Map<string, MemoryCandidate[]>();
     for (const candidate of low) {
-      const arr = lowByContext.get(candidate.context) ?? [];
+      if (candidate.sourceRole !== "user") continue;
+      const key = `${candidate.context}:${candidate.sourceRole}`;
+      const arr = lowByContext.get(key) ?? [];
       arr.push(candidate);
-      lowByContext.set(candidate.context, arr);
+      lowByContext.set(key, arr);
     }
-    for (const [context, items] of lowByContext) {
+    for (const items of lowByContext.values()) {
+      const context = items[0]!.context;
       const sorted = [...items].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
       const combined = sorted.map((e) => `[${e.source}] ${e.text}`).join("\n\n---\n\n");
       if (combined.length < 20) continue;
@@ -393,6 +445,8 @@ export class MemoryConsolidationService {
   private async egress(actorId: string, decided: DecidedCandidate[]): Promise<MemoryCandidate[]> {
     const egressFailed: MemoryCandidate[] = [];
     const provenanceOf = (c: MemoryCandidate) => ({
+      sourceRole: c.record?.sourceRole ?? c.sourceRole ?? classifyMemorySourceRole(c.text),
+      ...(c.record ? { record: c.record } : {}),
       ...(c.eventId ? { sourceEventId: c.eventId } : {}),
       ...(c.eventTime ? { eventTime: c.eventTime } : {}),
     });
@@ -436,19 +490,28 @@ export class MemoryConsolidationService {
       }
     }
 
-    // 旧路径（unified 不可用回退）候选：非 reject 的整批一次 writeDecided
+    // 旧路径（unified 不可用回退）候选：按来源角色与上下文分组，避免把助手时间线
+    // 和用户事实混成同一条“用户记忆”。
     const legacy = decided.filter((d) => !d.unified && d.decision.decision !== "reject");
-    if (legacy.length > 0 && this.deps.narrative) {
-      const body = legacy.map((d) => d.text).join("\n");
-      const context = legacy[0]!.candidate.context;
+    const legacyGroups = new Map<string, DecidedCandidate[]>();
+    for (const d of legacy) {
+      const key = `${d.candidate.context}:${d.candidate.sourceRole ?? "unknown"}`;
+      const group = legacyGroups.get(key) ?? [];
+      group.push(d);
+      legacyGroups.set(key, group);
+    }
+    for (const group of legacyGroups.values()) {
+      if (!this.deps.narrative) continue;
+      const body = group.map((d) => d.text).join("\n");
+      const first = group[0]!.candidate;
       try {
-        await this.deps.narrative.writeDecided(actorId, body, legacy[0]!.candidate.source, {
-          context,
+        await this.deps.narrative.writeDecided(actorId, body, first.source, {
+          context: first.context,
           highSignal: true,
-          ...provenanceOf(legacy[0]!.candidate),
+          ...provenanceOf(first),
         });
       } catch (err) {
-        egressFailed.push(...legacy.map((d) => d.candidate));
+        egressFailed.push(...group.map((d) => d.candidate));
         console.warn(
           "[memory-consolidation] legacy 批量落库失败（候选回灌）:",
           err instanceof Error ? err.message : err,

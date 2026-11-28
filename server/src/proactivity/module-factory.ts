@@ -686,6 +686,8 @@ export interface SensorLayer {
   goalFeeder: ReturnType<typeof registerFeeder>;
   /** 入站消息 feeder（MessageHub onInbound 推送） */
   messageFeeder: ReturnType<typeof registerFeeder>;
+  /** 通话记录 feeder（phone.call_log 拉取成功后回灌 → call_log 流持久化） */
+  callLogFeeder: ReturnType<typeof registerFeeder>;
   /** 物理设备 feeder 缓存（sensorId → emit；device-signal 上行入口用） */
   deviceFeeders: Map<string, (signal: { actorId?: string; at: number; fingerprint: string; salience: "high" | "medium" | "low"; payload?: Record<string, unknown> }) => void>;
   /** 主活跃用户口径（最近交互优先；规则 tick 与晨报共用） */
@@ -713,6 +715,9 @@ export function createSensorLayer(deps: SensorLayerDeps): SensorLayer {
   });
   const goalFeeder = registerFeeder(kernel, "goal_board", "goal");
   const messageFeeder = registerFeeder(kernel, "message_hub", "message");
+  // 通话记录流：agent 每次成功拉取 phone.call_log 后回灌（去重靠 fingerprint），
+  // 经 kernel.onSignal → SourceStore.feed 落盘，重启后 mail.recent 同款跨源可查。
+  const callLogFeeder = registerFeeder(kernel, "phone_bridge", "call_log");
   const deviceFeeders = new Map<string, (signal: { actorId?: string; at: number; fingerprint: string; salience: "high" | "medium" | "low"; payload?: Record<string, unknown> }) => void>();
   const primaryActor = (): string | null => {
     const actors = deps.hub.exportActors();
@@ -752,6 +757,7 @@ export function createSensorLayer(deps: SensorLayerDeps): SensorLayer {
     scheduleSensor,
     goalFeeder,
     messageFeeder,
+    callLogFeeder,
     deviceFeeders,
     primaryActor,
     recentScreenSignals,

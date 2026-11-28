@@ -1,12 +1,8 @@
 import type { FastifyInstance } from "fastify";
 import { readFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
-import { applyProfileOps, verifyProfileOps } from "../../brain/user-profile-aggregator.js";
-import {
-  touchProfileLines,
-  readProfileMeta,
-  parseProfileLines,
-} from "../../brain/profile-lines-meta.js";
+import { UserProfileAggregator } from "../../brain/user-profile-aggregator.js";
+import { readProfileMeta, parseProfileLines } from "../../brain/profile-lines-meta.js";
 import { UserProfileStore } from "../../services/user-personalization/user-profile-store.js";
 
 const SECTION_KEYS = new Set(["basic", "interest", "communication", "note"]);
@@ -29,7 +25,7 @@ export function registerProfileManageRoutes(app: FastifyInstance): void {
     if (!actorId) return reply.code(400).send({ ok: false, error: "actorId required" });
 
     const store = new UserProfileStore();
-    const markdown = await store.read(actorId);
+    const markdown = await new UserProfileAggregator().readProfile(actorId);
     const meta = await readProfileMeta(actorId);
     const metaByLine = new Map(meta.map((m) => [m.line, m]));
 
@@ -106,9 +102,7 @@ export function registerProfileManageRoutes(app: FastifyInstance): void {
       return reply.code(400).send({ ok: false, error: "match required" });
     }
 
-    const store = new UserProfileStore();
-    const current = await store.read(actorId);
-    const { profile: next, applied, skipped } = applyProfileOps(current, [
+    const result = await new UserProfileAggregator().updateProfile(actorId, [
       {
         op: op as "ADD" | "UPDATE" | "DELETE",
         section: section as "basic" | "interest" | "communication" | "note",
@@ -116,29 +110,19 @@ export function registerProfileManageRoutes(app: FastifyInstance): void {
         ...(match ? { match } : {}),
       },
     ]);
-    // 写入门槛：疑问句/临时安排/行为频率/对助手的观察/不确定推断/无明确主语
-    // 的条目被确定性丢弃——明确回绝而不是静默无变更，避免用户以为"写进去了"。
-    if (skipped.length > 0 && applied.length === 0) {
+    if (result.skipped.length > 0 && !result.changed) {
       return reply.code(400).send({
         ok: false,
-        error: `该内容不符合画像写入门槛（疑问句 / 临时安排 / 行为频率 / 对助手的观察 / 不确定推断 / 无明确主语），未写入：${skipped[0]}`,
+        error: `该内容不符合画像写入门槛（疑问句 / 临时安排 / 行为频率 / 对助手的观察 / 不确定推断 / 无明确主语），未写入：${result.skipped[0]}`,
       });
     }
-    if (applied.length === 0) {
+    if (!result.changed) {
       return reply.code(409).send({ ok: false, error: "没有产生变更（行已存在或定位词未命中）" });
     }
-    await store.write(actorId, next);
-    const written = await store.read(actorId);
-    const failures = verifyProfileOps(written, applied);
-    try {
-      await touchProfileLines(actorId, written, applied.map((a) => a.expectLine ?? "").filter(Boolean));
-    } catch {
-      /* sidecar 失败不影响 */
-    }
-    if (failures.length > 0) {
+    if (!result.verified) {
       return reply.code(500).send({ ok: false, error: "写入校验未通过" });
     }
-    return { ok: true, markdown: written };
+    return { ok: true, markdown: result.profile };
   });
 
   /**

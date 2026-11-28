@@ -12,6 +12,7 @@
  */
 import { getToolSearchConfig } from "./env.js";
 import { ensureLocalEmbeddingEndpoint, getLocalEmbeddingEndpoint } from "../../agentic-memory/local-embedding/local-embedding-endpoint.js";
+import { ensureLocalRerankerEndpoint, getLocalRerankerEndpoint } from "./local-reranker/local-reranker-endpoint.js";
 import {
   toolSearchMetrics,
   type NeuralMetricFeature,
@@ -27,7 +28,7 @@ export type NeuralEmbedResult = {
 
 export type NeuralRerankResult = {
   model: string;
-  /** 与 documents 等长，按传入顺序对应 */
+  /** 与 documents 等长，按传入顺序对应的原始相关性 logit */
   scores: number[];
 };
 
@@ -219,28 +220,29 @@ const SIDECAR_MAX_BATCH = 64;
  * （单块 ≤32 条长文本，且可能是 sidecar 冷启动的第一个请求，含模型懒加载）。
  */
 export async function neuralEmbedTextsBulk(texts: string[]): Promise<NeuralEmbedResult | null> {
+  const cfg = getToolSearchConfig();
+  const timeoutMs = cfg.neuralEmbedBulkTimeoutMs;
   // provider=openai（2026-11-20）：查询与工具向量必须同模型同维度——
   // 本地 bge(512) 与 SiliconFlow bge-large(1024) 不能互算余弦。走远端缓存通道。
-  if (getToolSearchConfig().embeddingProvider === "openai") {
+  if (cfg.embeddingProvider === "openai") {
     const { fetchOpenAiCompatibleEmbeddings } = await import("../../services/openai-embedding-client.js");
     const out = await guardedCall("embed", () =>
-      fetchOpenAiCompatibleEmbeddings({ inputs: texts, model: getToolSearchConfig().embeddingModel, timeoutMs: Math.max(timeoutMs, 3_000) }),
+      fetchOpenAiCompatibleEmbeddings({ inputs: texts, model: cfg.embeddingModel, timeoutMs: Math.max(timeoutMs, 3_000) }),
     );
     if (!out || out.vectors.length !== texts.length) return null;
-    return { model: getToolSearchConfig().embeddingModel, dim: out.vectors[0]?.length ?? 0, vectors: out.vectors };
+    return { model: cfg.embeddingModel, dim: out.vectors[0]?.length ?? 0, vectors: out.vectors };
   }
 
   if (texts.length === 0) return { model: "", dim: 0, vectors: [] };
-  const timeoutMs = getToolSearchConfig().neuralEmbedBulkTimeoutMs;
   let first: NeuralEmbedResult | null = null;
   const vectors: number[][] = [];
   for (let i = 0; i < texts.length; i += 32) {
     const chunk = texts.slice(i, i + 32);
-    const part =
-      (await guardedCall("embed", () => embedTextsOnce(chunk, timeoutMs))) ??
-      (await guardedCall("embed", () =>
-        postJson<NeuralEmbedResult>("/embed", { texts: chunk }, timeoutMs),
-      ));
+    let part = await guardedCall("embed", () => embedTextsOnce(chunk, timeoutMs));
+    if (!part && cfg.embeddingProvider === "local") return null;
+    part ??= await guardedCall("embed", () =>
+      postJson<NeuralEmbedResult>("/embed", { texts: chunk }, timeoutMs),
+    );
     if (!part) return null;
     if (!first) first = part;
     vectors.push(...part.vectors);
@@ -253,28 +255,29 @@ export async function neuralEmbedTextsBulk(texts: string[]): Promise<NeuralEmbed
  * （部分成功不留半吊子向量，调用方整体走下一 provider 重来）。
  */
 export async function neuralEmbedTexts(texts: string[]): Promise<NeuralEmbedResult | null> {
+  const cfg = getToolSearchConfig();
+  const timeoutMs = cfg.neuralEmbedTimeoutMs;
   // provider=openai（2026-11-20）：查询与工具向量必须同模型同维度——
   // 本地 bge(512) 与 SiliconFlow bge-large(1024) 不能互算余弦。走远端缓存通道。
-  if (getToolSearchConfig().embeddingProvider === "openai") {
+  if (cfg.embeddingProvider === "openai") {
     const { fetchOpenAiCompatibleEmbeddings } = await import("../../services/openai-embedding-client.js");
     const out = await guardedCall("embed", () =>
-      fetchOpenAiCompatibleEmbeddings({ inputs: texts, model: getToolSearchConfig().embeddingModel, timeoutMs: Math.max(timeoutMs, 3_000) }),
+      fetchOpenAiCompatibleEmbeddings({ inputs: texts, model: cfg.embeddingModel, timeoutMs: Math.max(timeoutMs, 3_000) }),
     );
     if (!out || out.vectors.length !== texts.length) return null;
-    return { model: getToolSearchConfig().embeddingModel, dim: out.vectors[0]?.length ?? 0, vectors: out.vectors };
+    return { model: cfg.embeddingModel, dim: out.vectors[0]?.length ?? 0, vectors: out.vectors };
   }
 
   if (texts.length === 0) return { model: "", dim: 0, vectors: [] };
-  const timeoutMs = getToolSearchConfig().neuralEmbedTimeoutMs;
   let first: NeuralEmbedResult | null = null;
   const vectors: number[][] = [];
   for (let i = 0; i < texts.length; i += SIDECAR_MAX_BATCH) {
     const chunk = texts.slice(i, i + SIDECAR_MAX_BATCH);
-    const part =
-      (await guardedCall("embed", () => embedTextsOnce(chunk, timeoutMs))) ??
-      (await guardedCall("embed", () =>
-        postJson<NeuralEmbedResult>("/embed", { texts: chunk }, timeoutMs),
-      ));
+    let part = await guardedCall("embed", () => embedTextsOnce(chunk, timeoutMs));
+    if (!part && cfg.embeddingProvider === "local") return null;
+    part ??= await guardedCall("embed", () =>
+      postJson<NeuralEmbedResult>("/embed", { texts: chunk }, timeoutMs),
+    );
     if (!part) return null;
     if (!first) first = part;
     vectors.push(...part.vectors);
@@ -282,23 +285,85 @@ export async function neuralEmbedTexts(texts: string[]): Promise<NeuralEmbedResu
   return first ? { ...first, vectors } : null;
 }
 
-/** 交叉编码重排（N2）：scores 与 documents 等长、按传入顺序对应。 */
+/** 本地交叉编码重排（N2）：scores 与 documents 等长、按传入顺序对应。 */
 export async function neuralRerank(
   query: string,
   documents: string[],
-  topK?: number,
 ): Promise<NeuralRerankResult | null> {
   if (documents.length === 0) return null;
   const timeoutMs = getToolSearchConfig().neuralRerankTimeoutMs;
-  return guardedCall("rerank", () =>
-    postJson<NeuralRerankResult>("/rerank", { query, documents, top_k: topK }, timeoutMs),
-  );
+  return guardedCall("rerank", async () => {
+    let local = getLocalRerankerEndpoint();
+    if (!local) {
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        local = await Promise.race([
+          ensureLocalRerankerEndpoint(),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => {
+              const error = new Error(`local reranker endpoint startup exceeded ${timeoutMs}ms`);
+              error.name = "TimeoutError";
+              reject(error);
+            }, timeoutMs);
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
+    if (!local) throw new Error("local reranker endpoint unavailable");
+    const response = await fetch(`${local.baseUrl}/rerank`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${local.apiKey}`,
+      },
+      body: JSON.stringify({ query, documents }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!response.ok) throw new Error(`local reranker HTTP ${response.status}`);
+    const payload = (await response.json()) as {
+      model?: string;
+      data?: Array<{ index?: number; score?: number }>;
+    };
+    const rows = payload.data ?? [];
+    if (rows.length !== documents.length || rows.some((row, index) => row.index !== index || !Number.isFinite(row.score))) {
+      throw new Error(`local reranker score count mismatch: ${rows.length}/${documents.length}`);
+    }
+    return {
+      model: payload.model ?? local.model,
+      scores: rows.map((row) => row.score!),
+    };
+  });
 }
 
 /** 健康探测（测试/运维用）：模型已加载返回 true，不可达/未就绪返回 false。 */
 export async function probeNeuralSidecar(timeoutMs = 750): Promise<boolean> {
+  const cfg = getToolSearchConfig();
+  if (cfg.embeddingProvider === "local" && cfg.neuralEmbedEnabled === "off") return false;
+  if (cfg.embeddingProvider !== "openai" && cfg.neuralEmbedEnabled !== "off") {
+    const local = getLocalEmbeddingEndpoint() ?? (await ensureLocalEmbeddingEndpoint());
+    if (local) {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        try {
+          const res = await fetch(`${local.baseUrl}/health`, {
+            signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
+          });
+          if (res.ok) {
+            const data = (await res.json()) as { ok?: boolean };
+            if (data.ok) return true;
+          }
+        } catch {
+          // 模型仍在装载，继续等到本次探测预算耗尽
+        }
+        await new Promise((resolve) => setTimeout(resolve, Math.min(100, Math.max(1, deadline - Date.now()))));
+      }
+    }
+    if (cfg.embeddingProvider === "local") return false;
+  }
+
   try {
-    const cfg = getToolSearchConfig();
     const res = await fetch(`${cfg.neuralSidecarUrl}/health`, {
       signal: AbortSignal.timeout(timeoutMs),
     });

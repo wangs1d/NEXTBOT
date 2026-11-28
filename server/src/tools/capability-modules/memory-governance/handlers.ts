@@ -4,11 +4,11 @@ import type { InterestWatcher } from "../../../proactivity/interest-watcher.js";
 import type { AuditTrailService } from "../../../proactivity/audit-timeline.js";
 import type { GoalBoard } from "../../../proactivity/goal-board.js";
 import type { ShoppingCompareService } from "../../../services/shopping-compare-service.js";
-import { getAgenticMemoryRuntime, getMemoryComponents } from "../../../agentic-memory/index.js";
-import { actorIdVariants } from "../../../agentic-memory/actor-key.js";
+import { getMemoryComponents } from "../../../agentic-memory/index.js";
 import { getEventMemoryStore } from "../../../agentic-memory/event-store.js";
 import { formatEventLine } from "../../../agentic-memory/event-recall.js";
 import { isEventMemoryRecallEnabled } from "../../../agentic-memory/env.js";
+import { forgetMemoryTarget } from "../../../services/memory-forget-service.js";
 
 /**
  * memory.forget / activity.timeline handler + 注册入口。
@@ -36,6 +36,9 @@ export function createForgetHandler(deps: MemoryGovernanceModuleDeps): ToolHandl
       watches: 0,
       goals: 0,
       memories: 0,
+      facts: 0,
+      understandings: 0,
+      graphNodes: 0,
     };
     const skipped: string[] = [];
     const hitScope = (s: string): boolean => scope === "auto" || scope === s;
@@ -80,37 +83,17 @@ export function createForgetHandler(deps: MemoryGovernanceModuleDeps): ToolHandl
       }
     }
 
-    // 5) 长期记忆（Mem0：按关键词检索后按 id 删除；未启用时如实说明）
+    // 5) 长期记忆：事实、理解、图、Mem0 与 FTS 统一级联
     if (hitScope("memory")) {
-      const runtime = getAgenticMemoryRuntime();
-      if (!runtime?.memory || !runtime?.lifecycle) {
-        skipped.push("memory(长期记忆系统未启用)");
-      } else {
-        try {
-          // mem0ai v3 getAll 强制 filters.user_id；actor 存量数据两种形式并存，逐形式扫
-          const records: Array<{ id: string; memory?: string; metadata?: { actorId?: string } }> = [];
-          for (const variant of actorIdVariants(actorId)) {
-            const all = (await runtime.memory.getAll({
-              topK: 10000,
-              filters: { user_id: variant },
-            })) as { results?: Array<{ id: string; memory?: string; metadata?: { actorId?: string } }> };
-            records.push(...(all.results ?? []));
-          }
-          const ids = records
-            .filter((m) => (m.metadata?.actorId ?? actorId) === actorId)
-            .filter((m) => String(m.memory ?? "").toLowerCase().includes(kw))
-            .map((m) => m.id);
-          if (ids.length > 0) {
-            const deleted = await runtime.lifecycle.deleteByIds(ids);
-            cleared.memories = deleted.length;
-          }
-        } catch (err) {
-          skipped.push(`memory(删除失败：${err instanceof Error ? err.message : String(err)})`);
-        }
-      }
+      const forgotten = await forgetMemoryTarget(actorId, target);
+      cleared.memories = forgotten.memories;
+      cleared.facts = forgotten.facts;
+      cleared.understandings = forgotten.understandings;
+      cleared.graphNodes = forgotten.graphNodes;
+      skipped.push(...forgotten.skipped);
     }
 
-    const total = (cleared.interests as number) + (cleared.watches as number) + (cleared.goals as number) + (cleared.memories as number);
+    const total = Object.values(cleared).reduce<number>((sum, n) => sum + (typeof n === "number" ? n : 0), 0);
     return {
       ok: true,
       target,
@@ -243,44 +226,29 @@ export function createProfileUpdateHandler(_deps: MemoryGovernanceModuleDeps): T
       };
     }
 
-    const { applyProfileOps, verifyProfileOps } = await import(
+    const { UserProfileAggregator } = await import(
       "../../../brain/user-profile-aggregator.js"
     );
-    const { UserProfileStore } = await import(
-      "../../../services/user-personalization/user-profile-store.js"
-    );
-    const { touchProfileLines } = await import("../../../brain/profile-lines-meta.js");
-
-    const store = new UserProfileStore();
-    const current = await store.read(actorId);
-    const { profile: next, applied } = applyProfileOps(current, [
+    const result = await new UserProfileAggregator().updateProfile(actorId, [
       { op: op as "ADD" | "UPDATE" | "DELETE", section: section as "basic" | "interest" | "communication" | "note", ...(line ? { line } : {}), ...(match ? { match } : {}) },
     ]);
-    if (applied.length === 0) {
+    if (!result.changed) {
       return {
         ok: false,
-        error: "没有产生任何变更（ADD 幂等：该行已存在，或定位词没匹配到旧行）",
-        hint: "如实告诉用户这条已经在档案里了，或换个更贴近旧行原文的 match 再试一次",
+        error: result.skipped.length > 0
+          ? `该内容不符合画像写入门槛，未写入：${result.skipped[0]}`
+          : "没有产生任何变更（ADD 幂等：该行已存在，或定位词没匹配到旧行）",
+        hint: result.skipped.length > 0
+          ? "如实告诉用户这条不适合长期画像，不要硬记"
+          : "如实告诉用户这条已经在档案里了，或换个更贴近旧行原文的 match 再试一次",
       };
     }
-    await store.write(actorId, next);
-    const written = await store.read(actorId);
-    const failures = verifyProfileOps(written, applied);
-    try {
-      await touchProfileLines(
-        actorId,
-        written,
-        applied.map((a) => a.expectLine ?? "").filter(Boolean),
-      );
-    } catch {
-      /* sidecar 失败不影响主流程 */
-    }
     return {
-      ok: failures.length === 0,
-      appliedCount: applied.length,
+      ok: result.verified,
+      appliedCount: 1,
       section,
       recorded: line || match,
-      hint: failures.length === 0
+      hint: result.verified
         ? "已写入画像。回复里自然带过即可（如「记上了」），不要复述档案字段、分区或写入过程"
         : "写入未生效。先用更贴近旧行原文的定位词重试一次；仍失败则一句话说明这条没记上即可，不要向用户展开校验、字段或档案结构细节",
     };

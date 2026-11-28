@@ -144,11 +144,24 @@ test("正文单一出口：定稿 = 已放出，收尾 flush 流式净化器，d
   assert.match(handler, /streamMarkerGuard\.flush\(\)/, "出口净化器缓冲流末必须放出");
   // done 不再拿「已流文本 vs finalText」互相比对去补差——那会把已上屏内容再追加一遍。
   assert.doesNotMatch(handler, /unstreamedSuffix|stripSentencesAlreadySaid|seal backfill/, "done 收口不得比对补推");
-  // provider 侧：流式净化器带缓冲，流结束必须 flush，缓冲经同一出口放出。
-  assert.match(toolLoop, /waveMetaFilter\(waveTagSanitizer\.flush\(\)\)/, "tool-loop 收尾必须冲刷净化器缓冲");
-  assert.match(toolLoop, /waveMetaFilter\.flush\(\)/);
-  assert.match(provider, /metaFilter\(sanitizer\.flush\(\)\)/, "纯文本分支收尾必须冲刷净化器缓冲");
-  assert.match(provider, /metaFilter\.flush\(\)/);
+  // provider 侧：三条产出通道（工具波 / 无 schema 汇总探测 / 纯文本分支）共用
+  // 同一个净化出口工厂，流结束必须 flush——通道各自拼过滤器或干脆直推 onDelta
+  // 是协议文本透出的根源（2026-11-26 NEED_MORE_TOOLS 与工具旁白进气泡）。
+  const helpers = serverSrc("external-model/stream-chat-helpers.ts");
+  assert.match(helpers, /export function createStreamTextPurifier/, "净化出口只有一个工厂");
+  for (const [name, src] of [["tool-loop", toolLoop], ["纯文本 provider", provider]] as const) {
+    assert.match(src, /createStreamTextPurifier\(\)/, `${name} 必须用统一净化出口`);
+    assert.match(src, /\.flush\(\)/, `${name} 收尾必须冲刷净化器缓冲`);
+    assert.doesNotMatch(
+      src,
+      /createStreamControlTagSanitizer\(\)|createStreamMetaSentenceFilter\(\)/,
+      `${name} 不得再自建过滤器（绕过出口名单就会漏净化）`,
+    );
+  }
+  // 协议 token 名单也只有一处：tool-loop 引用常量，不再自己拼字符串。
+  assert.match(helpers, /export const NEED_MORE_TOOLS_MARKER = "NEED_MORE_TOOLS"/);
+  assert.doesNotMatch(toolLoop, /const NEED_MORE_TOOLS_MARKER\s*=/, "标记定义不得分叉");
+  assert.match(toolLoop, /NEED_MORE_TOOLS_MARKER,/);
   // 定稿文本取已放出文本（waveStreamedText / streamedVisible），整串净化链只在
   // 没有任何流式产出时使用。
   assert.match(toolLoop, /sanitizedFinalText = stripRequestCardTags\(\s*stripAllTimestampFrameLines\(waveStreamedText\)\.trim\(\)/);

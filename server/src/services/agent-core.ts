@@ -26,6 +26,7 @@ import type { TaskCompletionPushPort } from "./task-completion-push.js";
 import type { TurnLocationHook } from "./turn-location-hook.js";
 import { selectPromptLocation } from "./turn-location-hook.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
+import { planMemoryRecall, type MemoryRecallPlan } from "../agent/recall-planner.js";
 import { seedIdentityMarkdown } from "../agent/identity-markdown-seeder.js";
 import { isActorDisabled } from "./user-disable-gate.js";
 
@@ -799,6 +800,7 @@ export class AgentCore {
     let cognitiveNeedsToolLoop = true;
     /** cognize 阶段 1 已召回的记忆条目；非空时 standard path 复用，避免重复 MemoryCortex.recall */
     let cognitiveRecallItems: MemoryRecallItem[] | undefined;
+    let cognitiveRecallPlan: MemoryRecallPlan | undefined;
     /** 工作记忆摘要（注入 streamCompletion 的 prompt） */
     let cognitiveWorkingMemorySummary = "";
     /** cognize 阶段 1 情绪向量（透出给 runStandardLlmPath → promptContext.memory.emotionState） */
@@ -922,6 +924,7 @@ export class AgentCore {
       cognitiveResponse = brainCognition?.response ?? "";
       cognitiveNeedsToolLoop = true; // 强制走 streamCompletion/工具循环
       cognitiveRecallItems = brainCognition?.recallItems;
+      cognitiveRecallPlan = brainCognition?.recallPlan;
       cognitiveWorkingMemorySummary = brainCognition?.workingMemorySummary ?? "";
       cognitiveEmotion = brainCognition?.emotion ?? null;
       cognitiveUserPattern = this.brainCenter?.getOnlineLearningCortex()?.getProfile(actorId) ?? undefined;
@@ -1223,6 +1226,7 @@ if (route.plane === "task") {
         orchestrateToolCtx: orchestrateOpts,
         sessionId,
         shortTermTurn,
+        recallPlan: cognitiveRecallPlan,
         cognitiveEmotion,
         cognitiveUserPattern,
         cognitiveToolPlan,
@@ -1278,6 +1282,7 @@ if (route.plane === "task") {
             orchestrateToolCtx: orchestrateOpts,
             sessionId,
             shortTermTurn,
+            recallPlan: cognitiveRecallPlan,
             cognitiveUserPattern,
             cognitiveToolPlan,
             referentLines,
@@ -1876,6 +1881,7 @@ if (route.plane === "task") {
     opts: HandleUserMessageOptions | undefined,
     ctx: {
       narrativeRecall?: string;
+      recallPlan?: MemoryRecallPlan;
       /** 当前工作记忆摘要（独立块注入，不再拼入 narrativeRecall） */
       workingMemorySummary?: string;
       /** 最近对话回顾（独立块注入，thread 较短时填充） */
@@ -2168,13 +2174,23 @@ if (route.plane === "task") {
     // 而 promptContextBuilder.build() 是同步链——在进入 build 前把本轮 query 的
     // 画像语义命中算好进缓存，buildUserFactsBlock 内同步读取。失败静默（退化
     // 为仅字面命中），绝不阻塞消息管线。
-    await prefetchProfileRecall(actorId, text);
+    const routeDecision = opts?.routeDecision ? await opts.routeDecision : undefined;
+    const recallPlan = ctx.recallPlan ?? planMemoryRecall({
+      text,
+      threadMessageCount: ctx.orchestrateToolCtx?.threadMessageCount,
+      understanding: routeDecision?.understanding,
+    });
+    if (recallPlan.channels.includes("profile")) {
+      await prefetchProfileRecall(actorId, text);
+    }
     const baseStreamOpts = this.isChatLane(mode)
       ? ({
           ...(this.promptContextBuilder.build({
             actorId,
             sessionId: ctx.sessionId,
             userText: text,
+            understanding: routeDecision?.understanding,
+            recallPlan,
             threadMessageCount: ctx.orchestrateToolCtx?.threadMessageCount,
             narrativeRecall: ctx.narrativeRecall,
             workingMemorySummary: ctx.workingMemorySummary,
@@ -2219,6 +2235,8 @@ if (route.plane === "task") {
             actorId,
             sessionId: ctx.sessionId,
             userText: text,
+            understanding: routeDecision?.understanding,
+            recallPlan,
             threadMessageCount: ctx.orchestrateToolCtx?.threadMessageCount,
             narrativeRecall: ctx.narrativeRecall,
             workingMemorySummary: ctx.workingMemorySummary,

@@ -11,17 +11,27 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-process.env.PA_DATA_DIR = mkdtempSync(join(tmpdir(), "tool-neural-"));
+import {
+  LOCAL_EMBEDDING_DIMS,
+  LOCAL_EMBEDDING_MODEL_ID,
+} from "../src/agentic-memory/local-embedding/local-embedding-engine.js";
+
+const testDataDir = mkdtempSync(join(tmpdir(), "tool-neural-"));
+process.env.PA_DATA_DIR = testDataDir;
+process.env.NEXTBOT_DATA_DIR = testDataDir;
+process.env.AGENT_TOOL_SEARCH_EMBEDDING_CACHE = join(testDataDir, "tool-embeddings.json");
 process.env.AGENT_TOKENJUICE_ENABLED = "0";
 process.env.AGENT_TOOL_SEARCH_BACKEND = "adaptive";
 process.env.AGENT_TOOL_SEARCH_ENABLED = "on";
 // 神经通道全开（sidecar 提供向量；rerank/intent 走默认 auto）
 process.env.AGENT_TOOL_SEARCH_EMBEDDING = "auto";
 process.env.AGENT_TOOL_EMBEDDING_PROVIDER = "local";
+process.env.AGENT_NEURAL_RERANK_ENABLED = "off";
+process.env.AGENT_NEURAL_INTENT_ENABLED = "off";
 
 const { probeNeuralSidecar } = await import("../src/tools/tool-search/neural-sidecar.js");
 const sidecarUp = await probeNeuralSidecar(1_000);
@@ -53,28 +63,38 @@ async function main(): Promise<void> {
   const { prepareToolsWithToolSearch, executeToolSearchBridge } = await import(
     "../src/tools/tool-search/index.js"
   );
-  const { ensureToolEmbeddings, invalidateEmbeddingCache } = await import(
+  const { ensureToolEmbeddings, getToolEmbeddingCache, invalidateEmbeddingCache } = await import(
     "../src/tools/tool-search/tool-embedding.js"
   );
 
   // ── 准备：显式把全目录工具向量经 sidecar 算齐 ──
   invalidateEmbeddingCache();
   const first = prepareToolsWithToolSearch([], getBuiltinAgentChatTools());
-  const stats = await ensureToolEmbeddings(
-    first.deferredCatalog.entries.map((e) => ({
-      registryName: e.registryName,
-      searchText: e.embeddingInput || e.searchText,
-    })),
-  );
+  const items = first.deferredCatalog.entries.map((e) => ({
+    registryName: e.registryName,
+    embeddingViews: e.embeddingViews,
+  }));
+  assert.ok(items.length >= 30, `工具目录规模应至少为 30，实际=${items.length}`);
+  const stats = await ensureToolEmbeddings(items);
+  assert.equal(stats.computed + stats.reused, items.length);
+  assert.equal(stats.failed, 0);
+  const cache = getToolEmbeddingCache();
+  assert.equal(cache.meta.model, LOCAL_EMBEDDING_MODEL_ID);
+  assert.equal(cache.meta.dimension, LOCAL_EMBEDDING_DIMS);
   assert.ok(
-    stats.computed + stats.reused >= 60,
-    `sidecar 应补全绝大多数工具向量（computed=${stats.computed} reused=${stats.reused} failed=${stats.failed}）`,
+    Object.values(cache.entries).every(
+      (entry) =>
+        entry.model === LOCAL_EMBEDDING_MODEL_ID &&
+        entry.views.length > 0 &&
+        entry.views.every((view) => view.vector.length === LOCAL_EMBEDDING_DIMS),
+    ),
+    "工具缓存必须全部为本地 BGE 512 维多视图向量",
   );
 
   // embedding 落盘后 builtAt 变化 → 新 catalog 对象换签名 → 索引带上真向量重建
   const prepared = prepareToolsWithToolSearch([], getBuiltinAgentChatTools());
   const catalog = prepared.deferredCatalog;
-  assert.ok(catalog.embeddingIndex.size >= 60, "embedding 索引应已灌入 sidecar 向量");
+  assert.equal(catalog.embeddingIndex.size, items.length, "embedding 索引应已灌入全部本地向量");
 
   async function discover(query: string, limit = 5): Promise<DiscoverMatch[]> {
     const res = await executeToolSearchBridge("tool_discover", { query, limit }, catalog);
@@ -85,7 +105,7 @@ async function main(): Promise<void> {
   test("N1 通电检查：query embedding 命中 sidecar（首查返回非空向量）", async () => {
     const { getQueryEmbedding } = await import("../src/tools/tool-search/tool-embedding.js");
     const vec = await getQueryEmbedding("外头冷不冷");
-    assert.ok(vec && vec.length > 0, "sidecar 在线时 query embedding 不应为 null");
+    assert.ok(vec && vec.length === LOCAL_EMBEDDING_DIMS, "本地 BGE query embedding 应为 512 维");
   });
 
   for (const c of NEURAL_GOLDEN) {
@@ -114,4 +134,8 @@ async function main(): Promise<void> {
   });
 }
 
-await main();
+try {
+  await main();
+} finally {
+  rmSync(testDataDir, { recursive: true, force: true });
+}

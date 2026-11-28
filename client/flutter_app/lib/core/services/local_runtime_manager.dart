@@ -138,7 +138,11 @@ class LocalRuntimeManager {
     try {
       // 用户 config.env 注入子进程环境；server 侧 dotenv 不覆盖已有变量，
       // 因此这里的值始终生效（server 零改动）。
+      // 内置浏览器闸口（2026-11-27）：本地 runtime 默认开启 CDP 桥，让比价/
+      // 购物取页走用户可见的内置浏览器而非云端无头浏览器。优先级从低到高：
+      // 默认 1 → 系统环境变量 → 用户 config.env（可显式设 0 关闭）。
       final Map<String, String> env = <String, String>{
+        "SHARED_BROWSER_CDP_ENABLED": "1",
         ...Platform.environment,
         ...LocalRuntimeConfig.readSync(),
       };

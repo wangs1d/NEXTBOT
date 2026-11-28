@@ -3,6 +3,7 @@ import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { config as dotenvConfig } from "dotenv";
 import net from "node:net";
+import { ensureDigitalHuman } from "../../scripts/ensure-digital-human.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const serverDir = resolve(__dirname, "..");
@@ -66,6 +67,10 @@ function killAll() {
 }
 
 async function main() {
+  // 0. 数字人服务随后端一起拉起（await 端口检测+spawn ~1s，引擎加载后台化）。
+  //    GPU 环境缺失 / 8765 已占用时模块自行跳过 / 复用，不影响主服务启动。
+  await ensureDigitalHuman();
+
   // 1. 如果启用了微信 Claw，启动 OpenClaw Gateway
   if (isGatewayEnabled()) {
     const port = process.env.OPENCLAW_GATEWAY_WS_URL?.match(/:(\d+)/)?.[1] ?? "18789";
@@ -94,7 +99,12 @@ async function main() {
   }
 
   // 2. 启动 Node 服务（2026-09-11：Python tool-router 已删除，检索进程内完成）
-  const server = spawnProcess("node", ["--max-old-space-size=512", "dist/index.js"], { cwd: serverDir });
+  // 堆参数与 Dockerfile 保持一致：768MB 老生代 + 32MB 半空间（见 Dockerfile 注释）。
+  const server = spawnProcess(
+    "node",
+    ["--max-old-space-size=768", "--max-semi-space-size=32", "dist/index.js"],
+    { cwd: serverDir },
+  );
   // 主服务退出（含崩溃 code≠0）→ 包装进程以相同码退出，交由守护方重启；
   // 否则包装进程会因残留子进程（如 gateway）继续存活，形成 /health 永久失败的僵尸状态。
   server.on("exit", (code) => {

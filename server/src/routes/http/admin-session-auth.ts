@@ -8,6 +8,7 @@ import type { Database as SqliteDatabase } from "better-sqlite3";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 
+import { openSqlite } from "../../storage/sqlite.js";
 import { adminAudit } from "./admin-auth.js";
 
 /**
@@ -66,9 +67,7 @@ class AdminAuthStoreManager {
     if (this.db) return this.db;
     try {
       const file = adminAuthDbPath();
-      mkdirSync(dirname(file), { recursive: true });
-      const db = new Database(file);
-      db.pragma("journal_mode = WAL");
+      const db = openSqlite(file);
       db.exec(`
         CREATE TABLE IF NOT EXISTS admin_auth (
           id         INTEGER PRIMARY KEY CHECK (id = 1),

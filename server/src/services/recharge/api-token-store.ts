@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import Database from "better-sqlite3";
+import { openSqlite } from "../../storage/sqlite.js";
 import type { Database as SqliteDatabase } from "better-sqlite3";
 
 import { getDataDir } from "../../config/data-dir.js";
@@ -36,9 +36,7 @@ export class ApiTokenStore {
   private open(): SqliteDatabase {
     if (this.db) return this.db;
     const file = apiTokenDbPath();
-    mkdirSync(dirname(file), { recursive: true });
-    const db = new Database(file);
-    db.pragma("journal_mode = WAL");
+    const db = openSqlite(file);
     db.exec(`
       CREATE TABLE IF NOT EXISTS api_tokens (
         token_hash TEXT PRIMARY KEY,

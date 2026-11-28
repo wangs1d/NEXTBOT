@@ -24,6 +24,7 @@ import {
   classifyMemorySourceRole,
   extractEchoQueryFromAssistantReply,
   isAssistantVoiceQuery,
+  normalizeMemorySourceRole,
   type MemorySourceRole,
 } from "./memory-source-role.js";
 import {
@@ -37,8 +38,8 @@ import type { InferenceNode } from "../brain/types.js";
 
 /** 读取节点来源角色：优先 metadata 打标，旧节点按文本形态即时分类（legacy 兼容）。 */
 function resolveNodeRole(node: MemoryNodeRecord): MemorySourceRole {
-  const metaRole = node.metadata?.sourceRole;
-  return typeof metaRole === "string" ? (metaRole as MemorySourceRole) : classifyMemorySourceRole(node.summary);
+  const metaRole = normalizeMemorySourceRole(node.metadata?.sourceRole);
+  return metaRole ?? classifyMemorySourceRole(node.summary);
 }
 
 /**
@@ -795,8 +796,9 @@ export class HumanLikeMemoryService {
 
     const importance = this.computeImportance(summary, source, opts?.metadata);
     const confidence = this.computeConfidence(summary, opts?.metadata);
-    // 来源角色打标（root fix）：每条记忆落库时记录谁说的，下游覆盖/召回治理都依赖它
-    const sourceRole = classifyMemorySourceRole(summary);
+    // 来源角色打标（root fix）：显式 metadata 优先，旧链路才按文本形态兜底。
+    const sourceRole =
+      normalizeMemorySourceRole(opts?.metadata?.sourceRole) ?? classifyMemorySourceRole(summary);
     // 情感标记（P0 统一出入口）：外部显式传入优先，否则用共享词表推断。
     // 只在高光/至暗等有明显情绪时落 metadata，避免给每条记忆都挂噪音标签。
     const explicitEmotion = emotionFromMetadata(opts?.metadata);
@@ -842,17 +844,15 @@ export class HumanLikeMemoryService {
       existing.emotionTags = uniqueStrings([...existing.emotionTags, ...extractEmotionTags(summary)], 8);
       existing.emotionTags = uniqueStrings([...existing.emotionTags, ...inferredEmotion.tags], 8);
       // P1-2：换说法合并到旧节点时留痕（可观测重复率下降，不改变语义）
+      const existingRole = normalizeMemorySourceRole(existing.metadata?.sourceRole);
+      const mergedRole =
+        existingRole === "user" || sourceRole === "user" ? "user" : (existingRole ?? sourceRole);
       existing.metadata = {
         ...(existing.metadata ?? {}),
+        sourceRole: mergedRole,
         mergeCount: Number(existing.metadata?.mergeCount ?? 0) + 1,
+        ...emotionPatch,
       };
-      if (!existing.metadata?.sourceRole || emotionPatch.emotion) {
-        existing.metadata = {
-          ...(existing.metadata ?? {}),
-          ...(existing.metadata?.sourceRole ? {} : { sourceRole }),
-          ...emotionPatch,
-        };
-      }
       // 双时态（P2-1）：重新被断言 = 该事实当前有效
       existing.validTo = null;
       if (incomingVector) existing.vectorFingerprint = serializeVector(incomingVector);
@@ -1260,15 +1260,15 @@ export class HumanLikeMemoryService {
     actorId: string,
     nodeIds: string[],
     max = 4,
-  ): Array<{ id: string; summary: string }> {
+  ): Array<{ id: string; summary: string; sourceRole?: MemorySourceRole }> {
     if (!nodeIds || nodeIds.length === 0) return [];
-    const result: Array<{ id: string; summary: string }> = [];
+    const result: Array<{ id: string; summary: string; sourceRole?: MemorySourceRole }> = [];
     for (const nodeId of nodeIds) {
       if (result.length >= max) break;
       const node = this.store.nodes[nodeId];
       if (!node || node.actorId !== actorId || node.deletionStage === "hard_deleted") continue;
       if (typeof node.summary !== "string" || node.summary.length === 0) continue;
-      result.push({ id: node.id, summary: node.summary });
+      result.push({ id: node.id, summary: node.summary, sourceRole: resolveNodeRole(node) });
     }
     return result;
   }
@@ -1287,6 +1287,22 @@ export class HumanLikeMemoryService {
     }
     node.deletionStage = stage;
     this.schedulePersist();
+  }
+
+  /** 用户显式遗忘：节点退出召回，由 bridge 同步回收关联 Mem0。 */
+  forgetMatching(actorId: string, keyword: string): number {
+    const actor = actorId?.trim();
+    const kw = keyword?.trim().toLowerCase();
+    if (!actor || !kw) return 0;
+    let count = 0;
+    for (const node of Object.values(this.store.nodes)) {
+      if (node.actorId !== actor || node.deletionStage === "hard_deleted") continue;
+      if (!node.summary.toLowerCase().includes(kw)) continue;
+      node.deletionStage = "hard_deleted";
+      count += 1;
+    }
+    if (count > 0) this.schedulePersist();
+    return count;
   }
 
   /**

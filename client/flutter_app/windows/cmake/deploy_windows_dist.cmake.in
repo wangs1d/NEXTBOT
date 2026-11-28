@@ -19,6 +19,23 @@ set(_dest "${NEXTBOT_DEPLOY_ROOT}/${_cfg}")
 
 message(STATUS "Nextbot: mirroring Windows bundle ${_src} -> ${_dest}")
 
+# 捆绑 runtime 存活（2026-11-28）：windows_dist\Release 自 2026-11-27 起是
+# 「app + runtime 的完整本地版」，自启链（Run 键 / app-launcher.mjs /
+# launch-desktop-app.ps1）三处都指向这个固定路径，LocalRuntimeManager.isBundled
+# 也认这里的 runtime\node.exe。runtime 由 build-installer.ps1 的 [3.10] 从
+# staging 同步过来——但本文件的 REMOVE_RECURSE 会连 runtime 一起整目录抹掉
+# （build_windows.ps1 的 robocopy /XD runtime 挡不住这里：cmake install 在
+# flutter build 内部先跑，2026-11-28 实证：installer 出包当晚一次普通
+# flutter build 就把 Release\runtime 清没了，本地版被打回 cloud 壳）。
+# 处理：抹除前把 runtime 挪到部署根的暂存目录，镜像完成后再放回去。
+set(_runtime_keep "${NEXTBOT_DEPLOY_ROOT}/.runtime-keep")
+if(EXISTS "${_dest}/runtime")
+  if(EXISTS "${_runtime_keep}")
+    file(REMOVE_RECURSE "${_runtime_keep}")
+  endif()
+  file(RENAME "${_dest}/runtime" "${_runtime_keep}")
+endif()
+
 if(EXISTS "${_dest}")
   file(REMOVE_RECURSE "${_dest}")
 endif()
@@ -33,4 +50,10 @@ execute_process(
   RESULT_VARIABLE _nextbot_copy_rc)
 if(NOT _nextbot_copy_rc EQUAL 0)
   message(FATAL_ERROR "Nextbot: copy to windows_dist failed (code ${_nextbot_copy_rc})")
+endif()
+
+# 镜像完成：把抹除前挪走的捆绑 runtime 放回原位（app 产物里不含 runtime，
+# 放回不会与 copy 结果冲突；上轮构建 FATAL 中断留下的暂存也在这里归位）
+if(EXISTS "${_runtime_keep}")
+  file(RENAME "${_runtime_keep}" "${_dest}/runtime")
 endif()

@@ -4,7 +4,7 @@
 ///   图库不在此列：2026-09-29 起退出一级 tab，走常用工具入口以全屏路由
 ///   打开（见 GalleryWorkbenchPage），右面板窄栏放不下 3D 照片墙。）
 // friends 已整体下线（2026-11-23）：好友功能删除，其面板槽位改为 inbox（站内信）。
-enum RightPanelKind { inbox, messages, devices, schedule, imagePreview, videoPreview, browser, catalog, approvals, contentSummary, agentHome }
+enum RightPanelKind { inbox, messages, devices, schedule, imagePreview, videoPreview, browser, catalog, approvals, contentSummary, agentHome, digitalHuman }
 
 /// 宽屏布局断点：>= 此宽度时对话页显示右侧面板。
 const double kWideLayoutBreakpoint = 820;
@@ -39,6 +39,8 @@ extension RightPanelKindDefaults on RightPanelKind {
         return 0.42; // 内容详情：长文阅读（书签栏 + 正文），需要较大空间
       case RightPanelKind.agentHome:
         return 0.55; // Agent 主页：动态卡片流，右面板中等宽度
+      case RightPanelKind.digitalHuman:
+        return 0.55; // 数字人：头像舞台 + 换头像，右面板中等宽度
     }
   }
 }
@@ -112,6 +114,8 @@ String rightPanelTitle(RightPanelKind kind) {
       return "内容详情";
     case RightPanelKind.agentHome:
       return "主页";
+    case RightPanelKind.digitalHuman:
+      return "数字人";
   }
 }
 

@@ -1,5 +1,4 @@
 import "dart:convert";
-import "dart:typed_data";
 
 import "package:http/http.dart" as http;
 import "nb_http.dart";
@@ -211,68 +210,6 @@ class ModelApiTester {
     } catch (_) {/* 非 JSON */}
     final String flat = body.replaceAll(RegExp(r"\s+"), " ").trim();
     return flat.isEmpty ? "无响应体" : (flat.length > 80 ? "${flat.substring(0, 80)}…" : flat);
-  }
-}
-
-/// 声纹 HTTP 客户端（首启向导注册 + 语音闸验证共用）。
-class VoiceprintApi {
-  static Map<String, String> get _headers => <String, String>{"Content-Type": "application/json"};
-
-  static Uri _uri(String path) => Uri.parse("${ApiConfig.httpBase}$path");
-
-  static String get _userId => ApiConfig.effectiveActorId;
-
-  static Future<Map<String, dynamic>> status() async {
-    try {
-      final http.Response res = await NbHttp.get(
-            _uri("/api/voice/voiceprint/status?userId=${Uri.encodeComponent(_userId)}"),
-          )
-          .timeout(const Duration(seconds: 5));
-      return jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
-    } catch (_) {
-      return <String, dynamic>{"ok": false, "registered": false, "engineReady": false};
-    }
-  }
-
-  /// [samples]：PCM16 单声道 16k 字节（每段 ≥0.5s，建议 3-4s）。
-  static Future<Map<String, dynamic>> register(List<Uint8List> samples) async {
-    final http.Response res = await NbHttp.post(
-          _uri("/api/voice/voiceprint/register"),
-          headers: _headers,
-          body: jsonEncode(<String, dynamic>{
-            "userId": _userId,
-            "samples": samples.map((Uint8List s) => base64Encode(s)).toList(),
-          }),
-        )
-        .timeout(const Duration(seconds: 30));
-    return jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
-  }
-
-  /// 验证一段音频是否为已录入用户本人；命中返回 speakerToken。
-  static Future<Map<String, dynamic>> verify(Uint8List audio) async {
-    final http.Response res = await NbHttp.post(
-          _uri("/api/voice/voiceprint/verify"),
-          headers: _headers,
-          body: jsonEncode(<String, dynamic>{
-            "userId": _userId,
-            "audioBase64": base64Encode(audio),
-          }),
-        )
-        .timeout(const Duration(seconds: 15));
-    return jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
-  }
-
-  static Future<bool> unregister() async {
-    try {
-      final http.Response res = await NbHttp.delete(
-            _uri("/api/voice/voiceprint?userId=${Uri.encodeComponent(_userId)}"),
-          )
-          .timeout(const Duration(seconds: 5));
-      final dynamic parsed = jsonDecode(utf8.decode(res.bodyBytes));
-      return parsed is Map && parsed["ok"] == true;
-    } catch (_) {
-      return false;
-    }
   }
 }
 

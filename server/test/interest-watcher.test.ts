@@ -265,13 +265,19 @@ test("语义兜底：INTEREST_SEMANTIC_MATCH=0 一键关闭", async () => {
   process.env.INTEREST_SEMANTIC_MATCH = "0";
   try {
     const pushed: string[] = [];
+    let embedCalls = 0;
     const watcher = makeSemanticWatcher({
       hits: [{ title: "iPhone 17 全系发布", platform: "微博" }],
+      embed: async (texts) => {
+        embedCalls += 1;
+        return toyEmbed(texts);
+      },
       onHit: (_a, name, title) => pushed.push(`${name}→${title}`),
     });
     await watcher.addInterest("u1", "苹果手机", "brand");
     assert.equal(await watcher.checkAll(), 0);
     assert.equal(pushed.length, 0);
+    assert.equal(embedCalls, 0, "关闭语义匹配后不应嵌入兴趣名或热搜标题");
   } finally {
     delete process.env.INTEREST_SEMANTIC_MATCH;
   }

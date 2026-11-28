@@ -57,25 +57,38 @@ export type DynamicThreshold = {
  * 计算全部工具的余弦相似度并降序排列（不做截断）。
  * 调用方拿到完整排序后自行做动态阈值筛选。
  */
+export type ToolEmbeddingVectorSet = Float32Array | Float32Array[];
+
+function maxCosine(
+  query: Float32Array,
+  vectors: ToolEmbeddingVectorSet,
+): number | null {
+  const list = vectors instanceof Float32Array ? [vectors] : vectors;
+  let best: number | null = null;
+  for (const vector of list) {
+    if (vector.length !== query.length) continue;
+    let dot = 0;
+    for (let i = 0; i < query.length; i++) dot += query[i]! * vector[i]!;
+    if (best === null || dot > best) best = dot;
+  }
+  return best;
+}
+
 export function rankAllByEmbedding(
   queryVector: number[] | Float32Array,
-  docVectors: Map<string, Float32Array>,
+  docVectors: Map<string, ToolEmbeddingVectorSet>,
 ): Array<{ id: string; score: number }> {
   if (queryVector.length === 0 || docVectors.size === 0) return [];
 
-  let q: Float32Array;
-  if (queryVector instanceof Float32Array) {
-    q = queryVector;
-  } else {
-    q = preNormalizeVector(queryVector as number[]);
-  }
+  const q =
+    queryVector instanceof Float32Array
+      ? queryVector
+      : preNormalizeVector(queryVector as number[]);
 
   const hits: Array<{ id: string; score: number }> = [];
-  for (const [id, vec] of docVectors) {
-    if (vec.length !== q.length) continue;
-    let dot = 0;
-    for (let i = 0; i < q.length; i++) dot += q[i]! * vec[i]!;
-    hits.push({ id, score: dot });
+  for (const [id, vectors] of docVectors) {
+    const score = maxCosine(q, vectors);
+    if (score !== null) hits.push({ id, score });
   }
 
   hits.sort((a, b) => b.score - a.score);
@@ -130,24 +143,30 @@ type HnswIndex = {
 };
 
 export class ToolEmbeddingIndex {
-  private readonly vectors = new Map<string, Float32Array>();
+  private readonly vectors = new Map<string, Float32Array[]>();
   private dimension = 0;
-  // ANN 层（惰性构建）：ids 与 addPoint 的整数 label 一一对应
+  // ANN 层（惰性构建）：每个视图一条 label，检索后按工具取 max-sim。
   private annIndex: HnswIndex | null = null;
   private annIds: string[] = [];
   private annBuilding: Promise<void> | null = null;
   private annFailed = false;
 
-  ingest(registryName: string, vector: number[]): void {
-    if (vector.length === 0) return;
-    this.dimension = vector.length;
-    this.vectors.set(registryName, preNormalizeVector(vector));
-    this.annIndex = null; // 增量写入使 ANN 失效，下次 ensureAnn 重建
+  ingest(registryName: string, vector: number[] | number[][]): void {
+    const source = Array.isArray(vector[0]) ? (vector as number[][]) : [vector as number[]];
+    const normalized = source
+      .filter((item) => item.length > 0)
+      .map((item) => preNormalizeVector(item));
+    if (normalized.length === 0) return;
+    this.dimension = normalized[0]!.length;
+    this.vectors.set(registryName, normalized);
+    this.annIndex = null;
   }
 
-  ingestMany(entries: Iterable<[string, number[] | undefined | null]>): void {
-    for (const [name, vec] of entries) {
-      if (vec) this.ingest(name, vec);
+  ingestMany(
+    entries: Iterable<[string, number[] | number[][] | undefined | null]>,
+  ): void {
+    for (const [name, vectors] of entries) {
+      if (vectors) this.ingest(name, vectors);
     }
   }
 
@@ -177,11 +196,10 @@ export class ToolEmbeddingIndex {
       queryVector instanceof Float32Array ? queryVector : preNormalizeVector(queryVector);
     const hits: Array<{ id: string; score: number }> = [];
     for (const id of ids) {
-      const vec = this.vectors.get(id);
-      if (!vec || vec.length !== q.length) continue;
-      let dot = 0;
-      for (let i = 0; i < q.length; i++) dot += q[i]! * vec[i]!;
-      hits.push({ id, score: dot });
+      const vectors = this.vectors.get(id);
+      if (!vectors) continue;
+      const score = maxCosine(q, vectors);
+      if (score !== null) hits.push({ id, score });
     }
     hits.sort((a, b) => b.score - a.score);
     return hits;
@@ -199,20 +217,27 @@ export class ToolEmbeddingIndex {
     if (this.annIndex) {
       try {
         const q = Array.from(queryVector);
-        const raw = this.annIndex.searchKnn(q, Math.min(k, this.vectors.size));
-        const out: Array<{ id: string; score: number }> = [];
+        const maxViews = Math.max(1, ...[...this.vectors.values()].map((items) => items.length));
+        const raw = this.annIndex.searchKnn(
+          q,
+          Math.min(this.annIds.length, Math.max(k, k * maxViews)),
+        );
+        const bestById = new Map<string, number>();
         for (let i = 0; i < raw.neighbors.length; i++) {
           const label = raw.neighbors[i];
           const distance = raw.distances[i];
           const id = label !== undefined ? this.annIds[label] : undefined;
-          if (id !== undefined && distance !== undefined) {
-            out.push({ id, score: 1 - distance }); // cosine 距离 → 相似度
-          }
+          if (id === undefined || distance === undefined) continue;
+          const score = 1 - distance;
+          const previous = bestById.get(id);
+          if (previous === undefined || score > previous) bestById.set(id, score);
         }
-        out.sort((a, b) => b.score - a.score);
-        return out;
+        return [...bestById.entries()]
+          .map(([id, score]) => ({ id, score }))
+          .sort((a, b) => b.score - a.score)
+          .slice(0, Math.max(0, k));
       } catch {
-        this.annIndex = null; // ANN 异常一次性回落，下次 ensureAnn 重建
+        this.annIndex = null;
       }
     }
     return rankAllByEmbedding(queryVector, this.vectors).slice(0, Math.max(0, k));
@@ -223,7 +248,10 @@ export class ToolEmbeddingIndex {
     const cfg = getToolSearchConfig();
     if (cfg.annMode === "off") return false;
     if (cfg.annMode === "on") return true;
-    return this.vectors.size >= cfg.annMinTools;
+    return (
+      [...this.vectors.values()].reduce((sum, items) => sum + items.length, 0) >=
+      cfg.annMinTools
+    );
   }
 
   /**
@@ -239,16 +267,22 @@ export class ToolEmbeddingIndex {
             default?: { HierarchicalNSW: new (space: string, dim: number) => HnswIndex };
             HierarchicalNSW?: new (space: string, dim: number) => HnswIndex;
           };
-          const ids = [...this.vectors.keys()];
+          const ids: string[] = [];
+          const points: Float32Array[] = [];
+          for (const [id, vectors] of this.vectors) {
+            for (const vector of vectors) {
+              ids.push(id);
+              points.push(vector);
+            }
+          }
           if (ids.length === 0 || this.dimension === 0) return;
           // ESM 互操作：类挂在 default 下（ESM/CJS 混合包，顶层无具名导出）
           const Ctor = mod.default?.HierarchicalNSW ?? mod.HierarchicalNSW;
           if (typeof Ctor !== "function") throw new Error("HierarchicalNSW constructor not found");
           const index = new Ctor("cosine", this.dimension);
           index.initIndex(ids.length, 16, 200);
-          let i = 0;
-          for (const id of ids) {
-            index.addPoint(Array.from(this.vectors.get(id)!), i++);
+          for (let i = 0; i < points.length; i++) {
+            index.addPoint(Array.from(points[i]!), i);
           }
           this.annIds = ids;
           this.annIndex = index;

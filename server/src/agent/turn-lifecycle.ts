@@ -3,7 +3,7 @@ import type { UserPersonalizationService } from "../services/user-personalizatio
 import type { NarrativeMemoryPort } from "../services/narrative-memory-port.js";
 import type { TaskExecutionPlan } from "./plan-execute-loop.js";
 import { getAgentRuntimeConfig } from "./agent-runtime-config.js";
-import { detectMemorySignals } from "./memory-signal.js";
+import { detectMemorySignals, selectHotPathMemoryLines } from "./memory-signal.js";
 import type { TurnUnderstanding } from "./task-router.js";
 import { getShortTermMemoryConfig } from "../services/short-term-memory-config.js";
 import { getDailyDigestService } from "../services/daily-digest-service.js";
@@ -26,6 +26,7 @@ import { getPresenceFootprintStore } from "../rhythm/presence-footprint-store.js
 import { isEphemeralActorId } from "./actor-id.js";
 import { recordTurnEventSafely, type EventToolTrace } from "../agentic-memory/event-store.js";
 import { buildEventJournalEntry } from "../agentic-memory/event-builder.js";
+import { createMemoryRecord } from "../agentic-memory/memory-record.js";
 import { getDailyJournalService } from "../services/daily-journal-service.js";
 
 export type FinalizeTurnInput = {
@@ -109,11 +110,24 @@ export class TurnLifecycle {
     // 无高价值信号时只落一行极短的"用户意图主干"，再交整合链路裁决是否值得保留。
     // 完整轮次仍由 turn-wal / daily-digest / chat-threads 独立留存，不回落到长期图谱。
     const signal = detectMemorySignals(userText, assistantText, memoryInstruction, personalFact);
-    const body = buildTurnArchiveSnapshot(userText, assistantText, signal);
+    const body = signal.isHighSignal
+      ? selectHotPathMemoryLines(signal.extractLines).join("\n")
+      : buildTurnArchiveSnapshot(userText, assistantText, signal);
     if (!body) return;
 
     // 统一写入者：候选只入队，裁决/回声过滤/supersession/落库都在整合链路单点完成
     const consolidation = getMemoryConsolidationService();
+    const createdAt = new Date().toISOString();
+    const record = createMemoryRecord({
+      actorId,
+      sourceRef: provenance?.eventId ? `event:${provenance.eventId}` : "chat:turn_archive",
+      text: body,
+      sourceRole: "user",
+      kind: signal.isHighSignal ? "fact" : "event",
+      createdAt,
+      sourceEventId: provenance?.eventId,
+      eventTime: provenance?.eventTime,
+    });
     if (consolidation) {
       consolidation.submitCandidate({
         actorId,
@@ -121,7 +135,9 @@ export class TurnLifecycle {
         source: "chat:turn_archive",
         context,
         highSignal: signal.isHighSignal,
-        createdAt: new Date().toISOString(),
+        sourceRole: record.sourceRole,
+        record,
+        createdAt,
         topicHint: inferMemoryTopic(userText),
         ...(provenance ?? {}),
       });
@@ -140,6 +156,8 @@ export class TurnLifecycle {
       await this.deps.narrativeMemory?.ingest(actorId, body, "chat:turn_archive", {
         highSignal: decision.decision === "remember" || decision.decision === "overwrite",
         context,
+        sourceRole: record.sourceRole,
+        record,
         writer: "TurnLifecycle",
       });
     })().catch(() => {});
@@ -152,19 +170,32 @@ export class TurnLifecycle {
     topicHint?: string,
     provenance?: TurnEventProvenance,
   ): void {
-    if (lines.length === 0) return;
+    const userLines = selectHotPathMemoryLines(lines);
+    if (userLines.length === 0) return;
 
     // 统一写入者：每条高信号原子行一个候选；KV summary 行由整合链路统一落
     const consolidation = getMemoryConsolidationService();
     if (consolidation) {
       const now = new Date().toISOString();
-      for (const line of lines) {
+      for (const line of userLines) {
+        const record = createMemoryRecord({
+          actorId,
+          sourceRef: provenance?.eventId ? `event:${provenance.eventId}` : "chat:fast_path",
+          text: line,
+          sourceRole: "user",
+          kind: "fact",
+          createdAt: now,
+          sourceEventId: provenance?.eventId,
+          eventTime: provenance?.eventTime,
+        });
         consolidation.submitCandidate({
           actorId,
           text: line,
           source: "chat:fast_path",
           context,
           highSignal: true,
+          sourceRole: record.sourceRole,
+          record,
           createdAt: now,
           topicHint,
           ...(provenance ?? {}),
@@ -174,7 +205,16 @@ export class TurnLifecycle {
     }
 
     if (!this.deps.narrativeMemory) return;
-    const body = lines.join("\n");
+    const body = userLines.join("\n");
+    const record = createMemoryRecord({
+      actorId,
+      sourceRef: provenance?.eventId ? `event:${provenance.eventId}` : "chat:fast_path",
+      text: body,
+      sourceRole: "user",
+      kind: "fact",
+      sourceEventId: provenance?.eventId,
+      eventTime: provenance?.eventTime,
+    });
     void (async () => {
       const decision = await decideMemoryWrite(body, {
         actorId,
@@ -184,6 +224,8 @@ export class TurnLifecycle {
       await this.deps.narrativeMemory?.ingest(actorId, body, "chat:fast_path", {
         highSignal: decision.decision === "remember" || decision.decision === "overwrite",
         context,
+        sourceRole: record.sourceRole,
+        record,
         writer: "TurnLifecycle",
       });
     })().catch(() => {});

@@ -43,9 +43,12 @@ export type HybridRetrievalInput = {
   prebuiltIndex?: Bm25Index; // 预构建 BM25 索引，复用避免每次新建
   /** 传给 BM25 的别名条目（缺省则退化为纯词面匹配，中文召回明显变差） */
   aliasEntries?: HybridAliasEntry[];
-  /** 意图解析出的候选域（驱动 domain_match 打分，来自分层路由结果） */
+  /** 意图域后验分（0~1）；优先于等权域集合，避免硬过滤与多数票偏置 */
+  intentDomainScores?: Record<string, number>;
+  /** 意图能力后验分（0~1）；用于区分同域内的查询、创建、发送等动作 */
+  intentCapabilityScores?: Record<string, number>;
+  /** 兼容调用方的等权域/能力集合 */
   intentDomains?: string[];
-  /** 意图解析出的候选能力（驱动 capability_match 打分） */
   intentCapabilities?: string[];
   /**
    * 负例短语表（resource_id → negativeAliases+negativeExamples）。声明的负例
@@ -112,8 +115,10 @@ export class HybridRetrievalEngine {
         latency_score: history.latency_score,
         failure_penalty: history.failure_penalty,
         base_score: record.level1.base_score,
-        domain_match: overlapRatio(record.level1.domain, input.intentDomains),
-        capability_match: overlapRatio(record.level1.capability, input.intentCapabilities),
+        domain_match: posteriorMatch(record.level1.domain, input.intentDomainScores)
+          ?? overlapRatio(record.level1.domain, input.intentDomains),
+        capability_match: posteriorMatch(record.level1.capability, input.intentCapabilityScores)
+          ?? overlapRatio(record.level1.capability, input.intentCapabilities),
         negative_match: negativeMatch(
           input.negativePhrasesById?.get(record.level1.resource_id),
           input.query,
@@ -161,8 +166,8 @@ export function weightsForQuery(query: string, hasQueryVector = true): HybridRet
   // Python 原值 0.15/0.25 是在其自身权重体系（embedding 0.3 + bm25 0.3 + …）里定的；
   // TS 通道的 keyword/embedding 分值分布更尖，等权照搬会把结构信号放大到盖过词面
   // 相关性（实测把 commitment.list 顶到「今天有什么热搜」top-1），按 TS 分布校准。
-  const domain = envFloat("AGENT_TOOL_SEARCH_DOMAIN_WEIGHT", 0.06, 0, 1);
-  const capability = envFloat("AGENT_TOOL_SEARCH_CAPABILITY_WEIGHT", 0.1, 0, 1);
+  const domain = envFloat("AGENT_TOOL_SEARCH_DOMAIN_WEIGHT", 0.12, 0, 1);
+  const capability = envFloat("AGENT_TOOL_SEARCH_CAPABILITY_WEIGHT", 0.16, 0, 1);
   const negative = envFloat("AGENT_TOOL_SEARCH_NEGATIVE_WEIGHT", 0.35, 0, 1);
   if (!hasQueryVector) {
     return normalizeWeights({
@@ -208,19 +213,12 @@ function scoreKeywords(
   prebuiltIndex?: Bm25Index,
   aliasEntries?: HybridAliasEntry[],
 ): Map<string, number> {
-  // 极短 query（1-2 token）跳过 BM25：lexicalToolBoost 已覆盖 token 重叠
-  if (tokenize(query).length <= 2) return new Map();
-
   if (prebuiltIndex) {
     const candidateIds = new Set(candidates.map((r) => r.level1.resource_id));
-    // 放大 limit：全量索引里其他域的工具会挤占名额，候选集是子集时需多取再过滤
-    const bm25Limit = Math.max(candidates.length * 2, 20);
-    const hits = prebuiltIndex.search(query, bm25Limit, aliasEntries);
-    const max = Math.max(...hits.map((h) => h.score), 0);
+    const hits = prebuiltIndex.search(query, prebuiltIndex.size, aliasEntries);
     const out = new Map<string, number>();
     for (const hit of hits) {
-      if (!candidateIds.has(hit.id)) continue;
-      out.set(hit.id, max > 0 ? clamp01(hit.score / max) : 0);
+      if (candidateIds.has(hit.id)) out.set(hit.id, hit.score);
     }
     return out;
   }
@@ -229,23 +227,22 @@ function scoreKeywords(
     text: searchableText(record),
   }));
   const index = new Bm25Index(docs);
-  const hits = index.search(query, Math.max(candidates.length, 1), aliasEntries);
-  const max = Math.max(...hits.map((h) => h.score), 0);
-  const out = new Map<string, number>();
-  for (const hit of hits) {
-    out.set(hit.id, max > 0 ? clamp01(hit.score / max) : 0);
-  }
-  return out;
+  const hits = index.search(query, index.size, aliasEntries);
+  return new Map(hits.map((hit) => [hit.id, hit.score]));
 }
 
 function scoreEmbedding(
   record: ResourceRecord,
   queryVector: number[] | Float32Array,
 ): number {
-  const docVector = record.level1.embedding;
-  if (!docVector.length || queryVector.length !== docVector.length) return 0;
-  const cosine = cosineSimilarity(Array.from(queryVector), docVector);
-  return clamp01((cosine + 1) / 2);
+  const query = Array.from(queryVector);
+  let best = -1;
+  for (const docVector of record.level1.embeddings) {
+    if (!docVector.length || query.length !== docVector.length) continue;
+    const cosine = cosineSimilarity(query, docVector);
+    if (cosine > best) best = cosine;
+  }
+  return best < 0 ? 0 : clamp01((best + 1) / 2);
 }
 
 function searchableText(record: ResourceRecord): string {
@@ -298,7 +295,7 @@ function normalizeWeights(weights: HybridRetrievalWeights): HybridRetrievalWeigh
  *     按"任一 token 命中"会让本工具的正面例句（「明天早上九点提醒我开会」）
  *     反过来吃满负例惩罚，create 被 delete/list 反超。
  */
-function negativeMatch(phrases: string[] | undefined, query: string): number {
+export function negativeMatch(phrases: string[] | undefined, query: string): number {
   if (!phrases || phrases.length === 0) return 0;
   const qLower = query.trim().toLowerCase();
   const qTokens = new Set(tokenize(query));
@@ -315,6 +312,19 @@ function negativeMatch(phrases: string[] | undefined, query: string): number {
     if (hits >= 2) break;
   }
   return Math.min(1, hits * 0.5);
+}
+
+function posteriorMatch(
+  candidateValues: string[],
+  posterior?: Record<string, number>,
+): number | null {
+  if (!posterior || Object.keys(posterior).length === 0) return null;
+  let best = 0;
+  for (const value of candidateValues) {
+    const score = posterior[value.toLowerCase()];
+    if (Number.isFinite(score)) best = Math.max(best, score as number);
+  }
+  return clamp01(best);
 }
 
 /** 意图集合与候选集合的重合度：|交| / |意图集|（意图集为空返回 0，不参与打分）。 */

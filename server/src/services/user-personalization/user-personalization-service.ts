@@ -796,7 +796,7 @@ export class UserPersonalizationService {
       style = this.applyStyleProfile(actorId, userText, relationship, behavior, style);
       replyLength = this.applyReplyLengthProfile(actorId, userText, replyLength);
     }
-    const profile = await this.store.read(actorId);
+    const profile = await this.projectProfileFieldAuthority(actorId, await this.store.read(actorId));
     const maxChars = Number.parseInt(process.env.AGENT_USER_PROFILE_PROMPT_MAX_CHARS ?? "3500", 10);
     const cap = Number.isFinite(maxChars) && maxChars > 400 ? maxChars : 3500;
     // 结构感知截断：超长时先丢备注/兴趣等次要 section，绝不丢【基本信息】里的姓名/所在地
@@ -832,7 +832,7 @@ export class UserPersonalizationService {
    */
   async getProfileOnlySlice(actorId: string): Promise<PersonalizationPromptSlice> {
     if (!isUserPersonalizationEnabled()) return {};
-    const profile = await this.store.read(actorId);
+    const profile = await this.projectProfileFieldAuthority(actorId, await this.store.read(actorId));
     if (!hasRealProfileContent(profile)) return {};
     const maxChars = Number.parseInt(process.env.AGENT_USER_PROFILE_PROMPT_MAX_CHARS ?? "3500", 10);
     const cap = Number.isFinite(maxChars) && maxChars > 400 ? maxChars : 3500;

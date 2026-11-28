@@ -6,6 +6,7 @@ import { recallProfileFieldsSync } from "../brain/profile-semantic-recall.js";
 import { getMemoryComponents } from "../agentic-memory/index.js";
 import { peekMemorySuppressionStore } from "../agentic-memory/memory-suppression.js";
 import { buildEventRecallBlock } from "../agentic-memory/event-auto-recall.js";
+import { planMemoryRecall, type MemoryRecallPlan } from "./recall-planner.js";
 import { buildTemporalFactAddressing } from "./memory-temporal-intent.js";
 import { CAPABILITY_DOMAINS, type CapabilityDomain } from "./agent-capabilities.js";
 import { getAgentRuntimeConfig } from "./agent-runtime-config.js";
@@ -338,6 +339,7 @@ export type BuildPromptContextInput = {
    * 按「无特殊处理」（最小注入）执行。
    */
   understanding?: TurnUnderstanding;
+  recallPlan?: MemoryRecallPlan;
   /**
    * 当前工作记忆摘要（来自 WorkingMemoryCortex.toSummary）。
    * 作为独立块注入 system prompt，不再拼入 narrativeRecall，
@@ -578,6 +580,11 @@ export class PromptContextBuilder {
     // 缺省（路由失败）按「无特殊处理」执行——误注入=串台，漏注入=少点可选上下文。
     // 命名区分：本变量是本轮路由语义；下方 `understanding` 是用户理解档案块（另一概念）。
     const turnUnderstanding = input.understanding;
+    const recallPlan = input.recallPlan ?? planMemoryRecall({
+      text: userText,
+      threadMessageCount: input.threadMessageCount,
+      understanding: turnUnderstanding,
+    });
     const followUpTurn = turnUnderstanding?.isFollowUp === true;
     const digestService = getDailyDigestService();
 
@@ -689,7 +696,7 @@ export class PromptContextBuilder {
     // 结构化事实块先算（2026-11-18 根修）：画像投影的行级门控需要本轮实际注入的
     // 字段白名单——画像里的身份字段行只在权威块本轮真的渲染时才保留，否则画像
     // 又变成「每轮把全部身份字段摊在桌上」的第二权威源。
-    const facts = this.buildUserFactsBlock(input.actorId, userText);
+    const facts = this.buildUserFactsBlock(input.actorId, userText, recallPlan);
     const rawUserProfile = compactPromptBlock(
       gateProfileMarkdownForPrompt(input.personalization?.userProfile, {
         injectedFactFields: new Set(facts.injectedValues.keys()),
@@ -881,7 +888,7 @@ export class PromptContextBuilder {
     // 事件回忆（L0）：只在对话面、用户出现时间回溯意图且命中真实事件时注入；
     // 无命中零注入，失败静默（事件层不可用不影响本轮 prompt）。
     let eventRecallBlock: string | undefined;
-    if (input.plane === "chat") {
+    if (input.plane === "chat" && recallPlan.channels.includes("event")) {
       try {
         eventRecallBlock = buildEventRecallBlock(input.actorId, userText, input.understanding);
       } catch (err) {
@@ -892,7 +899,7 @@ export class PromptContextBuilder {
     // 长尾事实召回（structured_facts tail:*）：用户过去表达过的偏好/习惯，
     // 仅在与本轮话题强相关时带出；定位是往事背景，不是本轮指令。
     let tailFactsRecallBlock: string | undefined;
-    if (input.plane === "chat") {
+    if (input.plane === "chat" && recallPlan.channels.includes("tailFacts")) {
       try {
         tailFactsRecallBlock =
           getMemoryComponents().factStore?.renderTailRecallBlock(input.actorId, userText) ??
@@ -1014,7 +1021,7 @@ export class PromptContextBuilder {
 
     // 读侧唯一裁决：跨块去重 + 全局预算。各 builder 只负责生产候选，
     // 是否最终进 prompt 由编译器按权威序统一决定（超预算整块丢弃）。
-    const compiled = compileMemoryContext(promptMemory);
+    const compiled = compileMemoryContext(promptMemory, Date.now(), recallPlan.budgetChars);
     if (compiled.dedupedLines > 0 || compiled.droppedFields.length > 0) {
       console.log(
         `[mem-compile] actor=${input.actorId} deduped=${compiled.dedupedLines} ` +
@@ -1087,6 +1094,7 @@ export class PromptContextBuilder {
   private buildUserFactsBlock(
     actorId: string,
     userText: string,
+    recallPlan: MemoryRecallPlan,
   ): {
     stableBlock: string | undefined;
     matchedFields: string[];
@@ -1136,7 +1144,7 @@ export class PromptContextBuilder {
         // 模型看到就顺带全报。召回必须对应问题，背景不能靠"先摆出来"。
         if (matchedFields.length > 0) {
           for (const field of matchedFields) whitelist.add(field);
-        } else {
+        } else if (recallPlan.channels.includes("profile")) {
           const topSemantic = recallProfileFieldsSync(actorId, userText)[0];
           if (topSemantic) {
             whitelist.add(topSemantic);

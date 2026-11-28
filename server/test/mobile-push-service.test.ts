@@ -119,6 +119,56 @@ test("huawei provider: click_action 用 type=1 深链（点通知直达对话/�
   }
 });
 
+test("huawei provider: 明日预览走 WORK 通知并透传完整 evening.digest 帧", async () => {
+  const { calls, restore } = stubFetch((url) => {
+    if (url.includes("oauth-login")) {
+      return { status: 200, body: JSON.stringify({ access_token: "tok", expires_in: 3600 }) };
+    }
+    return { status: 200, body: JSON.stringify({ code: "80000000", msg: "Success" }) };
+  });
+  try {
+    const provider = new HuaweiPushProvider("119933823", "secret");
+    const wire = JSON.stringify({
+      type: "evening.digest",
+      payload: {
+        messageId: "evening-digest-2026-11-28",
+        narrationText: "明天有小雨，记得带伞。",
+        digest: { date: "2026-11-28", narrationText: "明天有小雨，记得带伞。" },
+      },
+    });
+    const result = await provider.push(
+      { provider: "huawei", token: "hms-token" },
+      {
+        actorId: "a@x.com",
+        title: "明日速览",
+        body: "明天有小雨，记得带伞。",
+        importance: "medium",
+        kind: "evening_digest",
+        deliveryId: "evening-digest-2026-11-28",
+        stableKey: "evening-digest-2026-11-28",
+        event: "evening.digest",
+        wire,
+      },
+    );
+    assert.equal(result.ok, true);
+    const pushes = calls.filter((c) => c.url.includes("messages:send"));
+    assert.equal(pushes.length, 2);
+    const notification = JSON.parse(String(pushes[0]!.init.body)) as {
+      message: { android: { category: string; notification: unknown } };
+    };
+    assert.equal(notification.message.android.category, "WORK");
+    assert.ok(notification.message.android.notification, "明日预览必须弹系统通知");
+    const data = JSON.parse(String(pushes[1]!.init.body)) as {
+      message: { android: { data: string } };
+    };
+    const passThrough = JSON.parse(data.message.android.data) as Record<string, string>;
+    assert.equal(passThrough.type, "evening.digest");
+    assert.equal(passThrough.wire, wire);
+  } finally {
+    restore();
+  }
+});
+
 test("push registry: 注册/注销 + 落盘重启恢复", () => {
   const dir = mkdtempSync(join(tmpdir(), "mobile-push-"));
   try {

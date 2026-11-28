@@ -11,11 +11,13 @@ import type { FastifyInstance } from "fastify";
 
 import { getAgenticMemoryRuntime, getMemoryComponents } from "../../agentic-memory/index.js";
 import { getMemorySuppressionStore } from "../../agentic-memory/memory-suppression.js";
+import { getMemoryLifecycleService } from "../../agentic-memory/memory-lifecycle-controller.js";
 import { getRerankStatsSnapshot } from "../../agentic-memory/rerank-cross-encoder.js";
 import { canonicalFactField } from "../../agentic-memory/structured-fact-store.js";
 import { actorIdVariants } from "../../agentic-memory/actor-key.js";
 import { getGlobalMemoryInventory } from "../../brain/memory-inventory.js";
-import { UserProfileStore } from "../../services/user-personalization/user-profile-store.js";
+import { UserProfileAggregator } from "../../brain/user-profile-aggregator.js";
+import { forgetMemoryTarget } from "../../services/memory-forget-service.js";
 
 type Mem0Record = {
   id: string;
@@ -116,12 +118,27 @@ export function registerMemoryCrudRoutes(app: FastifyInstance): void {
     }
   });
 
+  app.post("/api/memory/forget", async (request, reply) => {
+    const body = (request.body ?? {}) as { actorId?: string; target?: string };
+    const actorId = String(body.actorId ?? "").trim();
+    const target = String(body.target ?? "").trim();
+    if (!actorId || target.length < 2) {
+      return reply.code(400).send({ ok: false, error: "actorId 与至少 2 个字符的 target 必填" });
+    }
+    try {
+      const result = await forgetMemoryTarget(actorId, target);
+      return { ok: true, ...result };
+    } catch (err) {
+      return reply.code(500).send({ ok: false, error: `遗忘失败：${err instanceof Error ? err.message : String(err)}` });
+    }
+  });
+
   app.get("/api/memory/profile", async (request, reply) => {
     const query = request.query as { actorId?: string };
     const actorId = String(query.actorId ?? "").trim();
     if (!actorId) return reply.code(400).send({ ok: false, error: "actorId required" });
     try {
-      const markdown = await new UserProfileStore().read(actorId);
+      const markdown = await new UserProfileAggregator().readProfile(actorId);
       return { ok: true, actorId, markdown };
     } catch (err) {
       return reply.code(500).send({
@@ -320,7 +337,14 @@ export function registerMemoryCrudRoutes(app: FastifyInstance): void {
     if (!actorId || !key) return reply.code(400).send({ ok: false, error: "actorId/key required" });
     const store = getMemorySuppressionStore();
     if (!store) return reply.code(503).send({ ok: false, error: "抑制存储未启用" });
-    const item = store.add(actorId, body?.kind === "text" ? "text" : "field", key, body?.reason);
+    const kind = body?.kind === "text" ? "text" : "field";
+    const result = await getMemoryLifecycleService().execute({
+      actorId,
+      intent: "suppress",
+      target: { kind, key },
+      reason: body?.reason,
+    });
+    const item = result.actions["suppress:suppression"] as ReturnType<typeof store.add>;
     if (!item) return reply.code(400).send({ ok: false, error: "key 无效" });
     return { ok: true, item };
   });

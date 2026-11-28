@@ -121,6 +121,11 @@ export class PhoneBridgeCoordinator {
     return this.executors.has(actorId);
   }
 
+  /** 当前桥接在线的 actorId 列表（后台定时同步通话记录用） */
+  onlineActorIds(): string[] {
+    return [...this.executors.keys()];
+  }
+
   getDeviceInfo(actorId: string): PhoneDeviceInfo | undefined {
     return this.deviceInfoByActor.get(actorId);
   }

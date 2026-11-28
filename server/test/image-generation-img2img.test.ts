@@ -146,7 +146,8 @@ test("服务链路：openai 不支持图生图时回退 gemini，base64 结果�
       );
       assert.equal(result.ok, true);
       if (result.ok) {
-        assert.match(result.imageUrl, /^\/agent\/images\/session-mvp-001\/\d+-[a-f0-9]{8}\.png$/);
+        // 2026-11 起默认落盘 WebP（限幅 + 有损压缩），旧图仍可能是 PNG。
+        assert.match(result.imageUrl, /^\/agent\/images\/session-mvp-001\/\d+-[a-f0-9]{8}\.(?:png|webp)$/);
         assert.equal(result.model, "gemini-2.5-flash-image");
         // imageUrl 相对 storageRoot 解析后文件确实存在
         const fileName = result.imageUrl.split("/").pop()!;

@@ -527,6 +527,11 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             }),
           );
         };
+        // 直投失败时的离线写穿出口（2026-11-26）：不在此处判断事件类型，
+        // 由 push 层的白名单决定；在线帧绝不走这条路。
+        const offlineMirrorFrame = (data: string): void => {
+          wsConnectionRegistry.mirrorOffline(boundActorId ?? "", data);
+        };
 
         // 呼叫失败只回 error.event（客户端关外呼窗并 toast 提示原因），
         // 不再往聊天流落文字气泡：语音电话的内容不以文字方式进聊天记录。
@@ -1551,7 +1556,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             typeof actionPayload.cardAction === "string" ? actionPayload.cardAction.trim() : "";
           if (rideCardAction.startsWith("ride.")) {
             const handled = await handleCardActionEvent(
-              { socket, boundActorId, sendUnifiedError },
+              { socket, boundActorId, sendUnifiedError, offlineMirror: offlineMirrorFrame },
               {
                 sessionId: typeof actPl.sessionId === "string" ? actPl.sessionId : boundActorId,
                 messageId: typeof actPl.messageId === "string" ? actPl.messageId : "",
@@ -1649,6 +1654,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
               clientIp,
               deviceClass: wsConnectionRegistry.deviceClassOf(boundActorId ?? "", socket),
               sendUnifiedError,
+              offlineMirror: offlineMirrorFrame,
             },
             userMessagePayload,
             {
@@ -1674,7 +1680,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             return;
           }
           await handleCardActionEvent(
-            { socket, boundActorId, sendUnifiedError },
+            { socket, boundActorId, sendUnifiedError, offlineMirror: offlineMirrorFrame },
             event.payload,
             { shoppingOrderService, shoppingCompareService, paymentService, bookingService, mcpClientService },
           );
@@ -1690,6 +1696,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
               clientIp,
               deviceClass: wsConnectionRegistry.deviceClassOf(boundActorId ?? "", socket),
               sendUnifiedError,
+              offlineMirror: offlineMirrorFrame,
             },
             event.payload,
             {

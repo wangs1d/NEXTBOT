@@ -225,6 +225,7 @@ export const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
       name: "weather.get_local",
       description:
         "获取当地天气与穿衣建议（Open-Meteo）。\n" +
+        "⚠️ 温度/体感/湿度/天气现象这类实时事实只能说本轮回执里的数：凭感觉、印象或旧对话里自己说过的值（哪怕是你上一轮亲口报的）都不算依据，用户质疑你之前报的温度时先调本工具重查，不要凭记忆确认。\n" +
         "⚠️ 不要猜测用户所在城市——如果用户未明确说城市名，不要传 city/latitude/longitude，工具会自动获取用户真实位置。\n" +
         "用户明确说了城市名时才传 city（如「上海天气」→ city:'上海'）。\n" +
         "timezone 一般不要传：缺省 auto 由用户坐标推导当地时区（服务器时区与出口 IP 都不参与）。\n" +

@@ -147,9 +147,9 @@ import {
   StreamIdleTimeoutError,
   stripInlineThinkBlocks,
   stripInternalControlTags,
-  createStreamControlTagSanitizer,
-  createStreamMetaSentenceFilter,
+  createStreamTextPurifier,
   stripMetaSentences,
+  NEED_MORE_TOOLS_MARKER,
   type NormalChatChunk,
   type NormalToolCall,
   type NormalUsage,
@@ -1301,9 +1301,6 @@ function collectRecentDialogueLines(
  * agent-task-orchestrator 每轮一个动作）显式收紧用；生产链路不传 = 不限。
  */
 
-/** 充分性探测的升级标记：汇总调用首行输出该标记表示"结果不足，需要 replan"。 */
-const NEED_MORE_TOOLS_MARKER = "NEED_MORE_TOOLS";
-
 /**
  * 规划/循环内调用的可选输出 token 上限（仅「非思考」模型生效，思考模型的 reasoning
  * 空间不被压缩）。默认**不封顶**：历史上默认 3000，长回复（多来源汇总/攻略排版）会被
@@ -2390,10 +2387,10 @@ export async function streamCompletionWithTools(
     let waveGateClosed = false;
     // 关闸后滞留的净化文本：最终波冲刷（补齐最终回复），工具波整段丢弃。
     let waveHeldText = "";
-    // 波内直推的逐 delta 净化栈（与纯文本分支同款）：跨块控制标签状态机 +
-    // 元话语整句过滤，think 块已在 consumer 咽喉剥过。
-    const waveTagSanitizer = createStreamControlTagSanitizer();
-    const waveMetaFilter = createStreamMetaSentenceFilter();
+    // 波内直推的逐 delta 净化栈（与纯文本分支、汇总通道同一个出口对象工厂）：
+    // 裸控制 token → 跨块控制标签/内部帧状态机 → 元话语整句过滤；think 块已在
+    // consumer 咽喉剥过。
+    const wavePurifier = createStreamTextPurifier();
     // 流末尾 chunk 的 usage（可能缺失）；声明在 try 外，供块外审计使用
     let streamUsage: NormalUsage | undefined;
 
@@ -2471,7 +2468,7 @@ export async function streamCompletionWithTools(
               // 闸门规则：本波出现 tool_call 增量前 → 直推（确认语打字机透出）；
               // 关闸后 → 滞留 waveHeldText（工具波丢弃、最终波冲刷），思考过程
               // 不再透出。定稿文本即本出口的累计（流末 flush 见收尾）。
-              const clean0 = waveMetaFilter(waveTagSanitizer(d));
+              const clean0 = wavePurifier(d);
               if (!clean0) return;
               // 繁→简出口正规化（2026-10-11）：累计（waveStreamedText/waveHeldText）
               // 与直推用同一归一文本，1:1 等长替换不破坏闸门滞留与残差对账。
@@ -2752,8 +2749,7 @@ export async function streamCompletionWithTools(
         waveStreamedText += clean;
         onDelta(clean);
       };
-      emitWaveTail(waveMetaFilter(waveTagSanitizer.flush()));
-      emitWaveTail(waveMetaFilter.flush());
+      emitWaveTail(wavePurifier.flush());
       // 关闸滞留冲刷（2026-10-11）：最终波正常不关闸（无 tool_call 增量），
       // 此分支承接「流中出现 tool_call 增量但最终 stop」的罕见序——滞留的
       // 后半段正文属于最终回复，冲刷补齐，不丢内容。
@@ -3676,8 +3672,20 @@ export async function streamCompletionWithTools(
         stream: true,
       }, options?.signal ? { signal: options.signal } : undefined);
 
+      // 定稿文本 = 放给前端的文本（与工具波同一条净化出口，见 createStreamTextPurifier）。
+      // 此前这条通道直推原始 delta、另拿原始 summaryText 定稿：探测轮模型没把
+      // NEED_MORE_TOOLS 落在首行时，标记与工具旁白就原样进了气泡和落库正文。
+      const summaryPurifier = createStreamTextPurifier();
       let summaryText = "";
       let needMore = false;
+      /** 唯一可见正文出口：净化后文本 → 繁简归一 → 累计（即定稿）+ 推流，同一份。 */
+      const pushVisible = (purified: string): void => {
+        if (!purified) return;
+        // 繁→简出口正规化：累计与直推同源归一。
+        const clean = normalizeTraditionalToSimplified(purified).text;
+        summaryText += clean;
+        onDelta(clean);
+      };
       // 汇总通道照常流式直推（2026-11-25 统一管道：正文恒流式）；
       // NEED_MORE 首行探测不受影响（replan 判定仍需）。
       // 逃生模式下先缓冲首行（或前 48 字符）再决定是否推送给前端，防止标记透出
@@ -3689,23 +3697,17 @@ export async function streamCompletionWithTools(
         ),
         {
           onContentDelta: (d) => {
-            // 繁→简出口正规化：累计（summaryText）与直推同源归一。
-            const nd = normalizeTraditionalToSimplified(d).text;
-            summaryText += nd;
             if (headDecided) {
-              if (!needMore) onDelta(nd);
+              if (!needMore) pushVisible(summaryPurifier(d));
               return;
             }
-            pendingHead += nd;
+            pendingHead += d;
             const nl = pendingHead.indexOf("\n");
             if (nl >= 0 || pendingHead.trim().length >= 48) {
               headDecided = true;
               const firstLine = (nl >= 0 ? pendingHead.slice(0, nl) : pendingHead).trim();
-              if (firstLine.startsWith(NEED_MORE_TOOLS_MARKER)) {
-                needMore = true;
-              } else {
-                onDelta(pendingHead);
-              }
+              if (firstLine.startsWith(NEED_MORE_TOOLS_MARKER)) needMore = true;
+              else pushVisible(summaryPurifier(pendingHead));
               pendingHead = "";
             }
           },
@@ -3718,13 +3720,12 @@ export async function streamCompletionWithTools(
       // 流结束仍未触发首行判定（回答极短且无换行）
       if (!headDecided) {
         headDecided = true;
-        if (pendingHead.trim().startsWith(NEED_MORE_TOOLS_MARKER)) {
-          needMore = true;
-        } else if (pendingHead) {
-          onDelta(pendingHead);
-        }
+        if (pendingHead.trim().startsWith(NEED_MORE_TOOLS_MARKER)) needMore = true;
+        else pushVisible(summaryPurifier(pendingHead));
         pendingHead = "";
       }
+      // 净化器缓冲（无句末标点的末句、待判半截标签/token）经同一条出口放出。
+      pushVisible(summaryPurifier.flush());
       summaryText = summaryText.trim();
       // Token 用量审计：summary/探测轮跟随调用方 stage（任务面 task_plane_* /
       // 前台 main_chat_tools），与规划轮次同一把尺子。

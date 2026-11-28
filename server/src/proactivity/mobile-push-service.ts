@@ -35,6 +35,15 @@ export type PushInput = {
    * 透传写穿到本地对话时以它为消息 id，推送重试不会在聊天里留下两条同样的内容。
    */
   stableKey?: string;
+  /**
+   * 仅透传写穿、不弹系统通知（2026-11-26 离线事件统一降级）。
+   * 卡片原地更新 / 看板变更这类“状态同步”不该再弹一条横幅；提醒/聊天回复仍走通知。
+   */
+  silent?: boolean;
+  /** 完整 WS 事件帧（chat.assistant_done / card.update / evening.digest / agent.today_board），超长时省略并带 needHistory */
+  wire?: string;
+  /** 事件 type，客户端据此分派到既有 handler */
+  event?: string;
 };
 
 /** 通知 id 的唯一口径：有 intent 用 intent，没有就用 delivery（两端必须一致） */
@@ -86,6 +95,8 @@ export type PushTokenEntry = { provider: string; token?: string; deviceId?: stri
 
 const FETCH_TIMEOUT_MS = 10_000;
 const MAX_ENTRIES_PER_ACTOR = 10;
+/** HMS data-only 单条载荷留余量（厂商上限约 4KB）；超长只带稳定键，由冷启动历史补齐。 */
+const MAX_PUSH_WIRE_BYTES = 3_200;
 
 /**
  * 华为自分类权益 kind → category 映射（2026-11-23 AGC 审批通过 4 个云端类型：
@@ -142,6 +153,7 @@ const KIND_CATEGORY: Record<string, string> = {
   daily: "WORK",
   weekly: "WORK",
   digest: "WORK",
+  evening_digest: "WORK",
   monthly_report: "WORK",
   mute_suggest: "WORK",
   sleep_boundary: "WORK",
@@ -361,7 +373,9 @@ export class HuaweiPushProvider implements PushProvider {
       // 逐字一致（大写）；无效值会被打回营销类。
       // 归类：Agent 主动消息/发现推送 = 即时聊天 IM；日程/提醒/简报等 = 工作事项提醒 WORK。
       const category = categoryForKind(input.kind);
-      const payload = {
+      // silent 事件（卡片换卡 / 看板变更）只走 data-only：系统模板通知已经在
+      // 远端弹过一次，再弹一条同内容横幅就是打扰。
+      const notificationPayload = input.silent ? null : {
         validate_only: false,
         message: {
           android: {
@@ -434,11 +448,31 @@ export class HuaweiPushProvider implements PushProvider {
         return { ok: true };
       };
 
-      const notifyResult = await send(payload);
-      // 透传写穿（2026-11-25）：通知消息只负责弹窗（系统层保证），内容进不了 App
-      // 进程。再补一条 data-only 消息，HMS 会把被杀掉的 App 拉起来交给
-      // onMessageReceived，客户端落本地对话——「不点通知，打开 App 也能看到」。
-      // 失败不影响整体结果：弹窗已由通知消息保证，服务端 WAL 也会在下次连网时补齐。
+      const notifyResult = notificationPayload
+        ? await send(notificationPayload)
+        : { ok: true, reason: "silent" };
+
+      // 透传写穿（2026-11-25 → 2026-11-26 扩展）：通知消息只负责弹窗，内容进不了
+      // App 进程。补一条 data-only 把事件帧带进去，HMS 会把被杀掉的 App 拉起来
+      // 交给 onMessageReceived；客户端按 type 分派到既有聊天/卡片/看板 handler。
+      // 事件帧超长时只带稳定键，冷启动由 WAL 历史补齐（不在厂商通道上赌大包）。
+      const wire = input.wire;
+      const wireTooLarge = !!wire && new TextEncoder().encode(wire).length > MAX_PUSH_WIRE_BYTES;
+      const dataPayload: Record<string, unknown> = {
+        title: input.title,
+        body: input.body,
+        text: input.body,
+        deliveryId: input.deliveryId,
+        intentId: input.intentId ?? "",
+        kind: input.kind,
+        importance: input.importance,
+        stableKey: input.stableKey ?? input.deliveryId,
+        ts: Date.now(),
+        ...(input.event ? { type: input.event } : {}),
+        ...(wire && !wireTooLarge ? { wire } : {}),
+        ...(wireTooLarge ? { needHistory: true } : {}),
+        ...(input.silent ? { silent: true } : {}),
+      };
       if (notifyResult.ok) {
         try {
           await send({
@@ -446,26 +480,17 @@ export class HuaweiPushProvider implements PushProvider {
             message: {
               android: {
                 collapse_key: -1,
-                urgency: "HIGH",
+                urgency: input.silent ? "LOW" : "HIGH",
                 category,
                 // 写穿只补「同一晚/同一上午」的内容：超过 12h 的老消息不该再插进对话
                 ttl: "43200s",
-                data: JSON.stringify({
-                  title: input.title,
-                  body: input.body,
-                  deliveryId: input.deliveryId,
-                  intentId: input.intentId ?? "",
-                  kind: input.kind,
-                  importance: input.importance,
-                  stableKey: input.stableKey ?? input.deliveryId,
-                  ts: Date.now(),
-                }),
+                data: JSON.stringify(dataPayload),
               },
               token: [target.token],
             },
           });
         } catch {
-          /* 透传是增强通道，失败不改变「通知已弹出」这一结论 */
+          /* 透传是增强通道：silent 事件本身没有通知兜底，失败就等 WAL 历史补齐 */
         }
       }
       return notifyResult;

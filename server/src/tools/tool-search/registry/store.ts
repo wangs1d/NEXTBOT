@@ -22,7 +22,7 @@ import { dirname, resolve } from "node:path";
 import { resolveDataPath } from "../../../config/data-dir.js";
 
 import { QdrantClient } from "@qdrant/js-client-rest";
-import Database from "better-sqlite3";
+import { openSqlite } from "../../../storage/sqlite.js";
 import type { Database as SqliteDatabase } from "better-sqlite3";
 import { createClient, type RedisClientType } from "redis";
 
@@ -147,11 +147,8 @@ export class ToolRegistryStore {
     // 1. SQLite（同步 API，先建表）
     try {
       const absPath = resolveDataPath(this.sqlitePath);
-      const dir = dirname(absPath);
-      mkdirSync(dir, { recursive: true });
-      this.sqlite = new Database(absPath);
-      this.sqlite.pragma("journal_mode = WAL");
-      this.sqlite.pragma("foreign_keys = ON");
+      // 工具索引属于高频读写热库。
+      this.sqlite = openSqlite(absPath, { foreignKeys: true });
       this.createTables();
     } catch (e) {
       console.warn("[tool-registry] sqlite initialize failed", e);
@@ -227,18 +224,19 @@ export class ToolRegistryStore {
     const payload = meta as unknown as Record<string, unknown>;
     const domains = meta.domain.length > 0 ? meta.domain : ["_default"];
 
-    // Qdrant：写入每个 domain collection（多归属资源会在多个 collection 中冗余一份）
+    // Qdrant 点向量保留定义视图，完整多视图向量随 payload 持久化。
     if (this.qdrant) {
+      const primaryVector = meta.embeddings[0] ?? [];
       for (const rawDomain of domains) {
         const collectionName = this.collectionName(rawDomain);
         try {
-          await this.ensureCollection(collectionName, meta.embedding.length);
+          await this.ensureCollection(collectionName, primaryVector.length);
           await this.qdrant.upsert(collectionName, {
             wait: true,
             points: [
               {
                 id: meta.resource_id,
-                vector: meta.embedding,
+                vector: primaryVector,
                 payload,
               },
             ],
@@ -1064,10 +1062,18 @@ export class ToolRegistryStore {
     }
   }
 
+  private normalizeLevel1(obj: Level1IndexMeta): Level1IndexMeta {
+    if (Array.isArray(obj.embeddings)) return obj;
+    const legacy = obj as Level1IndexMeta & { embedding?: number[] };
+    obj.embeddings = legacy.embedding ? [legacy.embedding] : [];
+    delete legacy.embedding;
+    return obj;
+  }
+
   private parseLevel1(raw: string): Level1IndexMeta | null {
     try {
       const obj = JSON.parse(raw) as Level1IndexMeta;
-      return obj && typeof obj.resource_id === "string" ? obj : null;
+      return obj && typeof obj.resource_id === "string" ? this.normalizeLevel1(obj) : null;
     } catch (e) {
       console.warn("[tool-registry] parseLevel1 JSON failed", e);
       return null;
@@ -1079,7 +1085,7 @@ export class ToolRegistryStore {
     try {
       const obj = payload as Level1IndexMeta;
       if (typeof obj.resource_id !== "string") return null;
-      return obj;
+      return this.normalizeLevel1(obj);
     } catch (e) {
       console.warn("[tool-registry] parseLevel1FromPayload failed", e);
       return null;

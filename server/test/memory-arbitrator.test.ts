@@ -80,6 +80,16 @@ test("arbitrateMemories: 通道权重影响最终排序（agentic > kvSummary）
   assert.equal(result[0]!.content, "高权重通道记忆", "agentic 权重更高应排第一");
 });
 
+test("arbitrateMemories: latest_wins 冲突策略优先保留最新表述", () => {
+  const oldItem = { ...makeItem("用户住在北京", 0.9), timestamp: "2025-01-01T00:00:00.000Z" };
+  const newItem = { ...makeItem("用户住在上海", 0.2), timestamp: "2026-01-01T00:00:00.000Z" };
+  const channels: ChannelRecallResult[] = [{ channel: "agentic", items: [oldItem, newItem] }];
+  const result = arbitrateMemories(channels, DEFAULT_ARBITRATOR_CONFIG, {
+    conflictPolicy: "latest_wins",
+  });
+  assert.equal(result[0]!.content, "用户住在上海");
+});
+
 // ── 关闭仲裁时简单拼接 ─────────────────────────────────────────────
 
 test("arbitrateMemories: enabled=false 时简单拼接，不去重不排序", () => {

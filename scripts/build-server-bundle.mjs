@@ -5,6 +5,7 @@
  *   dist-bundle/index.js                 Fastify 服务（supervisor 的 worker）
  *   dist-bundle/supervisor-main.js       端口持有 + worker 监督
  *   dist-bundle/local-embedding-host.js  向量引擎子进程
+ *   dist-bundle/local-reranker-host.js   交叉编码子进程
  *   dist-bundle/runtime-main.js          remote 拓扑下的 runtime 进程
  *   dist-bundle/workers/*.mjs            worker_threads 任务脚本（不参与打包，原样拷贝）
  *
@@ -27,6 +28,7 @@ const entryPoints = [
   { in: "src/index.ts", out: "index" },
   { in: "src/supervisor-main.ts", out: "supervisor-main" },
   { in: "src/agentic-memory/local-embedding/local-embedding-host.ts", out: "local-embedding-host" },
+  { in: "src/tools/tool-search/local-reranker/local-reranker-host.ts", out: "local-reranker-host" },
   { in: "src/runtime-main.ts", out: "runtime-main" },
 ].map((e) => ({ in: join(serverDir, e.in), out: e.out }));
 
@@ -57,7 +59,7 @@ for (const name of readdirSync(workersSrc)) {
   cpSync(join(workersSrc, name), join(workersOut, name));
 }
 
-for (const required of ["index.js", "supervisor-main.js", "local-embedding-host.js"]) {
+for (const required of ["index.js", "supervisor-main.js", "local-embedding-host.js", "local-reranker-host.js"]) {
   if (!existsSync(join(outdir, required))) throw new Error(`打包产物缺失: ${required}`);
 }
 console.log(`[bundle] 输出 ${outdir}`);

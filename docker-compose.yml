@@ -12,6 +12,13 @@
 # 下载上传功能：访问 /downloads 页面，使用 ADMIN_UPLOAD_TOKEN 上传桌面应用安装包。
 # 上传文件存储在 downloads 卷中，由 nginx 直接提供下载。
 
+# 统一日志轮转：默认 json-file 不设上限，小磁盘会被日志吃满（2G 机器尤其明显）
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   homeassistant:
     image: ghcr.io/home-assistant/home-assistant:stable
@@ -23,6 +30,7 @@ services:
       - /etc/localtime:/etc/localtime:ro
     restart: unless-stopped
     privileged: true
+    logging: *default-logging
     environment:
       TZ: Asia/Shanghai
 
@@ -32,15 +40,26 @@ services:
       - "6333"
     volumes:
       - qdrant-data:/qdrant/storage
+    logging: *default-logging
     restart: unless-stopped
 
   redis:
     image: redis:7-alpine
     expose:
       - "6379"
-    command: ["redis-server", "--appendonly", "yes"]
+    # 只承载限流与热缓存，数据可丢：关 AOF/RDB，省掉每秒刷盘；
+    # maxmemory 防止在 2G 机器上被缓存撑爆。
+    command:
+      [
+        "redis-server",
+        "--appendonly", "no",
+        "--save", "",
+        "--maxmemory", "96mb",
+        "--maxmemory-policy", "allkeys-lru",
+      ]
     volumes:
       - redis-data:/data
+    logging: *default-logging
     restart: unless-stopped
 
   api:
@@ -87,6 +106,7 @@ services:
       AGENT_EMBEDDING_BASE_URL: ${AGENT_EMBEDDING_BASE_URL:-}
       AGENT_EMBEDDING_MODEL: ${AGENT_EMBEDDING_MODEL:-}
       JINA_API_KEY: ${JINA_API_KEY:-}
+    logging: *default-logging
     volumes:
       - app-data:/app/data
       - downloads:/app/downloads
@@ -119,6 +139,7 @@ services:
         NPM_REGISTRY: ${NPM_REGISTRY:-https://registry.npmmirror.com}
     ports:
       - "80:80"
+    logging: *default-logging
     volumes:
       - downloads:/app/downloads
     depends_on:

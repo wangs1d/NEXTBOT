@@ -346,6 +346,13 @@ function buildExtractMessages(
  * 对话内抽取 + 确定性落位
  * ────────────────────────────────────────────────────────────── */
 
+export interface ProfileUpdateResult {
+  changed: boolean;
+  verified: boolean;
+  skipped: string[];
+  profile: string;
+}
+
 export class UserProfileAggregator {
   private readonly store = new UserProfileStore();
   private readonly config: ProfileAggregatorConfig;
@@ -604,10 +611,28 @@ export class UserProfileAggregator {
    */
   async readProfile(actorId: string): Promise<string> {
     try {
-      return (await this.store.read(actorId)) ?? "";
+      return await this.projectProfileFields(actorId, await this.store.read(actorId));
     } catch {
       return "";
     }
+  }
+
+  /** 画像管理接口与对话写入共用的确定性更新入口。 */
+  async updateProfile(actorId: string, ops: ProfileOp[]): Promise<ProfileUpdateResult> {
+    return this.runSerialized(actorId, async () => {
+      const currentProfile = await this.store.read(actorId);
+      const preview = applyProfileOps(currentProfile, ops);
+      if (preview.applied.length === 0 || preview.profile === currentProfile) {
+        return { changed: false, verified: true, skipped: preview.skipped, profile: currentProfile };
+      }
+      const verified = await this.applyOpsAndPersist(actorId, currentProfile, ops);
+      return {
+        changed: true,
+        verified,
+        skipped: preview.skipped,
+        profile: await this.readProfile(actorId),
+      };
+    });
   }
 
   /**

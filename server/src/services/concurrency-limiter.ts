@@ -14,7 +14,7 @@
 
 import { adaptiveConcurrency } from "./adaptive-concurrency.js";
 import { workerPool } from "./worker-pool.js";
-import { resourcePoolSnapshot, sweepRetained, toolBudget, turnBudget } from "./resource-pool.js";
+import { poolPressure, resourcePoolSnapshot, sweepRetained, toolBudget, turnBudget } from "./resource-pool.js";
 import { clusterSnapshot } from "./cluster-router.js";
 
 export class Semaphore {
@@ -188,9 +188,14 @@ function syncTurnCeiling(): void {
 export function startAdaptiveConcurrency(): void {
   if (!adaptiveTimer) {
     syncTurnCeiling();
+    let tick = 0;
     adaptiveTimer = setInterval(() => {
+      // 闸口本身每 2s 校一次（只读实时堆统计 + 缓存水位，很轻）。
       syncTurnCeiling();
-      sweepRetained();
+      tick += 1;
+      // 常驻缓存清扫 + cgroup 内存读数不必 2s 一次：正常水位下每 16s 一次足够，
+      // 高水位时仍保持 2s，确保能及时收紧并发。堆占比是实时计算的，不受影响。
+      if (poolPressure().tier !== "normal" || tick % 8 === 0) sweepRetained();
     }, 2000);
     if (adaptiveTimer.unref) adaptiveTimer.unref();
   }

@@ -220,25 +220,31 @@ export type ParkedEntry = {
   snapshot: ContextSnapshot;
 };
 
+import { backgroundScheduler } from "../services/background-scheduler.js";
+
 export class ArbiterV2 {
   private readonly parked: ParkedEntry[] = [];
   private readonly deliveredAt: number[] = [];
   private lastCost = -1;
   /** 每 actor 的上下文基线（pause 跃迁检测的比对起点） */
   private readonly actorBaselines = new Map<string, ContextSnapshot>();
-  private timer: ReturnType<typeof setInterval> | null = null;
+  private cancelTick: (() => void) | null = null;
 
   constructor(private readonly deps: ArbiterV2Deps) {}
 
   start(): void {
-    if (this.timer) return;
-    this.timer = setInterval(() => this.tick(), 30_000);
-    if (typeof this.timer.unref === "function") this.timer.unref();
+    if (this.cancelTick) return;
+    // 统一后台调度：错峰 + 内存水位高时跳过（打扰判定不是关键路径）。
+    this.cancelTick = backgroundScheduler.schedule({
+      name: "arbiter-v2.tick",
+      intervalMs: 30_000,
+      run: () => this.tick(),
+    });
   }
 
   stop(): void {
-    if (this.timer) clearInterval(this.timer);
-    this.timer = null;
+    this.cancelTick?.();
+    this.cancelTick = null;
   }
 
   /** 当前上下文快照（诊断接口展示"为什么现在打扰/不打扰"） */

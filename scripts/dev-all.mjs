@@ -5,6 +5,7 @@ import { spawn, execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { isTcpPortInUse } from "./port-in-use.mjs";
+import { ensureDigitalHuman } from "./ensure-digital-human.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const isWin = process.platform === "win32";
@@ -40,6 +41,12 @@ async function filterAvailable(services) {
   }
   return available;
 }
+
+// 数字人服务随后端一起拉起：await 的是「端口检测 + spawn」（~1s），
+// GPU 引擎加载（~25s）在模块内后台完成，不阻断 :3000。
+// 放在端口判断之前 —— 后端已在跑时 dev-all 会直接 exit，但仍需保证数字人已在。
+// GPU 环境缺失 / 端口已占用时模块自行跳过 / 复用，绝不 throw 阻断后端。
+await ensureDigitalHuman();
 
 let toStart = await filterAvailable(SERVICES);
 

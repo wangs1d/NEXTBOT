@@ -21,6 +21,8 @@
 // ProactivityHub 的 FrequencyGovernor 管"全局"维度（interest_alert 4h 冷却 +
 // 每日预算 6 次）。两层都防刷屏。
 import { randomUUID } from "node:crypto";
+
+import { backgroundScheduler } from "../services/background-scheduler.js";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
@@ -181,7 +183,7 @@ export class InterestWatcher {
   private onHit: InterestWatcherDeps["onHit"];
   /** 兴趣名向量缓存：`${interestId}:${normalizeFp(name)}` → 向量（跨轮复用） */
   private readonly nameVecCache = new Map<string, number[]>();
-  private timer: ReturnType<typeof setInterval> | null = null;
+  private cancelTick: (() => void) | null = null;
   private started = false;
 
   constructor(deps: InterestWatcherDeps = {}) {
@@ -233,12 +235,15 @@ export class InterestWatcher {
     if (this.started) return;
     this.started = true;
     const intervalMs = readTickIntervalMs();
-    this.timer = setInterval(() => {
-      void this.checkAll().catch((err) => {
-        console.log(`[InterestWatcher] tick 失败（忽略）: ${err}`);
-      });
-    }, intervalMs);
-    if (typeof this.timer.unref === "function") this.timer.unref();
+    this.cancelTick = backgroundScheduler.schedule({
+      name: "interest-watcher.tick",
+      intervalMs,
+      run: async () => {
+        await this.checkAll().catch((err) => {
+          console.log(`[InterestWatcher] tick 失败（忽略）: ${err}`);
+        });
+      },
+    });
     console.log(
       `[InterestWatcher] 已启动（tick=${Math.round(intervalMs / 60000)}min，同兴趣推送间隔=${Math.round(this.minPushIntervalMs / 60000)}min，池=${this.interests.size}）`,
     );
@@ -249,10 +254,8 @@ export class InterestWatcher {
   }
 
   stop(): void {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = null;
-    }
+    this.cancelTick?.();
+    this.cancelTick = null;
     this.started = false;
   }
 
@@ -463,6 +466,7 @@ export class InterestWatcher {
     ensureTitleVecs: () => Promise<number[][] | null>,
     nowMs: number,
   ): Promise<boolean> {
+    if (!this.embed || !isSemanticMatchEnabled()) return false;
     if (normalizeFp(interest.name).length < 2) return false;
     const vecKey = `${interest.id}:${normalizeFp(interest.name)}`;
     let nameVec = this.nameVecCache.get(vecKey);

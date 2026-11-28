@@ -16,6 +16,7 @@ import {
 import { formatStatusForDisplay, normalizeDashTypos } from "../../utils/text.js";
 import { createStreamMarkerGuard } from "../../utils/stream-marker-guard.js";
 import { wireToolExecuted, wireToolExecuteStart } from "../chat-tool-wire.js";
+import { sendDroppable } from "../backpressure.js";
 import { subscribeTravelProgress } from "../../skills/travel-planning/travel-progress-bus.js";
 import { getTurnWalService } from "../../services/turn-wal-service.js";
 import { resolvePreviewPayloads } from "../../services/tomorrow-preview-bridge.js";
@@ -246,7 +247,11 @@ function formatToolResultAsReply(toolName: string, result: Record<string, unknow
     if (notes) parts.push(notes);
     return parts.join("\n");
   }
-  // 天气/时钟/日历：直接 JSON 转可读文本
+  // 天气（2026-11-26 用户定稿）：服务端不再拼整句模板，正文一律由模型按结构化字段
+  // 实时生成。兜底也不输出——否则会退化成 `currentTempC: 11` 字段转储，比没正文更糟；
+  // 天气数据由天气卡承载，无正文时走空轮撤泡路径（与 search 类同口径）。
+  if (t.startsWith("weather.")) return "";
+  // 时钟/日历：直接 JSON 转可读文本
   const summary = (result.summary ?? result.description ?? result.text ?? "") as string;
   if (summary) return String(summary);
   // 兜底：把 result 的关键字段拼出来，避免完全无内容
@@ -347,6 +352,15 @@ export type ChatUserMessageHandlerDeps = {
   imageGenerationService?: import("../../services/image-generation-service.js").ImageGenerationService | null;
 };
 
+/** socket 直投与离线镜像的统一出口：在线走 WS，断链交给 push 写穿。 */
+function sendFrameWithMirror(ctx: ChatUserMessageContext, data: string): void {
+  try {
+    ctx.socket.send(data);
+  } catch {
+    ctx.offlineMirror?.(data);
+  }
+}
+
 export type ChatUserMessageContext = {
   socket: { send: (data: string) => void };
   boundActorId: string;
@@ -360,6 +374,8 @@ export type ChatUserMessageContext = {
    */
   deviceClass?: "desktop" | "mobile";
   sendUnifiedError: (code: string, message: string, traceId?: string) => void;
+  /** socket 直投失败时把这一帧交给离线镜像（2026-11-26 卡片 / 收口兜底） */
+  offlineMirror?: (data: string) => void;
 };
 
 /**
@@ -812,7 +828,10 @@ async function processBatchedMessage(
       cleanedChunk,
       meta?.bubble !== "continue",
     );
-    ctx.socket.send(
+    // 流式文字块属可丢弃帧：弱网下缓冲堆积时跳过（done 帧带全文兜底），
+    // 避免内核发送队列越堆越长把 RTT 拖到心跳超时（1006）。
+    sendDroppable(
+      ctx.socket,
       buildChunkFrame({
         sessionId: msgActor,
         // messageId 即块 id：客户端按它新建/续写同一条消息。
@@ -1331,31 +1350,25 @@ async function processBatchedMessage(
         // 心跳 pong 超时 → 连接被掐（1006）。预览帧是可丢弃的直播画面——
         // 发送缓冲堆积时直接丢本帧保连接，下一帧再来；语音/卡片等关键帧
         // 不走这条路，不受影响。
-        const buffered = (ctx.socket as { bufferedAmount?: number }).bufferedAmount;
-        if (typeof buffered === "number" && buffered > 96_000) {
-          return true;
-        }
-        try {
-          ctx.socket.send(
-            JSON.stringify({
-              type: "agent.browser.preview",
-              payload: {
-                sessionId: msgActor,
-                traceId: batched.originalMessageId,
-                threadId,
-                action: frame.action,
-                url: frame.url,
-                imageBase64: frame.imageBase64,
-                mode: frame.mode,
-                browserSessionId: frame.sessionId,
-              },
-            }),
-          );
-          return true;
-        } catch {
-          // 返回 false = 连接失效：连续预览流据此立即自停（不空烧）。
-          return false;
-        }
+        const result = sendDroppable(
+          ctx.socket,
+          JSON.stringify({
+            type: "agent.browser.preview",
+            payload: {
+              sessionId: msgActor,
+              traceId: batched.originalMessageId,
+              threadId,
+              action: frame.action,
+              url: frame.url,
+              imageBase64: frame.imageBase64,
+              mode: frame.mode,
+              browserSessionId: frame.sessionId,
+            },
+          }),
+          96_000,
+        );
+        // 返回 false = 连接失效：连续预览流据此立即自停（不空烧）。
+        return result !== "failed";
       },
       onAssistantDelta: (delta) => {
         // 模型上游 stream:true → delta 实时到达 → 即刻喂分段器（信息块切分 +
@@ -2347,7 +2360,8 @@ async function processBatchedMessage(
       })
       .catch(() => {});
 
-    ctx.socket.send(
+    sendFrameWithMirror(
+      ctx,
       buildDoneFrame({
         sessionId: msgActor,
         traceId: batched.originalMessageId,
@@ -2396,7 +2410,8 @@ async function processBatchedMessage(
     const reminderCardUpdate = buildReminderCardUpdate(msgActor, turnEffects);
     if (reminderCardUpdate) {
       try {
-        ctx.socket.send(
+        sendFrameWithMirror(
+          ctx,
           JSON.stringify({
             type: ServerEventType.CardUpdate,
             payload: {
@@ -2426,7 +2441,8 @@ async function processBatchedMessage(
     // 此处发空串让 UI 不显示虚假回复。sendUnifiedError 已通知前端出错。
     const errText = "";
     if (isStale()) return;
-    ctx.socket.send(
+    sendFrameWithMirror(
+      ctx,
       JSON.stringify({
         type: ServerEventType.ChatAssistantDone,
         payload: {

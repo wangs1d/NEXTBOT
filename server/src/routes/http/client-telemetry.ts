@@ -17,6 +17,7 @@ import type { Database as SqliteDatabase } from "better-sqlite3";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 
+import { openSqlite } from "../../storage/sqlite.js";
 import { isAdminRequest } from "./admin-auth.js";
 
 /** 客户端启动结果，与 Dart 侧 RuntimeBootStatus 取值一一对应。 */
@@ -121,9 +122,7 @@ class ClientTelemetryStore {
     if (this.db) return this.db;
     try {
       const file = telemetryDbPath();
-      mkdirSync(dirname(file), { recursive: true });
-      const db = new Database(file);
-      db.pragma("journal_mode = WAL");
+      const db = openSqlite(file);
       db.exec(`
         CREATE TABLE IF NOT EXISTS clients (
           install_id    TEXT PRIMARY KEY,

@@ -143,7 +143,7 @@ rm -rf /tmp/nb-extract
 cd $DeployDir
 export NPM_CONFIG_REGISTRY=https://registry.npmmirror.com
 # onnxruntime-node 的 postinstall 要直连 GitHub 下 build list（302 被墙即 npm ci 全挂）；
-# CPU 二进制本就捆绑在包里，ECS 也只做惰性 import（声纹/本地嵌入是桌面特性）——直接跳过下载。
+# CPU 二进制本就捆绑在包里，ECS 也只做惰性 import（本地嵌入是桌面特性）——直接跳过下载。
 export ONNXRUNTIME_NODE_INSTALL=skip
 npm ci --omit=dev --no-audit --no-fund 2>&1 | tail -3
 # Chromium for the cloud headless browser lane (2026-11-10): mobile

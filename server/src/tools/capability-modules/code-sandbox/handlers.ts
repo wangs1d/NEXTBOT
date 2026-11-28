@@ -16,19 +16,11 @@ import {
  *
  * 注册入口见本文件 {@link registerCodeSandboxTools}，由 `./index.ts` 的
  * `buildCodeSandboxModule` 在 `CapabilityModule.register` 中调用。
- *
- * Phase 2：code.run 优先走 worker 线程（故障隔离），失败时 fallback 到主进程。
  */
 
 /** code-sandbox 模块依赖（局部类型，避免修改全局 CapabilityModuleDeps）。 */
 export interface CodeSandboxModuleDeps {
   codeSandboxService: CodeSandboxService;
-}
-
-/** 是否启用 worker 线程隔离（环境变量控制，默认开启）。 */
-function isWorkerEnabled(): boolean {
-  const v = process.env.CODE_RUN_WORKER_ENABLED ?? "1";
-  return v === "1" || v === "true" || v === "on";
 }
 
 /** code.run —— 执行 Python / Node 代码。 */
@@ -53,61 +45,6 @@ export function createCodeRunHandler(
 
     const actorId = resolveActorId(context);
 
-    // Phase 2：优先走 worker 线程（故障隔离），失败时 fallback 到主进程
-    if (isWorkerEnabled()) {
-      try {
-        const { workerPool } = await import("../../../services/worker-pool.js");
-        const result = await workerPool.submit<{
-          ok: boolean;
-          stdout: string;
-          stderr: string;
-          exitCode: number | null;
-          durationMs: number;
-          timedOut: boolean;
-          truncated: boolean;
-          workspacePath: string;
-          error?: string;
-        }>("code.run", {
-          actorId,
-          params: { language, code, workspaceId, timeoutMs, stdin },
-        }, Math.max(30_000, (timeoutMs ?? 30_000) + 5_000));
-
-        if (!result.ok) {
-          return {
-            ok: false,
-            error: result.error ?? "代码执行失败",
-            exitCode: result.exitCode,
-            stderr: result.stderr,
-            stdout: result.stdout,
-            timedOut: result.timedOut,
-            truncated: result.truncated,
-            durationMs: result.durationMs,
-            workspacePath: result.workspacePath,
-            retryable: result.timedOut,
-            summary: result.timedOut
-              ? `代码执行超时（${result.durationMs}ms），可简化代码或缩短运行时间后重试`
-              : `代码执行失败（exit=${result.exitCode}，耗时 ${result.durationMs}ms）[worker]`,
-          };
-        }
-        return {
-          ok: true,
-          exitCode: result.exitCode,
-          stdout: result.stdout,
-          stderr: result.stderr,
-          durationMs: result.durationMs,
-          truncated: result.truncated,
-          workspacePath: result.workspacePath,
-          summary: result.truncated
-            ? `代码执行完成（exit=${result.exitCode}，耗时 ${result.durationMs}ms）[worker] stdout/stderr 已截断到 8KB，如需完整输出请用 code.write_file 写产物再 code.read_file 分段读`
-            : `代码执行完成（exit=${result.exitCode}，耗时 ${result.durationMs}ms）[worker]`,
-        };
-      } catch (workerErr) {
-        console.warn(`[code.run] worker 线程失败，fallback 到主进程: ${workerErr instanceof Error ? workerErr.message : workerErr}`);
-        // 继续走下面的主进程路径
-      }
-    }
-
-    // 主进程执行路径（fallback）
     const result = await service.runCode(actorId, {
       language,
       code,
@@ -172,7 +109,7 @@ export function createCodeShellHandler(
 
     const actorId = resolveActorId(context);
 
-    // 主进程执行路径（shell 命令不走 worker 线程，因为命令本身是外部进程）
+    // shell 命令直接 spawn 外部进程执行
     const result = await service.runShell(actorId, {
       command,
       args,

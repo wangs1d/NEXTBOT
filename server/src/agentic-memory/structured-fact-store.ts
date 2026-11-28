@@ -1605,6 +1605,29 @@ export class StructuredFactStore {
     return run();
   }
 
+  /** 按字段或当前值遗忘；只下线当前值与计划，历史保留。 */
+  clearMatching(actorId: string, keyword: string, entity = "user"): number {
+    const actor = actorId?.trim();
+    const kw = keyword?.trim().toLowerCase();
+    const ent = normalizeFactField(entity) || "user";
+    if (!actor || !kw) return 0;
+    const fields = new Set([
+      ...this.getActiveFacts(actor, ent).map((f) => f.field),
+      ...this.getTailFacts(actor, { entity: ent }).map((f) => f.field),
+    ]);
+    let cleared = 0;
+    for (const field of fields) {
+      const fact = this.getFact(actor, field, ent);
+      const tail = this.getTailFacts(actor, { entity: ent }).filter((f) => f.field === field);
+      const hit = field.toLowerCase().includes(kw) ||
+        Boolean(fact && fact.value.toLowerCase().includes(kw)) ||
+        tail.some((f) => f.value.toLowerCase().includes(kw)) ||
+        this.getPlannedFacts(actor, ent).some((f) => f.field === field && f.value.toLowerCase().includes(kw));
+      if (hit) cleared += this.clearFact(actor, field, { entity: ent }) ?? 0;
+    }
+    return cleared;
+  }
+
   /**
    * 实体级遗忘（2026-10-20，Life Model P2）：用户要求「忘掉我妹妹」时，把该实体
    * 主体名下的全部事实行物理删除。与 clearFact 的字段级 supersede 不同——这是隐私

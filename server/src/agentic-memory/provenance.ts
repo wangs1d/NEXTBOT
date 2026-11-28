@@ -119,6 +119,7 @@ export class ProvenanceService {
     private readonly graph: ProvenanceGraphLike | null,
     private readonly ledger: ProvenanceLedgerLike | null,
     db?: SqliteDatabase,
+    private readonly fts?: { remove(memoryIds: string[]): void } | null,
   ) {
     this.db = db ?? openAgenticSqlite();
     this.db.exec(`
@@ -239,6 +240,7 @@ export class ProvenanceService {
       if (edge.derivedKind === "mem0" && this.memory) {
         try {
           await this.memory.delete(edge.derivedId);
+          this.fts?.remove([edge.derivedId]);
           report.mem0Deleted += 1;
         } catch (err) {
           report.mem0DeleteErrors.push(`mem0:${edge.derivedId}: ${String(err)}`);
@@ -319,6 +321,7 @@ export class ProvenanceService {
     if (record.mem0Id && this.memory) {
       try {
         await this.memory.delete(record.mem0Id);
+        this.fts?.remove([record.mem0Id]);
         report.mem0Deleted += 1;
         // 节点反查：同 actor 下 metadata.mem0Ids 含该 id 的节点标记 overridden
         if (this.graph) {
@@ -377,6 +380,7 @@ export function createProvenanceIfEnabled(opts: {
   graph?: ProvenanceGraphLike | null;
   ledger?: AgenticLedger | ProvenanceLedgerLike | null;
   db?: SqliteDatabase;
+  fts?: { remove(memoryIds: string[]): void } | null;
 }): ProvenanceService | null {
   if (!isProvenanceEnabled()) return null;
   return new ProvenanceService(
@@ -384,5 +388,6 @@ export function createProvenanceIfEnabled(opts: {
     opts.graph ?? null,
     (opts.ledger as ProvenanceLedgerLike | null) ?? null,
     opts.db,
+    opts.fts ?? null,
   );
 }

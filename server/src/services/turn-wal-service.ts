@@ -28,6 +28,8 @@ export type TurnWalEntry = {
    * URL 指向服务端转存资产（/agent/images/*.png），卡片原样透传不脱敏。
    */
   mediaCards?: unknown[];
+  /** 明日预览结构化卡片；厂商透传超长时由历史接口还原。 */
+  eveningDigest?: unknown;
   /**
    * 用户随消息发出的照片 URL 列表（2026-11-18）：本会话由客户端内存字节即时
    * 渲染，但重启/换设备后字节不在了——WAL 落这份 URL 后，history 接口透传，

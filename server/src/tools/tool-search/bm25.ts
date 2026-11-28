@@ -1,16 +1,15 @@
-import { reciprocalRankFusion } from "../../agent/retrieval/rrf.js";
 import { getToolIntentMetadata } from "./intent-metadata.js";
 
 const STOP_WORDS = new Set([
   "a", "an", "the", "to", "for", "of", "in", "on", "at", "by", "with", "and", "or", "is", "are",
   "的", "了", "在", "是", "我", "你", "他", "她", "它", "这", "那", "有", "和", "中",
+  "好的", "嗯嗯", "谢谢", "然后", "一下", "什么", "怎么", "可以", "呢", "啊", "吧", "哦", "嗯", "哈",
 ]);
 
 function pushToken(tokens: string[], raw: string): void {
   const t = raw.trim();
   if (!t || STOP_WORDS.has(t)) return;
   if (/[\u4e00-\u9fa5]/.test(t)) {
-    if (t.length >= 2) tokens.push(t);
     for (let i = 0; i < t.length - 1; i++) {
       const bg = t.slice(i, i + 2);
       if (!STOP_WORDS.has(bg)) tokens.push(bg);
@@ -52,10 +51,21 @@ type SearchAliasEntry = {
   trigramSet?: Set<string>;
 };
 
+export type LexicalScoreChannels = {
+  bm25: number;
+  overlap: number;
+  trigram: number;
+  alias: number;
+  name: number;
+};
+
 export type Bm25Hit = {
   id: string;
   score: number;
+  channels: LexicalScoreChannels;
 };
+
+type ScoreRanking = Array<{ id: string; score: number }>;
 
 export class Bm25Index {
   private readonly docs: Bm25Document[];
@@ -71,6 +81,10 @@ export class Bm25Index {
   private readonly tfCache: Map<string, number>[];
   /** token → docIds（倒排索引：BM25 只扫含 query token 的 doc） */
   private readonly postings: Map<string, number[]>;
+
+  get size(): number {
+    return this.docs.length;
+  }
 
   constructor(docs: Bm25Document[]) {
     this.docs = docs;
@@ -115,53 +129,59 @@ export class Bm25Index {
   }
 
   search(query: string, limit: number, aliasEntries?: SearchAliasEntry[]): Bm25Hit[] {
-    const queries = expandSearchQueries(query, aliasEntries);
+    const queries = expandSearchQueries(query);
     if (queries.length === 0 || this.docs.length === 0) return [];
 
+    const originalQuery = normalizeSearchQuery(query);
     const bm25Ranking = this.rankByBm25(queries);
     const overlapRanking = this.rankByTokenOverlap(queries);
     const fuzzyRanking = rankByTrigramSimilarity(this.docs, queries, aliasEntries);
-    const registryRanking = rankByRegistryName(this.docs, queries);
-
-    const fused = reciprocalRankFusion(
-      [bm25Ranking, overlapRanking, fuzzyRanking, registryRanking],
-      40,
-      Math.max(limit * 4, 12),
+    const registryRanking = rankByRegistryName(this.docs, [originalQuery]);
+    const aliasRanking = rankByAliases(this.docs, originalQuery, aliasEntries);
+    const ids = new Set(
+      [bm25Ranking, overlapRanking, fuzzyRanking, registryRanking, aliasRanking]
+        .flatMap((ranking) => ranking.map((hit) => hit.id)),
     );
-    const boosted = applySearchRankingBoosts(
-      fused.map((hit) => ({ id: hit.id, score: hit.rrf })),
-      query,
-      this.docs,
-    );
-    boosted.sort((a, b) => b.score - a.score);
-    if (boosted.length > 0) return boosted.slice(0, limit);
+    const scoreMaps = [bm25Ranking, overlapRanking, fuzzyRanking, registryRanking, aliasRanking]
+      .map((ranking) => new Map(ranking.map((hit) => [hit.id, hit.score])));
 
-    return rankBySubstringFallback(this.docs, queries, query).slice(0, limit);
+    const hits: Bm25Hit[] = [];
+    for (const id of ids) {
+      const channels: LexicalScoreChannels = {
+        bm25: scoreMaps[0]!.get(id) ?? 0,
+        overlap: scoreMaps[1]!.get(id) ?? 0,
+        trigram: scoreMaps[2]!.get(id) ?? 0,
+        alias: scoreMaps[4]!.get(id) ?? 0,
+        name: scoreMaps[3]!.get(id) ?? 0,
+      };
+      const score = fuseLexicalChannels(channels);
+      if (score > 0) hits.push({ id, score, channels });
+    }
+    hits.sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+    return hits.slice(0, Math.max(0, limit));
   }
 
   /**
    * BM25 打分：利用倒排索引只扫「含 query token」的 doc，并用预计算的 tf。
    * 复杂度从 O(Q × D × L) 降到 O(sum(docFreq(qt)))。
    */
-  private rankByBm25(queries: string[]): Array<{ id: string }> {
+  private rankByBm25(queries: string[]): ScoreRanking {
     const N = this.docs.length;
     const scoreById = new Map<string, number>();
     const avgDl = this.avgDl || 1;
 
     for (const query of queries) {
-      const qTokens = tokenize(query);
-      if (qTokens.length === 0) continue;
-      // 合并同一 query 内重复 token，减少重复 doc 访问
-      const qTokenSet = Array.from(new Set(qTokens));
-
-      // 预聚合：收集所有候选 docIds（用倒排索引缩小扫描范围）
+      const qTokenSet = Array.from(new Set(tokenize(query)));
+      if (qTokenSet.length === 0) continue;
       const candidateDocs = new Set<number>();
+      let theoreticalMax = 0;
       for (const qToken of qTokenSet) {
-        const postings = this.postings.get(qToken);
-        if (!postings) continue;
-        for (const docIdx of postings) candidateDocs.add(docIdx);
+        const docFreq = this.df.get(qToken) ?? 0;
+        if (docFreq === 0) continue;
+        theoreticalMax += Math.log(1 + (N - docFreq + 0.5) / (docFreq + 0.5));
+        for (const docIdx of this.postings.get(qToken) ?? []) candidateDocs.add(docIdx);
       }
-      if (candidateDocs.size === 0) continue;
+      if (candidateDocs.size === 0 || theoreticalMax <= 0) continue;
 
       for (const docIdx of candidateDocs) {
         const tokens = this.docTokens[docIdx]!;
@@ -178,7 +198,8 @@ export class Bm25Index {
           score += idf * ((freq * (this.k1 + 1)) / denom);
         }
         if (score > 0) {
-          scoreById.set(this.docs[docIdx]!.id, Math.max(scoreById.get(this.docs[docIdx]!.id) ?? 0, score));
+          const normalized = clamp01(score / theoreticalMax);
+          scoreById.set(this.docs[docIdx]!.id, Math.max(scoreById.get(this.docs[docIdx]!.id) ?? 0, normalized));
         }
       }
     }
@@ -186,16 +207,14 @@ export class Bm25Index {
     return sortRanking(scoreById);
   }
 
-  /** Token overlap：复用预计算 doc token Set，避免每次 search 重新 tokenize 全部 doc。 */
-  private rankByTokenOverlap(queries: string[]): Array<{ id: string }> {
+  /** Token overlap：IDF 加权召回率，所有通道共享 0~1 刻度。 */
+  private rankByTokenOverlap(queries: string[]): ScoreRanking {
     const scoreById = new Map<string, number>();
     const N = Math.max(1, this.docs.length);
 
     for (const query of queries) {
       const queryTokens = Array.from(new Set(tokenize(query)));
       if (queryTokens.length === 0) continue;
-      // IDF 加权：「什么/一下」这类全场通用 token 在大量 doc 里出现，
-      // 裸计数会让短描述工具靠通用词登顶；idf 把权重集中到区分性 token 上。
       const qIdf = queryTokens.map((t) => Math.log(1 + N / ((this.df.get(t) ?? 0) + 0.5)));
       const qIdfSum = qIdf.reduce((s, v) => s + v, 0) || 1;
 
@@ -207,7 +226,7 @@ export class Bm25Index {
           if (docTokens.has(queryTokens[j]!)) sharedIdf += qIdf[j]!;
         }
         if (sharedIdf === 0) continue;
-        const score = sharedIdf / Math.sqrt(qIdfSum * docTokens.size);
+        const score = clamp01(sharedIdf / qIdfSum);
         scoreById.set(this.docs[i]!.id, Math.max(scoreById.get(this.docs[i]!.id) ?? 0, score));
       }
     }
@@ -220,7 +239,7 @@ function rankByTrigramSimilarity(
   docs: Bm25Document[],
   queries: string[],
   aliasEntries?: SearchAliasEntry[],
-): Array<{ id: string }> {
+): ScoreRanking {
   const scoreById = new Map<string, number>();
   // 优先从 aliasEntries 拿预计算的 trigramSet（catalog 构建时已缓存），
   // 避免每次 search 都重算 O(D × L)。仅当 aliasEntries 缺失时才回退到原始重算。
@@ -249,6 +268,7 @@ function rankByTrigramSimilarity(
   for (const query of queries) {
     const queryGrams = buildCharacterTrigrams(query);
     if (queryGrams.size === 0) continue;
+    const queryWeight = [...queryGrams].reduce((sum, gram) => sum + 1 / gramDfOf(gram), 0);
 
     for (const doc of docs) {
       const docGrams =
@@ -260,7 +280,8 @@ function rankByTrigramSimilarity(
         if (docGrams.has(gram)) shared += 1 / gramDfOf(gram);
       }
       if (shared === 0) continue;
-      const score = shared / Math.sqrt(queryGrams.size * docGrams.size);
+      const docWeight = [...docGrams].reduce((sum, gram) => sum + 1 / gramDfOf(gram), 0);
+      const score = clamp01(shared / Math.sqrt(queryWeight * docWeight));
       scoreById.set(doc.id, Math.max(scoreById.get(doc.id) ?? 0, score));
     }
   }
@@ -268,19 +289,27 @@ function rankByTrigramSimilarity(
   return sortRanking(scoreById);
 }
 
-function rankByRegistryName(docs: Bm25Document[], queries: string[]): Array<{ id: string }> {
+function rankByRegistryName(docs: Bm25Document[], queries: string[]): ScoreRanking {
   const scoreById = new Map<string, number>();
-  const queryTokens = Array.from(new Set(queries.flatMap((query) => tokenize(query))));
+  const query = queries.map(normalizeSearchQuery).find(Boolean) ?? "";
+  if (!query) return [];
+  const queryTokens = Array.from(new Set(tokenize(query))).filter((token) => token.length >= 2);
+  const queryNorm = query.replace(/\s+/g, "_").replace(/\./g, "_");
 
   for (const doc of docs) {
     const idLower = doc.id.toLowerCase();
     const idNorm = idLower.replace(/\./g, "_");
+    const segments = idLower.split(/[._-]+/).filter(Boolean);
     let score = 0;
-    for (const token of queryTokens) {
-      if (token.length < 2) continue;
-      if (idLower === token || idNorm === token) score += 5;
-      else if (idLower.startsWith(token) || idNorm.startsWith(token)) score += 2.5;
-      else if (idLower.includes(token) || idNorm.includes(token)) score += 1;
+    if (idLower === query || idNorm === queryNorm) score = 1;
+    else if (idLower.startsWith(query) || idNorm.startsWith(queryNorm)) score = 0.82;
+    else if (idLower.includes(query) || idNorm.includes(queryNorm)) score = 0.62;
+    else {
+      let matched = 0;
+      for (const token of queryTokens) {
+        if (segments.some((segment) => segment === token || segment.startsWith(token))) matched += 1;
+      }
+      if (matched > 0) score = 0.45 * (matched / queryTokens.length);
     }
     if (score > 0) scoreById.set(doc.id, score);
   }
@@ -288,41 +317,52 @@ function rankByRegistryName(docs: Bm25Document[], queries: string[]): Array<{ id
   return sortRanking(scoreById);
 }
 
-function rankBySubstringFallback(
+function rankByAliases(
   docs: Bm25Document[],
-  queries: string[],
-  rawQuery: string,
-): Bm25Hit[] {
-  const qLower = rawQuery.toLowerCase().trim();
-  if (!qLower) return [];
-  const fallbackById = new Map<string, number>();
-
-  for (const query of queries) {
-    const qTokens = tokenize(query);
-    for (const doc of docs) {
-      const textLower = doc.text.toLowerCase();
-      const idLower = doc.id.toLowerCase();
-      if (
-        textLower.includes(qLower) ||
-        idLower.includes(qLower) ||
-        qTokens.some((token) => textLower.includes(token) || idLower.includes(token))
-      ) {
-        fallbackById.set(doc.id, Math.max(fallbackById.get(doc.id) ?? 0, 0.01));
-      }
-    }
+  query: string,
+  aliasEntries?: SearchAliasEntry[],
+): ScoreRanking {
+  if (!aliasEntries?.length || !query) return [];
+  const queryTokens = new Set(tokenize(query));
+  const byId = new Map(aliasEntries.map((entry) => [entry.registryName, entry]));
+  const scoreById = new Map<string, number>();
+  for (const doc of docs) {
+    const aliases = byId.get(doc.id)?.searchAliases;
+    if (!aliases?.length) continue;
+    const score = clamp01(aliasMatchScore(query, queryTokens, aliases) / 4);
+    if (score > 0) scoreById.set(doc.id, score);
   }
-
-  return applySearchRankingBoosts(
-    Array.from(fallbackById.entries()).map(([id, score]) => ({ id, score })),
-    rawQuery,
-    docs,
-  ).sort((a, b) => b.score - a.score);
+  return sortRanking(scoreById);
 }
 
-function sortRanking(scoreById: Map<string, number>): Array<{ id: string }> {
+function sortRanking(scoreById: Map<string, number>): ScoreRanking {
   return Array.from(scoreById.entries())
-    .sort((a, b) => b[1] - a[1])
-    .map(([id]) => ({ id }));
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([id, score]) => ({ id, score }));
+}
+
+function fuseLexicalChannels(channels: LexicalScoreChannels): number {
+  return clamp01(
+    channels.bm25 * 0.38 +
+    channels.overlap * 0.22 +
+    channels.trigram * 0.16 +
+    channels.alias * 0.14 +
+    channels.name * 0.1,
+  );
+}
+
+function normalizeSearchQuery(query: string): string {
+  return query
+    .toLowerCase()
+    .replace(/https?:\/\/\S+/gi, " ")
+    .replace(/[^\u4e00-\u9fa5a-z0-9._\s-]/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function clamp01(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return Math.min(1, Math.max(0, value));
 }
 
 function buildCharacterTrigrams(text: string): Set<string> {
@@ -348,47 +388,6 @@ function registryNameSearchTokens(name: string): string[] {
   const segments = name.split(/[._-]+/).filter((s) => s.length >= 2);
   const underscored = name.replace(/\./g, "_");
   return [...segments, underscored !== name ? underscored : ""].filter(Boolean);
-}
-
-/** URL 本体的 registry 语义归一（与 expandSearchQueries 的 URL 规则同源）。 */
-function normalizeUrlNoise(query: string): string {
-  return query.replace(/https?:\/\/\S+/gi, "fetch_web 网页 url page read 读取 内容");
-}
-
-function applySearchRankingBoosts(
-  hits: Bm25Hit[],
-  query: string,
-  docs: Bm25Document[],
-): Bm25Hit[] {
-  // 先归一再取 token：否则 example.com 的 "example" 会命中工具 id 段
-  // 并拿到 +0.6 的按位加权，压过 RRF 词面序。
-  const q = normalizeUrlNoise(query).trim().toLowerCase();
-  if (!q) return hits;
-
-  const docById = new Map(docs.map((d) => [d.id, d]));
-  const qNorm = q.replace(/\s+/g, "_").replace(/\./g, "_");
-  const qTokens = tokenize(q);
-
-  return hits.map((hit) => {
-    const doc = docById.get(hit.id);
-    if (!doc) return hit;
-
-    const idLower = hit.id.toLowerCase();
-    const idNorm = idLower.replace(/\./g, "_");
-    let boost = 0;
-
-    if (idLower === q || idNorm === qNorm) boost += 8;
-    else if (idLower.startsWith(q) || idNorm.startsWith(qNorm)) boost += 4;
-    else if (idLower.includes(q) || idNorm.includes(qNorm)) boost += 2;
-
-    const idSegments = hit.id.split(/[._-]+/).map((s) => s.toLowerCase());
-    for (const token of qTokens) {
-      if (token.length < 2) continue;
-      if (idSegments.some((seg) => seg === token || seg.startsWith(token))) boost += 0.6;
-    }
-
-    return boost > 0 ? { ...hit, score: hit.score + boost } : hit;
-  });
 }
 
 export function buildToolSearchText(tool: {
@@ -471,7 +470,7 @@ function extractParameterValues(parameters: unknown): string[] {
   return values;
 }
 
-function expandSearchQueries(query: string, aliasEntries?: SearchAliasEntry[]): string[] {
+function expandSearchQueries(query: string): string[] {
   const trimmed = query.trim();
   if (!trimmed) return [];
 
@@ -537,38 +536,6 @@ function expandSearchQueries(query: string, aliasEntries?: SearchAliasEntry[]): 
   for (const [pattern, replacement] of replacements) {
     if (pattern.test(trimmed)) {
       variants.add(trimmed.replace(pattern, replacement));
-    }
-  }
-
-  const queryTokens = tokenize(normalized);
-  const queryTokenSet = new Set(queryTokens);
-  const addedVariants: string[] = [];
-  const MAX_VARIANTS = 8; // 限制变体数，避免 BM25/Trigram 多路 RRF 跑 N 次
-  if (aliasEntries?.length && queryTokens.length > 0) {
-    // 别名命中规则：别名是"用户可能说出的短语"，只有 query 里真的出现了这个别名
-    // （整串包含；或英文多词别名中有完整实词命中）才算。
-    // 旧规则是"query 的任一 bigram 出现在别名串里"——中文 bigram 如「一下」「什么」
-    // 会在无关工具的别名里撞上，于是把该工具的 registryName 拼进 query，
-    // rankByRegistryName 再按前缀把同族工具整体推到最前，
-    // 反而把纯 BM25 已排到 top-1 的正确工具挤下去（召回噪声的主来源之一）。
-    type ScoredEntry = { entry: SearchAliasEntry; score: number };
-    const scored: ScoredEntry[] = [];
-    for (const entry of aliasEntries) {
-      if (!entry.searchAliases?.length) continue;
-      const score = aliasMatchScore(normalized, queryTokenSet, entry.searchAliases);
-      if (score > 0) scored.push({ entry, score });
-    }
-    scored.sort((a, b) => b.score - a.score);
-    for (const s of scored) {
-      if (addedVariants.length >= MAX_VARIANTS) break;
-      const v = `${trimmed} ${s.entry.registryName}`;
-      variants.add(v);
-      addedVariants.push(v);
-    }
-    // 把最相关 entry 的 alias 原文也拼进 query（帮助 token overlap / trigram 通道命中同义表达）
-    if (scored.length > 0 && scored[0]!.entry.searchAliases) {
-      const topAliases = scored[0]!.entry.searchAliases!.slice(0, 6).join(" ");
-      variants.add(`${trimmed} ${topAliases}`);
     }
   }
 

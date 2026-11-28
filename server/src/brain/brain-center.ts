@@ -50,6 +50,7 @@ import { extractEpitomeEntries, SessionEpitomeTurnGate } from "../services/sessi
 import type { RuntimeKernel, RuntimeKernelState } from "../agent/runtime-kernel.js";
 import { getRuntimeKernel } from "../agent/runtime-kernel.js";
 import { shouldRecallLongTerm } from "../agent/recall-gate.js";
+import { planMemoryRecall } from "../agent/recall-planner.js";
 import type { BodyGatewayLike, BodyState } from "../body/types.js";
 import { isMultimodalFusionEnabled } from "./multimodal-fusion-cortex.js";
 
@@ -183,7 +184,7 @@ interface MemoryCortexLike {
   recall(
     actorId: string,
     query: string,
-    opts?: { domain?: MemoryDomainKind; limit?: number; subQueries?: string[] },
+    opts?: { domain?: MemoryDomainKind; limit?: number; subQueries?: string[]; recallPlan?: import("../agent/recall-planner.js").MemoryRecallPlan },
   ): Promise<MemoryRecallResult>;
   recallCrossDomain(actorId: string, query: string): Promise<MemoryRecallResult>;
   consolidate(actorIds: string[]): Promise<MemoryConsolidationStats>;
@@ -197,7 +198,7 @@ interface MemoryCortexLike {
   recallWithProvenance?(
     actorId: string,
     query: string,
-    opts?: { domain?: MemoryDomainKind; limit?: number; subQueries?: string[] },
+    opts?: { domain?: MemoryDomainKind; limit?: number; subQueries?: string[]; recallPlan?: import("../agent/recall-planner.js").MemoryRecallPlan },
   ): Promise<MemoryRecallResult>;
   /** 联想预判（委托 AssociativeGraph，未注册返回空结果） */
   predictAssociation?(actorId: string, query: string): Promise<PredictedAssociation>;
@@ -1108,6 +1109,11 @@ export class BrainCenter {
       threadMessageCount: cognizeThreadMessageCount,
       understanding: turnUnderstanding,
     });
+    const recallPlan = planMemoryRecall({
+      text: query,
+      threadMessageCount: cognizeThreadMessageCount,
+      understanding: turnUnderstanding,
+    });
     if (recallGate.trigger) {
       console.log(`[BrainCenter] recall gate triggered (${recallGate.reason})`);
     }
@@ -1160,12 +1166,13 @@ export class BrainCenter {
       this.memory && recallGate.trigger
         ? (typeof this.memory.recallWithProvenance === "function"
             ? this.memory.recallWithProvenance(actorId, recallQuery, {
-                limit: 5,
-                // P2-2 多意图并行召回：recallWithProvenance 路径同样透传子意图
+                limit: recallPlan.finalN,
+                recallPlan,
                 ...(recallSubQueries ? { subQueries: recallSubQueries } : {}),
               })
             : this.memory.recall(actorId, recallQuery, {
-                limit: 5,
+                limit: recallPlan.finalN,
+                recallPlan,
                 ...(recallSubQueries ? { subQueries: recallSubQueries } : {}),
               })
           ).catch(() => null)
@@ -1569,6 +1576,7 @@ export class BrainCenter {
       recallItems: recallResult?.items ?? [],
       // 门控单点化：白名单判定结果透出，agent-core / prompt 装配层复用，不再各自重评
       recallGate: { trigger: recallGate.trigger, reason: recallGate.reason },
+      recallPlan,
       // 深度优化：工作记忆摘要（活跃目标+槽位+待办），供 streamCompletion 注入 prompt
       workingMemorySummary,
       // 最近 6 轮对话历史，供 streamCompletion 注入 prompt【最近对话】块（解决追问断片）

@@ -185,7 +185,7 @@ export function createTravelCommuteBuiltinSkills(deps: Deps): SkillDefinition[] 
             weatherText: brief.weatherText,
             tempC: Math.round(brief.currentTempC),
             rainPct: Math.round(brief.peakRainPct),
-            summary: brief.summaryLine,
+            summary: `${brief.weatherText}，${Math.round(brief.todayMinC)}-${Math.round(brief.todayMaxC)}°C`,
           };
           hourly = brief.hourlyForecast.map((h) => ({
             hour: h.hour,

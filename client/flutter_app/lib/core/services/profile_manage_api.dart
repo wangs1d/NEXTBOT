@@ -143,6 +143,29 @@ class ProfileManageApi {
     }
   }
 
+  /// 关键词遗忘：事实、理解、图节点、Mem0 与 FTS 统一级联。
+  Future<Map<String, dynamic>?> forget(String target) async {
+    try {
+      final Uri uri = Uri.parse("$_baseUrl/api/memory/forget");
+      final http.Response res = await _client.post(
+        uri,
+        headers: <String, String>{
+          "Content-Type": "application/json",
+          ...NbHttp.headersFor(uri),
+        },
+        body: jsonEncode(<String, dynamic>{
+          "actorId": ApiConfig.effectiveActorId,
+          "target": target,
+        }),
+      ).timeout(const Duration(seconds: 15));
+      final Map<String, dynamic> json =
+          jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
+      return json["ok"] == true ? json : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// 行级修改：op=ADD/UPDATE/DELETE（UPDATE/DELETE 须带 match 定位旧行）。
   /// 返回 null = 请求失败；非 null = 成功（含服务端回传的最新画像全文）。
   Future<String?> mutateLine({

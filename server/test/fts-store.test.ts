@@ -166,6 +166,22 @@ test("FTS：同 memory_id upsert 覆盖旧内容", () => {
   });
 });
 
+test("FTS：metadata.sourceRole 优先，助手时间线不占用户召回位", () => {
+  withStore(({ store }) => {
+    store.indexMemories("user-1", [
+      {
+        id: "assistant-neutral",
+        memory: "周末去公园散步",
+        metadata: { context: "main", sourceRole: "assistant" },
+      },
+      { id: "legacy-neutral", memory: "周末去河边钓鱼", metadata: { context: "main" } },
+    ]);
+
+    const hits = store.search("user-1", "周末 公园 河边", { context: "main" });
+    assert.deepEqual(hits.map((hit) => hit.memoryId), ["legacy-neutral"]);
+  });
+});
+
 test("FTS：remove 与 purgeActor", () => {
   withStore((ctx) => {
     const { store } = ctx;

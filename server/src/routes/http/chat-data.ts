@@ -171,6 +171,7 @@ export function registerChatDataRoutes(
           clientMessageId?: string;
           userImageUrls?: string[];
           mediaCards?: unknown[];
+          eveningDigest?: Record<string, unknown>;
           bubbles?: Array<{ id: string; text: string }>;
         }> = [];
         for (const turn of turns) {
@@ -195,7 +196,9 @@ export function registerChatDataRoutes(
               role: "user" | "assistant";
               text: string;
               ts: number | null;
+              messageId?: string;
               mediaCards?: unknown[];
+              eveningDigest?: Record<string, unknown>;
               bubbles?: Array<{ id: string; text: string }>;
             } = {
               role: "assistant",
@@ -205,11 +208,17 @@ export function registerChatDataRoutes(
               // 保证「问在上、答在下」的次序在一切排序下确定（2026-10-16）。
               ts: turn.ts == null ? null : turn.ts + 1,
             };
+            // 普通轮次的 WAL messageId 是用户消息锚；只有无用户锚的明日预览
+            // 需要把它作为助手卡 id，避免历史回填与 push 落泡去重失效。
+            if (turn.eveningDigest && turn.clientMessageId) {
+              assistantItem.messageId = turn.clientMessageId;
+            }
             // 本轮媒体卡随行下发（2026-11-09）：客户端重装/换设备后回填历史
             // 才能重建照片气泡；URL 指向服务端转存资产，跨设备仍可加载。
             if (turn.mediaCards && turn.mediaCards.length > 0) {
               assistantItem.mediaCards = turn.mediaCards;
             }
+            if (turn.eveningDigest) assistantItem.eveningDigest = turn.eveningDigest;
             // 真·分绿泡对账数组随行下发（2026-11-13）：真实分泡轮逐泡透传，
             // 客户端重装/换设备后回填按泡重建多条消息（与当轮实时形态一致）；
             // 旧行/塌缩/单泡轮缺省 → 客户端降级单泡，与升级前行为一致。

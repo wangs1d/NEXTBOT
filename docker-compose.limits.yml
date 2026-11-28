@@ -1,0 +1,28 @@
+# 资源上限覆盖层（P1-4）
+#
+# 目的：当前 api 容器没有任何 cgroup 限制，一次图片解码/内存暴涨会连健康检查
+# 一起拖死；同时 Node 堆上限（Dockerfile 里的 768MB）需要和容器上限对齐才有意义。
+#
+# 用法：
+#   docker compose -f docker-compose.yml -f docker-compose.limits.yml up -d
+#
+# 取值依据：本机为 **2 核 2G**。1400m 已接近可分配上限，不要再上调——剩下 ~600MB
+# 要留给 nginx / qdrant / redis / 其他容器与系统。堆 768MB ≈ 54%，剩余给 embedding
+# 子进程（onnxruntime）、sharp 解码缓冲与 native 内存。
+#
+# 如果同时启用了 homeassistant / qdrant 且内存吃紧，优先停用未使用的服务；
+# 实在要压，把 API_MEM_LIMIT 降到 1100m 并将 Dockerfile 堆改到 600MB 左右（≈55%）。
+#
+# 如果机器更大，需要同时改本文件的 mem_limit 与 server/Dockerfile 的堆参数
+# （堆 ≈ 容器内存 × 55%），两者必须一起调整。
+#
+# 注意：拆分为 gateway / runtime / media-worker 三个容器属于部署结构调整，
+# 需要同时改 nginx 反代与 compose 编排，本覆盖层不做（先靠单容器限流 + 调度器
+# 降频拿到 80% 收益，再评估是否值得拆）。
+
+services:
+  api:
+    mem_limit: ${API_MEM_LIMIT:-1400m}
+    memswap_limit: ${API_MEM_LIMIT:-1400m}
+    cpus: ${API_CPUS:-2.0}
+

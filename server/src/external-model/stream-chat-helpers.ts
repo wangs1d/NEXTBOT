@@ -1397,6 +1397,77 @@ const INTERNAL_CONTROL_TAG_PREFIX_RE =
 const INTERNAL_FRAME_STEM_PREFIX_RE = INTERNAL_FRAME_PREFIX_RE;
 
 /* ------------------------------------------------------------------ *
+ * 裸控制 token（prompt 让模型单独成行输出的协议指令，无方括号）          *
+ * ------------------------------------------------------------------ *
+ * 名单只写这一处：tool-loop 的逃生指令用它拼 prompt，出口净化（整串 + 流式）
+ * 用它删文本。2026-11-26 事故前两者是分开的——标记定义在 tool-loop、净化器不
+ * 认识它，模型没把标记落在首行时就原样进了气泡。 */
+export const NEED_MORE_TOOLS_MARKER = "NEED_MORE_TOOLS";
+const INTERNAL_PROTOCOL_TOKENS: readonly string[] = [NEED_MORE_TOOLS_MARKER];
+
+const PROTOCOL_TOKEN_SRC = INTERNAL_PROTOCOL_TOKENS.map((t) =>
+  t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+).join("|");
+/** 独占一行的裸 token：连整行（含行末换行）删，不留空行。 */
+const PROTOCOL_TOKEN_LINE_RE = new RegExp(`^[ \\t]*(?:${PROTOCOL_TOKEN_SRC})[ \\t]*\\n?`, "gm");
+/** 夹在正文里的裸 token：按 ASCII 词边界删 token，顺带吃掉紧随的一个空格。 */
+const PROTOCOL_TOKEN_INLINE_RE = new RegExp(
+  `(?<![A-Za-z0-9_])(?:${PROTOCOL_TOKEN_SRC})[ \\t]?(?![A-Za-z0-9_])`,
+  "g",
+);
+/** 删掉 token 后留下的空括号（「（NEED_MORE_TOOLS）」→「（）」）。 */
+const EMPTY_BRACKET_RESIDUE_RE = /[（(]\s*[)）][ \t]*/g;
+
+/** 整串剥裸控制 token（独占行与行内两种形态都删净）。 */
+export function stripInternalProtocolTokens(text: string): string {
+  if (!text) return text;
+  return text
+    .replace(PROTOCOL_TOKEN_LINE_RE, "")
+    .replace(PROTOCOL_TOKEN_INLINE_RE, "")
+    .replace(EMPTY_BRACKET_RESIDUE_RE, "");
+}
+
+/**
+ * 末尾是不是「还没写全」的裸 token 前缀（只认纯大写 ASCII 段）。
+ * 流式必须扣住它：半截放出去就撤不回，而整段到齐后是能删的。
+ */
+function protocolTokenPartialTailLen(text: string): number {
+  const m = /([A-Z_]+)$/.exec(text);
+  if (!m) return 0;
+  const candidate = m[1];
+  for (const token of INTERNAL_PROTOCOL_TOKENS) {
+    if (token.length > candidate.length && token.startsWith(candidate)) {
+      return candidate.length;
+    }
+  }
+  return 0;
+}
+
+/**
+ * 裸 token 的流式拦截器。
+ *
+ * 必须独立于 createStreamControlTagSanitizer 存在：那个净化器在认出「这是正常
+ * 正文」之后切直通、不再过滤，而裸 token 恰恰是混在正文里出现的（正文开头多半
+ * 是真句子）。本拦截器对每一段放行文本恒定生效。
+ */
+export function createStreamProtocolTokenScrubber(): StreamTextTransform {
+  let carry = "";
+  const feed = ((delta: string): string => {
+    const stripped = stripInternalProtocolTokens(carry + delta);
+    carry = "";
+    const hold = protocolTokenPartialTailLen(stripped);
+    if (hold > 0) {
+      carry = stripped.slice(-hold);
+      return stripped.slice(0, -hold);
+    }
+    return stripped;
+  }) as StreamTextTransform;
+  // 流已结束仍是半截 token：残缺的控制标记，不是正文（与标签净化器同判据）。
+  feed.flush = (): string => "";
+  return feed;
+}
+
+/* ------------------------------------------------------------------ *
  * 元术语整句净化（2026-08-29）                                        *
  * ------------------------------------------------------------------ *
  * 兜底防御 LLM 复读系统元术语（如「执行脑/规划任务/已接手/处理中」）
@@ -1522,6 +1593,39 @@ const SENTENCE_SPLIT_RE = /(?<=[。！？!?\n])/;
 type OrphanCloserState = { orphan: number };
 
 /**
+ * 工具调用旁白整句净化（2026-11-26 事故：「先补查询：web_search quote XAUUSD、
+ * web_search quote XAGUSD。」原样进了气泡）。
+ *
+ * 模型把「我准备调哪个工具」写进 content，且名字常常是**错的**（registry 里是
+ * search_web，它写成 web_search）——所以判据不能是工具名单，只能是形态：
+ * 句内出现 snake_case / 点分的小写 ASCII 标识符，且其近旁（±8 字）跟着
+ * 「调用/补查/换个关键词」这类动作旁白 → 整句丢弃。
+ * 误删防护（宁误放不误删：误删是丢数据，误放只是一句多余旁白）：句内含数字、
+ * 货币/温度/百分号、URL 或反引号 → 是带数据的正文，放行；整句超长 → 放行。
+ */
+const CODE_IDENTIFIER_RE = /\b[a-z][a-z0-9]*(?:[._][a-z0-9]+)+\b/g;
+const TOOL_NARRATION_CUE_RE =
+  /(调用|调一下|补查|再查|先查|查一下|查一次|查询|检索|搜索|抓取|拉取|执行|重试|换个?关键词|跑一下|试一下|我用|我先|让我)/;
+/** 旁白线索与标识符的最大间隔（字数）。 */
+const NARRATION_WINDOW = 8;
+/** 带数据形态：命中即视为正文，绝不当旁白删。 */
+const DATA_BEARING_RE = /[0-9０-９%℃¥$€]|https?:\/\//;
+const TOOL_NARRATION_MAX_CHARS = 90;
+
+function isToolNarrationSentence(sentence: string): boolean {
+  const raw = sentence.trim();
+  if (!raw || raw.length > TOOL_NARRATION_MAX_CHARS) return false;
+  if (DATA_BEARING_RE.test(raw) || raw.includes("`")) return false;
+  CODE_IDENTIFIER_RE.lastIndex = 0;
+  for (let m = CODE_IDENTIFIER_RE.exec(raw); m; m = CODE_IDENTIFIER_RE.exec(raw)) {
+    const from = Math.max(0, m.index - NARRATION_WINDOW);
+    const to = Math.min(raw.length, m.index + m[0].length + NARRATION_WINDOW);
+    if (TOOL_NARRATION_CUE_RE.test(raw.slice(from, to))) return true;
+  }
+  return false;
+}
+
+/**
  * 按句末标点切片并逐句过滤（元术语句 / 元决策自述句），顺带吞掉孤立闭括号。
  * @param state 流式路径需跨批传入同一 state；整串路径省略（内部新建）。
  */
@@ -1531,7 +1635,11 @@ function filterMetaSentences(text: string, state?: OrphanCloserState): string {
   const kept: string[] = [];
   for (const piece of text.split(SENTENCE_SPLIT_RE)) {
     if (!piece) continue;
-    if (isMetaOnlySentence(piece) || isMetaDecisionSentence(piece)) {
+    if (
+      isMetaOnlySentence(piece) ||
+      isMetaDecisionSentence(piece) ||
+      isToolNarrationSentence(piece)
+    ) {
       const bal = bracketBalance(piece.replace(/[\s。！？!?\n]+$/u, ""));
       if (bal > 0) st.orphan += bal;
       continue;
@@ -1630,7 +1738,8 @@ export function stripInternalControlTags(text: string): string {
     if (next === out) break;
     out = next;
   }
-  return out;
+  // 裸控制 token（NEED_MORE_TOOLS 之类）与上面同一套名单，整串路径也删净。
+  return stripInternalProtocolTokens(out);
 }
 
 /**
@@ -1737,6 +1846,14 @@ export function createStreamControlTagSanitizer(maxPendingChars = 512): StreamTe
         pending = stripped;
         return "";
       }
+      // 流首是一段**还没闭合**的短方括号（`[` / `[话题` / `[不可信内容`）：控制标签
+      // 与正文（「[评分 4.8]」「[标题](url)」）都长这样，此刻判不出来。扣住到 `]` 到齐
+      // 或超过词干长度——放过一次就撤不回（chunk=1 时旧的前缀判据只看 `[话题|Topic|STOP`，
+      // 首 chunk 的裸 `[` 会直接切直通，整条标签逐字透出）。
+      if (/^\s*\[[^\]]{0,12}$/.test(stripped)) {
+        pending = stripped;
+        return "";
+      }
       const rest = stripped.replace(INTERNAL_CONTROL_TAG_FULL_RE, "");
       if (
         rest !== stripped &&
@@ -1777,6 +1894,32 @@ export function createStreamControlTagSanitizer(maxPendingChars = 512): StreamTe
       return "";
     }
     return stripped;
+  };
+  return feed;
+}
+
+/**
+ * 可见正文的唯一净化出口：裸控制 token → 内部控制标签/帧 → 元话语整句。
+ *
+ * 三条产出通道（工具波、无 schema 汇总/探测、纯文本 provider）必须共用它。
+ * 2026-11-26 的协议文本透出就是分叉造成的：主波各建各的净化器、汇总通道干脆
+ * 直推 onDelta——「哪条通道忘了过净化」无法靠约定防住，只能收敛成一个对象。
+ * feed/flush 放出的文本逐字等于用户看到的文本，定稿取这里的累计（I2 正文单一出口）。
+ */
+export function createStreamTextPurifier(): StreamTextTransform {
+  const tokens = createStreamProtocolTokenScrubber();
+  const sanitizer = createStreamControlTagSanitizer();
+  const meta = createStreamMetaSentenceFilter();
+
+  const feed = ((delta: string): string => meta(sanitizer(tokens(delta)))) as StreamTextTransform;
+
+  feed.flush = (): string => {
+    let out = "";
+    const tail = tokens.flush();
+    if (tail) out += meta(sanitizer(tail));
+    const held = sanitizer.flush();
+    if (held) out += meta(held);
+    return out + meta.flush();
   };
   return feed;
 }

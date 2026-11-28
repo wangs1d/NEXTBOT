@@ -3,6 +3,7 @@
 import type { RuntimeKernelState } from "../agent/runtime-kernel.js";
 import type { BodyState } from "../body/types.js";
 import type { EmotionSignal } from "../services/emotion-memory.js";
+import type { MemoryRecallPlan } from "../agent/recall-planner.js";
 
 // 能力描述符
 export type CapabilityStatus = "active" | "disabled" | "planned" | "deprecated";
@@ -381,6 +382,8 @@ export interface MemoryRecallItem {
   content: string;
   domain: MemoryDomainKind;
   source?: string;
+  /** 结构化来源角色；召回过滤优先读该字段，旧数据才按正文形态兜底 */
+  sourceRole?: import("../services/memory-source-role.js").MemorySourceRole;
   importance?: "critical" | "high" | "medium" | "low";
   /** 隐私分级，缺省 "public"。recall 默认剔除 restricted。 */
   sensitivity?: MemorySensitivity;
@@ -640,6 +643,7 @@ export interface CognitiveResult {
    * 不再各自重评（三处独立评估正则易漂移）。缺失时消费方自行降级评估。
    */
   recallGate?: { trigger: boolean; reason: string };
+  recallPlan?: MemoryRecallPlan;
   /**
    * 工作记忆摘要（深度链接优化）：含活跃目标 + 槽位 + 待办。
    * 由 BrainCenter.cognize 阶段 3 生成，注入到 streamCompletion 的 system prompt，

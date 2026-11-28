@@ -65,6 +65,7 @@ const registerBodySchema = z
     tags: z.array(z.string()).default([]),
     version: z.string().default("1.0.0"),
     base_score: z.number().min(0).max(1).optional(),
+    embeddings: z.array(z.array(z.number())).optional(),
     embedding: z.array(z.number()).optional(),
     level2: level2Schema,
     level3: z.record(z.unknown()),

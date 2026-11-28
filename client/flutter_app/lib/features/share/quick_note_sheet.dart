@@ -99,7 +99,7 @@ class _QuickNoteSheetState extends State<QuickNoteSheet> {
     });
     // 系统听写（与桌面语音输入同一套 SpeechService）：识别结果直接进输入框，
     // 用户看得见、能改——管家听错一个字，比重新说一遍便宜得多。
-    await stt.startListening(
+    final bool started = await stt.startListening(
       onResult: (String text) {
         if (!mounted) return;
         final String merged = _text.text.trim().isEmpty
@@ -114,6 +114,12 @@ class _QuickNoteSheetState extends State<QuickNoteSheet> {
         if (mounted) setState(() => _listening = false);
       },
     );
+    if (!started && mounted) {
+      setState(() {
+        _listening = false;
+        _hint = "语音识别启动失败，请检查麦克风权限后重试";
+      });
+    }
   }
 
   Future<void> _pickCamera() async {

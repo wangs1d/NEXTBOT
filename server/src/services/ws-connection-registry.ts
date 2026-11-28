@@ -42,6 +42,13 @@ export class WsConnectionRegistry {
   /** 连接变化回调（PresenceService 在场感知接线；首连接 true / 末断开 false，fire-and-forget） */
   onConnectionChange?: (actorId: string, connected: boolean) => void;
 
+  /**
+   * WS 离线镜像（2026-11-26 离线事件统一降级）：发送失败或手机端没有在线连接时，
+   * 把原始事件帧交给 push 层决定是否写穿。回调自己按事件白名单过滤，registry
+   * 不认识业务类型，也不改变 send 的返回值（fire-and-forget）。
+   */
+  onOfflineEvent?: (actorId: string, data: string, mobileDelivered: boolean) => void;
+
   register(sessionId: string, socket: WsLike, meta?: { deviceClass?: DeviceClass; deviceId?: string }): void {
     let set = this.connections.get(sessionId);
     if (!set) {
@@ -149,6 +156,20 @@ export class WsConnectionRegistry {
     return !!set && set.size > 0;
   }
 
+  /** 直接把一帧交给离线镜像（ctx.socket.send 失败时用；与 registry 投递无关）。 */
+  mirrorOffline(sessionId: string, data: string): void {
+    this.notifyOffline(sessionId, data, false);
+  }
+
+  private notifyOffline(sessionId: string, data: string, mobileDelivered: boolean): void {
+    if (!this.onOfflineEvent) return;
+    try {
+      this.onOfflineEvent(sessionId, data, mobileDelivered);
+    } catch {
+      /* 镜像失败不影响主投递语义 */
+    }
+  }
+
   /**
    * 全量广播（客户端版本更新推送等运营事件）：遍历全部 session 的全部连接，
    * open 状态才发；单连接发送失败吞掉（不影响其余连接，也不影响遍历）。
@@ -245,8 +266,15 @@ export class WsConnectionRegistry {
       if (!open || entry.lastActiveAt < cutoff) continue;
       if (!best || entry.lastActiveAt > best.lastActiveAt) best = entry;
     }
-    if (!best) return false;
-    return this.trySendEntry(sessionId, best, data);
+    if (!best) {
+      this.notifyOffline(sessionId, data, false);
+      return false;
+    }
+    const delivered = this.trySendEntry(sessionId, best, data);
+    if (!delivered || best.deviceClass !== "mobile") {
+      this.notifyOffline(sessionId, data, delivered && best.deviceClass === "mobile");
+    }
+    return delivered;
   }
 
   /**
@@ -263,23 +291,37 @@ export class WsConnectionRegistry {
   /** 向该 actor 的全部在线设备投递（电脑端 + 手机端都收到），任一成功即算送达 */
   trySend(sessionId: string, data: string): boolean {
     const set = this.connections.get(sessionId);
-    if (!set || set.size === 0) return false;
-    let delivered = false;
-    for (const entry of [...set]) {
-      delivered = this.trySendEntry(sessionId, entry, data) || delivered;
+    if (!set || set.size === 0) {
+      this.notifyOffline(sessionId, data, false);
+      return false;
     }
+    let delivered = false;
+    let mobileDelivered = false;
+    for (const entry of [...set]) {
+      const ok = this.trySendEntry(sessionId, entry, data);
+      delivered = ok || delivered;
+      mobileDelivered = (ok && entry.deviceClass === "mobile") || mobileDelivered;
+    }
+    if (!mobileDelivered) this.notifyOffline(sessionId, data, false);
     return delivered;
   }
 
   /** 仅向指定类别的在线设备投递（升级链按设备分级触达用），任一成功即算送达 */
   trySendToDeviceClasses(sessionId: string, data: string, deviceClasses: DeviceClass[]): boolean {
     const set = this.connections.get(sessionId);
-    if (!set || set.size === 0 || deviceClasses.length === 0) return false;
+    if (!set || set.size === 0 || deviceClasses.length === 0) {
+      this.notifyOffline(sessionId, data, false);
+      return false;
+    }
     let delivered = false;
+    let mobileDelivered = false;
     for (const entry of [...set]) {
       if (!deviceClasses.includes(entry.deviceClass)) continue;
-      delivered = this.trySendEntry(sessionId, entry, data) || delivered;
+      const ok = this.trySendEntry(sessionId, entry, data);
+      delivered = ok || delivered;
+      mobileDelivered = (ok && entry.deviceClass === "mobile") || mobileDelivered;
     }
+    if (!mobileDelivered) this.notifyOffline(sessionId, data, false);
     return delivered;
   }
 

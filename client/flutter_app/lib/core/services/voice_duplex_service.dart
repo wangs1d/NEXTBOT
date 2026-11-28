@@ -85,6 +85,10 @@ class VoiceDuplexService {
   /// 麦克风实时电平（0-1，对数映射），通话 UI 画电平条/做诊断提示用。
   final ValueNotifier<double> micLevel = ValueNotifier<double>(0);
 
+  /// 麦克风是否处于采集状态。数字人倾听态据此切换（开麦=倾听，
+  /// 关麦=恢复空闲微动），比 micLevel 可靠：停麦后 micLevel 停在残值不清零。
+  final ValueNotifier<bool> micOpen = ValueNotifier<bool>(false);
+
   /// 上一个完整诊断窗口（2s）的峰值 RMS（16bit 原值口径）；0 表示窗口内没数据
   double lastMicPeakRms = 0;
 
@@ -124,7 +128,6 @@ class VoiceDuplexService {
   /// 引擎（engineKind=="realtime"，与具体厂商无关）。
   Future<bool> start({
     String? sessionId,
-    String? actorId,
     Duration timeout = const Duration(seconds: 6),
   }) async {
     await stop();
@@ -141,8 +144,6 @@ class VoiceDuplexService {
       channel.sink.add(jsonEncode(<String, dynamic>{
         "type": "session.start",
         if (sessionId != null && sessionId.isNotEmpty) "sessionId": sessionId,
-        // 声纹闸：声明身份；该身份已注册声纹时服务端要求 speaker.verify 后才受理对话
-        if (actorId != null && actorId.isNotEmpty) "actorId": actorId,
       }));
       final bool ok = await _readyCompleter!.future.timeout(
         timeout,
@@ -157,16 +158,6 @@ class VoiceDuplexService {
       await stop();
       return false;
     }
-  }
-
-  /// 声纹验证通过后上报一次性说话人令牌（服务端放行本连接的对话帧）。
-  void sendSpeakerVerify(String token) {
-    final WebSocketChannel? channel = _channel;
-    if (channel == null) return;
-    channel.sink.add(jsonEncode(<String, dynamic>{
-      "type": "speaker.verify",
-      "token": token,
-    }));
   }
 
   /// 发送一轮文本对话（纯语音模式：本地识别文本 → 语音回流）。
@@ -184,13 +175,14 @@ class VoiceDuplexService {
   }
 
   /// 开启麦克风上行（16kHz PCM16 单声道流式 → audio.chunk）。
-  /// 仅电话通话用；纯语音模式的麦克风归本地唤醒/声纹/识别，勿开。
+  /// 仅电话通话用；纯语音模式的麦克风归本地唤醒/识别，勿开。
   Future<bool> startMic() async {
     final WebSocketChannel? channel = _channel;
     if (channel == null || !isReady) return false;
     if (_micSub != null) {
       // 已在采集：兜底补齐诊断探针（二者本应成对，异常错位时自愈）
       if (_micProbeTimer == null) _startMicProbe();
+      micOpen.value = true;
       return true;
     }
     try {
@@ -228,6 +220,7 @@ class VoiceDuplexService {
         }));
       });
       _startMicProbe();
+      micOpen.value = true;
       // 若此刻恰有 TTS 在播（通话接通问候语等），门控到播完
       if (TtsPlayer.instance.isPlaying) {
         _setMicGated(true);
@@ -257,6 +250,7 @@ class VoiceDuplexService {
     _stopMicProbe();
     await _micSub?.cancel();
     _micSub = null;
+    micOpen.value = false;
     _setMicGated(false);
     TtsPlayer.instance
       ..removeOnPlaybackStarted(_onPlaybackStarted)

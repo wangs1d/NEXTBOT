@@ -17,6 +17,21 @@
 
 export type MemorySourceRole = "user" | "assistant" | "mixed" | "tool" | "system" | "unknown";
 
+const MEMORY_SOURCE_ROLES: readonly MemorySourceRole[] = [
+  "user",
+  "assistant",
+  "mixed",
+  "tool",
+  "system",
+  "unknown",
+];
+
+export function normalizeMemorySourceRole(raw: unknown): MemorySourceRole | null {
+  return typeof raw === "string" && (MEMORY_SOURCE_ROLES as readonly string[]).includes(raw)
+    ? (raw as MemorySourceRole)
+    : null;
+}
+
 /**
  * 用户是否在明确询问「助手说过/答应过什么」。
  * 只有这类询问才允许助手发言进入召回；其余（我叫什么、我多大）一律不把助手发言
@@ -33,9 +48,11 @@ export function isAssistantVoiceQuery(query: string): boolean {
 const JOURNAL_USER_RE = /日志固化[^\]]*·(?:用户|fact|prefer)\]/;
 const JOURNAL_ASSISTANT_RE = /日志固化[^\]]*·(?:助手|commit|Agent)\]/;
 const USER_REMEMBER_RE = /\[用户要求记住\]/;
+const USER_FACT_RE = /\[用户事实\]/;
 const AGENT_PROMISE_RE = /Agent 承诺\/结论|\[?承诺：/;
 const TOOL_EVENT_RE = /工具调用成功|Tool interaction/i;
 const TURN_ARCHIVE_RE = /^\s*(?:Turn archive|Turn \|)/;
+const TURN_USER_RE = /^\s*Turn\s*\|\s*user\s*:/i;
 
 /** 从 EvolutionLoop 行里抽取被回答的用户原话（user="…"），供回声检测比对当前 query。
  *  生产数据里该行是二次 JSON 序列化文本，引号常为转义形态（user=\"…\"），需兼容。 */
@@ -51,9 +68,11 @@ export function classifyMemorySourceRole(rawText: string): MemorySourceRole {
   // dream:replay / dream:reinforce 前缀是夜间巩固的再入行为，角色看内层文本
   const stripped = text.replace(/^dream:\w+\s*\|\s*/g, "").trim();
 
-  const hasUser = JOURNAL_USER_RE.test(stripped) || USER_REMEMBER_RE.test(stripped);
+  const hasUser =
+    JOURNAL_USER_RE.test(stripped) || USER_REMEMBER_RE.test(stripped) || USER_FACT_RE.test(stripped);
   const hasAssistant = JOURNAL_ASSISTANT_RE.test(stripped) || AGENT_PROMISE_RE.test(stripped);
 
+  if (TURN_USER_RE.test(stripped)) return "user";
   if (/EvolutionLoop:/i.test(stripped)) {
     if (/reply=\\{0,2}["']/.test(stripped)) return "assistant"; // assistantDone：内容主体是助手自己的回复
     if (/user=\\{0,2}["']/.test(stripped)) return "user";

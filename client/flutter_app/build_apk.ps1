@@ -13,6 +13,9 @@ param(
   [string] $HttpBase = "",
   # 控制面（账号/OTP/登录页所在）；留空则与 -HttpBase 同值
   [string] $ControlPlaneUrl = "",
+  # 数字人独立服务根地址；-Lan 时自动取 http://<局域网IP>:8765
+  [string] $DigitalHumanBase = "",
+  [int] $DigitalHumanPort = 8765,
   # 内测版 internal / 开源版 oss
   [string] $Edition = "internal",
   [int] $Port = 3000,
@@ -21,6 +24,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+Set-Location -LiteralPath $PSScriptRoot
 
 # ── 自动探测本机局域网 IPv4（排除回环/链路本地，优先 192.168.* / 10.*）──
 function Get-LanIPv4 {
@@ -57,6 +61,16 @@ if ([string]::IsNullOrWhiteSpace($ControlPlaneUrl)) {
     $ControlPlaneUrl = $HttpBase
   }
 }
+if ([string]::IsNullOrWhiteSpace($DigitalHumanBase)) {
+  if ($Lan) {
+    $ip = Get-LanIPv4
+    if (-not $ip) { throw "未能探测到局域网 IPv4，请显式传 -DigitalHumanBase http://<电脑IP>:8765" }
+    $DigitalHumanBase = "http://${ip}:$DigitalHumanPort"
+    Write-Host "本机联调（-Lan）：烤入数字人地址 $DigitalHumanBase" -ForegroundColor Cyan
+  } else {
+    throw "生产 APK 必须显式传 -DigitalHumanBase（数字人需独立 GPU 服务）；局域网联调请传 -Lan"
+  }
+}
 
 # --no-version-check：跳过 flutter 启动时的 `git log` 版本新鲜度检查。
 # 该检查纯属提示用途；在管道资源紧张的机器上它会直接让 flutter 崩掉
@@ -66,24 +80,26 @@ $dartDefines = @(
   "--suppress-analytics",
   "--dart-define", "HTTP_BASE=$HttpBase",
   "--dart-define", "CONTROL_PLANE_URL=$ControlPlaneUrl",
+  "--dart-define", "DIGITAL_HUMAN_BASE_URL=$DigitalHumanBase",
   "--dart-define", "PAI_EDITION=$Edition"
 )
 
-Write-Host "烤入：HTTP_BASE=$HttpBase | CONTROL_PLANE_URL=$ControlPlaneUrl | PAI_EDITION=$Edition" -ForegroundColor Yellow
+Write-Host "烤入：HTTP_BASE=$HttpBase | CONTROL_PLANE_URL=$ControlPlaneUrl | DIGITAL_HUMAN_BASE_URL=$DigitalHumanBase | PAI_EDITION=$Edition" -ForegroundColor Yellow
 
 # 明文 HTTP 白名单提醒：Android 9+ 默认禁明文，局域网 http:// 地址必须在
 # android/app/src/main/res/xml/network_security_config.xml 的白名单里，
 # 否则请求被系统直接掐掉（表现同样是「网络错误」）。
-$uri = [Uri]$HttpBase
 $nsConfig = Join-Path $PSScriptRoot "android\app\src\main\res\xml\network_security_config.xml"
-if ((Test-Path $nsConfig) -and $uri.Scheme -eq "http" -and $uri.Host -match '^\d+\.\d+\.\d+\.\d+$') {
-  $xmlText = Get-Content $nsConfig -Raw
-  if ($xmlText -notmatch "<domain[^>]*>\s*$([regex]::Escape($uri.Host))\s*</domain>") {
-    Write-Host ""
-    Write-Host "⚠ 明文白名单未包含 $($uri.Host)：Android 会拦截 http 请求（登录报「网络错误」）。" -ForegroundColor Yellow
-    Write-Host "  请把 <domain includeSubdomains=""false"">$($uri.Host)</domain> 加进：" -ForegroundColor Yellow
-    Write-Host "  $nsConfig" -ForegroundColor Yellow
-    Write-Host "  （或改用 https 域名，如 https://login.nextbot.top）" -ForegroundColor Yellow
+foreach ($base in @($HttpBase, $DigitalHumanBase)) {
+  $uri = [Uri]$base
+  if ((Test-Path $nsConfig) -and $uri.Scheme -eq "http" -and $uri.Host -match '^\d+\.\d+\.\d+\.\d+$') {
+    $xmlText = Get-Content $nsConfig -Raw
+    if ($xmlText -notmatch "<domain[^>]*>\s*$([regex]::Escape($uri.Host))\s*</domain>") {
+      Write-Host ""
+      Write-Host "⚠ 明文白名单未包含 $($uri.Host)：Android 会拦截 $base。" -ForegroundColor Yellow
+      Write-Host "  请把 <domain includeSubdomains=""false"">$($uri.Host)</domain> 加进：" -ForegroundColor Yellow
+      Write-Host "  $nsConfig" -ForegroundColor Yellow
+    }
   }
 }
 

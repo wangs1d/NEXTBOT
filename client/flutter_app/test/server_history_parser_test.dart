@@ -15,7 +15,8 @@ Map<String, dynamic> _assistantItem({
   List<Map<String, dynamic>>? bubbles,
   List<Map<String, dynamic>>? mediaCards,
   int ts = 1799900000000,
-}) => <String, dynamic>{
+}) =>
+    <String, dynamic>{
       "role": "assistant",
       "text": text,
       "ts": ts,
@@ -28,7 +29,12 @@ void main() {
     test("带 bubbles 的 assistant item 逐泡建消息，fromBubbles 全 true", () {
       final ParsedServerHistory parsed = parseServerHistoryMessages(
         raw: <dynamic>[
-          <String, dynamic>{"role": "user", "text": "明早叫我", "ts": 1799900000000, "clientMessageId": "msg-1"},
+          <String, dynamic>{
+            "role": "user",
+            "text": "明早叫我",
+            "ts": 1799900000000,
+            "clientMessageId": "msg-1"
+          },
           _assistantItem(
             text: "好，到点叫你。\n\n不过你今晚得早点睡。",
             bubbles: <Map<String, dynamic>>[
@@ -149,6 +155,35 @@ void main() {
       );
       expect(dirty.messages.length, 1);
       expect(dirty.fromBubbles, <bool>[false]);
+    });
+
+    test("明日预览历史透传 messageId 与结构化 digest", () {
+      final Map<String, dynamic> digest = <String, dynamic>{
+        "date": "2026-11-28",
+        "tomorrowWeather": <String, dynamic>{
+          "text": "小雨",
+          "minC": 15,
+          "maxC": 19,
+          "alerts": <String>[],
+        },
+        "narrationText": "明天有小雨，记得带伞。",
+      };
+      final ParsedServerHistory parsed = parseServerHistoryMessages(
+        raw: <dynamic>[
+          <String, dynamic>{
+            "role": "assistant",
+            "text": "明天有小雨，记得带伞。",
+            "ts": 1799900000000,
+            "messageId": "evening-digest-2026-11-28",
+            "eveningDigest": digest,
+          },
+        ],
+        sessionKey: "actor-1",
+      );
+      final ChatMessage message = parsed.messages.single;
+      expect(message.messageId, "evening-digest-2026-11-28");
+      expect(message.contentType, "evening_digest");
+      expect(message.eveningDigest, digest);
     });
 
     test("user item 透传 clientMessageId；user 的 bubbles 字段被忽略", () {

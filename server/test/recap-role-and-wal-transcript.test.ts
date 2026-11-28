@@ -154,6 +154,37 @@ test("mediaCards 透传（2026-11-09）：出口补写的媒体卡随转史下�
   }
 });
 
+test("eveningDigest 透传（2026-11-27）：超长 push / 换设备后仍能还原明日预览卡", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "wal-digest-"));
+  try {
+    await mkdir(dir, { recursive: true });
+    const digest = {
+      date: "2026-11-28",
+      tomorrowWeather: { text: "小雨", minC: 15, maxC: 19, alerts: [] },
+      narrationText: "明天有小雨，记得带伞。",
+    };
+    await writeFile(
+      join(dir, "2026-11-27.jsonl"),
+      JSON.stringify({
+        ts: "2026-11-27T21:00:00+08:00",
+        actorId: "d@x",
+        userText: "",
+        assistantText: digest.narrationText,
+        messageId: "evening-digest-2026-11-28",
+        context: "main",
+        eveningDigest: digest,
+      }) + "\n",
+      "utf8",
+    );
+    const turns = await readActorTranscriptFromWal(dir, "d@x");
+    assert.equal(turns.length, 1);
+    assert.equal(turns[0]?.clientMessageId, "evening-digest-2026-11-28");
+    assert.deepEqual(turns[0]?.eveningDigest, digest);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("userImageUrls 透传（2026-11-18）：用户照片 URL 随转史下发，脏 URL 被过滤，旧行不受影响", async () => {
   const dir = await mkdtemp(join(tmpdir(), "wal-userimg-"));
   try {

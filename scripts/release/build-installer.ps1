@@ -189,7 +189,7 @@ New-Item -ItemType Directory -Force -Path $StageApp, $StageRuntime | Out-Null
 
 # 3.1 Flutter 产物 + VC 运行库（本机 System32 同架构拷贝，免去 vc_redist 静默安装）
 # 集合按包内全部原生二进制的 import 表取全：onnxruntime.dll 除 msvcp140/vcruntime140(_1)
-# 外还要 msvcp140_1 与 msvcp140_atomic_wait，少一个是装机后本地向量引擎/声纹加载崩，
+# 外还要 msvcp140_1 与 msvcp140_atomic_wait，少一个是装机后本地向量引擎加载崩，
 # 而构建机 System32 常带完整 redist，本地冒烟看不出来。
 # 运行期日志不进包：App 在 Release 目录里就地跑过会写下 pai_app_stderr.log——它既会
 # 因被占用而拦下整次 staging 拷贝，也可能把上一台机器的运行痕迹发给所有用户。
@@ -343,11 +343,7 @@ foreach ($nmRoot in @($StageRuntime, (Join-Path $StageRuntime 'dist'))) {
 # bge-small-zh-v1.5——引擎按模块相对路径解析（dist/agentic-memory/local-embedding
 # 上三级即 runtime 根），与 load-server-env 的 serverRoot 口径一致。
 Copy-Item (Join-Path $Repo 'server\models\bge-small-zh-v1.5') (Join-Path $StageRuntime 'models\bge-small-zh-v1.5') -Recurse -Force
-
-# 3.7.1 说话人向量模型（声纹底座）：3D-Speaker CAM++ 中文版 ONNX（~28MB，192 维，
-# CN-Celeb+CN-Common ~20 万说话人）。与 bge 同目录约定（runtime\models\speaker-campplus-zh）。
-# 2026-10-03 由 wespeaker cnceleb_resnet34 升级；换模型=换向量空间，旧声纹全部作废。
-Copy-Item (Join-Path $Repo 'server\models\speaker-campplus-zh') (Join-Path $StageRuntime 'models\speaker-campplus-zh') -Recurse -Force
+Copy-Item (Join-Path $Repo 'server\models\bge-reranker-base') (Join-Path $StageRuntime 'models\bge-reranker-base') -Recurse -Force
 
 # 3.8 旅行知识种子数据（68KB）：travel 技能的离线底座（poi/坐标/目的地/国内关键词）。
 # 知识库读 cwd\data\travel-knowledge，捆绑 runtime 的 cwd 就是 runtime 目录，路径正好对上；
@@ -407,7 +403,11 @@ Write-Host ("  ffmpeg.exe 入包 " + [math]::Round($stagedFfmpegBytes / 1MB, 1) 
 $searchEnvLines = @(
   "SEARCH_API_PROVIDER=anysearch",
   "ANYSEARCH_ENDPOINT=$SearchApiUrl",
-  "PLAYWRIGHT_BROWSERS_PATH=ms-playwright"
+  "PLAYWRIGHT_BROWSERS_PATH=ms-playwright",
+  # 桌面端内置浏览器闸口（2026-11-27）：本机 runtime 开启 CDP 桥，比价/购物
+  # 取页走用户可见的 WebView2（登录态即本人），而非云端无头 Chromium。
+  # 同机部署直连 127.0.0.1:9333；云端部署须另经 WS 隧道（见 cdp-tunnel.ts）。
+  "SHARED_BROWSER_CDP_ENABLED=1"
 )
 if ($SearchApiToken) { $searchEnvLines += "SEARCH_API_KEY=$SearchApiToken" }
 if ($UpdateManifestUrl) {
@@ -430,15 +430,50 @@ if ($Edition -eq 'oss') {
   $ossManifest | ConvertTo-Json | Set-Content -Path (Join-Path $StageRuntime 'config\client-manifest.oss.json') -Encoding ascii
 }
 
+# 3.10 同步完整 runtime 到 windows_dist\Release\runtime（2026-11-27）：
+# 自启链（HKCU Run / app-launcher.mjs / launch-desktop-app.ps1）三处都指向
+# windows_dist\Release 这个固定路径，LocalRuntimeManager.isBundled 也认这里的
+# runtime\node.exe。此前 build_windows.ps1 只镜像 app 产物，Release 是「无 runtime
+# 的 cloud 壳」→ 自启拉的是空壳，后端靠 dev 计划任务兜底，装机形态根本起不来。
+# 这里把 staging 的整套 runtime（含上面写好的 .env / CDP 闸口）镜像过去，让
+# Release 变成「app + runtime 的完整本地版」，自启即拉本地后端。
+# build_windows.ps1 的 /MIR 已加 /XD runtime，不会被下一轮 app 镜像清掉。
+# 必须走 tar 管道而非 robocopy（2026-11-27 实测）：node_modules 深路径超 MAX_PATH，
+# robocopy /MIR 静默漏拷 6900+ 文件（openai/resources/videos.mjs 缺失 → worker 起不来
+# 且 robocopy 退出码仍是 0/3，自检发现不了）。tar -h 解引用软链、不经 Win32 路径长度
+# 限制，与 3.3 段 staging 拷贝同一手法；先删旧 runtime 保证 /MIR 语义（不残留旧文件）。
+$releaseRuntime = Join-Path $Repo 'windows_dist\Release\runtime'
+if (Test-Path $releaseRuntime) {
+  Remove-Item -Recurse -Force -LiteralPath ('\\?\' + $releaseRuntime)
+}
+# 目标目录必须先建出来：Release\runtime 可能已被 cmake 镜像整目录抹掉
+# （deploy_windows_dist.cmake 的 REMOVE_RECURSE），而 tar -x 的 -C 不会自动
+# 创建缺失目录——直接 "could not chdir"（2026-11-28 实证）。
+New-Item -ItemType Directory -Force -Path $releaseRuntime | Out-Null
+$stagePosix2 = ($StageRuntime -replace '\\', '/')
+$releasePosix2 = ($releaseRuntime -replace '\\', '/')
+& cmd /c "tar -chf - -C $stagePosix2 . | tar -xf - -C $releasePosix2"
+if ($LASTEXITCODE -ne 0) { throw "同步 runtime 到 windows_dist\Release 失败 (tar copy exit=$LASTEXITCODE)" }
+# 完整性自检：node_modules 文件数必须与 staging 一致（robocopy 漏拷就是这里发现的）
+$stageCount = (Get-ChildItem (Join-Path $StageRuntime 'node_modules') -Recurse -File).Count
+$releaseCount = (Get-ChildItem (Join-Path $releaseRuntime 'node_modules') -Recurse -File).Count
+if ($releaseCount -ne $stageCount) {
+  throw "Release\\runtime\\node_modules 不完整：$releaseCount / $stageCount files（tar 拷贝漏文件？）"
+}
+Write-Host ("  本地版 Release\\runtime 已同步 ({0:N0} files, node_modules {1:N0}/{2:N0})" -f (Get-ChildItem $releaseRuntime -Recurse -File).Count, $releaseCount, $stageCount)
+
 Write-Host '== [4/5] 校验关键文件 =='
 foreach ($f in (Join-Path $StageApp 'NEXTBOT.exe'),
                (Join-Path $StageRuntime 'node.exe'),
                (Join-Path $StageRuntime 'dist\bundle\supervisor-main.js'),
+               (Join-Path $StageRuntime 'dist\bundle\local-reranker-host.js'),
                (Join-Path $StageRuntime 'node_modules\@nextbot\agent-world\dist'),
                (Join-Path $StageRuntime 'node_modules\onnxruntime-node\bin\napi-v6\win32\x64'),
                (Join-Path $StageRuntime 'models\bge-small-zh-v1.5\model_quantized.onnx'),
                (Join-Path $StageRuntime 'models\bge-small-zh-v1.5\vocab.txt'),
-               (Join-Path $StageRuntime 'models\speaker-campplus-zh\campplus_zh_cn_common_200k.onnx'),
+               (Join-Path $StageRuntime 'models\bge-reranker-base\model_quantized.onnx'),
+               (Join-Path $StageRuntime 'models\bge-reranker-base\tokenizer.json'),
+               (Join-Path $StageRuntime 'models\bge-reranker-base\tokenizer_config.json'),
                (Join-Path $StageRuntime "ms-playwright\chromium_headless_shell-$($pwRev.revision)\chrome-headless-shell-win64\chrome-headless-shell.exe"),
                (Join-Path $StageRuntime 'bin\ffmpeg.exe'),
                (Join-Path $StageRuntime 'package.json')) {

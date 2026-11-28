@@ -4,6 +4,19 @@ import type { ToolContext, ToolRegistry } from "./tool-registry.js";
 
 export type PhoneBridgeToolsDeps = {
   bridge: PhoneBridgeCoordinator;
+  /**
+   * 通话记录入库 feeder（可选，晚绑定）：phone.call_log 拉取成功后回灌
+   * call_log 流 → SourceStore 落盘，重启后历史通话仍可跨源检索。
+   * bootstrap 里 proactivitySensors 创建晚于工具注册，经 ref holder 回填。
+   */
+  callLogFeed?: (signal: {
+    actorId?: string;
+    at: number;
+    fingerprint: string;
+    salience: "high" | "medium" | "low";
+    delta?: string;
+    payload?: Record<string, unknown>;
+  }) => void;
 };
 
 function mustBeOnline(ctx: ToolContext): string {
@@ -117,7 +130,17 @@ export function registerPhoneBridgeTools(registry: ToolRegistry, deps: PhoneBrid
     const actorId = resolveActorId(ctx);
     const err = mustBeOnline(ctx);
     if (err) return { ok: false, error: err };
-    return deps.bridge.invoke(actorId, "call_log", { limit: params.limit ?? 20 });
+    const result = await deps.bridge.invoke(actorId, "call_log", { limit: params.limit ?? 20 });
+    // 拉取成功即回灌入库（静默，salience=low；fingerprint 幂等去重），
+    // 让通话记录参与跨源检索与历史查询，而不是只活在这一次对话里。
+    if (result.ok === true && deps.callLogFeed) {
+      try {
+        feedCallLog(deps.callLogFeed, actorId, result);
+      } catch (e) {
+        console.warn(`[CallLog] 入库失败（忽略）: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+    return result;
   });
 
   registry.register("phone.dial", async (params, ctx: ToolContext) => {
@@ -163,6 +186,51 @@ export function registerPhoneBridgeTools(registry: ToolRegistry, deps: PhoneBrid
     }
     return { ...result, summary: summarizeDialState(result) };
   });
+}
+
+/**
+ * 通话记录回灌 call_log 流。端侧回执形态防御式解析：
+ * calls/items 数组，字段 number|phone|address、name、type、duration、date|ts。
+ * fingerprint = 号码|方向|时间，同一条通话重复拉取不会重复入库。
+ * 导出供后台定时同步复用（同一条链路，同一套去重）。
+ */
+export function feedCallLog(
+  feed: NonNullable<PhoneBridgeToolsDeps["callLogFeed"]>,
+  actorId: string,
+  result: Record<string, unknown>,
+): void {
+  const raw = Array.isArray(result.calls)
+    ? result.calls
+    : Array.isArray(result.items)
+      ? result.items
+      : [];
+  const now = Date.now();
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) continue;
+    const entry = item as Record<string, unknown>;
+    const number = String(entry.number ?? entry.phone ?? entry.address ?? "").trim();
+    if (!number) continue;
+    const name = String(entry.name ?? "").trim();
+    const type = String(entry.type ?? entry.callType ?? "").trim();
+    const atMs = Number(entry.date ?? entry.ts ?? entry.timestamp ?? 0);
+    const at = Number.isFinite(atMs) && atMs > 0 ? atMs : now;
+    const durationSec = Number(entry.duration ?? 0) || 0;
+    const typeLabel =
+      /missed|未接/i.test(type) ? "未接"
+      : /outgoing|out|去电|拨/i.test(type) ? "去电"
+      : /incoming|in|来电/i.test(type) ? "来电"
+      : type || "通话";
+    feed({
+      actorId,
+      at,
+      fingerprint: `call:${actorId}:${number}:${typeLabel}:${at}`,
+      salience: "low",
+      delta: name
+        ? `与 ${name}（${number}）的${typeLabel}通话`
+        : `与 ${number} 的${typeLabel}通话`,
+      payload: { number, name, type: typeLabel, durationSec, date: new Date(at).toISOString() },
+    });
+  }
 }
 
 /** 把手机端回执的 state 翻译成模型可直接引用的一句话结果 */

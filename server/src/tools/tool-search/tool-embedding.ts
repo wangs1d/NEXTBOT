@@ -6,10 +6,10 @@
  *   - 磁盘 JSON 缓存（data/tool-embeddings.json），避免服务重启后全量重算
  *   - 启动时按需懒加载：首次 searchDeferredTools 时尝试加载 cache，缺失的工具 background 预计算
  *   - provider 链（N1，docs/neural-retrieval-plan.md）：
- *       AGENT_TOOL_EMBEDDING_PROVIDER = auto/local → 本地 sidecar 优先，失败回落
- *       OpenAI API，再失败降级纯 BM25（不报错）；= openai → 跳过 sidecar（回滚开关）
- *   - 缓存条目与 query LRU 都带模型名：本地 bge（512 维）与 openai（1536 维）
- *     混存不污染，provider 切换自动重算
+ *       AGENT_TOOL_EMBEDDING_PROVIDER = local → 仅本地 bge，失败降级纯 BM25；
+ *       auto → 本地优先，失败回落 OpenAI API；= openai → 仅远端（回滚开关）
+ *   - 缓存条目与 query LRU 都带模型名：本地 bge（512 维）与远端模型隔离，
+ *     读取缓存时同时校验模型和维度
  *
  * 流程：
  *   buildDeferredCatalog → 标记每个 entry 预计算状态
@@ -17,33 +17,48 @@
  *                       → 下一次 search 即可用 hybrid
  */
 
-import { getDataDir } from "../../config/data-dir.js";
+import { resolveDataPath } from "../../config/data-dir.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname } from "node:path";
 import { createHash } from "node:crypto";
 
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
+import {
+  LOCAL_EMBEDDING_DIMS,
+  LOCAL_EMBEDDING_MODEL_ID,
+} from "../../agentic-memory/local-embedding/local-embedding-engine.js";
+import { getLocalEmbeddingEndpoint } from "../../agentic-memory/local-embedding/local-embedding-endpoint.js";
 import { fetchOpenAiCompatibleEmbedding } from "../../services/openai-embedding-client.js";
 import { getToolSearchConfig } from "./env.js";
+import { getToolIntentMetadata } from "./intent-metadata.js";
 import { neuralEmbedTexts, neuralEmbedTextsBulk } from "./neural-sidecar.js";
 
-/** 工具 embedding cache 项 */
-export type ToolEmbeddingCacheEntry = {
-  /** 工具的 searchText 内容的 SHA-256 hash（用于检测 description 变化） */
+export type ToolEmbeddingViewKind = "definition" | "parameters" | "exemplar";
+
+export type ToolEmbeddingViewInput = {
+  key: string;
+  kind: ToolEmbeddingViewKind;
+  text: string;
+};
+
+export type ToolEmbeddingView = {
+  key: string;
+  kind: ToolEmbeddingViewKind;
   contentHash: string;
-  /** 1536 维 embedding 向量 */
   vector: number[];
-  /** embedding 模型名（防止不同模型混用） */
+};
+
+export type ToolEmbeddingCacheEntry = {
+  contentHash: string;
   model: string;
-  /** 写入时间戳（ms） */
+  views: ToolEmbeddingView[];
   updatedAt: number;
 };
 
 export type ToolEmbeddingCache = {
-  /** key = 工具 registryName */
+  schemaVersion: 2;
   entries: Record<string, ToolEmbeddingCacheEntry>;
-  /** cache 整体元数据 */
   meta: {
     model: string;
     dimension: number;
@@ -51,7 +66,7 @@ export type ToolEmbeddingCache = {
   };
 };
 
-const DEFAULT_CACHE_PATH = resolve(getDataDir(), "tool-embeddings.json");
+const DEFAULT_CACHE_PATH = resolveDataPath("tool-embeddings-v2.json");
 
 let _cache: ToolEmbeddingCache | null = null;
 let _cacheLoaded = false;
@@ -59,7 +74,7 @@ let _pendingComputePromise: Promise<{ computed: number; reused: number; failed: 
 
 function getCachePath(): string {
   const override = getToolSearchConfig().embeddingCachePath;
-  return override ? resolve(override) : DEFAULT_CACHE_PATH;
+  return override ? resolveDataPath(override) : DEFAULT_CACHE_PATH;
 }
 
 function getApiKey(): string | null {
@@ -84,7 +99,38 @@ let _lastLocalEmbedModel: string | null = null;
 function expectedQueryModel(): string {
   const cfg = getToolSearchConfig();
   if (cfg.embeddingProvider === "openai") return getModel();
-  return _lastLocalEmbedModel ?? cfg.neuralEmbedModel;
+  if (cfg.embeddingProvider === "local") {
+    return getLocalEmbeddingEndpoint()?.model ?? LOCAL_EMBEDDING_MODEL_ID;
+  }
+  if (cfg.neuralEmbedEnabled !== "off") {
+    return _lastLocalEmbedModel ?? getLocalEmbeddingEndpoint()?.model ?? LOCAL_EMBEDDING_MODEL_ID;
+  }
+  return getModel();
+}
+
+function activeCacheIdentity(): { model: string; dimension: number | null } {
+  const model = expectedQueryModel();
+  if (model === LOCAL_EMBEDDING_MODEL_ID) {
+    return { model, dimension: LOCAL_EMBEDDING_DIMS };
+  }
+  const cache = getToolEmbeddingCache();
+  return {
+    model,
+    dimension: cache.meta.model === model ? cache.meta.dimension || null : null,
+  };
+}
+
+function isActiveCacheEntry(entry: ToolEmbeddingCacheEntry): boolean {
+  const active = activeCacheIdentity();
+  return (
+    entry.model === active.model &&
+    entry.views.length > 0 &&
+    entry.views.every(
+      (view) =>
+        view.vector.length > 0 &&
+        (active.dimension === null || view.vector.length === active.dimension),
+    )
+  );
 }
 
 /** 工具 searchText 的内容指纹（description / aliases / examples 任何变化都会让 hash 变） */
@@ -92,24 +138,34 @@ export function hashSearchText(text: string): string {
   return createHash("sha256").update(text).digest("hex").slice(0, 16);
 }
 
+export function hashEmbeddingViews(views: ToolEmbeddingViewInput[]): string {
+  return hashSearchText(
+    JSON.stringify(views.map((view) => [view.key, view.kind, view.text])),
+  );
+}
+
+function emptyCache(): ToolEmbeddingCache {
+  return {
+    schemaVersion: 2,
+    entries: {},
+    meta: { model: expectedQueryModel(), dimension: 0, builtAt: 0 },
+  };
+}
+
 function loadCacheFromDisk(): ToolEmbeddingCache {
   const path = getCachePath();
-  if (!existsSync(path)) {
-    return { entries: {}, meta: { model: getModel(), dimension: 0, builtAt: 0 } };
-  }
+  if (!existsSync(path)) return emptyCache();
   try {
     const raw = readFileSync(path, "utf8");
     const parsed = JSON.parse(raw) as ToolEmbeddingCache;
-    if (!parsed?.entries || !parsed?.meta) {
-      return { entries: {}, meta: { model: getModel(), dimension: 0, builtAt: 0 } };
-    }
+    if (parsed?.schemaVersion !== 2 || !parsed.entries || !parsed.meta) return emptyCache();
     return parsed;
   } catch (error) {
     console.warn(
       "[tool-embedding] Failed to read cache, starting fresh:",
       error instanceof Error ? error.message : String(error),
     );
-    return { entries: {}, meta: { model: getModel(), dimension: 0, builtAt: 0 } };
+    return emptyCache();
   }
 }
 
@@ -138,10 +194,9 @@ export function getToolEmbeddingCache(): ToolEmbeddingCache {
 export function isEmbeddingSearchEnabled(): boolean {
   const cfg = getToolSearchConfig();
   if (cfg.embedding === "off") return false;
-  // provider=openai 维持旧语义（必须有 key）；local/auto 视 sidecar 为可用候选，
-  // sidecar 实际不可用时由 provider 链内部熔断降级，不在这里做网络探测。
   if (cfg.embeddingProvider === "openai") return Boolean(getApiKey());
-  return true;
+  if (cfg.embeddingProvider === "local") return cfg.neuralEmbedEnabled !== "off";
+  return cfg.neuralEmbedEnabled !== "off" || Boolean(getApiKey());
 }
 
 /**
@@ -155,151 +210,248 @@ export function isEmbeddingSearchEnabled(): boolean {
  *
  * 不抛错：全链失败仅记录 warning，下一次 search 仍可走纯 BM25。
  */
+export type ToolEmbeddingRequest = {
+  registryName: string;
+  searchText?: string;
+  embeddingViews?: ToolEmbeddingViewInput[];
+};
+
+type EmbeddingPlan = {
+  registryName: string;
+  views: ToolEmbeddingViewInput[];
+  contentHash: string;
+  cachedByKey: Map<string, ToolEmbeddingView>;
+};
+
+type PendingView = ToolEmbeddingViewInput & {
+  registryName: string;
+  contentHash: string;
+};
+
+function normalizeEmbeddingViews(tool: ToolEmbeddingRequest): ToolEmbeddingViewInput[] {
+  const source = tool.embeddingViews?.length
+    ? tool.embeddingViews
+    : tool.searchText
+      ? [{ key: "definition", kind: "definition" as const, text: tool.searchText }]
+      : [];
+  const seen = new Set<string>();
+  return source
+    .map((view) => ({ ...view, text: view.text.trim() }))
+    .filter((view) => {
+      if (!view.text || seen.has(view.key)) return false;
+      seen.add(view.key);
+      return true;
+    })
+    .slice(0, 64);
+}
+
+function viewCacheKey(registryName: string, key: string): string {
+  return `${registryName}\0${key}`;
+}
+
 export async function ensureToolEmbeddings(
-  tools: Array<{ registryName: string; searchText: string }>,
+  tools: ToolEmbeddingRequest[],
 ): Promise<{ computed: number; reused: number; failed: number }> {
   if (!isEmbeddingSearchEnabled() || tools.length === 0) {
     return { computed: 0, reused: 0, failed: 0 };
   }
-  if (_pendingComputePromise) {
-    await _pendingComputePromise;
-  }
+  if (_pendingComputePromise) return _pendingComputePromise;
 
-  _pendingComputePromise = (async () => {
+  const promise = (async () => {
     const cache = getToolEmbeddingCache();
     const cfg = getToolSearchConfig();
     const openaiModel = getModel();
-    const useOpenai = Boolean(getApiKey());
+    const useOpenai = cfg.embeddingProvider !== "local" && Boolean(getApiKey());
     const useSidecar = cfg.embeddingProvider !== "openai" && cfg.neuralEmbedEnabled !== "off";
     if (!useSidecar && !useOpenai) {
       return { computed: 0, reused: 0, failed: 0 };
     }
 
-    let computed = 0;
+    const activeCache = activeCacheIdentity();
+    const plans: EmbeddingPlan[] = tools.map((tool) => {
+      const views = normalizeEmbeddingViews(tool);
+      const existing = cache.entries[tool.registryName];
+      const cachedByKey = new Map<string, ToolEmbeddingView>();
+      if (existing && isActiveCacheEntry(existing)) {
+        for (const view of existing.views) cachedByKey.set(view.key, view);
+      }
+      return {
+        registryName: tool.registryName,
+        views,
+        contentHash: hashEmbeddingViews(views),
+        cachedByKey,
+      };
+    });
+
+    const pending: PendingView[] = [];
     let reused = 0;
+    for (const plan of plans) {
+      let missing = 0;
+      for (const view of plan.views) {
+        const cached = plan.cachedByKey.get(view.key);
+        const contentHash = hashSearchText(view.text);
+        if (cached?.contentHash === contentHash) continue;
+        pending.push({ ...view, registryName: plan.registryName, contentHash });
+        missing += 1;
+      }
+      if (missing === 0) reused += 1;
+    }
+
+    let providerModel: string | null = null;
+    let resolved = new Map<string, ToolEmbeddingView>();
+    let computed = 0;
     let failed = 0;
+    let writtenDimension = 0;
 
-    // 找出需要重算的（没有 cache / hash 不匹配 / 模型与两个在用 provider 都不符）
-    const eligibleModels = new Set<string>([openaiModel]);
-    if (_lastLocalEmbedModel) eligibleModels.add(_lastLocalEmbedModel);
-    const toCompute: typeof tools = [];
-    for (const t of tools) {
-      const h = hashSearchText(t.searchText);
-      const existing = cache.entries[t.registryName];
-      if (
-        existing &&
-        existing.contentHash === h &&
-        eligibleModels.has(existing.model)
-      ) {
-        reused += 1;
-        continue;
-      }
-      toCompute.push(t);
-    }
-    if (toCompute.length === 0) {
-      return { computed, reused, failed };
-    }
-
-    const writeEntries = (
-      entries: Array<{ registryName: string; contentHash: string; vector: number[]; model: string }>,
-    ): void => {
-      for (const e of entries) {
-        cache.entries[e.registryName] = {
-          contentHash: e.contentHash,
-          vector: e.vector,
-          model: e.model,
-          updatedAt: Date.now(),
-        };
-        computed += 1;
-      }
-    };
-
-    // ── provider 1：本地 sidecar（批量补全用独立的秒级预算，含冷启动懒加载）──
-    const remaining: typeof tools = [...toCompute];
-    if (useSidecar) {
-      const res = await neuralEmbedTextsBulk(
-        toCompute.map((t) => t.searchText.slice(0, 8000)),
-      );
-      if (res && res.vectors.length === toCompute.length && res.dim > 0) {
-        _lastLocalEmbedModel = res.model;
-        writeEntries(
-          toCompute.map((t, i) => ({
-            registryName: t.registryName,
-            contentHash: hashSearchText(t.searchText),
-            vector: res.vectors[i]!,
-            model: res.model,
-          })),
-        );
-        remaining.length = 0;
-        // sidecar 已确认是本环境的产出模型：缓存里其它模型的条目视为过期，
-        // 让下一次 ensure 重算（维度混存会让余弦通道静默归零）
-        for (const t of tools) {
-          const existing = cache.entries[t.registryName];
-          if (existing && existing.model !== res.model) {
-            existing.contentHash = "";
-          }
+    if (pending.length > 0 && useSidecar) {
+      const local = new Map<string, ToolEmbeddingView>();
+      let localModel: string | null = null;
+      let localDimension = 0;
+      let complete = true;
+      for (let i = 0; i < pending.length; i += 64) {
+        const batch = pending.slice(i, i + 64);
+        const res = await neuralEmbedTextsBulk(batch.map((view) => view.text.slice(0, 8000)));
+        if (!res || res.vectors.length !== batch.length || res.dim <= 0) {
+          complete = false;
+          break;
+        }
+        localModel ??= res.model;
+        localDimension = res.dim;
+        if (res.model !== localModel || res.dim !== localDimension) {
+          complete = false;
+          break;
+        }
+        for (let j = 0; j < batch.length; j++) {
+          const view = batch[j]!;
+          local.set(viewCacheKey(view.registryName, view.key), {
+            key: view.key,
+            kind: view.kind,
+            contentHash: view.contentHash,
+            vector: res.vectors[j]!,
+          });
         }
       }
+      if (complete && localModel) {
+        providerModel = localModel;
+        resolved = local;
+        writtenDimension = localDimension;
+        _lastLocalEmbedModel = localModel;
+      }
     }
 
-    // ── provider 2：远端 OpenAI 兼容端点（SiliconFlow 等，须显式配 base；api.openai.com 兜底已删除）──
-    if (remaining.length > 0 && useOpenai) {
+    if (pending.length > 0 && !providerModel && useOpenai) {
+      _lastLocalEmbedModel = null;
       const apiKey = getApiKey()!;
-      const CONCURRENCY = 8;
-      for (let i = 0; i < remaining.length; i += CONCURRENCY) {
-        const batch = remaining.slice(i, i + CONCURRENCY);
+      resolved = new Map();
+      providerModel = openaiModel;
+      const remoteViews: PendingView[] = plans.flatMap((plan) =>
+        plan.views.map((view) => ({
+          ...view,
+          registryName: plan.registryName,
+          contentHash: hashSearchText(view.text),
+        })),
+      );
+      for (let i = 0; i < remoteViews.length; i += 8) {
+        const batch = remoteViews.slice(i, i + 8);
         const results = await Promise.allSettled(
-          batch.map(async (t) => {
-            const h = hashSearchText(t.searchText);
+          batch.map(async (view) => {
             const { vector } = await fetchOpenAiCompatibleEmbedding({
               apiKey,
               model: openaiModel,
-              input: t.searchText.slice(0, 8000),
+              input: view.text.slice(0, 8000),
             });
-            return { registryName: t.registryName, contentHash: h, vector, model: openaiModel };
+            return { view, vector };
           }),
         );
-        const fulfilled = [];
-        for (const r of results) {
-          if (r.status === "fulfilled") fulfilled.push(r.value);
-          else failed += 1;
+        for (const result of results) {
+          if (result.status !== "fulfilled") continue;
+          const { view, vector } = result.value;
+          resolved.set(viewCacheKey(view.registryName, view.key), {
+            key: view.key,
+            kind: view.kind,
+            contentHash: view.contentHash,
+            vector,
+          });
+          writtenDimension ||= vector.length;
         }
-        writeEntries(fulfilled);
       }
-    } else if (remaining.length > 0) {
-      failed += remaining.length;
+    }
+
+    if (providerModel) {
+      for (const plan of plans) {
+        const views: ToolEmbeddingView[] = [];
+        for (const view of plan.views) {
+          const cached = plan.cachedByKey.get(view.key);
+          const contentHash = hashSearchText(view.text);
+          const reusable =
+            cached?.contentHash === contentHash &&
+            cache.entries[plan.registryName]?.model === providerModel
+              ? cached
+              : undefined;
+          const next = reusable ?? resolved.get(viewCacheKey(plan.registryName, view.key));
+          if (next) views.push(next);
+        }
+        if (views.length === 0) continue;
+        const complete = views.length === plan.views.length;
+        if (complete && plan.cachedByKey.size === plan.views.length) {
+          continue;
+        }
+        cache.entries[plan.registryName] = {
+          contentHash: plan.contentHash,
+          model: providerModel,
+          views,
+          updatedAt: Date.now(),
+        };
+        if (complete) computed += 1;
+        else failed += 1;
+      }
+    } else {
+      failed = plans.filter((plan) =>
+        plan.views.some((view) => {
+          const cached = plan.cachedByKey.get(view.key);
+          return cached?.contentHash !== hashSearchText(view.text);
+        }),
+      ).length;
     }
 
     if (computed > 0) {
-      // 更新 meta
-      const dim = Object.values(cache.entries)[0]?.vector.length ?? 0;
-      cache.meta = { model: _lastLocalEmbedModel ?? openaiModel, dimension: dim, builtAt: Date.now() };
+      cache.meta = {
+        model: providerModel ?? activeCache.model,
+        dimension: writtenDimension || activeCache.dimension || 0,
+        builtAt: Date.now(),
+      };
       saveCacheToDisk(cache);
     }
 
     return { computed, reused, failed };
   })();
 
-  const result = await _pendingComputePromise;
-  _pendingComputePromise = null;
-  return result;
+  _pendingComputePromise = promise;
+  try {
+    return await promise;
+  } finally {
+    if (_pendingComputePromise === promise) _pendingComputePromise = null;
+  }
 }
 
-/** 取单个工具的 embedding（可能为 null，未缓存 / 计算失败） */
+/** 取单个工具的定义向量（未缓存 / 计算失败时返回 null）。 */
 export function getToolEmbedding(registryName: string): number[] | null {
   const cache = getToolEmbeddingCache();
-  return cache.entries[registryName]?.vector ?? null;
+  const entry = cache.entries[registryName];
+  return entry && isActiveCacheEntry(entry) ? entry.views[0]?.vector ?? null : null;
 }
 
-/** 取批量 embedding（用于构建 catalog 时建索引） */
+/** 取批量工具的多视图向量，用于 catalog 与 adaptive 索引。 */
 export function getToolEmbeddingsForCatalog(
   registryNames: string[],
-): Map<string, number[]> {
+): Map<string, number[][]> {
   const cache = getToolEmbeddingCache();
-  const out = new Map<string, number[]>();
+  const out = new Map<string, number[][]>();
   for (const name of registryNames) {
-    const v = cache.entries[name]?.vector;
-    if (v) out.set(name, v);
+    const entry = cache.entries[name];
+    if (entry && isActiveCacheEntry(entry)) {
+      out.set(name, entry.views.map((view) => view.vector));
+    }
   }
   return out;
 }
@@ -330,6 +482,55 @@ export function buildEmbeddingInput(tool: ChatCompletionTool): string {
   })();
   if (parameterNames.length > 0) parts.push(`params: ${parameterNames.join(", ")}`);
   return parts.filter(Boolean).join("\n");
+}
+
+function buildParameterEmbeddingInput(tool: ChatCompletionTool): string {
+  if (tool.type !== "function" || !tool.function) return "";
+  const fn = tool.function;
+  const schema = fn.parameters as
+    | { properties?: Record<string, Record<string, unknown>> }
+    | undefined;
+  const properties = schema?.properties ?? {};
+  const lines = Object.entries(properties)
+    .slice(0, 40)
+    .map(([name, value]) => {
+      const description = typeof value.description === "string" ? value.description : "";
+      const type = typeof value.type === "string" ? value.type : "";
+      const enumValues = Array.isArray(value.enum)
+        ? value.enum.map((item) => String(item)).join("|")
+        : "";
+      return [name, type, description, enumValues ? `enum=${enumValues}` : ""]
+        .filter(Boolean)
+        .join(": ");
+    });
+  if (lines.length === 0) return "";
+  return [`[${fn.name}] parameters`, ...lines].join("\n").slice(0, 6000);
+}
+
+/** 工具的多视图语义表示：定义、参数语义、口语别名/例句独立成向量。 */
+export function buildEmbeddingViews(tool: ChatCompletionTool): ToolEmbeddingViewInput[] {
+  if (tool.type !== "function" || !tool.function) return [];
+  const fn = tool.function;
+  const metadata = getToolIntentMetadata(fn.name);
+  const views: ToolEmbeddingViewInput[] = [
+    { key: "definition", kind: "definition", text: buildEmbeddingInput(tool) },
+  ];
+  const parameters = buildParameterEmbeddingInput(tool);
+  if (parameters) {
+    views.push({ key: "parameters", kind: "parameters", text: parameters });
+  }
+  const exemplars = [...new Set([...(metadata.examples ?? []), ...(metadata.aliases ?? [])])]
+    .map((text) => text.trim())
+    .filter(Boolean)
+    .slice(0, 24);
+  for (const text of exemplars) {
+    views.push({
+      key: `exemplar:${hashSearchText(text)}`,
+      kind: "exemplar",
+      text: `[${fn.name}] ${text}`,
+    });
+  }
+  return views;
 }
 
 /** 清空内存缓存（自我进化装载 Skill 后调用，让新工具的 embedding 重新计算） */
@@ -429,6 +630,9 @@ export async function getQueryEmbedding(query: string): Promise<Float32Array | n
       }
     }
 
+    if (cfg.embeddingProvider === "local") return null;
+    _lastLocalEmbedModel = null;
+
     // provider 2：OpenAI 兼容 API
     try {
       const apiKey = getApiKey();
@@ -454,10 +658,10 @@ export async function getQueryEmbedding(query: string): Promise<Float32Array | n
         error instanceof Error ? error.message : String(error),
       );
       return null;
-    } finally {
-      _queryVectorInflight.delete(inflightKey);
     }
-  })();
+  })().finally(() => {
+    _queryVectorInflight.delete(inflightKey);
+  });
 
   _queryVectorInflight.set(inflightKey, promise);
   return promise;

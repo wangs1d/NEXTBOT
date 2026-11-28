@@ -7,6 +7,9 @@ import type {
   HumanLikeMemoryService,
   MemoryContextKind,
 } from "./human-like-memory-service.js";
+import type { MemorySourceRole } from "./memory-source-role.js";
+import type { MemoryRecord } from "../agentic-memory/memory-record.js";
+import { createMemoryRecord, memoryRecordMetadata } from "../agentic-memory/memory-record.js";
 
 export type NarrativeMemoryContext = "main" | "notes";
 
@@ -18,6 +21,10 @@ export type MemoryWriteProvenance = {
   sourceEventIds?: string[];
   /** 事件发生时刻（ISO，不是入库时间） */
   eventTime?: string;
+  /** 结构化来源角色：写入与召回都以该字段为准，不再靠正文猜 */
+  sourceRole?: MemorySourceRole;
+  /** 写入边界生成的不可变来源信封 */
+  record?: MemoryRecord;
 };
 
 /** 写入结果：persisted=false 表示所有配置的落库侧都抛错，调用方不应丢弃源流水。 */
@@ -31,8 +38,10 @@ export type NarrativeMemoryPort = {
     opts?: {
       highSignal?: boolean;
       context?: NarrativeMemoryContext;
+      sourceRole?: MemorySourceRole;
       /** 写入契约的调用方身份（memory.cognition / memory.longterm 的 producer） */
       writer?: string;
+      record?: MemoryRecord;
     },
   ): Promise<void>;
   /**
@@ -82,6 +91,8 @@ function pickProvenance(provenance: MemoryWriteProvenance): MemoryWriteProvenanc
     ...(provenance.sourceEventId ? { sourceEventId: provenance.sourceEventId } : {}),
     ...(provenance.sourceEventIds?.length ? { sourceEventIds: provenance.sourceEventIds } : {}),
     ...(provenance.eventTime ? { eventTime: provenance.eventTime } : {}),
+    ...(provenance.sourceRole ? { sourceRole: provenance.sourceRole } : {}),
+    ...(provenance.record ? { record: provenance.record } : {}),
   };
 }
 
@@ -121,16 +132,27 @@ export class NarrativeMemoryFacade implements NarrativeMemoryPort {
     opts?: {
       highSignal?: boolean;
       context?: NarrativeMemoryContext;
+      sourceRole?: MemorySourceRole;
       /** 写入契约的调用方身份（memory.cognition / memory.longterm 的 producer） */
       writer?: string;
+      record?: MemoryRecord;
     },
   ): Promise<void> {
     const context = (opts?.context ?? "main") as MemoryContextKind;
+    const record = opts?.record ?? createMemoryRecord({
+      actorId,
+      sourceRef: source,
+      text,
+      sourceRole: opts?.sourceRole,
+      kind: opts?.highSignal ? "fact" : "event",
+    });
 
     if (this.bridge) {
       await this.bridge.writeUnified(actorId, source, text, {
         context,
         highSignal: opts?.highSignal === true,
+        sourceRole: record.sourceRole,
+        record,
       });
       this.fireOnWrite(actorId, text, source);
       return;
@@ -139,7 +161,10 @@ export class NarrativeMemoryFacade implements NarrativeMemoryPort {
     if (this.humanLikeMemory) {
       await this.humanLikeMemory.ingest(actorId, text, source, {
         context,
-        metadata: { highSignal: opts?.highSignal === true },
+        metadata: {
+          highSignal: opts?.highSignal === true,
+          ...memoryRecordMetadata(record),
+        },
         writer: opts?.writer ?? "NarrativeMemoryFacade",
       });
     }
@@ -148,6 +173,8 @@ export class NarrativeMemoryFacade implements NarrativeMemoryPort {
       await this.agenticIngest.ingestText(actorId, source, text, {
         highSignal: opts?.highSignal,
         context,
+        sourceRole: record.sourceRole,
+        record,
       });
     }
     this.fireOnWrite(actorId, text, source);
@@ -161,7 +188,16 @@ export class NarrativeMemoryFacade implements NarrativeMemoryPort {
     unified?: import("../agentic-memory/unified-extractor.js").UnifiedExtraction,
   ): Promise<WriteDecidedOutcome> {
     const context = opts.context as MemoryContextKind;
-    const provenance = pickProvenance(opts);
+    const record = opts.record ?? createMemoryRecord({
+      actorId,
+      sourceRef: opts.sourceEventId ? `event:${opts.sourceEventId}` : source,
+      text,
+      sourceRole: opts.sourceRole,
+      kind: opts.highSignal ? "fact" : "event",
+      sourceEventId: opts.sourceEventId,
+      eventTime: opts.eventTime,
+    });
+    const provenance = { ...pickProvenance(opts), record };
     if (this.bridge) {
       const result = await this.bridge.writeUnified(
         actorId,

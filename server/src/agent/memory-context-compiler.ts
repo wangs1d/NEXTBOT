@@ -177,7 +177,12 @@ export type CompiledMemoryContext = {
 export function compileMemoryContext(
   memory: AgentPromptMemoryContext,
   now = Date.now(),
+  budgetChars = TOTAL_BUDGET_CHARS,
 ): CompiledMemoryContext {
+  const totalBudget = Math.max(0, Math.floor(budgetChars));
+  const stateBudget = Math.floor(totalBudget * (STATE_BUDGET_CHARS / TOTAL_BUDGET_CHARS));
+  const pendingBudget = Math.floor(totalBudget * (PENDING_BUDGET_CHARS / TOTAL_BUDGET_CHARS));
+  const recallBudget = totalBudget - stateBudget - pendingBudget;
   const out: AgentPromptMemoryContext = { ...memory };
   const claimed = new Set<string>();
   let dedupedLines = 0;
@@ -231,36 +236,36 @@ export function compileMemoryContext(
     "【当前状态】",
     "（背景事实，不是朗读清单：只答用户问到的那一项，不连带罗列；与最新消息冲突以最新消息为准）",
     stateLines,
-    STATE_BUDGET_CHARS,
+    stateBudget,
   );
   const pending = joinWithinBudget(
     "【在办】",
     "（未完成的事，按紧迫度排列；括号里是开始距今，用户问起时按此如实回答）",
     pendingLines,
-    PENDING_BUDGET_CHARS,
+    pendingBudget,
   );
   const recall = joinWithinBudget(
     "【按需回忆】",
     `（截至 ${dayStamp(now)} 的真实历史；仅用于回答对往事的询问，不主动翻旧账，不提检索过程）`,
     recallLines,
-    RECALL_BUDGET_CHARS,
+    recallBudget,
   );
 
   let [keptState, keptPending, keptRecall] = [currentState, pending, recall];
   let chars = (keptState?.length ?? 0) + (keptPending?.length ?? 0) + (keptRecall?.length ?? 0);
   const droppedFields: CompiledMemoryContext["droppedFields"] = [];
   // 总预算兜底：按「回忆 → 在办 → 当前状态」整块丢弃。
-  if (chars > TOTAL_BUDGET_CHARS && keptRecall) {
+  if (chars > totalBudget && keptRecall) {
     chars -= keptRecall.length;
     droppedFields.push(MEMORY_COMPILED_BLOCKS.recall);
     keptRecall = undefined;
   }
-  if (chars > TOTAL_BUDGET_CHARS && keptPending) {
+  if (chars > totalBudget && keptPending) {
     chars -= keptPending.length;
     droppedFields.push(MEMORY_COMPILED_BLOCKS.pending);
     keptPending = undefined;
   }
-  if (chars > TOTAL_BUDGET_CHARS && keptState) {
+  if (chars > totalBudget && keptState) {
     chars -= keptState.length;
     droppedFields.push(MEMORY_COMPILED_BLOCKS.currentState);
     keptState = undefined;
@@ -271,5 +276,5 @@ export function compileMemoryContext(
   out.memoryPending = keptPending;
   out.memoryRecall = keptRecall;
 
-  return { memory: out, droppedFields, dedupedLines, chars, budgetChars: TOTAL_BUDGET_CHARS };
+  return { memory: out, droppedFields, dedupedLines, chars, budgetChars: totalBudget };
 }

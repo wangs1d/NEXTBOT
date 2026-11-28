@@ -26,6 +26,18 @@ export type ScheduleCommitmentInput = {
   category?: string;
 };
 
+export type FollowUpCommitmentInput = {
+  id: string;
+  actorId: string;
+  event: string;
+  eventAt: number;
+  followAt: number;
+  sensitivity: "normal" | "private";
+  sourceRef: string;
+  category: string;
+  confidence: number;
+};
+
 function commitmentIdForTask(taskId: string): string {
   return `sched_${taskId}`;
 }
@@ -67,6 +79,113 @@ export function ensureCommitmentTable(db: ReturnType<typeof openAgenticSqlite>):
   const cols = db.prepare(`PRAGMA table_info(commitments)`).all() as Array<{ name?: string }>;
   if (!cols.some((c) => c?.name === "kind")) {
     db.exec(`ALTER TABLE commitments ADD COLUMN kind TEXT`);
+  }
+}
+
+export function insertFollowUpCommitment(
+  dbPath: string | undefined,
+  rec: FollowUpCommitmentInput,
+): boolean {
+  const db = openAgenticSqlite(dbPath);
+  try {
+    ensureCommitmentTable(db);
+    const now = new Date().toISOString();
+    const notes = JSON.stringify({
+      event: rec.event,
+      eventAt: rec.eventAt,
+      followAt: rec.followAt,
+      sensitivity: rec.sensitivity,
+      sourceRef: rec.sourceRef,
+      category: rec.category,
+    });
+    const info = db
+      .prepare(
+        `INSERT INTO commitments (
+           id, actor_id, text, committed_by, status, deadline, dependencies,
+           escalation_policy, evidence_ledger_ids, source, confidence,
+           created_at, updated_at, category, kind, notes
+         ) VALUES (?, ?, ?, 'user', 'active', ?, '[]', '{}', '[]', 'follow_up', ?, ?, ?, ?, 'follow_up', ?)
+         ON CONFLICT(id) DO UPDATE SET
+           text = excluded.text,
+           confidence = excluded.confidence,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        rec.id,
+        rec.actorId,
+        `跟进：${rec.event}`.slice(0, 200),
+        new Date(rec.followAt).toISOString(),
+        rec.confidence,
+        now,
+        now,
+        rec.category,
+        notes,
+      );
+    if (info.changes > 0) invalidateCommitmentCache(rec.actorId);
+    return info.changes > 0;
+  } finally {
+    db.close();
+  }
+}
+
+export function markFollowUpCommitmentSubmitted(
+  dbPath: string | undefined,
+  id: string,
+  at: number,
+): void {
+  const db = openAgenticSqlite(dbPath);
+  try {
+    ensureCommitmentTable(db);
+    const iso = new Date(at).toISOString();
+    const info = db
+      .prepare(
+        `UPDATE commitments SET reminder_sent_at = ?, updated_at = ?
+         WHERE id = ? AND kind = 'follow_up'`,
+      )
+      .run(iso, iso, id);
+    if (info.changes > 0) {
+      const row = db.prepare(`SELECT actor_id FROM commitments WHERE id = ?`).get(id) as
+        | { actor_id?: string }
+        | undefined;
+      if (row?.actor_id) invalidateCommitmentCache(row.actor_id);
+    }
+  } finally {
+    db.close();
+  }
+}
+
+export function settleFollowUpCommitment(
+  dbPath: string | undefined,
+  id: string,
+  outcome: "fulfilled" | "cancelled",
+  at: number,
+): boolean {
+  const db = openAgenticSqlite(dbPath);
+  try {
+    ensureCommitmentTable(db);
+    const iso = new Date(at).toISOString();
+    const info = db
+      .prepare(
+        `UPDATE commitments
+         SET status = ?, updated_at = ?, fulfilled_at = ?, cancelled_at = ?
+         WHERE id = ? AND kind = 'follow_up' AND status = 'active'`,
+      )
+      .run(
+        outcome,
+        iso,
+        outcome === "fulfilled" ? iso : null,
+        outcome === "cancelled" ? iso : null,
+        id,
+      );
+    if (info.changes > 0) {
+      const row = db.prepare(`SELECT actor_id FROM commitments WHERE id = ?`).get(id) as
+        | { actor_id?: string }
+        | undefined;
+      if (row?.actor_id) invalidateCommitmentCache(row.actor_id);
+    }
+    return info.changes > 0;
+  } finally {
+    db.close();
   }
 }
 

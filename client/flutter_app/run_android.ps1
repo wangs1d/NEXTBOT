@@ -10,6 +10,9 @@ param(
   [string] $HttpBase = "",
   # 控制面（账号/OTP/登录页所在）；留空则与 -HttpBase 同值
   [string] $ControlPlaneUrl = "",
+  # 数字人独立服务根地址；留空则自动取 http://<局域网IP>:8765
+  [string] $DigitalHumanBase = "",
+  [int] $DigitalHumanPort = 8765,
   # 内测版 internal / 开源版 oss
   [string] $Edition = "internal",
   [int] $Port = 3000,
@@ -165,15 +168,21 @@ if ([string]::IsNullOrWhiteSpace($HttpBase)) {
   Write-Host "自动探测到局域网地址：$HttpBase" -ForegroundColor Cyan
 }
 if ([string]::IsNullOrWhiteSpace($ControlPlaneUrl)) { $ControlPlaneUrl = $HttpBase }
+if ([string]::IsNullOrWhiteSpace($DigitalHumanBase)) {
+  $ip = Get-LanIPv4
+  if (-not $ip) { throw "未能探测到局域网 IPv4，请显式传 -DigitalHumanBase http://<电脑IP>:8765" }
+  $DigitalHumanBase = "http://${ip}:$DigitalHumanPort"
+}
 
 $dartDefines = @(
   "--suppress-analytics",
   "--dart-define", "HTTP_BASE=$HttpBase",
   "--dart-define", "CONTROL_PLANE_URL=$ControlPlaneUrl",
+  "--dart-define", "DIGITAL_HUMAN_BASE_URL=$DigitalHumanBase",
   "--dart-define", "PAI_EDITION=$Edition"
 )
 
-Write-Host "烤入：HTTP_BASE=$HttpBase | CONTROL_PLANE_URL=$ControlPlaneUrl | PAI_EDITION=$Edition" -ForegroundColor Yellow
+Write-Host "烤入：HTTP_BASE=$HttpBase | CONTROL_PLANE_URL=$ControlPlaneUrl | DIGITAL_HUMAN_BASE_URL=$DigitalHumanBase | PAI_EDITION=$Edition" -ForegroundColor Yellow
 
 $runArgs = @("run")
 if (-not [string]::IsNullOrWhiteSpace($Device)) { $runArgs += @("-d", $Device) }

@@ -653,7 +653,7 @@ export function registerTravelPlanRoutes(
         if (wx?.rainy) {
           event = "rain";
           mood = "雨天室内";
-          note = `Agent 感知到目的地天气变化（${wx.summaryLine}）· 室内安排已优先`;
+          note = `Agent 感知到目的地天气变化（${wx.weatherText}）· 室内安排已优先`;
         }
       }
 

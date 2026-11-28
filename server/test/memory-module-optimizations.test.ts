@@ -22,6 +22,8 @@ import {
   parseExtractOps,
 } from "../src/brain/user-profile-aggregator.js";
 import { truncateProfileForPrompt } from "../src/services/user-personalization/profile-heuristics.js";
+import { UserProfileStore } from "../src/services/user-personalization/user-profile-store.js";
+import { getMemoryComponents, registerMemoryComponents } from "../src/agentic-memory/index.js";
 
 // ── P1-1：召回查询扩展 ──────────────────────────────────────
 
@@ -253,6 +255,55 @@ test("P0-1 observeTurn：不再维护 pending-turns 队列（画像只在对话�
     if (prevDir === undefined) delete process.env.AGENT_USER_PROFILE_DIR;
     else process.env.AGENT_USER_PROFILE_DIR = prevDir;
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("P0-1 updateProfile：管理入口与对话共用权威回灌/投影路径", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "profile-update-test-"));
+  const prevDir = process.env.AGENT_USER_PROFILE_DIR;
+  const previousFactStore = getMemoryComponents().factStore;
+  process.env.AGENT_USER_PROFILE_DIR = dir;
+  let canonical = "王哥";
+  const applied: Array<{ field: string; value: string }> = [];
+  registerMemoryComponents({
+    factStore: {
+      getActiveFacts: () => [{ field: "称呼", value: canonical }],
+      getFact: () => ({ field: "称呼", value: canonical }),
+      getAllValuesForField: () => [canonical],
+      applyFact: (input: { field: string; value: string }) => {
+        canonical = input.value;
+        applied.push({ field: input.field, value: input.value });
+        return { changed: true, fact: input, previous: [] };
+      },
+    } as never,
+  });
+  try {
+    const agg = new UserProfileAggregator({ extractEnabled: false });
+    const updated = await agg.updateProfile("profile-actor", [
+      { op: "UPDATE", section: "basic", line: "称呼：老王", match: "称呼" },
+    ]);
+    assert.equal(updated.changed, true);
+    assert.equal(updated.verified, true);
+    assert.deepEqual(applied, [{ field: "称呼", value: "老王" }]);
+    assert.match(updated.profile, /称呼：老王/);
+    assert.doesNotMatch(updated.profile, /称呼：王哥/);
+
+    const repeated = await agg.updateProfile("profile-actor", [
+      { op: "ADD", section: "basic", line: "称呼：老王" },
+    ]);
+    assert.equal(repeated.changed, false, "重复更新必须幂等");
+
+    const store = new UserProfileStore();
+    await store.write("profile-actor", "# 用户画像\n\n## 基本信息\n\n- 称呼：陈旧值\n");
+    canonical = "王哥";
+    const projected = await agg.readProfile("profile-actor");
+    assert.match(projected, /称呼：王哥/);
+    assert.doesNotMatch(projected, /陈旧值/);
+  } finally {
+    registerMemoryComponents({ factStore: previousFactStore });
+    if (prevDir === undefined) delete process.env.AGENT_USER_PROFILE_DIR;
+    else process.env.AGENT_USER_PROFILE_DIR = prevDir;
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   }
 });
 

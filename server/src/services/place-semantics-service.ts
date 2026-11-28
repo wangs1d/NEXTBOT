@@ -16,7 +16,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
-import Database from "better-sqlite3";
+import { openSqlite } from "../storage/sqlite.js";
 import type { Database as SqliteDatabase } from "better-sqlite3";
 
 import { getLocationDbPath } from "../config/location-env.js";
@@ -756,9 +756,7 @@ export class PlaceSemanticsService {
 
   constructor(opts?: PlaceSemanticsOptions) {
     const file = opts?.dbPath ?? getLocationDbPath();
-    mkdirSync(dirname(file), { recursive: true });
-    this.db = new Database(file);
-    this.db.pragma("journal_mode = WAL");
+    this.db = openSqlite(file);
     this.db.exec(SCHEMA);
     ensurePlaceAdminColumns(this.db);
     this.history = opts?.history ?? null;

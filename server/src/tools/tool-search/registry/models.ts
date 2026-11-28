@@ -69,8 +69,8 @@ export type Level1IndexMeta = {
   status: ResourceStatus;
   /** 冷启动基础分（0~1）；新资源默认 0.5 保障曝光，避免被排在末尾 */
   base_score: number;
-  /** 用于 Qdrant 余弦检索的稠密向量 */
-  embedding: number[];
+  /** 工具的多视图稠密向量；检索时对 query 取各视图 max-sim。 */
+  embeddings: number[][];
   /** 声明时延（毫秒，按域估算，与 Python models 对齐）；重排阶段用作超时软惩罚 */
   latency_ms: number;
 };

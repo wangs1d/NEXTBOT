@@ -7,7 +7,7 @@
  *  - workspace_map：多文件聚合概要 + hint 导航
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
@@ -24,6 +24,104 @@ function makeService(): { service: CodeSandboxService; root: string } {
   const root = join(tmpRoot, `svc-${Math.random().toString(36).slice(2)}`);
   return { service: new CodeSandboxService(root), root };
 }
+
+describe("code.run 主进程直接执行", () => {
+  test("handler 直接调用服务，保留 stdin 与工作目录环境", async () => {
+    const { service, root } = makeService();
+    const { createCodeRunHandler } = await import("../src/tools/capability-modules/code-sandbox/handlers.js");
+    const runCode = service.runCode.bind(service);
+    let calls = 0;
+    service.runCode = async (...args) => {
+      calls += 1;
+      return runCode(...args);
+    };
+    const previous = process.env.CODE_RUN_WORKER_ENABLED;
+    process.env.CODE_RUN_WORKER_ENABLED = "1";
+    try {
+      const handler = createCodeRunHandler(service);
+      const result = await handler({
+        language: "node",
+        code: [
+          'let input = "";',
+          'process.stdin.setEncoding("utf-8");',
+          'process.stderr.write("warning");',
+          'process.stdin.on("data", (chunk) => { input += chunk; });',
+          'process.stdin.on("end", () => console.log(JSON.stringify({',
+          '  input, cwd: process.cwd(), workspace: process.env.SANDBOX_WORKSPACE,',
+          '})));',
+        ].join("\n"),
+        workspaceId: "direct",
+        stdin: "payload",
+      }, { userId: "actor1", sessionId: "actor1" } as never) as Record<string, unknown>;
+
+      assert.equal(calls, 1);
+      assert.equal(result.ok, true);
+      assert.equal(result.stderr, "warning");
+      const output = JSON.parse(String(result.stdout));
+      assert.equal(output.input, "payload");
+      assert.equal(output.cwd, join(root, "actor1", "direct"));
+      assert.equal(output.workspace, output.cwd);
+      assert.doesNotMatch(String(result.summary), /\[worker\]/);
+    } finally {
+      if (previous === undefined) delete process.env.CODE_RUN_WORKER_ENABLED;
+      else process.env.CODE_RUN_WORKER_ENABLED = previous;
+    }
+  });
+
+  test("stdout/stderr 各截断到 8KB，并清理临时脚本", async () => {
+    const { service } = makeService();
+    const result = await service.runCode("actor1", {
+      language: "node",
+      code: 'process.stdout.write("o".repeat(9000)); process.stderr.write("e".repeat(9000));',
+      workspaceId: "truncate",
+    });
+
+    assert.equal(result.ok, true);
+    assert.equal(result.truncated, true);
+    assert.equal(Buffer.byteLength(result.stdout, "utf-8"), 8 * 1024);
+    assert.equal(Buffer.byteLength(result.stderr, "utf-8"), 8 * 1024);
+    assert.ok(readdirSync(result.workspacePath).every((name) => !name.startsWith("__run_")));
+  });
+
+  test("超时 SIGKILL 子进程并返回 timedOut", async () => {
+    const { service } = makeService();
+    const result = await service.runCode("actor1", {
+      language: "node",
+      code: "setTimeout(() => {}, 10_000);",
+      workspaceId: "timeout",
+      timeoutMs: 100,
+    });
+
+    assert.equal(result.ok, false);
+    assert.equal(result.timedOut, true);
+    assert.notEqual(result.exitCode, 0);
+    assert.ok(result.durationMs < 5_000, `超时进程未及时退出：${result.durationMs}ms`);
+    assert.ok(readdirSync(result.workspacePath).every((name) => !name.startsWith("__run_")));
+  });
+
+  test("workspace 按 actor 和 workspaceId 隔离，路径段被清洗", async () => {
+    const { service, root } = makeService();
+    const first = await service.runCode("actor/a", {
+      language: "node",
+      code: 'require("node:fs").writeFileSync("marker.txt", "actor-a");',
+      workspaceId: "../../shared",
+    });
+    assert.equal(first.ok, true);
+    assert.equal(first.workspacePath, join(root, "actor_a", "shared"));
+
+    const second = await service.runCode("actor/a", {
+      language: "node",
+      code: 'require("node:fs").readFileSync("marker.txt", "utf-8");',
+      workspaceId: "other",
+    });
+    assert.equal(second.ok, false);
+    assert.equal(second.workspacePath, join(root, "actor_a", "other"));
+
+    const otherActor = await service.readFile("actor/b", "shared", "marker.txt");
+    assert.equal(otherActor.ok, false);
+    assert.match(String(otherActor.error), /读取文件失败/);
+  });
+});
 
 describe("SandboxWorkspaceIndex 增量缓存", () => {
   test("mtime/size 未变 → 缓存命中不重算；文件变更 → 重建", async () => {

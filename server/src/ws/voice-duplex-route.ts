@@ -10,7 +10,7 @@ import type { DuplexSocketLike, VoiceDuplexService } from "../services/voice-dup
  * 连接建立后交给 VoiceDuplexService.attach 管理生命周期。
  *
  * ACCESS_AUTH_REQUIRED=1 时握手即验设备 token：实时语音直接烧运营方引擎额度，
- * 裸路径不能留成无凭证的计费入口；验过的归属同时钉死会话 actorId。
+ * 裸路径不能留成无凭证的计费入口。
  */
 export function registerVoiceDuplexWsRoute(
   app: FastifyInstance,
@@ -44,6 +44,6 @@ export function registerVoiceDuplexWsRoute(
       }
       return;
     }
-    service.attach(ws, verified.userId);
+    service.attach(ws);
   });
 }

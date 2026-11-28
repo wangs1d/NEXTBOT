@@ -3804,7 +3804,7 @@ export class PlanningService {
       const brief = await this.weatherService.getBrief(center.latitude, center.longitude, 'auto', destName);
       const ctx = this.buildWeatherContext(brief);
       console.log(
-        `[PlanningService] 天气感知: ${destName} ${brief.summaryLine} | ` +
+        `[PlanningService] 天气感知: ${destName} ${brief.weatherText} ${brief.todayMinC.toFixed(0)}-${brief.todayMaxC.toFixed(0)}°C | ` +
         `上午${ctx.morning.rainy ? '☔' : '☀'} 下午${ctx.afternoon.rainy ? '☔' : '☀'} 晚间${ctx.evening.rainy ? '☔' : '☀'} ` +
         `室内优先=${ctx.isRainyDay} 高温=${ctx.isHotDay}`
       );
@@ -3902,12 +3902,12 @@ export class PlanningService {
    */
   async signalWeather(
     center: Coordinates,
-  ): Promise<{ summaryLine: string; rainy: boolean } | null> {
+  ): Promise<{ weatherText: string; rainy: boolean } | null> {
     if (!this.weatherService) return null;
     try {
       const brief = await this.weatherService.getBrief(center.latitude, center.longitude, 'auto');
       const ctx = this.buildWeatherContext(brief);
-      return { summaryLine: brief.summaryLine, rainy: ctx.isRainyDay };
+      return { weatherText: brief.weatherText, rainy: ctx.isRainyDay };
     } catch {
       return null;
     }
@@ -3935,7 +3935,7 @@ export class PlanningService {
       isRainyDay: morning.rainy || afternoon.rainy,
       isHotDay: morning.hot || afternoon.hot,
       isColdDay: morning.cold || afternoon.cold,
-      summary: brief.summaryLine,
+      summary: `${brief.weatherText}，${brief.todayMinC.toFixed(0)}–${brief.todayMaxC.toFixed(0)}°C`,
     };
   }
 

@@ -99,6 +99,7 @@ import "mobile_ui/mobile_decision_sheet.dart";
 import "features/chat/agent_profile_page.dart";
 import "features/chat/agent_home_page.dart";
 import "features/chat/chat_page.dart";
+import "features/chat/digital_human_panel.dart";
 // v2 统一渲染信封（P4，2026-11-10 桌面端接入）：done 载荷抽信封块序列，
 // 与手机端 mobile_chat_controller 同一入口、同一挂载规则。
 import "features/chat/render_envelope_dispatcher.dart" show extractEnvelopeBlocks;
@@ -121,7 +122,6 @@ import "core/services/split_ratio_preference.dart";
 import "features/chat/sidebar_user_menu.dart";
 import "features/chat/floating_agent_sphere.dart";
 import "features/chat/morning_briefing_card.dart";
-import "features/chat/voiceprint_registration_page.dart";
 import "core/services/agent_sphere_voice_controller.dart";
 import "core/services/connected_call_launcher.dart";
 import "core/services/briefing_delivery_api.dart";
@@ -764,8 +764,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   bool _bootAnimDone = false;   // 开场动画是否已播完（每次武装前重置）
 
   /// 首启配置向导：仅当本次登录真正新建了账号（网页回连 fresh=1）时顶在
-  /// 主界面之前（进度条开机动画 + 称呼/agent 名同屏 + 模型两步；声纹已删，
-  /// 保留 just-in-time 入口）。已注册邮箱在任意机器登录都直达主界面
+  /// 主界面之前（进度条开机动画 + 称呼/agent 名同屏 + 模型两步）。
+  /// 已注册邮箱在任意机器登录都直达主界面
   /// （2026-10-16），不走本向导。
   bool _needsOnboarding = false;
   bool _onboardingDone = false;
@@ -1520,24 +1520,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     };
     // 纯语音模式（岛=唯一视觉，voice-orb 胶囊已退役）：注入 WS 发送器，
     // mode.changed 上报服务端切投递节奏。识别文本经 voiceCtrl.onRecognizedText
-    // 既有回调提交（仅声纹验证通过才会回调）。
+    // 既有回调提交。
     PureVoiceModeController.instance.sendEvent =
         (String type, Map<String, dynamic> payload) {
       _ws.sendEvent(type, payload);
-    };
-    voiceCtrl.onRequestVoiceprintRegistration = () {
-      if (!mounted) return;
-      Navigator.of(context).push(
-        MaterialPageRoute<void>(
-          builder: (BuildContext ctx) => VoiceprintRegistrationPage(
-            userId: ApiConfig.effectiveActorId,
-            onRegistrationComplete: () {
-              Navigator.of(ctx).pop();
-              voiceCtrl.markVoiceprintRegistered();
-            },
-          ),
-        ),
-      );
     };
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
@@ -1891,6 +1877,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               (activeTraceId != null && resetTraceId != activeTraceId)) {
             return;
           }
+          // 已整泡落屏的分泡（揭示后 streaming=false）同属「已流正文」：先整轮
+          // 撤走，再清空轮占位——否则 done 的单条正文会与它们并存成双份。
+          final List<String> retracted = _retractTraceBubbles(resetTraceId);
           final List<int> resetIdx = <int>[];
           for (int i = 0; i < _messages.length; i++) {
             final ChatMessage m = _messages[i];
@@ -1901,7 +1890,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             }
             resetIdx.add(i);
           }
-          if (resetIdx.isEmpty) return;
+          if (resetIdx.isEmpty && retracted.isEmpty) return;
           setState(() {
             for (final int i in resetIdx) {
               final ChatMessage previous = _messages[i];
@@ -2211,33 +2200,47 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             );
           } else {
           // 撤回轮（chat.stream_reset，2026-11-25 车道架构）：服务端已撤回流式
-          // 块并清空气泡账本，done 不带 bubbles → 走本单条路径。把本 trace 遗留
-          // 的空流式占位泡一并撤掉，finalText 以单条落屏——不存在「泡壳在、
-          // 单条又落一条」的并存。
+          // 块并清空气泡账本，done 不带 bubbles → 走本单条路径。
+          // 一轮一条呈现通道（2026-11-26 根因修复）：本帧 messageId 就是本轮基础
+          // id（撤回后 `outboundDoneMessageId` 回退 baseMessageId）且带整段正文时，
+          // 已落屏的分泡与它是同一份内容 → 整轮撤泡后单条落位；finalText 为空（纯
+          // 卡轮/异常收口）只撤空壳，保留已呈现的分泡。messageId 属于别的消息（后台
+          // 任务/子代理独立回复）不动本 trace 的泡——那是另一条消息。
+          String singleLaneId = messageId;
           if (doneTraceId != null && doneTraceId.isNotEmpty) {
-            final List<String> shellIds = <String>[];
-            setState(() {
-              _messages.removeWhere((m) {
-                final bool hit = m.streaming &&
-                    m.text.trim().isEmpty &&
-                    _isBubbleMessageId(m.messageId) &&
-                    _bubbleTraceOf(m.messageId) == doneTraceId;
-                if (hit) {
-                  _assistantMessageIndexById.remove(m.messageId);
-                  shellIds.add(m.messageId);
-                }
-                return hit;
+            final bool speaksForTurn =
+                messageId == "assistant-$doneTraceId" ||
+                _bubbleTraceOf(messageId) == doneTraceId;
+            if (speaksForTurn && resolvedText.trim().isNotEmpty) {
+              _retractTraceBubbles(doneTraceId);
+              // done 的 id 指向已撤走的末泡时按本轮基础 id 落位，别把撤掉的
+              // 泡 id 再挂一条回屏。
+              singleLaneId = "assistant-$doneTraceId";
+            } else {
+              final List<String> shellIds = <String>[];
+              setState(() {
+                _messages.removeWhere((m) {
+                  final bool hit = m.streaming &&
+                      m.text.trim().isEmpty &&
+                      _isBubbleMessageId(m.messageId) &&
+                      _bubbleTraceOf(m.messageId) == doneTraceId;
+                  if (hit) {
+                    _assistantMessageIndexById.remove(m.messageId);
+                    shellIds.add(m.messageId);
+                  }
+                  return hit;
+                });
               });
-            });
-            for (final String id in shellIds) {
-              try {
-                await _store.deleteMessage(id);
-              } catch (e) {
-                debugPrint("[chat] retracted bubble shell delete failed: $e");
+              for (final String id in shellIds) {
+                try {
+                  await _store.deleteMessage(id);
+                } catch (e) {
+                  debugPrint("[chat] retracted bubble shell delete failed: $e");
+                }
               }
             }
           }
-          final int? idx = _messageIndexById(messageId);
+          final int? idx = _messageIndexById(singleLaneId);
           if (idx != null) {
             final ChatMessage previous = _messages[idx];
             // 整轮既无正文也无结构产出 → 撤掉流式阶段留下的空泡。
@@ -2304,7 +2307,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           } else {
             // 极端边界：完全没收到任何 chunk（只收到 done），按 done 载荷落消息
             final ChatMessage finalMessage = ChatMessage(
-              messageId: messageId,
+              messageId: singleLaneId,
               sessionId: ApiConfig.effectiveActorId,
               role: "assistant",
               text: resolvedText,
@@ -2319,7 +2322,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             );
             setState(() {
               _messages.add(finalMessage);
-              _assistantMessageIndexById[messageId] = _messages.length - 1;
+              _assistantMessageIndexById[singleLaneId] = _messages.length - 1;
             });
             await _store.saveMessage(finalMessage);
           }
@@ -3236,6 +3239,33 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         debugPrint("[chat] bubble finalize saveMessage failed: $e");
       }));
     }
+  }
+
+  /// 整轮撤泡（2026-11-26 根因修复，与手机端 `_retractTraceBubbles` 同构）：
+  /// 删掉该 trace 已落屏的全部分泡行（含定稿后的 streaming=false 泡），本地历史
+  /// 同步删除，返回被撤的 id。
+  ///
+  /// 协议契约：服务端 `chat.stream_reset` 的语义是「客户端删掉全部已落屏块，本轮回
+  /// 到单条车道，done 不再带 bubbles」。此前只动 streaming 行与空壳，整泡落屏的泡
+  /// 撤不掉 → 分泡正文与 done 的整段单条并存，同一段正文/表格在屏上读两遍。
+  List<String> _retractTraceBubbles(String traceId) {
+    final List<String> gone = <String>[];
+    setState(() {
+      _messages.removeWhere((ChatMessage m) {
+        if (!_isBubbleMessageId(m.messageId)) return false;
+        if (_bubbleTraceOf(m.messageId) != traceId) return false;
+        gone.add(m.messageId);
+        _assistantMessageIndexById.remove(m.messageId);
+        return true;
+      });
+      if (gone.isNotEmpty) _rebuildAssistantIndex();
+    });
+    for (final String id in gone) {
+      unawaited(_store.deleteMessage(id).catchError((Object e) {
+        debugPrint("[chat] 撤泡删除本地历史失败: $e");
+      }));
+    }
+    return gone;
   }
 
   /// 真·分绿泡 done 收口：逐泡以服务端对账数组（id+定稿文本）为准定稿。
@@ -4690,6 +4720,19 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     });
   }
 
+  /// 桌面数字人头像入口：从右侧滑出数字人专属 split 面板（聊天在左、数字人在右）。
+  /// 数字人头像/面板只在桌面端上线；窄窗口下不提供入口（头部组件也不渲染）。
+  void _openDigitalHumanPanel() {
+    if (MediaQuery.sizeOf(context).width < kWideLayoutBreakpoint) return;
+    setState(() {
+      _tabIndex = 0;
+      _rightPanel = RightPanelKind.digitalHuman;
+      _previousSplitRatio = _splitRatio;
+      _previousRightPanelWidth = _rightPanelWidth;
+      _splitRatio = RightPanelKind.digitalHuman.defaultSplitRatio;
+    });
+  }
+
   // ═══════════════════════════════════════════════════════════
   // 任务面回执（chat.task_update / chat.task_cancel）
   // ═══════════════════════════════════════════════════════════
@@ -6006,17 +6049,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       );
   }
 
-  Widget? _buildAppBarTitle() {
-    if (_tabIndex == 0) {
-      return null;
-    }
-    final String title = kTabTitles[_tabIndex];
-    if (title.isEmpty) {
-      return null;
-    }
-    return Text(title);
-  }
-
   /// 今日安排悬浮卡自动淡出计时器（surface.show 召唤时启动）
   Timer? _surfaceAutoHideTimer;
 
@@ -6517,31 +6549,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.stretch,
                               children: <Widget>[
-                                // 当右侧面板显示时（side 或 split 模式），
-                                // 给 AppBar 右侧加相应边距，把被右面板覆盖的部分
-                                // 从 AppBar 中裁掉。split 模式使用 [NextbotChatLayout]
-                                // 同步过来的实际动态宽度。
-                                Padding(
-                                  padding: EdgeInsets.only(
-                                    right: _appBarRightInset(),
-                                  ),
-                                  child: AppBar(
-                                    automaticallyImplyLeading: false,
-                                  // 与自绘标题栏(40px)和右侧面板顶栏(40px)对齐
-                                  toolbarHeight: kWindowTitleBarHeight,
-                                  // 顶栏与左侧边栏同色(深色主题下为 #131313 的深灰),
-                                  // 与聊天主背景的纯黑 (#0F0F0F) 形成可识别但克制的对比
-                                  backgroundColor:
-                                      AppPalette.resolveSidebar(variant),
-                                  foregroundColor:
-                                      AppPalette.resolveAppBarForeground(
-                                          variant),
-                                  surfaceTintColor: Colors.transparent,
-                                  elevation: 0,
-                                  scrolledUnderElevation: 0,
-                                  title: _buildAppBarTitle(),
-                                  ),
-                                ),
+                                // 对话 Tab 顶部原有一条 40px 空 AppBar（kTabTitles
+                                // 全为空串，纯占位）。2026-11-27 起删除：让桌面
+                                // 数字人头像+名字直接顶到对话区最上方。自绘标题栏
+                                // AppWindowTitleBar 保留，窗口拖拽/关闭不受影响。
                                 Expanded(
                                   child: MainPanel(
                                     child: _buildMainContent(),
@@ -7178,27 +7189,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     }
   }
 
-  /// 是否在主区显示右侧快捷功能面板（同时也是裁剪 AppBar / 占位宽度的依据）。
-  /// 条件：chat tab + 宽屏 (>= 820) + 无右抽屉打开。
-  bool _shouldShowRightSidePanel() {
-    if (_tabIndex != 0) return false;
-    if (_rightPanel != null) return false;
-    return MediaQuery.sizeOf(context).width >= kWideLayoutBreakpoint;
-  }
-
-  /// AppBar 右侧需要让出的宽度。
-  /// - side 模式：右面板实际渲染宽度 [_rightPanelWidth] - 8px 拖拽条，让
-  ///   AppBar 顶栏与右侧天气面板贴平，避免两者之间露出缺口。
-  /// - split 模式：[NextbotChatLayout] 同步过来的动态宽度 [_rightPanelWidth]
-  /// - 其他：0
-  double _appBarRightInset() {
-    if (_shouldShowRightSidePanel()) {
-      return _rightPanelWidth - _kSidePanelDividerWidth;
-    }
-    if (_rightPanel != null && _tabIndex == 0) return _rightPanelWidth;
-    return 0;
-  }
-
   /// 在外层 Stack 顶层用 [Positioned] 渲染右侧面板（side 或 split 模式），
   /// 使面板从 Stack 顶端（自绘标题栏下沿）贯通到底部，覆盖宽度范围内的 AppBar。
   ///
@@ -7323,8 +7313,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               // （面板组件内部自带完整顶栏：图片大图区）
               if (_rightPanel != RightPanelKind.imagePreview) ...<Widget>[
                 Icon(Icons.drag_indicator, size: 16, color: fgMuted),
-                // 内容详情面板的标题由正文文档头承担，chrome 不再重复
-                if (_rightPanel != RightPanelKind.contentSummary) ...<Widget>[
+                // 内容详情面板的标题由正文文档头承担，chrome 不再重复；
+                // 数字人面板（2026-11-27 用户要求）同样不显示「数字人」标题文案。
+                if (_rightPanel != RightPanelKind.contentSummary &&
+                    _rightPanel != RightPanelKind.digitalHuman) ...<Widget>[
                   const SizedBox(width: 8),
                   Text(
                     _rightPanel == null ? "" : rightPanelTitle(_rightPanel!),
@@ -7405,6 +7397,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         // Agent 主页：嵌入模式，面板顶栏已有"主页"标题，
         // 主页页体不再渲染自带 AppBar（与 GalleryPage.embedded 同约定）
         return AgentHomePage(embedded: true);
+      case RightPanelKind.digitalHuman:
+        // 数字人专属面板：detail 实时流 + 换头像；面板顶栏已有"数字人"标题
+        return DigitalHumanPanel(agentName: _agentName);
       case RightPanelKind.contentSummary:
         // 内容详情面板：标题由正文文档头承担（chrome 不重复），
         // 正文区与弹窗共用视图；按摘要 id 建 Key，切换详情时重置滚动/书签状态
@@ -7482,6 +7477,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       onUserAction: _handleCardAction,
       // 光球头像单击 → 右侧双栏面板打开 Agent 主页（窄窗口退化为全屏路由页）
       onOpenAgentHome: _openAgentHomePanel,
+      // 桌面数字人头像单击 → 右侧数字人专属面板（仅桌面宽屏渲染该入口）
+      onOpenDigitalHuman: MediaQuery.sizeOf(context).width >= kWideLayoutBreakpoint
+          ? _openDigitalHumanPanel
+          : null,
       // 任务面回执聚合（状态带「N 个任务后台进行中」）+ 逐任务取消入口
       backgroundTaskCount: _taskPlaneState.activeCount,
       onCancelBackgroundTask: _cancelBackgroundTask,

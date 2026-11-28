@@ -20,6 +20,7 @@ import {
 } from "../src/services/memory-consolidation-service.js";
 import { registerMemoryRecallTools } from "../src/tools/memory-recall-tools.js";
 import type { NarrativeMemoryPort } from "../src/services/narrative-memory-port.js";
+import type { MemorySourceRole } from "../src/services/memory-source-role.js";
 
 // 本文件全部为「unified 不可用回退路径」的行为锁定：统一抽取已默认启用，
 // 环境里有真实 API key 时高/低信号候选会走 extractUnified（决策由 LLM 给出，
@@ -83,7 +84,14 @@ type WriteDecidedCall = {
   actorId: string;
   text: string;
   source: string;
-  opts: { context: string; highSignal: boolean; sourceEventId?: string; eventTime?: string };
+  opts: {
+    context: string;
+    highSignal: boolean;
+    sourceEventId?: string;
+    eventTime?: string;
+    sourceRole?: MemorySourceRole;
+    record?: import("../src/agentic-memory/memory-record.js").MemoryRecord;
+  };
 };
 
 function makeFakeNarrativePort() {
@@ -152,6 +160,7 @@ function submitCandidate(service: MemoryConsolidationService, partial: Partial<M
     source: "chat:turn_archive",
     context: "main",
     highSignal: true,
+    sourceRole: "user",
     createdAt: new Date().toISOString(),
     ...partial,
   });
@@ -220,6 +229,41 @@ test("统一写入者: 来源事件随候选透传到 writeDecided（LTM 可追�
   }
 });
 
+test("统一写入者: sourceRole 随候选透传到 writeDecided", { timeout: 30_000 }, async () => {
+  resetMemoryConsolidationForTests();
+  resetMemoryEchoGuard();
+  const dir = await mkdtemp(join(tmpdir(), "consolidation-role-"));
+  try {
+    const { port, calls } = makeFakeNarrativePort();
+    const service = new MemoryConsolidationService({
+      narrative: port,
+      kvSync: null,
+      memory: null,
+      filePath: join(dir, "candidates.json"),
+    });
+
+    submitCandidate(service, {
+      text: "[用户事实] 我对花生过敏，避免吃一切含花生的东西",
+      source: "chat:fast_path",
+      sourceRole: "user",
+    });
+    submitCandidate(service, {
+      text: "周末去公园散步",
+      source: "chat:timeline",
+      sourceRole: "assistant",
+      highSignal: true,
+    });
+    await service.flushAll();
+
+    assert.equal(calls.length, 2);
+    assert.equal(calls[0]!.opts.sourceRole, "user");
+    assert.equal(calls[1]!.opts.sourceRole, "assistant");
+    assert.equal(calls[1]!.opts.highSignal, true, "非用户高信号候选只作为时间线保存");
+  } finally {
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+  }
+});
+
 test("统一写入者: reject 候选既不入长期图也不写 KV", { timeout: 30_000 }, async () => {
   resetMemoryConsolidationForTests();
   resetMemoryEchoGuard();
@@ -266,6 +310,31 @@ test("统一写入者: 注入记忆的复述候选被回声守卫拦截", { time
 
     assert.equal(calls.length, 0);
     assert.equal(service.pendingCount("actor-x"), 0);
+  } finally {
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+  }
+});
+
+test("统一写入者: 无角色候选 fail-closed，不进入用户长期记忆", { timeout: 30_000 }, async () => {
+  resetMemoryConsolidationForTests();
+  resetMemoryEchoGuard();
+  const dir = await mkdtemp(join(tmpdir(), "consolidation-unknown-"));
+  try {
+    const { port, calls } = makeFakeNarrativePort();
+    const service = new MemoryConsolidationService({
+      narrative: port,
+      kvSync: null,
+      memory: null,
+      filePath: join(dir, "candidates.json"),
+    });
+    submitCandidate(service, {
+      text: "我对花生过敏，避免吃一切含花生的东西",
+      sourceRole: undefined,
+    });
+    await service.flushAll();
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.opts.sourceRole, "unknown");
+    assert.equal(calls[0]!.opts.record?.authority, "unverified");
   } finally {
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   }

@@ -16,8 +16,7 @@ import { modelSupportsVision } from "./vision-support.js";
 import {
   adaptOpenAiChatCompletionStream,
   consumeNormalizedStream,
-  createStreamControlTagSanitizer,
-  createStreamMetaSentenceFilter,
+  createStreamTextPurifier,
   pickVisibleText,
   StreamIdleTimeoutError,
   ToolIntentWithoutToolsError,
@@ -621,14 +620,23 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
     // 流末从 DSML 原文提取出的工具调用（带出 try 作用域供下方意图升级判定）
     let toolIntentCalls: NormalToolCall[] = [];
     try {
-      const sanitizer = createStreamControlTagSanitizer();
-      const metaFilter = createStreamMetaSentenceFilter();
+      const purifier = createStreamTextPurifier();
       // LLM 计时（2026-09-28 延迟诊断配套）：request 发出 → 首个可见 delta → 流结束，
       // 区分「API 排队/首 token 慢」与「生成长」。首 delta 为空（净化后无输出）
       // 时以首个原始 chunk 近似（由首参数记录）。量小常开，一行一条。
       const timingStart = Date.now();
       let timingFirstRaw: number | null = null;
       let timingFirstDelta: number | null = null;
+      /** 唯一的可见正文出口：净化后的文本 → 繁简归一 → 累计 + 推流。 */
+      const pushVisible = (text: string): void => {
+        if (!text) return;
+        // 繁→简出口正规化（2026-10-11）：流式与累计（streamedVisible）用同一
+        // 归一文本，1:1 等长替换不破坏流式分段。
+        const normalized = normalizeTraditionalToSimplified(text).text;
+        streamedVisible += normalized;
+        if (timingFirstDelta === null) timingFirstDelta = Date.now();
+        onDelta(normalized);
+      };
       const timedSource = (async function* () {
         for await (
           const chunk of stream as AsyncIterable<OpenAI.Chat.Completions.ChatCompletionChunk>
@@ -641,20 +649,9 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
         adaptOpenAiChatCompletionStream(timedSource),
         {
           onContentDelta: (d) => {
-            // 根源净化：model 偶发会把内部控制标签（如 [STOP...] / [话题切换...]）
-            // 混进 content，逐 chunk 直推这里时先过净化器，避免标签透出到前端气泡。
-            // 2026-08-29 扩展：再叠一层元术语整句过滤（"上一轮转入规划任务..."），
-            // 兜底 LLM 在流式中把系统元描述整段写进回复。
-            const clean = metaFilter(sanitizer(d));
-            if (clean) {
-              // 繁→简出口正规化（2026-10-11）：流式与累计（streamedVisible）用同一
-              // 归一文本，1:1 等长替换不破坏流式分段。
-              const t2s = normalizeTraditionalToSimplified(clean);
-              const normalized = t2s.text;
-              streamedVisible += normalized;
-              if (timingFirstDelta === null) timingFirstDelta = Date.now();
-              onDelta(normalized);
-            }
+            // 根源净化：内部控制标签/帧、裸控制 token、元术语与工具旁白整句都在
+            // createStreamTextPurifier 一条出口里处理（与工具波、汇总通道同一个工厂）。
+            pushVisible(purifier(d));
           },
           providerId: this.id,
           model,
@@ -686,12 +683,7 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
       // 正文单一出口（2026-11-25 统一管道根修）：定稿 = 经 onDelta 放出的文本。
       // 流末 flush 把净化器缓冲（无句末标点的末句、待判半截标签）交还同一出口；
       // 整串净化链只服务没有任何流式产出的情况。
-      for (const tail of [metaFilter(sanitizer.flush()), metaFilter.flush()]) {
-        if (!tail) continue;
-        const normalized = normalizeTraditionalToSimplified(tail).text;
-        streamedVisible += normalized;
-        onDelta(normalized);
-      }
+      pushVisible(purifier.flush());
       visible = streamedVisible.trim()
         ? streamedVisible.trim()
         : normalizeTraditionalToSimplified(

@@ -323,7 +323,7 @@ test("连续三轮封顶：第四轮通知上只剩「打开对话」，没有�
   );
 });
 
-test("出站帧：仍是 agent.proactive_message，带 notification_reply 来源与横幅归属端", () => {
+test("出站帧：对话 done + proactive.notificationReply，带横幅归属端", () => {
   const sent: string[] = [];
   const delivery = new ProactiveDeliveryService({
     trySend: (_actorId, json) => {
@@ -360,18 +360,19 @@ test("出站帧：仍是 agent.proactive_message，带 notification_reply 来源
   assert.equal(sent.length, 1);
   const frame = JSON.parse(sent[0]!) as {
     type: string;
-    payload: Record<string, unknown> & { messageId: string; deliveryId: string };
+    payload: Record<string, any>;
   };
-  // 事件类型不变 = 客户端已有的「前台落流 / 后台同 id 更新通知 / 非归属端不弹横幅」
-  // 三段判定原样生效，不需要新事件类型、不需要改 main.dart
-  assert.equal(frame.type, "agent.proactive_message");
-  assert.equal(frame.payload["source"], "notification_reply");
-  assert.deepEqual(frame.payload["reply"], { rootIntentId: root, round: 2 });
-  assert.equal(frame.payload["notifyOn"], "mobile", "横幅钉在回话的这一端（通知栏只在手机上）");
-  assert.equal(frame.payload["display"], undefined, "回信不是新打扰，不抢弹窗");
-  const payloadIntent = frame.payload["actionIntent"] as { intentId: string };
+  // 统一出口（2026-11-26）：应答也走对话 done，通知面只是 proactive 上的可选字段。
+  assert.equal(frame.type, "chat.assistant_done");
+  assert.equal(frame.payload["finalText"], "好，那我 6 点在门口等你");
+  const proactive = frame.payload["proactive"] as Record<string, any>;
+  assert.equal(proactive["source"], "notification_reply");
+  assert.deepEqual(proactive["notificationReply"], { rootIntentId: root, round: 2 });
+  assert.equal(proactive["notifyOn"], "mobile", "横幅钉在回话的这一端（通知栏只在手机上）");
+  assert.equal(proactive["display"], undefined, "回信不是新打扰，不抢弹窗");
+  const payloadIntent = proactive["actionIntent"] as { intentId: string };
   assert.equal(payloadIntent.intentId, root, "通知 id 由它算出：同一条通知原地更新");
-  assert.match(frame.payload.messageId, /^proactive-/);
+  assert.match(frame.payload["messageId"], /^assistant-proactive-/);
   // 两端都在线时电脑端也要看到这条应答：投递走全端 fan-out（trySend），
   // 只是不在那一端弹横幅
   assert.equal(sent.length, 1);

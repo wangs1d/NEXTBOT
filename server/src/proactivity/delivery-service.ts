@@ -125,8 +125,8 @@ export class ProactiveDeliveryService {
    * 应答送回用户界面。
    *
    * 复用 [deliver] 的同一套出站三件套（WS 直投 + 落流补发登记 + 横幅归属端），
-   * 事件类型也仍是 `agent.proactive_message`——客户端已有的三段判定（前台落对话流 /
-   * 后台用同 id 原地更新通知 / 非归属端不弹横幅）因此一行不改就接得住这条回复。
+   * 事件类型也统一为对话的 `chat.assistant_done`——通知面只是 payload.proactive
+   * 上的 `notificationReply` 字段，不再有第二条 `agent.proactive_message` 旁路。
    * 与 deliver 的唯一区别：动作视图由 `chat.reply` 执行器预先签好（回复线程的
    * 下一轮意图，displayIntentId 钉在根意图上），这里不再走 registerIntentForProposal。
    *
@@ -153,26 +153,39 @@ export class ProactiveDeliveryService {
     notifyOn?: "mobile" | "desktop" | null;
   }): DeliveryResult {
     const deliveryId = `d_${Date.now().toString(36)}_${(this.seq++).toString(36)}`;
-    const payload = {
-      type: "agent.proactive_message",
-      payload: {
-        deliveryId,
-        // 稳定消息 id：与 deliver 同口径，重连补投按 (sessionId, messageId) 幂等
-        messageId: `proactive-${deliveryId}`,
-        title: input.title,
-        text: input.text,
-        importance: "medium" as ProactiveImportance,
-        kind: input.kind ?? "notification_reply",
-        // 这条消息的来源：通知栏里回的那一句话所触发的应答（客户端落流详情用）
-        source: "notification_reply",
-        reply: { rootIntentId: input.rootIntentId, round: input.round },
-        ...(input.userText ? { userText: input.userText } : {}),
-        ...(input.actionIntent ? { actionIntent: input.actionIntent } : {}),
-        ...(input.notifyOn === null ? {} : { notifyOn: input.notifyOn ?? "mobile" }),
+    // 统一出口（2026-11-26）：应答也走对话 done，通知面只是 done 上的一个可选字段。
+    // 生成侧本来就是 runChatTurnForActor 的同一条 AgentCore，这里只负责回写。
+    let sent = false;
+    publishAssistantTurn(
+      (json) => {
+        const ok = this.deps.trySend(input.actorId, json);
+        if (ok) sent = true;
+        return ok;
       },
-    };
+      {
+        sessionId: input.actorId,
+        traceId: `proactive-${deliveryId}`,
+        finalText: input.text,
+        proactive: {
+          deliveryId,
+          title: input.title,
+          importance: "medium",
+          kind: input.kind ?? "notification_reply",
+          source: "notification_reply",
+          ...(input.actionIntent
+            ? { actionIntent: input.actionIntent as unknown as Record<string, unknown> }
+            : {}),
+          notificationReply: {
+            rootIntentId: input.rootIntentId,
+            round: input.round,
+            ...(input.userText ? { userText: input.userText } : {}),
+          },
+          ...(input.notifyOn === null ? {} : { notifyOn: input.notifyOn ?? "mobile" }),
+        },
+      },
+    );
     // 全端 fan-out：回复要落到会话流（电脑/手机都该看见），只是横幅归一台
-    if (!this.deps.trySend(input.actorId, JSON.stringify(payload))) {
+    if (!sent) {
       return { ok: false, reason: "no_online_device" };
     }
     return { ok: true, deliveryId };

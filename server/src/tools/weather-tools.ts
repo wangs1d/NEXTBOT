@@ -168,7 +168,7 @@ export function registerWeatherTools(registry: ToolRegistry, weather: WeatherSer
     let singleDayIndex = -1; // 后天及更远（≥2）的单日聚焦索引；0/1 走各自已有路径
     if (intent?.kind === "single") {
       // 原话明确某一天：单日聚焦，回执只放那天的数据。
-      //   今天 → days=1，summaryLine 天然只有今日段（无明日），走默认回执即可；
+      //   今天 → days=1，回执只带今日字段（现况与今日区间分列，不再拼整句）；
       //   明天 → days≥2 走 buildTomorrowFocusResult，只留明日（已上线验证，字节不动）；
       //   后天/大后天 → 走通用单日回执，只留那天（避免默认回执里今日/明日/后天三套打架）。
       days = intent.dayIndex === 0 ? 1 : Math.max(2, intent.dayIndex + 1);
@@ -206,9 +206,11 @@ export function registerWeatherTools(registry: ToolRegistry, weather: WeatherSer
       return buildSingleDayFocusResult(brief.daily[singleDayIndex], singleDayIndex, locLabel);
     }
 
+    // 不再透出服务端拼好的整句模板（2026-11-26 用户定稿）：那句话与下面的结构化字段
+    // 是同一份数据，模型会既复述它又按字段再说一遍 → 用户看到「现况」+「今日区间」两遍。
+    // 正文完全由模型按回执字段实时生成；服务端任何场景都不再拼整句天气文案。
     return {
       ok: true,
-      summary: brief.summaryLine,
       clothingAdvice: brief.clothingAdvice,
       currentTempC: brief.currentTempC,
       apparentTempC: brief.apparentTempC,
@@ -249,7 +251,6 @@ function buildTomorrowFocusResult(
   return {
     ok: true,
     focusDay: "tomorrow",
-    summary: tomorrowFocusSummary(ctx.locationLabel, t),
     weatherText: t.weatherText,
     tomorrowRangeC: `${t.minC.toFixed(0)}°–${t.maxC.toFixed(0)}°`,
     ...(t.rainPct > 0 ? { tomorrowRainPct: t.rainPct } : {}),
@@ -277,26 +278,15 @@ function buildSingleDayFocusResult(
   locationLabel: string,
 ) {
   const dayLabel = withDayLabel(item, dayIndex).dayLabel;
-  const rainInfo = item.rainPct > 0 ? `，降水概率 ${item.rainPct}%` : "";
   return {
     ok: true,
     focusDay: "single",
     focusDayLabel: dayLabel,
-    summary: `${locationLabel ? `${locationLabel} ` : ""}${dayLabel}${item.weatherText}，${item.minC.toFixed(0)}–${item.maxC.toFixed(0)}°C${rainInfo}。`,
     weatherText: item.weatherText,
     focusRangeC: `${item.minC.toFixed(0)}°–${item.maxC.toFixed(0)}°`,
     ...(item.rainPct > 0 ? { focusRainPct: item.rainPct } : {}),
     locationLabel,
   };
-}
-
-/** 明日聚焦一句话摘要（口径与 getBrief 的 tomorrowSummary 段一致，前置地点） */
-function tomorrowFocusSummary(locationLabel: string, t: WeatherTomorrow): string {
-  const rainInfo =
-    t.rainPct > 0
-      ? `，降水概率 ${t.rainPct}%${t.rainWindow ? `（${t.rainWindow.label}）` : ""}`
-      : "";
-  return `${locationLabel ? `${locationLabel} ` : ""}明日${t.weatherText}，${t.minC.toFixed(0)}–${t.maxC.toFixed(0)}°C${rainInfo}。`;
 }
 
 /** 给逐日条目加人类可读标签：前 3 天固定今天/明天/后天，其余标周几（确定性 UTC 计算，无 Date.now） */

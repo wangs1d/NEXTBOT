@@ -50,7 +50,7 @@ android {
     // AGC 配置单一源（2026-11-22）：仓库里只保留 app/agconnect-services.json。
     // 运行时 MobilePushPlugin 从 assets 读 app_id，所以构建期复制一份进去。
     // 旧做法是手工维护 src/main/assets/ 里的第二份副本——换 AGC 应用时漏改就会
-    // 打出旧 app_id（本次实测：APK 内仍是上一个应用的 119341653，token 必然失败）。
+    // 打出旧 app_id，token 必然失败。
     sourceSets {
         getByName("main") {
             assets.srcDir(layout.buildDirectory.dir("generated/agc-assets").get().asFile)

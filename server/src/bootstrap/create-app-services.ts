@@ -59,14 +59,21 @@ import {
 } from "../agent/agent-runtime-config.js";
 import { resolvePrimaryChatSessionId } from "../agent/master-chat-session.js";
 import { UserPersonalizationService } from "../services/user-personalization/user-personalization-service.js";
-import { createNarrativeMemoryPort } from "../services/narrative-memory-port.js";
+import { createHash } from "node:crypto";
+
+import { createNarrativeMemoryPort, type NarrativeMemoryPort } from "../services/narrative-memory-port.js";
 import { initMemoryManagerService, getMemoryManagerService } from "../services/memory-manager-service.js";
 import { initHumanLikeMemoryService } from "../services/human-like-memory-service.js";
 import { getAgenticMemoryRuntime, registerMemoryComponents } from "../agentic-memory/index.js";
 import {
   embedViaLocalEndpoint,
   ensureLocalEmbeddingEndpoint,
+  warmLocalEmbedding,
 } from "../agentic-memory/local-embedding/local-embedding-endpoint.js";
+import {
+  ensureLocalRerankerEndpoint,
+  warmLocalReranker,
+} from "../tools/tool-search/local-reranker/local-reranker-endpoint.js";
 import { createMemoryBridgeIfEnabled } from "../agentic-memory/memory-bridge-service.js";
 import { createAgenticLedgerIfEnabled } from "../agentic-memory/ledger.js";
 import { createProvenanceIfEnabled } from "../agentic-memory/provenance.js";
@@ -87,8 +94,8 @@ import {
   reconcileProfileFactsRuntime,
 } from "../services/user-personalization/profile-fact-authority-runtime.js";
 import { createMemoryFtsStoreIfEnabled } from "../agentic-memory/fts-store.js";
-import { retireMemoriesForFactChange } from "../agentic-memory/fact-supersede.js";
-import { getMemoryReinforcementStore } from "../agentic-memory/memory-reinforcement.js";
+import { getMemoryLifecycleService, retryPendingMemoryLifecycleOperations, registerMemoryLifecycleExecutor } from "../agentic-memory/memory-lifecycle-controller.js";
+import { createMemoryRecord } from "../agentic-memory/memory-record.js";
 import { initMemorySuppressionStore } from "../agentic-memory/memory-suppression.js";
 import { getMemoryHealthSnapshot } from "../agentic-memory/health.js";
 import { registerTaskDispatchTool } from "../tools/task-dispatch-tool.js";
@@ -334,7 +341,7 @@ import { WechatClawBridgeService } from "../services/wechat-claw-bridge-service.
 import { MessageHubService, type MessageHubPlatform } from "../services/message-hub-service.js";
 import { MessagePlatformGateway } from "../services/message-platform-gateway.js";
 import { MessageBridgeService } from "../services/message-bridge-service.js";
-import { registerPhoneBridgeTools } from "../tools/phone-bridge-tools.js";
+import { registerPhoneBridgeTools, feedCallLog } from "../tools/phone-bridge-tools.js";
 import { registerMailWatchTools } from "../tools/mail-watch-tools.js";
 import { PhoneBridgeCoordinator } from "../services/phone-bridge-coordinator.js";
 import { PhoneCallCoordinator } from "../services/phone-call-coordinator.js";
@@ -346,7 +353,7 @@ import { registerMcpTools } from "../tools/mcp-tools.js";
 import { buildMcpChatTools } from "../tools/mcp-tools.js";
 import { McpClientService } from "../services/mcp-client-service.js";
 import { setMcpChatTools, setBrainChatTools, setBodyChatTools, setMemoryChatTools } from "../external-model/openai-compatible-tool-loop.js";
-import { ensureToolEmbeddings } from "../tools/tool-search/tool-embedding.js";
+import { buildEmbeddingViews, ensureToolEmbeddings, isEmbeddingSearchEnabled } from "../tools/tool-search/tool-embedding.js";
 import { getToolSearchConfig } from "../tools/tool-search/env.js";
 import { warnOnChatToolDrift } from "../tools/chat-tool-drift.js";
 import { registerBrainTools, BRAIN_TOOLS } from "../tools/brain-tools.js";
@@ -495,6 +502,7 @@ import { ProactiveContactPolicyService } from "../services/proactive-contact-pol
 // 主动性多元化模块（ProactivityHub）+ 节律感知（RhythmCore）+ 统一主动性管道
 import { ProactivityHub } from "../proactivity/proactivity-hub.js";
 import { InterestWatcher } from "../proactivity/interest-watcher.js";
+import { startMediaRetention } from "../services/media-retention-service.js";
 import { ProactivitySuppressionStore } from "../proactivity/suppression-store.js";
 import { FrequencyGovernor } from "../proactivity/frequency-governor.js";
 import { PresenceService } from "../proactivity/presence-service.js";
@@ -615,6 +623,7 @@ import { TurnLocationHook, formatActorLocationBrief } from "../services/turn-loc
 import { OnboardingIntroService } from "../services/onboarding-intro-service.js";
 import { setOnboardingHintRuntime } from "../services/onboarding-state.js";
 import { MobilePushService } from "../proactivity/mobile-push-service.js";
+import { createOfflineEventPusher } from "../proactivity/offline-event-pusher.js";
 import { AlarmClockService, buildWakeFallback } from "../services/alarm-clock/alarm-clock-service.js";
 import { registerAlarmRoutes } from "../routes/http/alarms.js";
 import { ProactivePipeline, IN_CONVERSATION_WINDOW_MS } from "../proactivity/proactive-pipeline.js";
@@ -665,39 +674,38 @@ async function discoverMcpToolsInBackground(
   // 缓存——否则首个 tool_discover(query) 要现算 200+ 条，混合召回首轮不可用。
   void (async () => {
     try {
-      const provider = getToolSearchConfig().embeddingProvider;
-      if (provider === "openai") {
+      const cfg = getToolSearchConfig();
+      if (!isEmbeddingSearchEnabled()) {
+        log("[tool-embedding] 语义向量通道未启用，跳过预热（检索保持 BM25）");
+        return;
+      }
+      const useLocal = cfg.embeddingProvider !== "openai" && cfg.neuralEmbedEnabled !== "off";
+      if (!useLocal) {
         // 远端档（ECS 2vCPU 本地宿主不稳）：直接预热 SiliconFlow bge-m3
         const seen = new Set<string>();
         const items = getBuiltinAgentChatTools()
           .filter((t) => t.type === "function" && Boolean(t.function?.name) && !seen.has(t.function!.name) && seen.add(t.function!.name))
           .map((t) => ({
             registryName: (t as { function: { name: string } }).function.name,
-            searchText: ((t as { function: { description?: string; name: string } }).function.description ?? "") +
-              " " + (t as { function: { name: string } }).function.name,
+            embeddingViews: buildEmbeddingViews(t),
           }));
         const stats = await ensureToolEmbeddings(items);
         log("[tool-embedding] 预热完成 computed=" + stats.computed + " reused=" + stats.reused + " failed=" + stats.failed);
         return;
       }
       // 本地档：等 bge 侧车真正可推理（端口绑定 ≠ 模型就绪，否则熔断器会被打开）
-      const { ensureLocalEmbeddingEndpoint } = await import("../agentic-memory/local-embedding/local-embedding-endpoint.js");
-      const { neuralEmbedTextsBulk } = await import("../tools/tool-search/neural-sidecar.js");
-      await ensureLocalEmbeddingEndpoint();
-      let warm = false;
-      for (let i = 0; i < 8; i++) {
-        const probe = await neuralEmbedTextsBulk(["warmup"]);
-        if (probe && probe.vectors.length > 0) { warm = true; break; }
-        await new Promise((r2) => setTimeout(r2, 1500));
-      }
-      if (!warm) throw new Error("工具向量通道 12s 内未就绪");
+      const { probeNeuralSidecar } = await import("../tools/tool-search/neural-sidecar.js");
+      if (!(await probeNeuralSidecar(15_000))) throw new Error("工具向量通道 15s 内未就绪");
       const seen = new Set<string>();
       const items = getBuiltinAgentChatTools()
-        .filter((t) => t.type === "function" && Boolean(t.function?.name) && !seen.has(t.function!.name) && seen.add(t.function!.name))
+        .filter((t) => {
+          if (t.type !== "function") return false;
+          const name = t.function.name;
+          return Boolean(name) && !seen.has(name) && seen.add(name);
+        })
         .map((t) => ({
           registryName: (t as { function: { name: string } }).function.name,
-          searchText: ((t as { function: { description?: string; name: string } }).function.description ?? "") +
-            " " + (t as { function: { name: string } }).function.name,
+          embeddingViews: buildEmbeddingViews(t),
         }));
       const stats = await ensureToolEmbeddings(items);
       log("[tool-embedding] 预热完成 computed=" + stats.computed + " reused=" + stats.reused + " failed=" + stats.failed);
@@ -967,7 +975,7 @@ export async function createAppServices(
       loc.timezone || task.timezone || "auto",
       loc.label,
     );
-    const message = `${brief.summaryLine} 穿衣建议：${brief.clothingAdvice}`;
+    const message = `${brief.locationLabel ? `${brief.locationLabel} ` : ""}${brief.weatherText}，当前 ${Math.round(brief.currentTempC)}°C（体感 ${Math.round(brief.apparentTempC)}°C），今日 ${Math.round(brief.todayMinC)}–${Math.round(brief.todayMaxC)}°C。穿衣建议：${brief.clothingAdvice}`;
     wsConnectionRegistry.trySend(
       task.sessionId,
       JSON.stringify({
@@ -1290,7 +1298,22 @@ export async function createAppServices(
       );
     },
   });
-  registerPhoneBridgeTools(toolRegistry, { bridge: phoneBridgeCoordinator });
+  // 通话记录入库 feeder 晚绑定：proactivitySensors 在下方 5600+ 行才创建，
+  // 先挂 ref holder，传感层装配后回填（phone.call_log 拉取成功即回灌 call_log 流）。
+  const callLogFeedRef: {
+    current: ((signal: {
+      actorId?: string;
+      at: number;
+      fingerprint: string;
+      salience: "high" | "medium" | "low";
+      delta?: string;
+      payload?: Record<string, unknown>;
+    }) => void) | null;
+  } = { current: null };
+  registerPhoneBridgeTools(toolRegistry, {
+    bridge: phoneBridgeCoordinator,
+    callLogFeed: (signal) => callLogFeedRef.current?.(signal),
+  });
   // 站内消息的 sms 平台经手机桥真发（SmsManager + 手机确认窗）
   messagePlatformGateway.setPhoneBridgeSender({
     hasExecutor: (actorId) => phoneBridgeCoordinator.hasExecutor(actorId),
@@ -1853,6 +1876,8 @@ export async function createAppServices(
   // 返回 null 时按 AGENT_EMBEDDING_BASE_URL 远端兜底，再不行走既有降级路径）。
   // 确实只想用远端可设 AGENT_LOCAL_EMBEDDING_DISABLED=1。listen 不依赖这一段。
   await ensureLocalEmbeddingEndpoint();
+  void warmLocalEmbedding();
+  void ensureLocalRerankerEndpoint().then((endpoint) => endpoint ? warmLocalReranker() : false);
 
   const agenticMemoryRuntime = getAgenticMemoryRuntime();
   // 两个内存服务初始化相互独立（narrative 装配只依赖 humanLikeMemory），并行加载。
@@ -1881,10 +1906,12 @@ export async function createAppServices(
   // 共用同一 SQLite 文件（AGENT_AGENTIC_MEMORY_DB，缺省 data/agentic_memory/
   // agentic-memory.db），各建各表；各自 env 开关独立回退，互不阻断。
   const agenticLedger = createAgenticLedgerIfEnabled();
+  const memoryFtsStore = createMemoryFtsStoreIfEnabled();
   const provenance = createProvenanceIfEnabled({
     memory: agenticMemoryRuntime?.memory ?? null,
     graph: humanLikeMemory,
     ledger: agenticLedger,
+    fts: memoryFtsStore,
   });
   const userUnderstandingStore = createUserUnderstandingStoreIfEnabled();
   const structuredFactStore = createStructuredFactStoreIfEnabled();
@@ -1931,7 +1958,6 @@ export async function createAppServices(
   }
   // FTS 关键词第三路（混合检索 P0）：与四件套共用同一 SQLite 文件，
   // 作为 bridge 融合召回的 BM25 rank 来源；关闭/初始化失败返回 null（无害降级）。
-  const memoryFtsStore = createMemoryFtsStoreIfEnabled();
   const memoryBridge = createMemoryBridgeIfEnabled({
     memory: agenticMemoryRuntime?.memory ?? null,
     graph: humanLikeMemory,
@@ -1998,7 +2024,7 @@ export async function createAppServices(
             event.results.map((item) => ({
               actorId: event.actorId,
               claim: item.memory,
-              sourceRef: event.sourceId,
+              sourceRef: event.record?.sourceRef ?? event.sourceId,
               confidence: null,
               mem0Id: item.id,
               metadata: {
@@ -2009,7 +2035,7 @@ export async function createAppServices(
             })),
           )
         : [];
-      provenance?.recordDerivations(event.sourceId, event.actorId, {
+      provenance?.recordDerivations(event.record?.sourceRef ?? event.sourceId, event.actorId, {
         mem0Ids: event.results.map((item) => item.id),
         ledgerIds: records.map((r) => r.id),
       });
@@ -2042,7 +2068,7 @@ export async function createAppServices(
           actorId: event.actorId,
           field: `指代·${referent.role}`,
           value: referent.name,
-          sourceRef: event.sourceId,
+          sourceRef: event.record?.sourceRef ?? event.sourceId,
           confidence: referent.confidence ?? null,
         }, "UnifiedExtractionHook");
         if (result?.changed) {
@@ -2065,7 +2091,7 @@ export async function createAppServices(
           topic: understanding.topic,
           note: understanding.note,
           kind: understanding.kind,
-          sourceRef: event.sourceId,
+          sourceRef: event.record?.sourceRef ?? event.sourceId,
           confidence: understanding.confidence ?? null,
         });
         if (result?.changed) {
@@ -2087,7 +2113,7 @@ export async function createAppServices(
           actorId: event.actorId,
           field: fact.field,
           value: fact.value,
-          sourceRef: event.sourceId,
+          sourceRef: event.record?.sourceRef ?? event.sourceId,
           confidence: fact.confidence ?? null,
           // 时态与事发时间（2026-10-19 时间锚定）：past 只登记历史、不改现状；
           // upcoming 只登记计划、也不改现状（到期无证据只降级为"未确认"）；
@@ -2116,14 +2142,22 @@ export async function createAppServices(
             // 但 Mem0 里"住在杭州"那条旧记忆不会自动消失，不处理就有最长约一天
             // 的新旧并存窗口。按 factFields 标签/短句线索归档同字段旧条目
             // （archiveIds：可恢复，非物理删除）；失败静默，交回 lifecycle。
-            void retireMemoriesForFactChange({
-              memory: agenticMemoryRuntime?.memory ?? null,
-              reinforcement: getMemoryReinforcementStore(),
+            void getMemoryLifecycleService().execute({
               actorId: event.actorId,
-              field: fact.field,
-              newValue: fact.value,
-              previousValues: result.previous.map((p) => p.value),
-            }).catch(() => {});
+              intent: "supersede",
+              target: {
+                kind: "fact_field",
+                field: fact.field,
+                newValue: fact.value,
+                previousValues: result.previous.map((p) => p.value),
+              },
+              reason: "profile_fact_changed",
+            }).catch((err) => {
+              console.warn(
+                "[memory-lifecycle] 事实覆盖操作已落盘，等待重放:",
+                err instanceof Error ? err.message : err,
+              );
+            });
           }
         } else if (result?.ignored) {
           // 时间锚定的各个拦截口都留痕：past=用户说的是过去，不改现状；
@@ -2156,15 +2190,24 @@ export async function createAppServices(
     // 历史行保留可追溯；档案字段清档后同样收敛其它存储副本
     for (const field of event.forget ?? []) {
       try {
-        const cleared = structuredFactStore?.clearFact(event.actorId, field);
-        if (cleared !== null && cleared !== undefined) {
-          console.info(
-            `[structured-facts] 字段遗忘 actor=${event.actorId} ${field}（下线 ${cleared} 条）`,
-          );
-          if (cleared > 0 && isProfileField(field)) {
-            scheduleProfileFactReconcile(event.actorId);
+        void getMemoryLifecycleService().execute({
+          actorId: event.actorId,
+          intent: "forget",
+          target: { kind: "field", key: field },
+          reason: "unified_extraction_forget",
+        }).then((result) => {
+          const cleared = Number((result.actions["forget:facts"] as { facts?: number } | undefined)?.facts ?? 0);
+          if (cleared > 0) {
+            console.info(
+              `[structured-facts] 字段遗忘 actor=${event.actorId} ${field}（下线 ${cleared} 条）`,
+            );
+            if (isProfileField(field)) {
+              scheduleProfileFactReconcile(event.actorId);
+            }
           }
-        }
+        }).catch((err) => {
+          console.warn("[structured-facts] 字段遗忘失败（操作已落盘，等待重放）:", err);
+        });
       } catch (err) {
         console.warn("[structured-facts] 字段遗忘失败（忽略）:", err);
       }
@@ -2287,7 +2330,7 @@ export async function createAppServices(
     },
   });
 
-  const narrativeMemory = createNarrativeMemoryPort({
+  const narrativeMemoryCore = createNarrativeMemoryPort({
     agenticIngest: agenticMemoryRuntime?.ingest ?? null,
     agenticRetrieval: agenticMemoryRuntime?.retrieval ?? null,
     compressor: agenticMemoryRuntime?.compressor ?? null,
@@ -2297,6 +2340,102 @@ export async function createAppServices(
       void preferenceChangeTrigger.noteMemoryWrite(actorId, text, { sourceRef: source });
     },
   });
+
+  const narrativeMemory: NarrativeMemoryPort | null = narrativeMemoryCore
+    ? new Proxy(narrativeMemoryCore, {
+        get(target, property, receiver) {
+          if (property === "ingest" || property === "writeDecided") {
+            return async (
+              actorId: string,
+              text: string,
+              source: string,
+              opts?: Record<string, unknown>,
+              unified?: unknown,
+            ) => {
+              const decided = property === "writeDecided";
+              const highSignal = opts?.highSignal === true;
+              const sourceEventId = typeof opts?.sourceEventId === "string" ? opts.sourceEventId : undefined;
+              const sourceRole = typeof opts?.sourceRole === "string" ? opts.sourceRole : undefined;
+              const eventTime = typeof opts?.eventTime === "string" ? opts.eventTime : undefined;
+              const context = typeof opts?.context === "string" ? opts.context : "main";
+              const record = createMemoryRecord({
+                actorId,
+                sourceRef: !decided || !sourceEventId ? source : `event:${sourceEventId}`,
+                text,
+                sourceRole: sourceRole as import("../services/memory-source-role.js").MemorySourceRole | undefined,
+                kind: highSignal ? "fact" : "event",
+                sourceEventId,
+                eventTime,
+              });
+              const fingerprint = createHash("sha1")
+                .update(JSON.stringify([
+                  actorId,
+                  source,
+                  text,
+                  sourceEventId ?? "",
+                  sourceRole ?? "",
+                  eventTime ?? "",
+                  context,
+                  highSignal,
+                  decided,
+                ]))
+                .digest("hex")
+                .slice(0, 24);
+              const result = await getMemoryLifecycleService().execute({
+                opId: `memory-upsert:${fingerprint}`,
+                actorId,
+                intent: "upsert",
+                target: {
+                  kind: "record",
+                  record,
+                  text,
+                  source,
+                  options: { ...opts, record, ...(decided ? { decided: true, unified } : {}) },
+                },
+                reason: decided ? "memory_write_decided" : "memory_ingest",
+              });
+              return result.actions["upsert:narrative"];
+            };
+          }
+          const value = Reflect.get(target, property, receiver) as unknown;
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      })
+    : null;
+
+  if (narrativeMemoryCore) {
+    registerMemoryLifecycleExecutor("upsert:narrative", async (action, plan) => {
+      const payload = action.payload;
+      const options = (payload.options ?? {}) as Record<string, unknown>;
+      const { decided: _decided, unified, ...writeOptions } = options;
+      if (options.decided === true) {
+        return narrativeMemoryCore.writeDecided(
+          plan.actorId,
+          String(payload.text),
+          String(payload.source),
+          writeOptions as Parameters<NarrativeMemoryPort["writeDecided"]>[3],
+          unified as Parameters<NarrativeMemoryPort["writeDecided"]>[4],
+        );
+      }
+      await narrativeMemoryCore.ingest(
+        plan.actorId,
+        String(payload.text),
+        String(payload.source),
+        writeOptions as Parameters<NarrativeMemoryPort["ingest"]>[3],
+      );
+      return { persisted: true };
+    });
+  }
+
+  void retryPendingMemoryLifecycleOperations()
+    .then((retriedLifecycleOps) => {
+      if (retriedLifecycleOps > 0) {
+        console.info(`[memory-lifecycle] 启动重放完成 ${retriedLifecycleOps} 个未完成操作`);
+      }
+    })
+    .catch((err) => {
+      console.warn("[memory-lifecycle] 启动重放失败（保留操作日志）:", err);
+    });
 
   // ─── 统一记忆写入者（四路合一）：对话衍生的写入候选全部进整合队列，
   // 由单一链路完成 回声过滤 → 裁决 → 低信号摘要 → supersession → 落库。
@@ -2315,7 +2454,9 @@ export async function createAppServices(
             source: "cortex:low_signal",
             context: entry.context,
             highSignal: false,
-            createdAt: new Date().toISOString(),
+            sourceRole: entry.sourceRole ?? "user",
+            record: entry.record,
+            createdAt: entry.record?.createdAt ?? new Date().toISOString(),
           })
       : null,
   );
@@ -2849,58 +2990,35 @@ export async function createAppServices(
       // §10 需求八：这一刻就是当天唯一的健康检查钟——排今天/明天的用药打卡、把没落账
       // 的那句漏服提一次、周日带一句作息周报（三条都只走 submitProposal，落点由触点计划定）
       healthServiceRef.current?.evaluateEveningSlot(sessionId);
-      const sent = wsConnectionRegistry.trySend(
-        sessionId,
-        JSON.stringify({
-          type: ServerEventType.EveningDigest,
-          payload: {
-            sessionId,
-            narrationText: digest.narrationText,
-            digest,
-          },
-        }),
-      );
-      if (!sent) {
-        // 两端都不在线：转统一管道挂起（directText 零 LLM，must 层必达），重连即直推
-        proactivePipeline.submitProposal({
-          proposalId: `p_${Date.now().toString(36)}_edigest`,
+      const messageId = `evening-digest-${digest.date}`;
+      const frame = JSON.stringify({
+        type: ServerEventType.EveningDigest,
+        payload: {
+          sessionId,
+          messageId,
+          ts: Date.now(),
+          narrationText: digest.narrationText,
+          digest,
+        },
+      });
+      // 手机优先；手机离线时 registry 仍会触发完整事件透传，桌面只作在线兜底。
+      wsConnectionRegistry.trySendToDeviceClassOrder(sessionId, frame, ["mobile", "desktop"]);
+      // 无论走 WS 还是厂商 push，都留结构化轮次，超长透传和换设备历史都能还原卡片。
+      void getTurnWalService()
+        .append({
+          ts: new Date().toISOString(),
           actorId: sessionId,
-          kind: "evening_digest",
-          tier: "must",
-          importance: "medium",
-          dedupKey: `evening_digest:${sessionId}:${new Date().toISOString().slice(0, 10)}`,
-          title: "明日速览",
-          summary: digest.narrationText.slice(0, 200),
-          evidence: ["evening_digest_scheduled", "ws_push_failed"],
-          directText: digest.narrationText,
-          createdAt: Date.now(),
-          // 明日预览有时效：推送失败的重试窗口只到一小时后，不会把「明天带伞」拖到后半夜
-          expiresAt: Date.now() + 60 * 60_000,
-          source: "time",
+          userText: "",
+          assistantText: digest.narrationText,
+          messageId,
+          context: "main",
+          eveningDigest: digest,
+        })
+        .catch((err) => {
+          console.log(`[EveningDigest] 对话留底失败（忽略）sessionId=${sessionId}: ${err}`);
         });
-      } else {
-        // 对话留底（2026-11-25）：明日预览此前只活在「收到事件那台设备」的本地库，
-        // 重装/换机后聊天记录里就没了。直推成功时同步写一条主会话轮次，历史回填后
-        // 对话里翻得到；dispatched 却不在本机时也补回同一条。
-        // 同端不会出现「卡 + 文字」两份：历史合并在孤儿助手消息上按正文包含去重，
-        // 卡面 text 就是 narrationText（离线推送路径由管道负责写，这里不重复写）。
-        void getTurnWalService()
-          .append({
-            ts: new Date().toISOString(),
-            actorId: sessionId,
-            userText: "",
-            assistantText: digest.narrationText,
-            messageId: `evening-digest-${digest.date}`,
-            context: "main",
-          })
-          .catch((err) => {
-            console.log(`[EveningDigest] 对话留底失败（忽略）sessionId=${sessionId}: ${err}`);
-          });
-      }
     },
   });
-  eveningDigestScheduler.start();
-  app.log.info("[EveningDigest] 晚间 digest 调度器已启动");
 
   // ─── 明日预览接生产投递（2026-11-05）────────────────────────────────────
   // 聊天里问「明天什么安排」时，把当日 digest 作为场景数据面注入渲染出口，
@@ -5590,6 +5708,8 @@ export async function createAppServices(
   // prompt 注入：每轮告知 agent 用户关注什么（【用户兴趣关注列表】块）
   agentCore.setInterestListProvider((actorId) => interestWatcher.listForPrompt(actorId));
   interestWatcher.start();
+  // 媒体只保留 7 天（用户端已本地保存 + 预加载），每天清理一次原图与缩略图缓存。
+  startMediaRetention();
   proactivityHub.start();
   console.log("[Bootstrap] ProactivityHub 已装配（多元触发 + 频控 + speak/act/advise）");
   // 定时任务死信通知：连续失败进入死信（停止重试）时通报一次。aside-only（2026-10-27）：
@@ -5680,6 +5800,8 @@ export async function createAppServices(
   // 屏幕状态条件化信号源：内核 signals 日志（落盘持久，重启不丢；最近 600 条覆盖数日窗口）
   screenSignalSourceRef = () => sensorKernel.recentLog(600);
   proactivitySensors.start();
+  // 回填通话记录入库 feeder（上方 registerPhoneBridgeTools 处挂的 ref holder）
+  callLogFeedRef.current = proactivitySensors.callLogFeeder;
 
   // 天气一行话缓存（30min 刷新，按 actor 分桶）：规则 tick 按用户读自己的那一行，
   // 多租户下不能共用"最近交互用户"的天气。只刷新 24h 内有交互的用户，避免云端
@@ -5703,8 +5825,7 @@ export async function createAppServices(
       );
       weatherLineByActor.set(
         actorId,
-        brief.summaryLine ||
-          `${brief.weatherText}，${Math.round(brief.todayMinC)}-${Math.round(brief.todayMaxC)}°C${brief.peakRainPct >= 50 ? "，有雨记得带伞" : ""}`,
+        `${brief.weatherText}，${Math.round(brief.todayMinC)}-${Math.round(brief.todayMaxC)}°C${brief.peakRainPct >= 50 ? "，有雨记得带伞" : ""}`,
       );
     } catch {
       weatherLineByActor.set(actorId, null);
@@ -6735,6 +6856,46 @@ export async function createAppServices(
   // 负责重启后仍能查历史。必须放在 sourceStore 定义之后。
   registerMailWatchTools(toolRegistry, { mailWatch, sourceStore });
 
+  // 通话记录后台定期同步（2026-11-26）：不等用户问，桥接在线即周期拉取入库。
+  // - 间隔 CALL_LOG_SYNC_INTERVAL_MIN 分钟（默认 30；0=关闭）
+  // - 只对桥接在线的 actor 拉；fingerprint = 号码|方向|时间，内核与 SourceStore
+  //   双层去重，重复拉取不重复入库
+  // - 久远记录由 SourceStore 保留期统一清理（SENSOR_SOURCE_RETENTION_DAYS，
+  //   默认 30 天，写入时惰性 prune）
+  {
+    const syncMin = Number(process.env.CALL_LOG_SYNC_INTERVAL_MIN ?? 30);
+    const intervalMs = Number.isFinite(syncMin) && syncMin > 0 ? syncMin * 60_000 : 0;
+    if (intervalMs > 0 && sourceStore.enabled()) {
+      const syncCallLogFor = async (actorId: string): Promise<void> => {
+        const feed = callLogFeedRef.current;
+        if (!feed) return;
+        const result = await phoneBridgeCoordinator.invoke(actorId, "call_log", { limit: 50 });
+        if (result.ok !== true) return;
+        try {
+          feedCallLog(feed, actorId, result);
+        } catch (e) {
+          console.warn(`[CallLogSync] 入库失败（忽略）actorId=${actorId}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      };
+      const syncAllOnline = (): void => {
+        const online = phoneBridgeCoordinator.onlineActorIds();
+        if (online.length === 0) return;
+        for (const actorId of online) {
+          void syncCallLogFor(actorId).catch(() => {});
+        }
+      };
+      // 启动后 90s 先跑一轮（手机大概率已连上），之后按间隔轮询
+      const firstTimer = setTimeout(syncAllOnline, 90_000);
+      const loopTimer = setInterval(syncAllOnline, intervalMs);
+      if (typeof firstTimer.unref === "function") firstTimer.unref();
+      if (typeof loopTimer.unref === "function") loopTimer.unref();
+      console.log(
+        `[Bootstrap] 通话记录后台同步已装配：间隔 ${Math.round(intervalMs / 60_000)} 分钟，` +
+          `保留 ${sourceStore.retentionDaysFor("call_log")} 天（流级）`,
+      );
+    }
+  }
+
   // ─── Task 16 消费管家闭环装配（场景B）───
   // 工具执行成功 → hookBus tool.executed → 自动入账（finance-deep）
   // → 预算超支检测（life_reminder 单次提醒）→ 每月 1 日上月消费月报
@@ -6941,6 +7102,17 @@ export async function createAppServices(
   const proactivePushService = new MobilePushService({
     registryPath: join(getDataDir(), "proactivity", "push-tokens.json"),
   });
+  // 离线事件统一镜像（2026-11-26）：聊天回复 / 卡片 / 看板在手机端不在线时
+  // 经厂商 push 的 data-only 写穿，客户端冷启动再按 WAL 历史补齐。
+  // 只认白名单事件，在线手机端不镜像，同一稳定键 10 分钟内不重复推。
+  const offlineEventPusher = createOfflineEventPusher({
+    push: (input) => proactivePushService.push(input),
+    hasChannel: (actorId) => proactivePushService.hasChannel(actorId),
+  });
+  wsConnectionRegistry.onOfflineEvent = (actorId, data, mobileDelivered) =>
+    offlineEventPusher.handle({ actorId, data, mobileDelivered });
+  eveningDigestScheduler.start();
+  app.log.info("[EveningDigest] 晚间 digest 调度器已启动（手机优先投递已就绪）");
   // 推送 token 死亡 → 闭环自愈（2026-11-24 实际事故：token 被回执清掉后，
   // 客户端不知道要重新上报，离线推送从此 no_registered_token 静默瘫痪）。
   // 清 token 的瞬间向该 actor 的在线设备下发 push.re_register，客户端清掉
@@ -7406,7 +7578,7 @@ export async function createAppServices(
     try {
       followUpService.ingestFromExtraction({
         actorId: event.actorId,
-        sourceRef: event.sourceId,
+        sourceRef: event.record?.sourceRef ?? event.sourceId,
         followUps: event.followUps,
       });
     } catch (err) {
@@ -7618,7 +7790,7 @@ export async function createAppServices(
   // 明日预览的订阅不再依赖「此刻有设备在线」（2026-11-25 实证：11-23 全天 0 次推送）：
   // 断线不退订，开机再把近 7 天交互过的账号补进订阅表（与 module-factory 的
   // isActiveActor 同一口径，避免把测试 actor 坟场带进来）。到点照常生成 digest，
-  // 投递走既有两跳——在线 WS 直推 / 离线转统一管道升级系统推送（含对话留底）；
+  // 投递走手机优先 WS / 手机离线完整事件透传，并始终写结构化 WAL 留底；
   // App 没开的晚上不会再整天静默丢失。
   {
     const ACTIVE_WINDOW_MS = 7 * 24 * 60 * 60_000;

@@ -13,7 +13,8 @@ import "../models/chat_models.dart";
 import "assistant_text_sanitizer.dart";
 
 class ParsedServerHistory {
-  const ParsedServerHistory({required this.messages, required this.fromBubbles});
+  const ParsedServerHistory(
+      {required this.messages, required this.fromBubbles});
 
   final List<ChatMessage> messages;
 
@@ -53,17 +54,27 @@ ParsedServerHistory parseServerHistoryMessages({
         ? DateTime.fromMillisecondsSinceEpoch(tsMs)
         : DateTime.now();
     final String? clientMessageId = item["clientMessageId"]?.toString();
+    final String? serverMessageId = item["messageId"]?.toString();
     final String messageId =
         role == "user" && (clientMessageId?.isNotEmpty ?? false)
             ? clientMessageId!
-            : "hist-$role-${ts.millisecondsSinceEpoch}-${fallbackSeq++}";
+            : (serverMessageId?.isNotEmpty ?? false)
+                ? serverMessageId!
+                : "hist-$role-${ts.millisecondsSinceEpoch}-${fallbackSeq++}";
+    final Object? rawEveningDigest = item["eveningDigest"];
+    final Map<String, dynamic>? eveningDigest =
+        role == "assistant" && rawEveningDigest is Map
+            ? Map<String, dynamic>.from(rawEveningDigest)
+            : null;
+    final bool hasEveningDigest =
+        eveningDigest != null && eveningDigest.isNotEmpty;
     // 媒体卡回填（2026-11-09）：服务端 WAL 透传本轮 mediaCards，重装/
     // 换设备后历史里的照片气泡才能重建（URL 指向服务端转存资产，可直接加载）。
-    final List<Map<String, dynamic>>? mediaCards = (item["mediaCards"]
-            as List<dynamic>?)
-        ?.whereType<Map<dynamic, dynamic>>()
-        .map((Map<dynamic, dynamic> c) => Map<String, dynamic>.from(c))
-        .toList();
+    final List<Map<String, dynamic>>? mediaCards =
+        (item["mediaCards"] as List<dynamic>?)
+            ?.whereType<Map<dynamic, dynamic>>()
+            .map((Map<dynamic, dynamic> c) => Map<String, dynamic>.from(c))
+            .toList();
     // 用户照片回填（2026-11-18）：服务端 WAL 透传本轮 userImageUrls，
     // 重装/换设备后按真实缩略图重建用户泡，替换旧的「配图 ×N」文案。
     final List<String> userImageUrls = role == "user"
@@ -78,9 +89,8 @@ ParsedServerHistory parseServerHistoryMessages({
         : ((item["attachmentImageCount"] as num?)?.toInt() ?? 0);
     // 真·分绿泡对账数组（2026-11-13）：真实分泡轮逐泡建消息；旧行/塌缩/
     // 单泡轮缺省（或仅一泡，形态等价）→ 单泡路径，行为与升级前一致。
-    final List<Map<String, dynamic>>? histBubbles = role == "assistant"
-        ? parseHistoryBubbles(item["bubbles"])
-        : null;
+    final List<Map<String, dynamic>>? histBubbles =
+        role == "assistant" ? parseHistoryBubbles(item["bubbles"]) : null;
     if (histBubbles != null && histBubbles.length > 1) {
       for (int j = 0; j < histBubbles.length; j++) {
         final String bubbleText = stripAssistantProtocolFrames(
@@ -88,7 +98,8 @@ ParsedServerHistory parseServerHistoryMessages({
         ).trim();
         if (bubbleText.isEmpty) continue;
         messages.add(ChatMessage(
-          messageId: "hist-bubble-${ts.millisecondsSinceEpoch}-${fallbackSeq++}",
+          messageId:
+              "hist-bubble-${ts.millisecondsSinceEpoch}-${fallbackSeq++}",
           sessionId: sessionKey,
           role: "assistant",
           text: bubbleText,
@@ -111,6 +122,8 @@ ParsedServerHistory parseServerHistoryMessages({
       userImageUrls: userImageUrls,
       mediaCards:
           (mediaCards != null && mediaCards.isNotEmpty) ? mediaCards : null,
+      contentType: hasEveningDigest ? "evening_digest" : "text",
+      eveningDigest: eveningDigest,
     ));
     fromBubbles.add(false);
   }

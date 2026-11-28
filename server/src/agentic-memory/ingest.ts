@@ -2,10 +2,20 @@ import type { Memory } from "mem0ai/oss";
 
 import { decideMemoryWrite } from "../services/memory-decision-engine.js";
 import { factValueInText } from "../services/memory-record-utils.js";
-import { classifyMemorySourceRole } from "../services/memory-source-role.js";
+import {
+  normalizeMemorySourceRole,
+  type MemorySourceRole,
+} from "../services/memory-source-role.js";
 import { assertMemoryWriter } from "../memory/memory-authority.js";
 import { isEphemeralActorId, warnEphemeralActorMemoryBlocked } from "../agent/actor-id.js";
 import { gateLtmWrite } from "./ltm-write-gate.js";
+import { peekMemorySuppressionStore } from "./memory-suppression.js";
+import {
+  createMemoryRecord,
+  memoryRecordFromMetadata,
+  memoryRecordMetadata,
+  type MemoryRecord,
+} from "./memory-record.js";
 import {
   extractUnified,
   isMemoryUnifiedExtractEnabled,
@@ -35,6 +45,8 @@ export interface Mem0WriteEvent {
   sourceId: string;
   context: "main" | "notes";
   highSignal: boolean;
+  /** 写入边界生成的不可变来源信封 */
+  record?: MemoryRecord;
   /** Mem0 infer/unified 抽取结果（含记忆 id，供账本/溯源关联） */
   results: Mem0WrittenItem[];
   /** 统一抽取路径携带：用户纠正（钩子走 supersession + 溯源级联） */
@@ -67,6 +79,8 @@ export type LowSignalSink = (entry: {
   sourceId: string;
   text: string;
   context: "main" | "notes";
+  sourceRole?: MemorySourceRole;
+  record?: MemoryRecord;
 }) => void;
 
 export class AgenticMemoryIngestService {
@@ -155,7 +169,12 @@ export class AgenticMemoryIngestService {
     actorId: string,
     sourceId: string,
     text: string,
-    opts?: { highSignal?: boolean; context?: "main" | "notes" },
+    opts?: {
+      highSignal?: boolean;
+      context?: "main" | "notes";
+      sourceRole?: MemorySourceRole;
+      record?: MemoryRecord;
+    },
   ): Promise<void> {
     // v3 写入门：任务态/提醒回执/协议残留不入长期链路
     const gateVerdict = gateLtmWrite(text, sourceId);
@@ -173,9 +192,24 @@ export class AgenticMemoryIngestService {
     }
 
     const context = opts?.context ?? "main";
+    const record = opts?.record ?? createMemoryRecord({
+      actorId,
+      sourceRef: sourceId,
+      text: t,
+      sourceRole: opts?.sourceRole,
+      kind: opts?.highSignal ? "fact" : "event",
+    });
+    const sourceRole = record.sourceRole;
 
     if (opts?.highSignal) {
-      await this.ingestHighSignal(actorId, sourceId, t, context);
+      await this.ingestHighSignal(
+        actorId,
+        sourceId,
+        t,
+        context,
+        sourceRole,
+        memoryRecordMetadata(record),
+      );
       return;
     }
 
@@ -186,7 +220,7 @@ export class AgenticMemoryIngestService {
     // 画像是 token 浪费与噪音的主要来源）。
 
     if (this.lowSignalSink) {
-      this.lowSignalSink({ actorId, sourceId, text: t, context });
+      this.lowSignalSink({ actorId, sourceId, text: t, context, sourceRole, record });
       return;
     }
 
@@ -209,13 +243,12 @@ export class AgenticMemoryIngestService {
     sourceId: string,
     body: string,
     context: "main" | "notes",
+    sourceRole: MemorySourceRole,
+    recordMetadata: Record<string, unknown>,
   ): Promise<void> {
-    // 来源角色治理（2026-11-12 称呼事故）：助手发言不参与抽取。抽取协议只服务
-    // 「用户自身的字面陈述」；助手话（如「喊你大哥那位」）被蒸馏后会被反写成
-    // 用户事实或主体错乱的第三人，召回后直接把回答带偏。助手发言只按原文直存
-    // 时间线（infer:false + sourceRole），供明确问「你上次说过什么」时召回。
-    if (classifyMemorySourceRole(body) === "assistant") {
-      await this.writeDecidedDetailed(actorId, sourceId, body, context, true);
+    // 只有用户侧陈述进入统一抽取；助手/混合/工具内容只保留来源时间线，绝不蒸馏成用户事实。
+    if (sourceRole !== "user") {
+      await this.writeDecidedDetailed(actorId, sourceId, body, context, true, recordMetadata);
       return;
     }
 
@@ -233,7 +266,7 @@ export class AgenticMemoryIngestService {
         })
       : null;
     if (unified) {
-      await this.persistUnifiedExtraction(actorId, sourceId, unified, context, true, body);
+      await this.persistUnifiedExtraction(actorId, sourceId, unified, context, true, body, recordMetadata);
       return;
     }
 
@@ -247,6 +280,7 @@ export class AgenticMemoryIngestService {
     if (decision.decision === "reject") return;
 
     await this.writeDecidedDetailed(actorId, sourceId, body, context, true, {
+      ...recordMetadata,
       memoryDecision: decision.decision,
       memorySemanticClass: decision.semanticClass,
       importance: decision.importance,
@@ -278,6 +312,23 @@ export class AgenticMemoryIngestService {
       return [];
     }
 
+    const record = memoryRecordFromMetadata(extraMetadata) ?? createMemoryRecord({
+      actorId,
+      sourceRef: sourceId,
+      text: fallbackText ?? extraction.memories.join("\n"),
+      sourceRole: normalizeMemorySourceRole(extraMetadata?.sourceRole) ?? undefined,
+      kind: highSignal ? "fact" : "event",
+    });
+    const suppression = peekMemorySuppressionStore();
+    const isForgotten = (text: string) => suppression?.isForgotten(actorId, text) === true;
+    const filteredExtraction: UnifiedExtraction = {
+      ...extraction,
+      memories: extraction.memories.filter((text) => !isForgotten(text)),
+      facts: extraction.facts.filter((fact) => !isForgotten(`${fact.field} ${fact.value}`)),
+      understandings: extraction.understandings.filter((note) => !isForgotten(`${note.topic} ${note.note}`)),
+      profileOps: extraction.profileOps?.filter((op) => !isForgotten(`${op.line ?? ""} ${op.match ?? ""}`)),
+    };
+    extraction = filteredExtraction;
     const understandings =
       extraction.understandings.length > 0 ? extraction.understandings : undefined;
     const corrections =
@@ -298,6 +349,7 @@ export class AgenticMemoryIngestService {
           sourceId,
           context,
           highSignal,
+          record,
           results: [],
           corrections,
           understandings,
@@ -313,7 +365,7 @@ export class AgenticMemoryIngestService {
     const memories =
       extraction.memories.length > 0
         ? extraction.memories
-        : fallbackText
+        : fallbackText && !isForgotten(fallbackText)
           ? [fallbackText]
           : [];
     // 原文兜底标记（写入即精简原则的补丁）：抽取未产出条目时落库的是未蒸馏
@@ -336,6 +388,7 @@ export class AgenticMemoryIngestService {
         continue;
       }
       const trimmed = verdict.cleaned.length > 12_000 ? `${verdict.cleaned.slice(0, 12_000)}...` : verdict.cleaned;
+      const sourceRole = record.sourceRole;
       // 事实字段标签（2026-10-19）：这条记忆承载了哪些档案字段的值。事实变更时
       // fact-supersede 按标签精确退役旧条目——没有标签只能退回文本启发式，
       // 精确度和召回都差一截。只标「值确实出现在本条正文里」的字段，不猜。
@@ -360,6 +413,7 @@ export class AgenticMemoryIngestService {
             actorId,
             context,
             highSignal,
+            sourceRole,
             memoryDecision: extraction.decision,
             // 连续重要性分（0-1）：检索加权与 TTL 豁免的依据（unified 缺省按 decision 推导）；
             // 原文兜底条目固定低分 0.15，覆盖抽取分（兜底=精简失败，不该享受高待遇）
@@ -383,6 +437,7 @@ export class AgenticMemoryIngestService {
                 }
               : {}),
             ...extraMetadata,
+            ...memoryRecordMetadata(record),
           },
           // 统一抽取已完成记忆改写，Mem0 侧直存，不再进 infer 的 LLM
           infer: false,
@@ -410,6 +465,7 @@ export class AgenticMemoryIngestService {
         sourceId,
         context,
         highSignal,
+        record,
         results,
         corrections,
         understandings,
@@ -473,36 +529,45 @@ export class AgenticMemoryIngestService {
     }
 
     const trimmed = t.length > 12_000 ? `${t.slice(0, 12_000)}...` : t;
-    // 来源角色治理（2026-11-12 称呼事故）：整段都是助手发言时只保留原文时间线，
-    // 供「你上次说过什么」按来源角色过滤后召回，绝不参与用户事实抽取。
-    const assistantOnly = classifyMemorySourceRole(trimmed) === "assistant";
+    const record = memoryRecordFromMetadata(extraMetadata) ?? createMemoryRecord({
+      actorId,
+      sourceRef: sourceId,
+      text: trimmed,
+      sourceRole: normalizeMemorySourceRole(extraMetadata?.sourceRole) ?? undefined,
+      kind: highSignal ? "fact" : "event",
+    });
+    const sourceRole = record.sourceRole;
     assertMemoryWriter("mem0", "AgenticMemoryIngestService");
-    const addResult = (await this.memory.add([{ role: "user", content: trimmed }], {
-      userId: actorId,
-      metadata: {
-        source: sourceId,
-        actorId,
-        context,
-        highSignal,
-        ...(highSignal ? { memoryDecision: "remember" } : { memoryDecision: "decay" }),
-        // 连续重要性分缺省（infer 路径无统一抽取分数）：高信号 0.7 / 低信号 0.3，
-        // 调用方可经 extraMetadata 覆盖（如 ingestHighSignal 回退路径带真实决策分）
-        importance: highSignal ? 0.7 : 0.3,
-        ...(assistantOnly ? { sourceRole: "assistant" } : {}),
-        // 主题标签（旅游等，词表零成本判定；检索侧按 tag 过滤/加权）
-        ...(topicTagsFor(trimmed) ? { topicTags: topicTagsFor(trimmed) } : {}),
-        ...extraMetadata,
+    const addResult = (await this.memory.add(
+      [{ role: sourceRole === "assistant" ? "assistant" : "user", content: trimmed }],
+      {
+        userId: actorId,
+        metadata: {
+          source: sourceId,
+          actorId,
+          context,
+          highSignal,
+          sourceRole,
+          ...(highSignal ? { memoryDecision: "remember" } : { memoryDecision: "decay" }),
+          // 连续重要性分缺省（infer 路径无统一抽取分数）：高信号 0.7 / 低信号 0.3，
+          // 调用方可经 extraMetadata 覆盖（如 ingestHighSignal 回退路径带真实决策分）
+          importance: highSignal ? 0.7 : 0.3,
+          // 主题标签（旅游等，词表零成本判定；检索侧按 tag 过滤/加权）
+          ...(topicTagsFor(trimmed) ? { topicTags: topicTagsFor(trimmed) } : {}),
+          ...extraMetadata,
+          ...memoryRecordMetadata(record),
+        },
+        // Mem0 只做存储与索引，不做抽取（2026-11-13 统一抽取语义）：
+        // 统一抽取 extractUnified 已产出决策/评分/改写文本，这里直存即可。
+        // 助手发言同样直存——它的语义由 sourceRole 标记在检索侧过滤，
+        // 不需要（也不允许）Mem0 的内置蒸馏器再"理解"一遍。
+        infer: false,
       },
-      // Mem0 只做存储与索引，不做抽取（2026-11-13 统一抽取语义）：
-      // 统一抽取 extractUnified 已产出决策/评分/改写文本，这里直存即可。
-      // 助手发言同样直存——它的语义由 sourceRole 标记在检索侧过滤，
-      // 不需要（也不允许）Mem0 的内置蒸馏器再"理解"一遍。
-      infer: false,
-    })) as unknown as { results?: Mem0WrittenItem[] };
+    )) as unknown as { results?: Mem0WrittenItem[] };
 
     const results = addResult?.results ?? [];
     if (results.length > 0) {
-      this.fireWriteHooks({ actorId, sourceId, context, highSignal, results });
+      this.fireWriteHooks({ actorId, sourceId, context, highSignal, record, results });
     }
     return results;
   }

@@ -21,6 +21,12 @@ if (getRuntimeTopologyConfig().mode === "remote") {
 // 配置 undici 连接池 / keepAlive / strictContentLength=false，
 // 从根源上减少 undici Parser 在 socket 异常关闭时抛出 AssertionError 的频率。
 setupGlobalHttpAgent();
+
+// ─── 数字人服务随后端进程拉起（2026-11-28 下沉到进程自身） ───
+// 之前钩子只挂在 dev-all / start-with-gateway 两条启动链，tsx watch 直跑
+// 后端时绕过了它们。现在任何启动路径都会带起 8765；detached + 幂等，
+// 8765 已占用时复用，无 GPU Python 时静默跳过，绝不阻断 :3000。
+startDigitalHumanAutostart();
 import {
   createExternalChatProviderFromEnv,
   resolvePrimaryExternalModelBinding,
@@ -41,6 +47,8 @@ import { initResourcePool } from "./services/resource-pool.js";
 import { initClusterRouter } from "./services/cluster-router.js";
 import { resolveEmbeddingEndpoint } from "./services/openai-embedding-client.js";
 import { stopClientUpdatePusher } from "./services/client-update-pusher.js";
+import { backgroundScheduler } from "./services/background-scheduler.js";
+import { startDigitalHumanAutostart } from "./services/digital-human-autostart.js";
 
 // server/.env + server/.env.local 已在 load-server-env.ts 模块加载时自动执行
 
@@ -230,6 +238,8 @@ const performShutdown = (): void => {
   services.webhookService.stop();
   stopClientUpdatePusher();
   stopOpenClawModelSync();
+  // 统一后台调度器：一次停掉全部已迁移的周期任务（错峰/降频调度的那些）。
+  backgroundScheduler.stopAll();
   // 重启预告（2026-11-18 手机端「老是重连」治理）：先广播一帧，再用
   // 1001(Going Away) + reason=server_restart 关闭全部 WS。客户端据此走 ~1s
   // 快重连，不会把这次发版当成网络故障按 2s→30s 指数退避干等。

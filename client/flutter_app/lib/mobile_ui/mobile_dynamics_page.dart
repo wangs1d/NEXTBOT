@@ -939,19 +939,18 @@ class MobileDynamicsPageState extends State<MobileDynamicsPage> {
 
 // —— 磨砂玻璃 —— //
 
-/// 玻璃卡的深浅两套参数（填充/描边/顶部高光/投影），对照设计稿 V3：
+/// 玻璃卡的深浅两套参数（填充/描边/投影），对照设计稿 V3：
 /// blur 26 + 半透明底（深 .45 / 浅 .48）+ 白描边 + 投影，背景保持纯色不动。
+/// 顶部高光渐变已按用户要求移除，卡片不再有发光感。
 class _GlassTone {
   const _GlassTone({
     required this.fill,
     required this.stroke,
-    required this.highlight,
     required this.shadow,
   });
 
   final Color fill;
   final Color stroke;
-  final Color highlight;
   final List<BoxShadow> shadow;
 
   factory _GlassTone.of(BuildContext context) {
@@ -960,7 +959,6 @@ class _GlassTone {
       return _GlassTone(
         fill: const Color(0xFF1B1B1F).withValues(alpha: 0.45),
         stroke: Colors.white.withValues(alpha: 0.12),
-        highlight: Colors.white.withValues(alpha: 0.10),
         shadow: <BoxShadow>[
           BoxShadow(
             color: Colors.black.withValues(alpha: 0.38),
@@ -973,7 +971,6 @@ class _GlassTone {
     return _GlassTone(
       fill: Colors.white.withValues(alpha: 0.48),
       stroke: Colors.white.withValues(alpha: 0.60),
-      highlight: Colors.white.withValues(alpha: 0.55),
       shadow: <BoxShadow>[
         BoxShadow(
           color: const Color(0xFF1E293B).withValues(alpha: 0.18),
@@ -986,7 +983,7 @@ class _GlassTone {
 }
 
 /// 磨砂玻璃卡容器。投影层在 ClipRRect 外（否则阴影被裁掉），
-/// 内层 半透明底 + 白描边 + 顶部高光渐变。
+/// 内层 半透明底 + 白描边（顶部高光渐变已移除，无发光效果）。
 class _GlassCard extends StatelessWidget {
   const _GlassCard({
     required this.child,
@@ -1016,18 +1013,6 @@ class _GlassCard extends StatelessWidget {
               color: tone.fill,
               borderRadius: BorderRadius.circular(radius),
               border: Border.all(color: tone.stroke),
-            ),
-            foregroundDecoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(radius),
-              gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                colors: <Color>[
-                  tone.highlight,
-                  tone.highlight.withValues(alpha: 0),
-                ],
-                stops: const <double>[0, 0.18],
-              ),
             ),
             child: child,
           ),
@@ -1065,17 +1050,6 @@ class _GlassAppBar extends StatelessWidget implements PreferredSizeWidget {
             decoration: BoxDecoration(
               color: tone.fill,
               border: Border(bottom: BorderSide(color: tone.stroke)),
-            ),
-            foregroundDecoration: BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                colors: <Color>[
-                  tone.highlight,
-                  tone.highlight.withValues(alpha: 0),
-                ],
-                stops: const <double>[0, 0.3],
-              ),
             ),
           ),
         ),

@@ -52,6 +52,13 @@ export type ProactiveTurnMeta = {
   notifyOn?: "mobile" | "desktop";
   /** 「通知即界面」的动作视图（与通知栏同一 intent） */
   actionIntent?: Record<string, unknown>;
+  /** 通知栏回话的应答：把 done 同时回写到原通知线程（同一条通知原地更新） */
+  notificationReply?: {
+    rootIntentId: string;
+    round: number;
+    /** 用户那句原话：客户端据此只落一条用户气泡 */
+    userText?: string;
+  };
 };
 
 export type AssistantTurnInput = {

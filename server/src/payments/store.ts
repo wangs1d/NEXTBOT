@@ -5,6 +5,7 @@ import Database from "better-sqlite3";
 import type { Database as SqliteDatabase } from "better-sqlite3";
 
 import { getDataDir } from "../config/data-dir.js";
+import { openSqlite } from "../storage/sqlite.js";
 import type {
   AuthorizationStatus,
   BizDomain,
@@ -128,10 +129,7 @@ export class UnifiedPaymentStore {
   private open(): SqliteDatabase | null {
     if (this.db) return this.db;
     try {
-      mkdirSync(dirname(this.dbPath), { recursive: true });
-      const db = new Database(this.dbPath);
-      db.pragma("journal_mode = WAL");
-      db.pragma("busy_timeout = 5000");
+      const db = openSqlite(this.dbPath);
       db.exec(`
         CREATE TABLE IF NOT EXISTS authorizations (
           id                 TEXT PRIMARY KEY,

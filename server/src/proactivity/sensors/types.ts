@@ -27,6 +27,8 @@ export type SignalStream =
   | "mail"
   | "shopping"
   | "location"
+  /** 通话记录流（2026-11-26）：phone.call_log 拉取成功后回灌，重启后可跨源检索 */
+  | "call_log"
   /**
    * 账单/快递汇总流（2026-11-13）：邮件与短信识别出的账单/快递条目统一汇入。
    *

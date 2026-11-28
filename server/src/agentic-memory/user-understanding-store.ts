@@ -326,6 +326,26 @@ export class UserUnderstandingStore {
     ].join("\n");
   }
 
+  /** 关键词遗忘当前理解；历史保留，但不再参与注入。 */
+  clearMatching(actorId: string, keyword: string): number {
+    const actor = actorId?.trim();
+    const kw = keyword?.trim().toLowerCase();
+    if (!actor || !kw) return 0;
+    const rows = this.db.prepare(
+      `SELECT id, topic, note FROM user_understanding WHERE actor_id = ? AND status = 'active'`,
+    ).all(actor) as Array<{ id: string; topic: string; note: string }>;
+    const ids = rows.filter((r) => `${r.topic} ${r.note}`.toLowerCase().includes(kw)).map((r) => r.id);
+    if (ids.length === 0) return 0;
+    const now = new Date().toISOString();
+    const update = this.db.prepare(
+      `UPDATE user_understanding SET status = 'superseded', superseded_at = ?, superseded_by = 'forget' WHERE id = ?`,
+    );
+    this.db.transaction(() => {
+      for (const id of ids) update.run(now, id);
+    })();
+    return ids.length;
+  }
+
   /** actor 级清理（memory-clear-service 级联调用，隐私闭环） */
   purgeActor(actorId: string): number {
     if (!actorId) return 0;

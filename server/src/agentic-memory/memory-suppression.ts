@@ -60,6 +60,12 @@ export class MemorySuppressionStore {
         created_at TEXT NOT NULL,
         PRIMARY KEY (actor_id, kind, key)
       );
+      CREATE TABLE IF NOT EXISTS memory_forgotten_keywords (
+        actor_id TEXT NOT NULL,
+        keyword TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (actor_id, keyword)
+      );
     `);
   }
 
@@ -121,6 +127,28 @@ export class MemorySuppressionStore {
     return new Set(rows.map((r) => r.key));
   }
 
+  /** 记录显式遗忘关键词，防止后续对话再把同一内容抽取入库。 */
+  rememberForgotten(actorId: string, keyword: string): void {
+    const actor = actorId?.trim();
+    const value = keyword?.trim().toLowerCase();
+    if (!actor || !value) return;
+    this.db.prepare(
+      `INSERT INTO memory_forgotten_keywords (actor_id, keyword, created_at) VALUES (?, ?, ?)
+       ON CONFLICT(actor_id, keyword) DO NOTHING`,
+    ).run(actor, value, new Date().toISOString());
+  }
+
+  /** 显式遗忘的关键词不允许再次从对话抽取中落库。 */
+  isForgotten(actorId: string, text: string): boolean {
+    const actor = actorId?.trim();
+    const value = text?.toLowerCase() ?? "";
+    if (!actor || !value) return false;
+    const rows = this.db.prepare(
+      `SELECT keyword FROM memory_forgotten_keywords WHERE actor_id = ?`,
+    ).all(actor) as Array<{ keyword: string }>;
+    return rows.some((row) => value.includes(row.keyword));
+  }
+
   /** 文本片段是否命中软抑制（召回时给条目打标记，不删条目） */
   textKeys(actorId: string): string[] {
     const actor = actorId?.trim();
@@ -134,7 +162,9 @@ export class MemorySuppressionStore {
   purgeActor(actorId: string): number {
     const actor = actorId?.trim();
     if (!actor) return 0;
-    return this.db.prepare(`DELETE FROM memory_suppressions WHERE actor_id = ?`).run(actor).changes;
+    const forgotten = this.db.prepare(`DELETE FROM memory_forgotten_keywords WHERE actor_id = ?`).run(actor).changes;
+    const suppressed = this.db.prepare(`DELETE FROM memory_suppressions WHERE actor_id = ?`).run(actor).changes;
+    return forgotten + suppressed;
   }
 }
 

@@ -115,6 +115,9 @@ class OngoingStatusService {
     }
   }
 
+  /// 厂商透传带来的看板帧（2026-11-26）：与 WS 事件同一入口，不做第二套拼装。
+  void applyPushedBoard(Object? raw) => _apply(raw);
+
   /// 用已缓存的那一帧原地重画（改了管家名之后不需要再打一次服务端）。
   void _redraw() {
     final Map<String, dynamic>? last = _lastBoard;
@@ -150,6 +153,10 @@ class OngoingStatusService {
           "token": action["token"]?.toString() ?? "",
           "taskId": next["taskId"]?.toString() ?? "",
         },
+      }).catchError((Object e) {
+        // 非 Android / 测试环境没有原生实现：平台异常是异步抛出的，
+        // 只在同步 try 里接会变成 unhandled async error。
+        debugPrint("[ongoing-status] 更新常驻通知失败: $e");
       }));
     } on MissingPluginException {
       /* 非 Android */

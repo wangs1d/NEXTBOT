@@ -19,9 +19,10 @@ import { readFile } from "node:fs/promises";
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import Database, { type Database as SqliteDatabase, type Statement } from "better-sqlite3";
+import type { Database as SqliteDatabase, Statement } from "better-sqlite3";
 
 import { getDataDir } from "../config/data-dir.js";
+import { openSqlite } from "../storage/sqlite.js";
 
 /**
  * 认知图 SQLite 文件路径。nodes/turns/jobs 必须落在同一个库：
@@ -58,10 +59,7 @@ export class GraphSqlitePersistence {
   constructor(jsonPath: string) {
     this.jsonPath = jsonPath;
     const dbPath = resolveMemoryDbPath(jsonPath);
-    mkdirSync(dirname(dbPath), { recursive: true });
-    this.db = new Database(dbPath);
-    this.db.pragma("journal_mode = WAL");
-    this.db.pragma("synchronous = NORMAL");
+    this.db = openSqlite(dbPath);
     for (const c of COLLECTIONS) {
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS hm_${c} (
@@ -291,10 +289,7 @@ export class TurnLedgerStore {
 
   constructor(dbPath?: string) {
     const path = dbPath ?? resolveMemoryDbPath();
-    mkdirSync(dirname(path), { recursive: true });
-    this.db = new Database(path);
-    this.db.pragma("journal_mode = WAL");
-    this.db.pragma("synchronous = NORMAL");
+    this.db = openSqlite(path);
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS hm_turns (
         id TEXT PRIMARY KEY,

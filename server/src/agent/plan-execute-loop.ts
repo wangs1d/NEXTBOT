@@ -227,6 +227,33 @@ const PLAN_SYSTEM_PROMPT = [
 
 /** 规划提示里最多列出的相关工具名数量（BM25 top-N，避免把目录整本塞进计划轮）。 */
 const PLAN_TOOL_HINTS_MAX = 16;
+const PLAN_PROFILE_MAX_FACTS = 5;
+const PLAN_PROFILE_MAX_CHARS = 320;
+
+/** 规划轮只带称呼与任务直提字段，不加载画像全文或语义召回。 */
+async function buildPlanProfileHint(actorId: string | undefined, userText: string): Promise<string> {
+  if (!actorId) return "";
+  try {
+    const [{ getMemoryComponents }, { SNAPSHOT_CONSTANT_FIELDS }] = await Promise.all([
+      import("../agentic-memory/index.js"),
+      import("../brain/profile-router.js"),
+    ]);
+    const store = getMemoryComponents().factStore;
+    if (!store) return "";
+    const matched = store.matchFactsInText(actorId, userText)
+      .filter((fact) => fact.category !== "health");
+    const fields = new Set<string>(SNAPSHOT_CONSTANT_FIELDS);
+    for (const fact of matched) fields.add(fact.field);
+    const facts = store.getActiveFacts(actorId, "user")
+      .filter((fact) => fields.has(fact.field) && fact.category !== "health")
+      .slice(0, PLAN_PROFILE_MAX_FACTS);
+    if (facts.length === 0) return "";
+    const text = facts.map((fact) => `- ${fact.field}：${fact.value}`).join("\n");
+    return truncate(text, PLAN_PROFILE_MAX_CHARS);
+  } catch {
+    return "";
+  }
+}
 
 /** 规划轮的工具名提示：BM25 只取与用户任务相关的少量名字，不传任何 schema。 */
 function planToolHints(
@@ -333,10 +360,14 @@ export async function runPlanExecuteLoop(args: RunPlanExecuteLoopArgs): Promise<
 
   await emitPhase(onPhaseStatus, onDelta, "🔍 正在分析任务，制定执行计划…");
 
+  const planProfileHint = await buildPlanProfileHint(toolCtx?.actorId, userText);
   const planUserTurn: ChatUserTurn = {
     text: [
       "用户任务：",
       truncate(userText, 8000),
+      ...(planProfileHint
+        ? ["", "用户背景（仅用于拆分步骤，不要复述到 JSON）：", planProfileHint]
+        : []),
       "",
       "请只输出**一个合法 JSON 对象**（不要用 Markdown 代码围栏，不要其它说明文字），格式如下：",
       '{"goal":"用一句话概括用户要达成的结果","steps":[{"id":"1","intent":"该步要做什么","successCriteria":"如何判定该步完成","suggestedTools":[]}]}',

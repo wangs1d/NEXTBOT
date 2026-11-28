@@ -16,7 +16,7 @@ import { mkdirSync } from "node:fs";
 import { open, readFile, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import Database from "better-sqlite3";
+import { openSqlite } from "../storage/sqlite.js";
 import type { Database as SqliteDatabase } from "better-sqlite3";
 
 import { buildContentMap, renderOutline } from "../external-model/content-map.js";
@@ -64,8 +64,7 @@ export class SandboxWorkspaceIndex {
     try {
       const file = dbPath ?? getSandboxIndexDbPath();
       mkdirSync(dirname(file), { recursive: true });
-      this.db = new Database(file);
-      this.db.pragma("journal_mode = WAL");
+      this.db = openSqlite(file);
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS sandbox_file_outline (
           ws_path TEXT NOT NULL,

@@ -26,6 +26,8 @@ type WalRawEntry = {
   context?: string;
   /** 出口补写的本轮媒体卡（2026-11-09）；旧行/无媒体轮缺省。 */
   mediaCards?: unknown[];
+  /** 明日预览结构化卡片（2026-11-27）；旧行/非预览轮缺省。 */
+  eveningDigest?: unknown;
   /** 出口补写的真·分绿泡对账数组（2026-11-13）；旧行/非分泡轮缺省。 */
   bubbles?: Array<{ id?: unknown; text?: unknown }>;
   /** 出口补写的用户照片 URL（2026-11-18）；旧行/无图轮缺省。 */
@@ -40,6 +42,8 @@ export type WalTranscriptTurn = {
   clientMessageId?: string;
   /** 本轮媒体卡（照片/视频卡原样透传，供历史回填重建图片气泡）。 */
   mediaCards?: unknown[];
+  /** 明日预览结构化卡片，供超长 push / 换设备历史还原。 */
+  eveningDigest?: Record<string, unknown>;
   /** 用户随消息发出的照片 URL（2026-11-18），供历史回填真实缩略图。 */
   userImageUrls?: string[];
   /**
@@ -221,6 +225,13 @@ export async function readActorTranscriptFromWal(
       if (entry.messageId?.trim()) turn.clientMessageId = entry.messageId.trim();
       if (Array.isArray(entry.mediaCards) && entry.mediaCards.length > 0) {
         turn.mediaCards = entry.mediaCards;
+      }
+      if (
+        entry.eveningDigest &&
+        typeof entry.eveningDigest === "object" &&
+        !Array.isArray(entry.eveningDigest)
+      ) {
+        turn.eveningDigest = entry.eveningDigest as Record<string, unknown>;
       }
       if (Array.isArray(entry.userImageUrls) && entry.userImageUrls.length > 0) {
         turn.userImageUrls = entry.userImageUrls.filter(

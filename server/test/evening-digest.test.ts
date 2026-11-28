@@ -97,7 +97,6 @@ function weatherMock() {
       peakRainPct: 90,
       clothingAdvice: "",
       hourlyForecast: [],
-      summaryLine: "",
       daily: [
         { date: dayKey(new Date()), weatherCode: 65, weatherText: "大雨", minC: 18, maxC: 24, rainPct: 90 },
         { date: dayKey(tomorrow), weatherCode: 95, weatherText: "雷暴", minC: 17, maxC: 23, rainPct: 85 },
@@ -404,7 +403,6 @@ test("晚间 digest：无天气位置偏好时按定位兜底取明日天气", a
         peakRainPct: 20,
         clothingAdvice: "",
         hourlyForecast: [],
-        summaryLine: "",
         daily: [
           { date: dayKey(new Date()), weatherCode: 3, weatherText: "阴", minC: 16, maxC: 22, rainPct: 20 },
           { date: dayKey(tomorrow), weatherCode: 61, weatherText: "小雨", minC: 15, maxC: 19, rainPct: 80 },
@@ -484,7 +482,6 @@ test("晨报预警联动：预警 + 当日有日程 → 回调一次（同日去
       peakRainPct: 0,
       clothingAdvice: "",
       hourlyForecast: [],
-      summaryLine: "",
     }),
   };
   const weatherPrefsService = {
@@ -541,7 +538,6 @@ test("晨报预警联动：无预警或无日程 → 不触发", async () => {
           peakRainPct: 0,
           clothingAdvice: "",
           hourlyForecast: [],
-          summaryLine: "",
         }),
       } as never,
       weatherPrefsService: {

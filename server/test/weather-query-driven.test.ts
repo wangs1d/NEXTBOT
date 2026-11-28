@@ -2,7 +2,7 @@
  * 天气查询「用户原话驱动」契约（2026-11-21 根治）。
  *
  * 背景：旧实现把「查哪天」交给模型填 focus/days，模型漏传或复合路径丢参数时，
- * 回执退化成「今天+明天」两套：卡片取今日 todayRangeC、正文读 summaryLine 的明日段，
+ * 回执退化成「今天+明天」两套：卡片取今日 todayRangeC、正文复述模板句的明日段，
  * 同一条回复出现两个温度区间打架（用户实测「明天天气」出 9-16 与 9-14）。
  *
  * 根治：服务端读权威意图源 context.userText，确定性决定查哪天，模型参数降级为兜底。
@@ -59,7 +59,6 @@ function fakeWeatherWithSpy(): { svc: WeatherService; daysSeen: number[] } {
     ): Promise<any> => {
       daysSeen.push(days ?? 2);
       return {
-        summaryLine: "兴义 当前约 11°C，晴；今日约 9–16°C。 明日多云，9–14°C。",
         clothingAdvice: "长袖",
         currentTempC: 11,
         apparentTempC: 10,
@@ -115,9 +114,9 @@ test("问「明天天气」：即使模型啥参数都不传，也只查必要�
   assert.equal(result.focusDay, "tomorrow", "明日聚焦回执");
   assert.equal(daysSeen[0], 2, "明天查 2 天（今日+明日），但不把今日塞进回执");
   assert.equal(result.todayRangeC, undefined, "回执绝不能带今日区间——那是打架的源头");
-  assert.match(String(result.summary), /明日多云，9–14°C/, "summary 只有明日");
-  assert.doesNotMatch(String(result.summary), /今日约/, "summary 不得带今日段");
+  assert.equal(result.summary, undefined, "回执不带服务端预拼整句，正文由模型按字段实时生成");
   assert.equal(result.tomorrowRangeC, "9°–14°");
+  assert.equal(result.weatherText, "多云", "事实仍在结构化字段里");
   // 卡片只出一组温度
   const card = buildToolCard("weather.get_local", result);
   const temps = (card?.items ?? []).filter((i: any) => String(i.text).includes("气温"));
@@ -133,11 +132,11 @@ test("问「明天天气」：模型乱传 days=7 也以原话为准，不被带
   assert.equal(result.todayRangeC, undefined);
 });
 
-test("问「今天天气」：days=1，回执 summary 无明日段", async () => {
+test("问「今天天气」：days=1，回执不带预拼整句", async () => {
   const { result, daysSeen } = await exec("今天天气热不热");
   assert.equal(daysSeen[0], 1);
   assert.equal(result.todayRangeC, "9°–16°");
-  // 桩 summaryLine 固定带明日，但 days=1 的真实服务不会有；这里只断言走单日查询路径
+  assert.equal(result.summary, undefined, "今日回执也不带服务端拼好的整句");
   assert.equal(result.focusDay, undefined, "今日走默认回执，无需特殊 focus 标记");
 });
 

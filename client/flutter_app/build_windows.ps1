@@ -200,7 +200,13 @@ function Invoke-BuildAndDeploy {
   # （仅大小写不同）时，PowerShell 5.1 的 Start-Process 构造子进程环境字典
   # 会抛「已添加了具有相同键的项」，编译已成功却把整次构建判成失败
   # （2026-11-05 实证）。robocopy 退出码 0-7 均为成功，>=8 才是失败。
-  & robocopy.exe $src $dest /MIR /R:1 /W:1 /NFL /NDL /NJH /NJS
+  # /XD runtime（2026-11-27）：windows_dist\Release 已由「无 runtime 的 cloud 壳」
+  # 升级为「app + runtime 的完整本地版」——自启链（Run 键 / app-launcher.mjs /
+  # launch-desktop-app.ps1）三处都指向这个固定路径，Finder 的 isBundled 也认这里的
+  # runtime\node.exe。/MIR 会把源里没有的 runtime 当多余文件删掉，把本地版打回
+  # cloud 壳 → 自启拉不起后端。排除 runtime 目录，让镜像只管 app 产物。
+  # runtime 内容由 build-installer.ps1 在 staging 组装后同步（见该脚本 [3.9] 之后）。
+  & robocopy.exe $src $dest /MIR /XD runtime /R:1 /W:1 /NFL /NDL /NJH /NJS
   if ($LASTEXITCODE -ge 8) {
     Write-Error "robocopy to $dest failed (code $LASTEXITCODE)"
   }
@@ -221,3 +227,10 @@ if ($Configuration -eq 'Debug' -or $Configuration -eq 'Both') {
 
 Write-Host ''
 Write-Host ('Dist root: ' + $DistRoot)
+
+# 显式成功退出：脚本的最后一条原生命令是 robocopy（0-7 都算成功，见上），其退出码
+# 会留在 $LASTEXITCODE 里被上游 build-installer.ps1 的「flutter build failed
+# (exit=...)」检查误判（2026-11-27 实证：构建与部署全绿，仅因 robocopy=1 被判失败，
+# 只能 -SkipClientBuild 重跑后半段）。能走到这里说明所有步骤已通过 Assert-FlutterOk
+# 与 robocopy 检查，此处必然是成功路径。
+exit 0

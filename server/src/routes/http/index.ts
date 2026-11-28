@@ -70,7 +70,6 @@ import { registerV1GatewayRoutes } from "./v1-gateway.js";
 import { registerBriefingTestRoutes, registerEveningDigestTestRoutes } from "./briefing-test.js";
 import { registerBriefingTtsRoutes } from "./briefing-tts.js";
 import { registerVoiceRealtimeRoutes } from "./voice-realtime.js";
-import { registerVoiceprintRoutes } from "./voiceprint.js";
 import { registerUserPreferencesRoutes } from "./user-preferences.js";
 import { registerFeedbackRoutes } from "./feedback.js";
 import { registerAdminAuthRoutes } from "./admin-session-auth.js";
@@ -362,8 +361,6 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerHealthRhythmRoutes(app);
   // 用户头像（自包含，无 deps）：上传/查询/静态拉流
   registerUserAvatarRoutes(app);
-  // 声纹注册/验证（首启向导 + 语音对话说话人闸；引擎本地 ONNX，缺失时优雅降级）
-  registerVoiceprintRoutes(app);
   registerPaymentGuardrailRoutes(app);
   // 统一支付模块（授权页 / 收银台页 / 意图与授权 API；服务未装配时端点自报 503）
   registerUnifiedPaymentRoutes(app);

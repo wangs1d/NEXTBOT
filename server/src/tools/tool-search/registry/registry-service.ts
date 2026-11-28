@@ -67,7 +67,9 @@ export type RegisterInput = {
   version: string;
   /** 冷启动基础分（0~1），默认 0.5 */
   base_score?: number;
-  embedding: number[];
+  embeddings?: number[][];
+  /** 单向量注册输入仅用于兼容旧调用方，服务会规范化为 embeddings。 */
+  embedding?: number[];
   level2: Level2CapabilityMeta;
   level3: Level3Schema;
   tenant_id: string;
@@ -177,7 +179,12 @@ export class RegistryService {
       version: input.version,
       status: "online" as ResourceStatus,
       base_score: baseScore,
-      embedding: input.embedding,
+      embeddings:
+        input.embeddings && input.embeddings.length > 0
+          ? input.embeddings
+          : input.embedding
+            ? [input.embedding]
+            : [],
       // HTTP 注册面（管理/查询用途）无真实时延数据，用域无关默认值；生产检索
       // 路径的 adaptive-catalog 会按域估算（inferLatencyMs）
       latency_ms: 20,

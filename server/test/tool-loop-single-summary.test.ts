@@ -451,6 +451,45 @@ test("E. 探测升级：NEED_MORE_TOOLS → replan 继续取数 → 最终汇总
   assert.equal(requests[3].tools, undefined, "最终汇总请求不带 schema");
 });
 
+test("E2. 探测轮旁白 + 标记不在首行：唯一出口拦下，可见正文为空仍升级 replan", async () => {
+  // 2026-11-26 真机泄漏形态：模型没按逃生指令把标记落在首行，先念了一句工具旁白。
+  // 汇总通道当时直推原始 delta，标记与旁白同时进了气泡和落库正文。
+  resetLlmUsageAuditForTest();
+
+  const { client, requests } = makeFakeClient([
+    // wave 0（PLAN）：搜索
+    toolCallChunks([{ id: "call_e2_1", name: "bench_search", args: { query: "黄金 报价" } }]),
+    // 探测：旁白句 + 第二行才是标记
+    textChunks("先补查询：bench_search quote XAUUSD、bench_search quote XAGUSD。\nNEED_MORE_TOOLS"),
+    // wave 1（REPLAN）：继续取数
+    toolCallChunks([{ id: "call_e2_2", name: "bench_fetch", args: { query: "https://example.com/gold" } }]),
+    // 探测：通过 → 最终回答
+    textChunks(FINAL_ANSWER_NEW),
+  ]);
+
+  let streamed = "";
+  const { ctx, executed } = makeCtx();
+  const out = await streamCompletionWithTools(
+    client,
+    "deepseek-chat",
+    makeMessages() as never,
+    (d: string) => {
+      streamed += d;
+    },
+    ctx,
+    { tools: FAKE_TOOLS as never, maxRounds: 4, audit: { sessionId: "bench-escape-leak" } },
+  );
+
+  assert.ok(!streamed.includes("NEED_MORE_TOOLS"), "升级标记不得出现在前端流任何位置");
+  assert.ok(!streamed.includes("bench_search"), "工具旁白不得出现在前端流");
+  assert.ok(!out.includes("NEED_MORE_TOOLS"), "定稿同样不含标记（定稿 = 放出）");
+  assert.ok(!out.includes("bench_search"), "定稿同样不含旁白");
+  assert.equal(out, FINAL_ANSWER_NEW, "收尾答案原样定稿");
+  assert.equal(executed.length, 2, "旁白轮零可见正文 → 探测判为结果不足，升级 replan");
+  assert.equal(requests[1].tools, undefined, "探测请求不带 schema");
+  assert.ok(Array.isArray(requests[2].tools), "replan 请求带 schema");
+});
+
 test("F. 轮内去重缓存：同工具+同参数的重复调用只真实执行 1 次", async () => {
   resetLlmUsageAuditForTest();
 

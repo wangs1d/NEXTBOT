@@ -16,9 +16,9 @@
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import Database from "better-sqlite3";
 import type { Database as SqliteDatabase } from "better-sqlite3";
 
+import { openSqlite } from "../storage/sqlite.js";
 import { getAgenticMemoryDir } from "./env.js";
 
 export function getAgenticSqlitePath(): string {
@@ -28,14 +28,10 @@ export function getAgenticSqlitePath(): string {
   );
 }
 
-/** 打开（或创建）agentic-memory SQLite 库：WAL 模式 + 外键约束。 */
+/** 打开（或创建）agentic-memory SQLite 库：WAL + NORMAL + 外键（统一 opener，热库档）。 */
 export function openAgenticSqlite(path?: string): SqliteDatabase {
   const file = path ?? getAgenticSqlitePath();
-  mkdirSync(dirname(file), { recursive: true });
-  const db = new Database(file);
-  db.pragma("journal_mode = WAL");
-  db.pragma("foreign_keys = ON");
-  return db;
+  return openSqlite(file, { foreignKeys: true });
 }
 
 /** JSON 列序列化/反序列化（null 安全）。 */

@@ -287,6 +287,48 @@ test("NarrativeMemoryFacade：注入 bridge 后写入与召回都走桥接", asy
   });
 });
 
+test("NarrativeMemoryFacade：sourceRole 同时进入认知图与 Mem0", async () => {
+  await withBridgeEnv(async ({ graph, bridge, ingest, calls, retrievalState }) => {
+    const facade = new NarrativeMemoryFacade(ingest, makeFakeRetrieval(retrievalState), null, graph, bridge);
+
+    await facade.writeDecided("user-role", "周末去公园散步", "chat:timeline", {
+      context: "main",
+      highSignal: true,
+      sourceRole: "assistant",
+    });
+
+    assert.equal(calls.add.length, 1);
+    assert.equal(calls.add[0]!.metadata.sourceRole, "assistant");
+    assert.equal(graph.getAllNodes("user-role")[0]!.metadata?.sourceRole, "assistant");
+  });
+});
+
+test("searchFused：结构化角色优先于中性正文，追问助手发言时才放行", async () => {
+  await withBridgeEnv(async ({ bridge, retrievalState }) => {
+    retrievalState.candidates = [
+      {
+        content: "周末去公园散步",
+        score: 0.9,
+        highSignal: true,
+        sourceRole: "assistant",
+      },
+      {
+        content: "我住在兴义",
+        score: 0.8,
+        highSignal: true,
+        sourceRole: "user",
+      },
+    ];
+
+    const normal = await bridge.searchFused("user-1", "周末去哪 我住哪");
+    assert.ok(normal.some((item) => item.content.includes("兴义")));
+    assert.ok(!normal.some((item) => item.content.includes("公园")));
+
+    const asked = await bridge.searchFused("user-1", "你上次说过周末去哪吗");
+    assert.ok(asked.some((item) => item.content.includes("公园") && item.sourceRole === "assistant"));
+  });
+});
+
 test("writeUnified：两侧都失败时 ok=false，调用方可据此保留 journal 原文", async () => {
   const dir = await mkdtemp(join(tmpdir(), "memory-bridge-fail-"));
   const savedEnv = new Map(LLM_ENV_KEYS.map((k) => [k, process.env[k]] as const));

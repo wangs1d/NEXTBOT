@@ -3,21 +3,28 @@ import "dart:async";
 import "package:flutter/material.dart";
 import "package:url_launcher/url_launcher.dart";
 
+import "../core/services/alarm_access_service.dart";
 import "../core/services/call_log_access_service.dart";
 import "../core/services/model_api_tester.dart";
 import "../core/services/sms_access_service.dart";
+import "../features/alarm/alarm_engine.dart";
 import "mobile_theme.dart";
 
 /// 手机端「能力连接」页。
 ///
-/// 三个连接器统一成独立卡片（不拼成大列表），每张卡片带一圈向内收的呼吸光：
+/// 连接器统一成独立卡片（不拼成大列表），每张卡片带一圈淡白光晕：
 /// - 短信 / 通话记录：点「连接」弹 Android 系统授权框，授权后转「已连接」。
 ///   这两项是系统权限，断开只能去系统设置，所以页脚写明。
+/// - 闹钟：Android 12+ 的精确闹钟调度权（系统特殊权限，弹窗拉不起来，只能跳
+///   系统「闹钟和提醒」设置页）。授权回前台重查到状态翻转时，让 [AlarmEngine]
+///   全量重排——否则此前降级成 ±10min 窗口的存量闹钟不会升级成精确闹钟。
+///   卡片内另给电池优化 / 全屏意图可靠性开关（不影响能否设钟，只影响准点率）。
 /// - QQ 邮箱：当前走 IMAP 授权码，点「连接」在卡片内就地展开授权面板；
 ///   后续接 OAuth 的邮箱只需把展开面板换成拉起系统浏览器授权，卡片结构不变。
 ///
-/// 已连接状态回显依赖 [SmsAccessService] / [CallLogAccessService] 与
-/// [MailWatchApi.status]；从系统设置或浏览器返回时由生命周期回调重查。
+/// 已连接状态回显依赖 [SmsAccessService] / [CallLogAccessService] /
+/// [AlarmAccessService] 与 [MailWatchApi.status]；从系统设置或浏览器返回时由
+/// 生命周期回调重查。
 class MobileCapabilitiesPage extends StatefulWidget {
   const MobileCapabilitiesPage({super.key});
 
@@ -26,13 +33,7 @@ class MobileCapabilitiesPage extends StatefulWidget {
 }
 
 class _MobileCapabilitiesPageState extends State<MobileCapabilitiesPage>
-    with WidgetsBindingObserver, SingleTickerProviderStateMixin {
-  /// 呼吸灯节拍：所有卡片共用一条动画，节流且视觉统一。
-  late final AnimationController _breath = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 2600),
-  )..repeat(reverse: true);
-
+    with WidgetsBindingObserver {
   final TextEditingController _mailPass = TextEditingController();
 
   bool _ready = false;
@@ -42,6 +43,12 @@ class _MobileCapabilitiesPageState extends State<MobileCapabilitiesPage>
   bool _callForever = false;
   bool _smsBusy = false;
   bool _callBusy = false;
+
+  /// 闹钟权限（精确闹钟调度权）：platform 不支持时卡片显示「无需授权」。
+  bool _alarmSupported = false;
+  bool _alarmGranted = false;
+  bool _alarmBusy = false;
+  bool _alarmBatteryIgnored = true;
 
   Map<String, dynamic> _mailStatus = <String, dynamic>{};
   bool _mailExpanded = false;
@@ -60,7 +67,6 @@ class _MobileCapabilitiesPageState extends State<MobileCapabilitiesPage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _breath.dispose();
     _mailPass.dispose();
     super.dispose();
   }
@@ -77,16 +83,28 @@ class _MobileCapabilitiesPageState extends State<MobileCapabilitiesPage>
     final bool call = await CallLogAccessService.instance.isGranted();
     final bool callForever =
         await CallLogAccessService.instance.isPermanentlyDenied();
+    final bool alarmSupported = AlarmAccessService.instance.isSupported;
+    final bool alarm = await AlarmAccessService.instance.isGranted();
+    final bool alarmBattery =
+        await AlarmAccessService.instance.isBatteryOptimizationIgnored();
     final Map<String, dynamic> mail = await MailWatchApi.status();
     if (!mounted) return;
+    // 权限从未授予翻到已授予（用户刚在系统设置里开了精确闹钟）→ 必须全量
+    // 重排：存量闹钟此前被原生降级成 setWindow(±10min)，不重排就一直不准。
+    // 只在「本次进入页面时未授予、这次查到已授予」时触发，避免每次回前台空跑。
+    final bool alarmJustGranted = _ready && !_alarmGranted && alarm;
     setState(() {
       _smsGranted = sms;
       _smsForever = smsForever;
       _callGranted = call;
       _callForever = callForever;
+      _alarmSupported = alarmSupported;
+      _alarmGranted = alarm;
+      _alarmBatteryIgnored = alarmBattery;
       _mailStatus = mail;
       _ready = true;
     });
+    if (alarmJustGranted) unawaited(AlarmEngine.instance.rescheduleAll());
   }
 
   Future<void> _connectSms() async {
@@ -117,6 +135,25 @@ class _MobileCapabilitiesPageState extends State<MobileCapabilitiesPage>
       _callForever = forever;
     });
     if (!ok && forever) await CallLogAccessService.instance.openSettings();
+  }
+
+  /// 闹钟授权：精确闹钟是系统特殊权限，无法用运行时弹窗申请，只能跳系统
+  /// 「闹钟和提醒」设置页。返回后由 didChangeAppLifecycleState → _refresh 重查；
+  /// 这里也主动查一次，覆盖部分机型返回时不回调 resumed 的情况。
+  Future<void> _connectAlarm() async {
+    if (_alarmBusy) return;
+    setState(() => _alarmBusy = true);
+    await AlarmAccessService.instance.openSettings();
+    await _refresh();
+    if (!mounted) return;
+    setState(() => _alarmBusy = false);
+  }
+
+  /// 可靠性增强：Android 14+ 全屏意图 / 电池优化白名单。与能否设钟无关，
+  /// 只决定锁屏能否响、后台会不会被冻结，故放在卡片内次级入口，不阻塞主授权。
+  Future<void> _openAlarmReliability() async {
+    await AlarmAccessService.instance.openReliabilitySettings();
+    await _refresh();
   }
 
   Future<void> _saveMailPass() async {
@@ -221,6 +258,22 @@ class _MobileCapabilitiesPageState extends State<MobileCapabilitiesPage>
           const SizedBox(height: 12),
           _connectorCard(
             p: p,
+            icon: Icons.alarm_on_outlined,
+            iconColor: p.online,
+            title: "闹钟",
+            desc: !_alarmSupported
+                ? "当前设备无需单独授权，提醒由本地通知承载"
+                : _alarmGranted
+                    ? "精确闹钟已开启，Agent 可帮你设定时叫醒，到点真响铃"
+                    : "授权后 Agent 才能设到点真响的闹钟，否则只会弹普通提醒",
+            trailing: _alarmTrailing(p),
+            body: _alarmSupported && _alarmGranted
+                ? _alarmReliabilityPanel(p)
+                : null,
+          ),
+          const SizedBox(height: 12),
+          _connectorCard(
+            p: p,
             icon: Icons.mail_outline,
             iconColor: p.link,
             title: "邮箱",
@@ -238,7 +291,7 @@ class _MobileCapabilitiesPageState extends State<MobileCapabilitiesPage>
           ),
           const SizedBox(height: 16),
           Text(
-            "短信、通话记录为系统权限，断开需前往系统设置。",
+            "短信、通话记录、闹钟均为系统权限，断开或关闭需前往系统设置。",
             style: TextStyle(
               fontSize: 12,
               height: 1.45,
@@ -313,7 +366,81 @@ class _MobileCapabilitiesPageState extends State<MobileCapabilitiesPage>
     );
   }
 
-  /// 单张连接器卡片：独立圆角卡片 + 向内呼吸光。
+  /// 闹钟卡片右侧状态区：不支持平台显示「无需授权」；支持平台沿用通用连接器
+  /// 状态（未就绪转圈 / 已连接绿勾 / 未连接「连接」按钮）。
+  Widget _alarmTrailing(MobilePalette p) {
+    if (!_alarmSupported) {
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Icon(Icons.info_outline, size: 14, color: p.textMuted),
+          const SizedBox(width: 4),
+          Text("无需授权",
+              style: TextStyle(fontSize: 12, color: p.textMuted)),
+        ],
+      );
+    }
+    return _trailing(
+      p,
+      granted: _alarmGranted,
+      busy: _alarmBusy,
+      onTap: _connectAlarm,
+    );
+  }
+
+  /// 闹钟已授权后展开的可靠性开关（电池优化白名单 / 全屏意图）。
+  ///
+  /// 这两项不决定「能否设闹钟」，只决定锁屏能否响、后台会不会被冻结，所以
+  /// 收在卡片内次级面板，不让主授权入口变复杂。Android 14+ 的跳转由原生桥
+  /// 先走全屏意图、否则走电池优化白名单，这里只回显「是否已忽略电池优化」。
+  Widget _alarmReliabilityPanel(MobilePalette p) {
+    final bool ok = _alarmBatteryIgnored;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Divider(height: 1, color: p.divider),
+          const SizedBox(height: 10),
+          Row(
+            children: <Widget>[
+              Icon(
+                ok ? Icons.check_circle_outline : Icons.battery_saver_outlined,
+                size: 15,
+                color: ok ? p.online : p.textMuted,
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  ok ? "后台运行不受限，闹钟更准点" : "电池优化开启中，后台可能延迟响铃",
+                  style: TextStyle(fontSize: 12.5, color: p.textSecondary),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton(
+              onPressed: () => unawaited(_openAlarmReliability()),
+              style: TextButton.styleFrom(
+                minimumSize: const Size(0, 30),
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                foregroundColor: p.link,
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              child: Text(
+                ok ? "检查全屏意图设置" : "忽略电池优化，提升准点率",
+                style: const TextStyle(fontSize: 12.5),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 单张连接器卡片：独立圆角卡片 + 淡白光晕（静态，无动画）。
   Widget _connectorCard({
     required MobilePalette p,
     required IconData icon,
@@ -323,9 +450,8 @@ class _MobileCapabilitiesPageState extends State<MobileCapabilitiesPage>
     required Widget trailing,
     Widget? body,
   }) {
-    return _BreathingCard(
+    return _GlowCard(
       palette: p,
-      animation: _breath,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
@@ -496,71 +622,40 @@ class _MobileCapabilitiesPageState extends State<MobileCapabilitiesPage>
   }
 }
 
-/// 带向内呼吸光的圆角卡片。
+/// 带淡白光晕的圆角卡片（静态）。
 ///
-/// 光不是外发光：外层 `RadialGradient` 从中心透明到边缘着色，被圆角裁切后
-/// 呈现「四周向内渗光」的效果；外框用同色细描边收边，呼吸只改透明度与
-/// 模糊半径，不做布局动画。
-class _BreathingCard extends StatelessWidget {
-  const _BreathingCard({
+/// 不做任何动画：一层柔和的白色外发光 + 近乎不可见的白色细描边，
+/// 形成卡片「浮起一点白光」的效果。
+class _GlowCard extends StatelessWidget {
+  const _GlowCard({
     required this.palette,
-    required this.animation,
     required this.child,
   });
 
   final MobilePalette palette;
-  final Animation<double> animation;
   final Widget child;
 
   @override
   Widget build(BuildContext context) {
     final BorderRadius radius =
         BorderRadius.circular(MobileTheme.bubbleRadius);
-    return AnimatedBuilder(
-      animation: animation,
-      builder: (BuildContext context, _) {
-        final double t = Curves.easeInOut.transform(animation.value);
-        return Container(
-          decoration: BoxDecoration(
-            color: palette.surface,
-            borderRadius: radius,
-            border: Border.all(
-              color: palette.accent.withValues(alpha: 0.05 + 0.07 * t),
-            ),
-            boxShadow: <BoxShadow>[
-              BoxShadow(
-                color: palette.accent.withValues(alpha: 0.035 + 0.05 * t),
-                blurRadius: 18 + 8 * t,
-                spreadRadius: -2,
-              ),
-            ],
+    return Container(
+      decoration: BoxDecoration(
+        color: palette.surface,
+        borderRadius: radius,
+        border: Border.all(color: Colors.white.withValues(alpha: 0.06)),
+        boxShadow: <BoxShadow>[
+          BoxShadow(
+            color: Colors.white.withValues(alpha: 0.08),
+            blurRadius: 14,
+            spreadRadius: -2,
           ),
-          child: ClipRRect(
-            borderRadius: radius,
-            child: Stack(
-              children: <Widget>[
-                Positioned.fill(
-                  child: IgnorePointer(
-                    child: DecoratedBox(
-                      decoration: BoxDecoration(
-                        gradient: RadialGradient(
-                          radius: 1.02,
-                          colors: <Color>[
-                            palette.accent.withValues(alpha: 0),
-                            palette.accent.withValues(alpha: 0.03 + 0.05 * t),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-                child,
-              ],
-            ),
-          ),
-        );
-      },
-      child: child,
+        ],
+      ),
+      child: ClipRRect(
+        borderRadius: radius,
+        child: child,
+      ),
     );
   }
 }

@@ -1487,7 +1487,7 @@ export function splitMediaCardsByTopic(
 export function hideUnrenderedMediaCardsFromLibrary(removed: MediaCardItem[]): void {
   for (const c of removed) {
     const url = (c.thumbnailUrl || c.mediaUrl || "").trim();
-    const m = /^\/agent\/images\/([a-zA-Z0-9_-]+)\/(\d+-[a-f0-9]{8}\.png)$/.exec(url);
+    const m = /^\/agent\/images\/([a-zA-Z0-9_-]+)\/(\d+-[a-f0-9]{8}\.(?:png|webp))$/.exec(url);
     if (!m) continue;
     try {
       setMediaHidden(m[1], "images", m[2], true);

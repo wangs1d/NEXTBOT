@@ -1,14 +1,16 @@
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
-import { Bm25Index, buildToolSearchText, buildCharacterTrigrams, tokenize } from "./bm25.js";
+import { Bm25Index, buildToolSearchText, buildCharacterTrigrams } from "./bm25.js";
+import { negativeMatch } from "./retrieval/hybrid-retrieval.js";
 import { getToolSearchConfig } from "./env.js";
 import { getToolIntentMetadata } from "./intent-metadata.js";
 import { ToolEmbeddingIndex } from "./tool-embedding-index.js";
 import {
-  buildEmbeddingInput,
+  buildEmbeddingViews,
   ensureToolEmbeddings,
   getToolEmbeddingsForCatalog,
   isEmbeddingSearchEnabled,
+  type ToolEmbeddingViewInput,
 } from "./tool-embedding.js";
 
 
@@ -31,8 +33,9 @@ export type DeferredToolEntry = {
   negativeExamples: string[];
   /** 预先构建的字符 trigram 集合，避免每次 search 都重算 */
   trigramSet: Set<string>;
-  /** 工具用于 embedding 召回的"语义输入"（与 searchText 不同，更聚焦语义） */
+  /** 定义视图文本，保留给诊断与旧脚本；正式召回使用 embeddingViews。 */
   embeddingInput: string;
+  embeddingViews: ToolEmbeddingViewInput[];
 };
 
 /** 单轮对话内复用 BM25 索引与名称查找表，避免每次 tool_search 全量重建。 */
@@ -90,6 +93,7 @@ export function buildDeferredCatalog(deferredTools: ChatCompletionTool[]): Defer
       parameters: fn.parameters,
     });
     const metadata = getToolIntentMetadata(fn.name);
+    const embeddingViews = buildEmbeddingViews(tool);
     return {
       registryName: fn.name,
       tool,
@@ -101,7 +105,9 @@ export function buildDeferredCatalog(deferredTools: ChatCompletionTool[]): Defer
       examples: metadata.examples ?? [],
       negativeExamples: metadata.negativeExamples ?? [],
       trigramSet: buildCharacterTrigrams(text),
-      embeddingInput: buildEmbeddingInput(tool),
+      embeddingInput:
+        embeddingViews.find((view) => view.kind === "definition")?.text ?? "",
+      embeddingViews,
     };
   });
 
@@ -133,7 +139,7 @@ export function buildDeferredCatalog(deferredTools: ChatCompletionTool[]): Defer
     if (!embeddingReady) {
       const missing = entries
         .filter((e) => !getToolEmbeddingsForCatalog([e.registryName]).size)
-        .map((e) => ({ registryName: e.registryName, searchText: e.embeddingInput || e.searchText }));
+        .map((e) => ({ registryName: e.registryName, embeddingViews: e.embeddingViews }));
       if (missing.length > 0) {
         void ensureToolEmbeddings(missing).then((stats) => {
           if (stats.computed > 0) {
@@ -202,8 +208,7 @@ export type SearchDeferredOptions = {
   includeSchema?: boolean;
   /**
    * 查询的 embedding 向量（已归一化或未归一化均可）。
-   * 提供时启用 hybrid 召回：BM25/overlap/trigram/registryName 4 路 + embedding 第 5 路 RRF 融合。
-   * 不提供时降级为纯 BM25 召回。
+   * 提供时启用 hybrid 召回；不提供时降级为统一校准词面召回。
    */
   queryVector?: number[] | Float32Array;
 };
@@ -249,32 +254,18 @@ function searchWithinTools(
 }
 
 /**
- * 意图先验（legacy 兜底通道的正/负例打分，与 adaptive 主通道 negative_match 同源
- * 数据：intent-metadata 的 aliases/examples 加分、negativeAliases/negativeExamples 减分）。
+ * 兜底通道只保留显式负例护栏；正向词面证据已由统一词面融合器评分。
  */
 function applyIntentPrior(
   entry: DeferredToolEntry,
   query: string,
   baseScore: number,
 ): number {
-  const queryTokens = new Set(tokenize(query));
-  let score = baseScore;
-
-  for (const phrase of [...entry.searchAliases, ...entry.examples]) {
-    const tokens = tokenize(phrase);
-    if (tokens.length === 0) continue;
-    const overlap = tokens.filter((token) => queryTokens.has(token)).length;
-    if (overlap > 0) score += Math.min(1.2, overlap * 0.18);
-  }
-
-  for (const phrase of [...entry.negativeAliases, ...entry.negativeExamples]) {
-    const tokens = tokenize(phrase);
-    if (tokens.length === 0) continue;
-    const overlap = tokens.filter((token) => queryTokens.has(token)).length;
-    if (overlap > 0) score -= Math.min(1.5, overlap * 0.3);
-  }
-
-  return score;
+  const penalty = negativeMatch(
+    [...entry.negativeAliases, ...entry.negativeExamples],
+    query,
+  );
+  return Math.max(0, baseScore - penalty * 0.35);
 }
 
 export function describeDeferredTool(

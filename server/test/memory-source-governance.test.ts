@@ -9,6 +9,7 @@ import { MemoryCortex } from "../src/brain/memory-cortex.js";
 import {
   classifyMemorySourceRole,
   extractEchoQueryFromAssistantReply,
+  normalizeMemorySourceRole,
 } from "../src/services/memory-source-role.js";
 import {
   extractRelationshipAssertion,
@@ -63,6 +64,17 @@ test("classifyMemorySourceRole：各写入链路行格式识别", () => {
   assert.equal(classifyMemorySourceRole(HEDGE_REPLY_LINE), "assistant");
   assert.equal(classifyMemorySourceRole("用户请求搜索景甜的照片，工具调用成功"), "tool");
   assert.equal(classifyMemorySourceRole("梦呓 fallback 文本"), "unknown");
+  assert.equal(classifyMemorySourceRole("[用户事实] 我住在兴义"), "user");
+  assert.equal(classifyMemorySourceRole("Turn | user: 我住在兴义"), "user");
+});
+
+test("normalizeMemorySourceRole：只接受结构化合法角色", () => {
+  assert.equal(normalizeMemorySourceRole("assistant"), "assistant");
+  assert.equal(normalizeMemorySourceRole("user"), "user");
+  assert.equal(normalizeMemorySourceRole("system"), "system");
+  assert.equal(normalizeMemorySourceRole("ASSISTANT"), null);
+  assert.equal(normalizeMemorySourceRole(" bot "), null);
+  assert.equal(normalizeMemorySourceRole(null), null);
 });
 
 test("extractRelationshipAssertion：陈述可提取、疑问不误报", () => {
@@ -219,6 +231,21 @@ test("跟修：用户明确问「你说过什么」时助手节点才放行", as
     const recall = await service.buildRecall("actor-5", "你上次说喊你大哥那位是什么意思");
     assert.ok(recall.text.includes("喊你大哥那位"), "明确询问助手发言时应放行");
     assert.ok(recall.text.includes("（助手当时说的，不是用户事实）"));
+  });
+});
+
+test("跟修：中性正文按 metadata.sourceRole 隔离助手时间线", async () => {
+  await withService(async (service) => {
+    await service.ingest("actor-role", "周末去公园散步", "chat:timeline", {
+      metadata: { sourceRole: "assistant" },
+    });
+
+    const nodes = service.getAllNodes("actor-role");
+    assert.equal(nodes.length, 1);
+    assert.equal(nodes[0]!.metadata?.sourceRole, "assistant");
+    assert.equal((await service.buildRecall("actor-role", "周末去哪")).text.includes("周末去公园散步"), false);
+    const asked = await service.buildRecall("actor-role", "你上次说周末去公园散步");
+    assert.ok(asked.text.includes("周末去公园散步"));
   });
 });
 

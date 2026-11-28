@@ -125,6 +125,33 @@ async function doEnsure(): Promise<LocalEmbeddingEndpoint | null> {
   return started;
 }
 
+export async function warmLocalEmbedding(timeoutMs = 30_000): Promise<boolean> {
+  const endpoint = await ensureLocalEmbeddingEndpoint();
+  if (!endpoint) return false;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`${endpoint.baseUrl}/embeddings`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${endpoint.apiKey}`,
+        },
+        body: JSON.stringify({ model: endpoint.model, input: ["local embedding readiness probe"] }),
+        signal: AbortSignal.timeout(Math.max(1, deadline - Date.now())),
+      });
+      if (response.ok) {
+        const payload = await response.json() as { data?: Array<{ embedding?: number[] }> };
+        if (payload.data?.[0]?.embedding?.length === endpoint.dims) return true;
+      }
+    } catch {
+      // 模型仍在独立子进程内装载。
+    }
+    await new Promise((resolve) => setTimeout(resolve, Math.min(100, Math.max(1, deadline - Date.now()))));
+  }
+  return false;
+}
+
 /** 进程内调用方（非 OpenAI SDK）经宿主端点做嵌入；端点不可用返回 null */
 export async function embedViaLocalEndpoint(texts: string[]): Promise<number[][] | null> {
   const ep = started;

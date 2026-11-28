@@ -25,15 +25,10 @@ import "../features/chat/travel_plan_launcher.dart";
 import "../features/chat/followup_bubbles.dart";
 import "../features/chat/voice_message_bubble.dart";
 import "../features/settings/settings_page.dart";
-import "mobile_agent_status_orb.dart";
 import "mobile_attach_panel.dart";
 import "mobile_chat_controller.dart";
 import "mobile_theme.dart";
 import "proactive_why_sheet.dart";
-
-/// 状态球左缘距屏幕左缘的缩进：与消息气泡左缘（列表 padding 16）左对齐，
-/// 同一条竖线。
-const double kAgentStatusOrbInset = 16;
 
 /// 顶栏文字字体：与侧边栏统一使用 HarmonyOS Sans SC。
 const String _kTopBarFontFamily = "HarmonyOS Sans SC";
@@ -167,7 +162,7 @@ class _MobileChatPageState extends State<MobileChatPage> {
     return Scaffold(
       backgroundColor: dark ? Colors.transparent : p.background,
       appBar: PreferredSize(
-        preferredSize: const Size.fromHeight(52),
+        preferredSize: const Size.fromHeight(108),
         child: ListenableBuilder(
           listenable: _controller,
           builder: (context, _) => _buildTopBar(context, p),
@@ -190,8 +185,6 @@ class _MobileChatPageState extends State<MobileChatPage> {
               },
             ),
           ),
-          // 独立组件：思考链状态带长在消息区与输入栏之间，不进输入栏容器。
-          _buildAgentStatusOrb(p),
           ListenableBuilder(
             listenable: _controller,
             builder: (context, _) => _buildInputBar(context, p),
@@ -412,7 +405,7 @@ class _MobileChatPageState extends State<MobileChatPage> {
       backgroundColor: Colors.transparent,
       elevation: 0,
       scrolledUnderElevation: 0,
-      toolbarHeight: 52,
+      toolbarHeight: 100,
       centerTitle: true,
       titleSpacing: 0,
       leadingWidth: 60,
@@ -427,7 +420,7 @@ class _MobileChatPageState extends State<MobileChatPage> {
                 p: p,
               ),
       ),
-      title: side ? _buildSideChatTitle(p) : _buildTitle(context, p),
+      title: _buildTitle(context, p),
       actions: side
           ? <Widget>[
               Padding(
@@ -498,28 +491,6 @@ class _MobileChatPageState extends State<MobileChatPage> {
           Icons.arrow_back_ios_new_rounded,
           size: 18,
           color: p.textPrimary,
-        ),
-      ),
-    );
-  }
-
-  /// 旁聊顶栏标题：只有首轮对话生成标题后才展示；未命名时不显示任何
-  /// 占位文案（「新旁聊」/「旁聊」标签/「独立上下文 · 不影响主会话」副行已删除）。
-  Widget _buildSideChatTitle(MobilePalette p) {
-    final String title = (_controller.activeSideTitle ?? "").trim();
-    if (title.isEmpty || title == "新旁聊") return const SizedBox.shrink();
-    return ConstrainedBox(
-      constraints: const BoxConstraints(maxWidth: 220),
-      child: Text(
-        title,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: TextStyle(
-          fontFamily: _kTopBarFontFamily,
-          color: p.textPrimary,
-          fontSize: 17,
-          fontWeight: FontWeight.w600,
-          letterSpacing: 0.2,
         ),
       ),
     );
@@ -648,25 +619,24 @@ class _MobileChatPageState extends State<MobileChatPage> {
     });
   }
 
-  /// 顶栏名牌（2026-11-09 反馈定稿）：
-  /// - 名字套一枚椭圆胶囊，居中显示，长名单行省略；
-  /// - 不再有绿色在线状态点；
-  /// - 未取名时整块留空（不显示空胶囊）。
-  ///
-  /// 名字读 [AgentNameStore]：对话中取名 → 服务端广播 `identity_renamed`
-  /// → 控制器写 store → 这里即时重建，无需重进应用。
+  /// 手机端顶栏：2026-11-27 起数字人头像仅桌面端上线，手机端回退为
+  /// 纯名字胶囊，不再渲染圆形数字人头像，也无点击进入数字人页的入口。
   Widget _buildTitle(BuildContext context, MobilePalette p) {
     return ValueListenableBuilder<String?>(
       valueListenable: AgentNameStore.instance.name,
       builder: (BuildContext context, String? storeName, _) {
-        final String title = (storeName ?? widget.agentName ?? "").trim();
-        if (title.isEmpty) return const SizedBox.shrink();
+        final String agentName = (storeName ?? widget.agentName ?? "").trim();
+        final String sideName = (_controller.activeSideTitle ?? "").trim();
+        final String idleTitle = _controller.isSideChatActive
+            ? (sideName == "新旁聊" ? "" : sideName)
+            : agentName;
+        final String title = _controller.activityLabel ?? idleTitle;
         final bool dark = Theme.of(context).brightness == Brightness.dark;
+        if (title.isEmpty) return const SizedBox.shrink();
         return Container(
           constraints: const BoxConstraints(maxWidth: 200),
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
           decoration: BoxDecoration(
-            // 与左上角玻璃按钮同一种玻璃底，顶栏两块元素读起来是一套。
             color: dark
                 ? Colors.white.withValues(alpha: 0.07)
                 : p.surface.withValues(alpha: 0.55),
@@ -1268,60 +1238,6 @@ class _MobileChatPageState extends State<MobileChatPage> {
           ),
         ],
       ),
-    );
-  }
-
-  /// Agent 状态组件（思考链浮标）：**独立组件**，长在消息区与输入栏之间，
-  /// 不嵌进输入栏容器、不与输入框连体。
-  ///
-  /// 文案裁决在控制器（`activityLabel`），这里只管「什么时候出现 / 淡入淡出」：
-  /// 空闲时高度收回到 0（不留空白），干活时撑开一条状态带、淡入；文案变化原地
-  /// 更新，不重建整块（避免闪）。
-  ///
-  /// 水平位置：球左缘 = [kAgentStatusOrbInset]，与消息气泡左缘左对齐。
-  Widget _buildAgentStatusOrb(MobilePalette p) {
-    return ListenableBuilder(
-      listenable: _controller,
-      builder: (BuildContext context, Widget? _) {
-        final String? label = _controller.activityLabel;
-        final bool live = label != null;
-        return AnimatedSize(
-          duration: const Duration(milliseconds: 200),
-          curve: Curves.easeOut,
-          // 底对齐 + 不裁剪：收起/展开时球底部始终贴住输入框上边、整块向上
-          // 长出来或沉回去，中途不会被剪掉半个球。
-          alignment: Alignment.bottomLeft,
-          clipBehavior: Clip.none,
-          // 底部间距也随状态归零：空闲时这条带子的高度必须是 0，
-          // 否则输入框上会常驻一道空隙。
-          child: Padding(
-            padding: EdgeInsets.only(
-              left: kAgentStatusOrbInset,
-              bottom: live ? 10 : 0,
-            ),
-            // 靠左钉住：Column 交叉轴默认居中，不套 Align 会把球推到屏幕中间。
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: AnimatedSwitcher(
-                duration: const Duration(milliseconds: 200),
-                switchInCurve: Curves.easeOut,
-                switchOutCurve: Curves.easeIn,
-                transitionBuilder:
-                    (Widget child, Animation<double> animation) =>
-                        FadeTransition(opacity: animation, child: child),
-                child: live
-                    ? MobileAgentStatusOrb(
-                        key: const ValueKey<String>("orb-live"),
-                        label: label,
-                        percent: _controller.agentStatusPercent,
-                        toolName: _controller.currentToolName,
-                      )
-                    : const SizedBox.shrink(key: ValueKey<String>("orb-idle")),
-              ),
-            ),
-          ),
-        );
-      },
     );
   }
 

@@ -22,7 +22,6 @@ const fakeWeather = {
     _tz?: string,
     label?: string,
   ): Promise<any> => ({
-    summaryLine: "晴 18℃",
     clothingAdvice: "长袖即可",
     currentTempC: 18,
     apparentTempC: 17,

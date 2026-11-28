@@ -22,6 +22,7 @@ import "../core/services/client_geofence_service.dart";
 import "../core/services/client_location_service.dart";
 import "../core/services/local_notification_service.dart";
 import "../core/services/local_notification_actions.dart";
+import "../core/services/ongoing_status_service.dart";
 import "../core/services/proactive_decision.dart";
 import "../core/services/tts_player.dart";
 import "../core/services/ws_chat_service.dart";
@@ -211,6 +212,10 @@ class MobileChatController extends ChangeNotifier {
   bool _historyReady = false;
   final List<Map<String, dynamic>> _pendingReplays = <Map<String, dynamic>>[];
 
+  /// 透传的 card.update 可能比原消息先到（冷启动取件早于历史合并），先排队。
+  final List<Map<String, dynamic>> _pendingPushedCardUpdates =
+      <Map<String, dynamic>>[];
+
   /// 是否已连上过一次（区分首连与重连：重连要做漏消息对账，见 ws_connected）。
   bool _everConnected = false;
 
@@ -320,7 +325,8 @@ class MobileChatController extends ChangeNotifier {
   // 服务端 turn 级载荷带 threadId（2026-11-12 起），事件按它落回正确线程；
   // 旧服务端缺省时退回当前激活线程（与旧行为一致）。
 
-  final Map<String, _ThreadTurnState> _turnStates = <String, _ThreadTurnState>{};
+  final Map<String, _ThreadTurnState> _turnStates =
+      <String, _ThreadTurnState>{};
 
   _ThreadTurnState _turnOf(String key) =>
       _turnStates.putIfAbsent(key, _ThreadTurnState.new);
@@ -421,10 +427,12 @@ class MobileChatController extends ChangeNotifier {
 
   static bool _toolUsesCloudBrowser(String name, Object? input) {
     final String t = name.trim().toLowerCase();
-    if (t.startsWith("agent_browser") || t.startsWith("shared_browser")) return true;
+    if (t.startsWith("agent_browser") || t.startsWith("shared_browser"))
+      return true;
     if (t == "shopping.compare") {
-      final String action =
-          input is Map ? (input["action"]?.toString().trim().toLowerCase() ?? "") : "";
+      final String action = input is Map
+          ? (input["action"]?.toString().trim().toLowerCase() ?? "")
+          : "";
       // 缺省（模型不填 action）就是真去开页面比价：不点亮会让整轮比价
       // 完全没有画面（用户以为「浏览器没启动」）。只有 watch_* 是纯本地。
       if (action.isEmpty) return true;
@@ -469,7 +477,8 @@ class MobileChatController extends ChangeNotifier {
     if (action.isNotEmpty && action != "stream") browserPreviewAction = action;
     // 新会话重新点亮（用户此前点 × 关掉后，只有新任务能再弹出来）；
     // 同一会话的后续帧不覆盖用户的关闭决定。
-    final bool newSession = sid.isNotEmpty && !_browserPreviewSessions.contains(sid);
+    final bool newSession =
+        sid.isNotEmpty && !_browserPreviewSessions.contains(sid);
     if (sid.isNotEmpty) _browserPreviewSessions.add(sid);
     _browserTaskActive = true;
     if (newSession) _browserPreviewDismissed = false;
@@ -553,7 +562,8 @@ class MobileChatController extends ChangeNotifier {
   /// 回到主会话（主线程消息原样保留）。
   Future<void> returnToMain() async {
     if (_activeSessionKey == _mainSessionKey) return;
-    _activateSession(_mainSessionKey, serverSessionId: ApiConfig.effectiveActorId);
+    _activateSession(_mainSessionKey,
+        serverSessionId: ApiConfig.effectiveActorId);
     notifyListeners();
     await _loadSessionHistory(_mainSessionKey);
   }
@@ -674,6 +684,7 @@ class MobileChatController extends ChangeNotifier {
   /// 界面必须从「我看看」切到一句能解释的话，而不是无限转圈。
   /// 每线程一份（2026-11-12 P1）：旁聊与主会话可各自在途互不干扰。
   static const String _deliveryStallHint = "网络似乎不太顺，正在自动重试…";
+
   /// 服务端拒收后的过渡提示（连接层正在补发 session.init 并重投）。
   static const String _identityResyncHint = "正在重新同步账号身份，消息会自动重发…";
 
@@ -784,13 +795,22 @@ class MobileChatController extends ChangeNotifier {
 
   /// 放行本地历史加载期间压住的补投事件（见 [_pendingReplays]）。
   void _flushPendingReplays() {
-    if (_pendingReplays.isEmpty) return;
-    final List<Map<String, dynamic>> pending = List<Map<String, dynamic>>.of(_pendingReplays);
+    final List<Map<String, dynamic>> pending =
+        List<Map<String, dynamic>>.of(_pendingReplays);
     _pendingReplays.clear();
     for (final Map<String, dynamic> payload in pending) {
       _handleProactiveMessageEvent(payload);
     }
-    notifyListeners();
+    final bool hadCards = _pendingPushedCardUpdates.isNotEmpty;
+    if (hadCards) {
+      final List<Map<String, dynamic>> cards =
+          List<Map<String, dynamic>>.of(_pendingPushedCardUpdates);
+      _pendingPushedCardUpdates.clear();
+      for (final Map<String, dynamic> card in cards) {
+        _applyCardUpdate(card);
+      }
+    }
+    if (pending.isNotEmpty || hadCards) notifyListeners();
   }
 
   /// 补投命中已有气泡时，把仍未过期的按钮挂回去（2026-11-24）。
@@ -804,9 +824,11 @@ class MobileChatController extends ChangeNotifier {
     final Object? rawIntent = payload["actionIntent"];
     if (rawIntent is! Map<String, dynamic>) return false;
     final Object? rawExpires = rawIntent["expiresAt"];
-    final int? expires =
-        rawExpires is num ? rawExpires.toInt() : int.tryParse(rawExpires?.toString() ?? "");
-    if (expires != null && expires <= DateTime.now().millisecondsSinceEpoch) return false;
+    final int? expires = rawExpires is num
+        ? rawExpires.toInt()
+        : int.tryParse(rawExpires?.toString() ?? "");
+    if (expires != null && expires <= DateTime.now().millisecondsSinceEpoch)
+      return false;
     final List<NotifyAction> actions = NotifyAction.listFromIntent(rawIntent);
     if (actions.isEmpty) return false;
     final String intentId = rawIntent["intentId"]?.toString() ?? "";
@@ -888,12 +910,12 @@ class MobileChatController extends ChangeNotifier {
   /// 为什么改 text 标记而不是另存一份卡片对象：客户端的历史回放、复制、落盘
   /// 都以 text 里的 [AGENT_RESULT_CARD_START] 块为唯一真相源。只替换标记块，
   /// 当轮显示、重启后回放、复制出的文本三处同时一致，不需要第四份状态。
-  void _applyCardUpdate(Map<String, dynamic> payload) {
+  bool _applyCardUpdate(Map<String, dynamic> payload) {
     final String messageId = (payload["messageId"] ?? "").toString();
-    if (messageId.isEmpty) return;
+    if (messageId.isEmpty) return false;
     final int idx =
         messages.indexWhere((ChatMessage m) => m.messageId == messageId);
-    if (idx < 0) return;
+    if (idx < 0) return false;
     final ChatMessage msg = messages[idx];
     final Object? card = payload["card"];
     if (card is! Map) {
@@ -904,7 +926,7 @@ class MobileChatController extends ChangeNotifier {
         _armErrorHintAutoClear();
         notifyListeners();
       }
-      return;
+      return false;
     }
     final Map<String, dynamic> cardMap = Map<String, dynamic>.from(card);
     final String block =
@@ -916,8 +938,9 @@ class MobileChatController extends ChangeNotifier {
     // 没有 text 块，渲染层只能回退直读 text——写进去标记和 JSON 就整块漏进
     // 气泡（2026-11-15 删除提醒后卡片原地变「已取消」即此形态）。
     // 唯一例外是历史消息的 text 本身携带标记块：原位换新，保持文本投影同步。
-    final String nextText =
-        marker.hasMatch(msg.text) ? msg.text.replaceFirst(marker, block) : msg.text;
+    final String nextText = marker.hasMatch(msg.text)
+        ? msg.text.replaceFirst(marker, block)
+        : msg.text;
     final ChatMessage replaced = msg.copyWith(
       text: nextText,
       renderBlocks: msg.renderBlocks == null
@@ -935,6 +958,7 @@ class MobileChatController extends ChangeNotifier {
     messages[idx] = replaced;
     _persist(replaced);
     notifyListeners();
+    return true;
   }
 
   /// 把块序列里的第一张卡换成新卡；没有卡块就补在末尾（保序，不动文字/媒体）。
@@ -1037,7 +1061,8 @@ class MobileChatController extends ChangeNotifier {
     String? userText;
     String? anchorId;
     try {
-      final int idx = messages.indexWhere((ChatMessage m) => m.messageId == messageId);
+      final int idx =
+          messages.indexWhere((ChatMessage m) => m.messageId == messageId);
       if (idx >= 0) {
         userText = messages[idx].text;
         anchorId = turnAnchorOfMessage(messages[idx]);
@@ -1054,7 +1079,8 @@ class MobileChatController extends ChangeNotifier {
   }
 
   /// 通知服务端删除单轮（chat thread 摘除 + WAL 墓碑）。失败不打断本地删除。
-  Future<void> _notifyServerDeleteTurn(String userMessageId, String? userText) async {
+  Future<void> _notifyServerDeleteTurn(
+      String userMessageId, String? userText) async {
     try {
       final http.Response res = await NbHttp.post(
         Uri.parse("${ApiConfig.httpBase}/api/chat-data/delete-turn"),
@@ -1072,7 +1098,8 @@ class MobileChatController extends ChangeNotifier {
         }),
       ).timeout(const Duration(seconds: 10));
       if (res.statusCode != 200) {
-        debugPrint("[MobileChatController] delete-turn HTTP ${res.statusCode}: ${res.body}");
+        debugPrint(
+            "[MobileChatController] delete-turn HTTP ${res.statusCode}: ${res.body}");
       }
     } catch (e) {
       debugPrint("[MobileChatController] delete-turn 请求失败: $e");
@@ -1138,7 +1165,19 @@ class MobileChatController extends ChangeNotifier {
   }
 
   /// 兼容入口：主会话首次启动加载；重连对账复用（返回回填条数）。
-  Future<int> _pullServerHistory() => _pullServerHistoryFor(_mainSessionKey);
+  Future<int> _pullServerHistory() async {
+    final int backfilled = await _pullServerHistoryFor(_mainSessionKey);
+    // WAL 回填后，之前找不到 messageId 的 card.update 现在可以原地换卡了。
+    if (_pendingPushedCardUpdates.isNotEmpty) {
+      final List<Map<String, dynamic>> cards =
+          List<Map<String, dynamic>>.of(_pendingPushedCardUpdates);
+      _pendingPushedCardUpdates.clear();
+      for (final Map<String, dynamic> card in cards) {
+        _applyCardUpdate(card);
+      }
+    }
+    return backfilled;
+  }
 
   /// 重连对账：补拉服务端历史并回填漏掉的轮次；App 在后台时把漏收的
   /// 回复/主动消息按最后一条补系统通知（横幅触达）。
@@ -1147,12 +1186,12 @@ class MobileChatController extends ChangeNotifier {
     if (backfilled <= 0) return;
     debugPrint("[MobileChatController] 重连对账回填 $backfilled 条漏收消息");
     if (!_appBackgrounded) return;
-    final List<ChatMessage> list = _sessionMessages[_mainSessionKey] ??
-        const <ChatMessage>[];
+    final List<ChatMessage> list =
+        _sessionMessages[_mainSessionKey] ?? const <ChatMessage>[];
     for (final ChatMessage m in list.reversed) {
       if (m.role == "assistant" && m.text.trim().isNotEmpty) {
-        unawaited(LocalNotificationService.show(
-            title: "有新消息", body: m.text.trim()));
+        unawaited(
+            LocalNotificationService.show(title: "有新消息", body: m.text.trim()));
         break;
       }
     }
@@ -1190,12 +1229,14 @@ class MobileChatController extends ChangeNotifier {
 
     final Set<String> localUserIds = <String>{};
     final Set<String> localUserTexts = <String>{};
+    final Set<String> localAssistantIds = <String>{};
     final List<ChatMessage> localAssistants = <ChatMessage>[];
     for (final ChatMessage m in target) {
       if (m.role == "user") {
         localUserIds.add(m.messageId);
         localUserTexts.add(m.text.trim());
       } else if (m.role == "assistant" && m.text.trim().isNotEmpty) {
+        localAssistantIds.add(m.messageId);
         localAssistants.add(m);
       }
     }
@@ -1219,6 +1260,9 @@ class MobileChatController extends ChangeNotifier {
 
     bool assistantKnown(ChatMessage m) {
       final String text = m.text.trim();
+      // 透传写穿已用服务端 messageId 落过同一条：历史回填不再插双份。
+      if (m.messageId.isNotEmpty && localAssistantIds.contains(m.messageId))
+        return true;
       final bool fromBubbles = bubbleBackfillIds.contains(m.messageId);
       // 分泡回填消息跳过批量内精确文本去重：同文分泡是刻意形态，逐泡都要落。
       if (!fromBubbles && backfilledAssistantTexts.contains(text)) return true;
@@ -1264,7 +1308,6 @@ class MobileChatController extends ChangeNotifier {
     if (mutated && _activeSessionKey == key) notifyListeners();
     return insertedCount;
   }
-
 
   /// 发送一条用户消息(空文本+无图忽略)。携带 [visionFrames] 时与桌面端
   /// 同协议走 `chat.user_message.visionFrames`(base64,服务端视觉管线)。
@@ -1623,10 +1666,14 @@ class MobileChatController extends ChangeNotifier {
       // 只有原生事件没带坐标（老版本事件体）时，才回落到实时 GPS 兜底。
       final num? evLat = event["latitude"];
       final num? evLng = event["longitude"];
-      final bool hasEventCoords =
-          evLat != null && evLng != null &&
-          evLat.isFinite && evLng.isFinite &&
-          evLat >= -90 && evLat <= 90 && evLng >= -180 && evLng <= 180;
+      final bool hasEventCoords = evLat != null &&
+          evLng != null &&
+          evLat.isFinite &&
+          evLng.isFinite &&
+          evLat >= -90 &&
+          evLat <= 90 &&
+          evLng >= -180 &&
+          evLng <= 180;
 
       if (hasEventCoords) {
         _send("client.location_report", <String, dynamic>{
@@ -1766,9 +1813,10 @@ class MobileChatController extends ChangeNotifier {
         // 办完或已过期，服务端广播回执。手机这边收起那条还挂着按钮的通知——
         // 按钮点了只会拿到「已完成」，留着比收起更打扰。
         {
-          final String intentKey = (payload["intentId"]?.toString() ?? "").isNotEmpty
-              ? payload["intentId"].toString()
-              : (payload["deliveryId"]?.toString() ?? "");
+          final String intentKey =
+              (payload["intentId"]?.toString() ?? "").isNotEmpty
+                  ? payload["intentId"].toString()
+                  : (payload["deliveryId"]?.toString() ?? "");
           if (intentKey.isNotEmpty) {
             unawaited(LocalNotificationService.dismissIfPending(intentKey));
           }
@@ -1790,8 +1838,7 @@ class MobileChatController extends ChangeNotifier {
           final String vt = payload["text"]?.toString() ?? "";
           if (vt.trim().isNotEmpty) {
             unawaited(LocalNotificationService.show(
-                title: payload["title"]?.toString() ?? "Agent 语音联系",
-                body: vt));
+                title: payload["title"]?.toString() ?? "Agent 语音联系", body: vt));
           }
         }
       case "agent.voice.alarm":
@@ -1937,6 +1984,34 @@ class MobileChatController extends ChangeNotifier {
       payload["actionIntent"] = proactive["actionIntent"];
       payload["deliveryId"] = proactive["deliveryId"];
       payload["proactiveTitle"] = proactive["title"];
+      payload["notifyOn"] = proactive["notifyOn"];
+      // 通知栏回话的应答：用户那句原话只落一条气泡，id 与服务端落库 id 对齐。
+      final Object? replyRaw = proactive["notificationReply"];
+      if (replyRaw is Map) {
+        final String root = replyRaw["rootIntentId"]?.toString() ?? "";
+        final int? answeredRound =
+            int.tryParse(replyRaw["round"]?.toString() ?? "");
+        final String userText = (replyRaw["userText"]?.toString() ?? "").trim();
+        if (root.isNotEmpty &&
+            answeredRound != null &&
+            answeredRound > 1 &&
+            userText.isNotEmpty) {
+          final String userMsgId =
+              "notification-reply-$root-${answeredRound - 1}";
+          if (!_mainThreadMessages
+              .any((ChatMessage m) => m.messageId == userMsgId)) {
+            final ChatMessage userMsg = ChatMessage(
+              messageId: userMsgId,
+              sessionId: _mainSessionKey,
+              role: "user",
+              text: userText,
+              timestamp: DateTime.now(),
+            );
+            _mainThreadMessages.add(userMsg);
+            _persist(userMsg);
+          }
+        }
+      }
       final String id = proactive["deliveryId"]?.toString() ?? "";
       if (id.isNotEmpty) {
         AmbientFeedsController.instance.sendProactiveOutcome(id, "viewed");
@@ -2103,7 +2178,8 @@ class MobileChatController extends ChangeNotifier {
   bool _bannerOnOtherDevice(Map<String, dynamic> payload) {
     final String notifyOn = payload["notifyOn"]?.toString() ?? "";
     if (notifyOn.isEmpty) return false;
-    return notifyOn != (AmbientFeedsController.instance.isMobile ? "mobile" : "desktop");
+    return notifyOn !=
+        (AmbientFeedsController.instance.isMobile ? "mobile" : "desktop");
   }
 
   /// 提醒升级链 popup 级（reminder_popup）→ 对话流文本气泡（真实消息持久化）。
@@ -2160,60 +2236,159 @@ class MobileChatController extends ChangeNotifier {
       text = digestMap?["narrationText"]?.toString() ?? "";
     }
     if (text.trim().isEmpty) return;
+    final bool structured = digestMap != null && digestMap.isNotEmpty;
+    final String serverMessageId =
+        (payload["messageId"] ?? "").toString().trim();
+    final String messageId = serverMessageId.isNotEmpty
+        ? serverMessageId
+        : "assistant-evening-digest-${DateTime.now().microsecondsSinceEpoch}";
+    final int tsMs = payload["ts"] is num
+        ? (payload["ts"] as num).toInt()
+        : DateTime.now().millisecondsSinceEpoch;
+    final int existingIndex = _mainThreadMessages
+        .indexWhere((ChatMessage m) => m.messageId == messageId);
+    if (existingIndex >= 0) {
+      final ChatMessage existing = _mainThreadMessages[existingIndex];
+      if (!structured || existing.contentType == "evening_digest") return;
+      final ChatMessage upgraded = existing.copyWith(
+        text: text.trim(),
+        contentType: "evening_digest",
+        eveningDigest: digestMap,
+      );
+      _mainThreadMessages[existingIndex] = upgraded;
+      _persist(upgraded);
+      notifyListeners();
+      return;
+    }
     // 睡前提醒同为「真实消息」（2026-10-21）：落本地历史，重启后仍在。
     // 只落主会话线程（2026-11-12）：睡前提醒与旁聊无关。
     final ChatMessage digest = ChatMessage(
-      messageId:
-          "assistant-evening-digest-${DateTime.now().microsecondsSinceEpoch}",
+      messageId: messageId,
       sessionId: _mainSessionKey,
       role: "assistant",
       text: text.trim(),
-      timestamp: DateTime.now(),
-      contentType: (digestMap != null && digestMap.isNotEmpty)
-          ? "evening_digest"
-          : "text",
-      eveningDigest:
-          (digestMap != null && digestMap.isNotEmpty) ? digestMap : null,
+      timestamp: DateTime.fromMillisecondsSinceEpoch(tsMs),
+      contentType: structured ? "evening_digest" : "text",
+      eveningDigest: structured ? digestMap : null,
     );
-    _mainThreadMessages.add(digest);
+    int insertIndex = _mainThreadMessages
+        .indexWhere((ChatMessage m) => m.timestamp.isAfter(digest.timestamp));
+    if (insertIndex < 0) insertIndex = _mainThreadMessages.length;
+    _mainThreadMessages.insert(insertIndex, digest);
     _persist(digest);
     notifyListeners();
   }
 
-  /// 透传写穿（2026-11-25）：HMS 透传消息在 App 被杀/后台时由原生落队列，
-  /// 启动/回前台取件后写进本地对话。不点通知也能看到内容。
+  /// 把透传帧里的列表字段归一化成 ChatMessage 需要的 Map 列表。
+  static List<Map<String, dynamic>>? _pushedMaps(Object? raw) {
+    if (raw is! List) return null;
+    final List<Map<String, dynamic>> out = <Map<String, dynamic>>[];
+    for (final Object? element in raw) {
+      if (element is Map) out.add(Map<String, dynamic>.from(element));
+    }
+    return out.isEmpty ? null : out;
+  }
+
+  /// 透传写穿（2026-11-25 → 2026-11-26 扩到普通消息 / 卡片 / 看板）：
+  /// HMS 透传在 App 被杀/后台时由原生整包落队列，启动/回前台取件后按 type
+  /// 分派到既有 handler。不点通知也能看到内容。
   ///
-  /// 去重两条口径：① 稳定 id（服务端 stableKey，推送重试不重复落泡）；
-  /// ② 正文包含（WS 直投的卡 / 历史回填的留底已经在对话里时不再插第二条）。
+  /// 去重口径：① 服务端 messageId（与 WS 直投、WAL 历史同一 id 空间）；
+  /// ② stableKey（推送重试 / 重连补投）；③ 正文包含（±15 分钟的兜底）。
   void ingestPushedMessages(List<Map<String, dynamic>> items) {
     if (items.isEmpty) return;
     final List<ChatMessage> list = _mainThreadMessages;
     bool changed = false;
     for (final Map<String, dynamic> item in items) {
-      final String text =
-          (item["text"] ?? item["body"] ?? "").toString().trim();
-      if (text.isEmpty) continue;
-      final String stableKey =
-          (item["stableKey"] ?? "").toString().trim();
-      final String messageId = stableKey.isNotEmpty
-          ? "push-$stableKey"
-          : "push-${item["deliveryId"] ?? DateTime.now().microsecondsSinceEpoch}";
-      if (list.any((ChatMessage m) => m.messageId == messageId)) continue;
-      final int tsMs =
-          (item["ts"] as num?)?.toInt() ??
-              DateTime.now().millisecondsSinceEpoch;
+      Map<String, dynamic>? frame;
+      final String wire = (item["wire"] ?? "").toString();
+      if (wire.isNotEmpty) {
+        try {
+          final Object? decoded = jsonDecode(wire);
+          if (decoded is Map) frame = Map<String, dynamic>.from(decoded);
+        } catch (_) {
+          /* 坏帧当作纯文本透传处理 */
+        }
+      }
+      final String eventType =
+          (item["type"] ?? frame?["type"] ?? "").toString();
+      final Map<String, dynamic> payload = frame?["payload"] is Map
+          ? Map<String, dynamic>.from(frame!["payload"] as Map)
+          : <String, dynamic>{};
+
+      // 卡片原地更新：命中已有消息才换卡；冷启动取件早于历史合并时先排队。
+      if (eventType == "card.update" && payload.isNotEmpty) {
+        if (!_historyReady || !_applyCardUpdate(payload)) {
+          // 原消息还没在本地（WAL 历史尚未回填）→ 留到历史合并后再换卡。
+          _pendingPushedCardUpdates.add(payload);
+        } else {
+          changed = true;
+        }
+        continue;
+      }
+      // 看板变更：与 WS agent.today_board 走同一个应用入口，不另拼一套状态。
+      if (eventType == "agent.today_board") {
+        OngoingStatusService.instance.applyPushedBoard(
+          payload.isNotEmpty ? payload : item,
+        );
+        continue;
+      }
+      // 明日预览必须恢复结构化卡片，不能退化成通知正文气泡。
+      if (eventType == "evening.digest") {
+        final String stableKey = (item["stableKey"] ?? "").toString().trim();
+        final String fallbackId = stableKey.isNotEmpty
+            ? stableKey
+            : "push-${item["deliveryId"] ?? DateTime.now().microsecondsSinceEpoch}";
+        final Map<String, dynamic> digestPayload = <String, dynamic>{
+          ...payload,
+          if ((payload["messageId"] ?? "").toString().trim().isEmpty)
+            "messageId": fallbackId,
+          if (!(payload["ts"] is num) && item["ts"] is num) "ts": item["ts"],
+        };
+        if (payload.isEmpty) {
+          final String body =
+              (item["text"] ?? item["body"] ?? "").toString().trim();
+          // 超长帧由 WAL 历史补卡；坏帧/旧透传才降级为纯文本。
+          if (item["needHistory"] == true || body.isEmpty) continue;
+          digestPayload["narrationText"] = body;
+        }
+        _handleEveningDigestEvent(digestPayload);
+        continue;
+      }
+
+      final String rawText =
+          (payload["finalText"] ?? item["text"] ?? item["body"] ?? "")
+              .toString()
+              .trim();
+      if (rawText.isEmpty) continue;
+      final String serverMessageId =
+          (payload["messageId"] ?? payload["traceId"] ?? "").toString().trim();
+      final String stableKey = (item["stableKey"] ?? "").toString().trim();
+      final String messageId = serverMessageId.isNotEmpty
+          ? serverMessageId
+          : stableKey.isNotEmpty
+              ? "push-$stableKey"
+              : "push-${item["deliveryId"] ?? DateTime.now().microsecondsSinceEpoch}";
+      // 旧透传使用 push-<stableKey>；两种 id 空间都查，避免升级后同一条再落一次。
+      if (list.any((ChatMessage m) =>
+          m.messageId == messageId ||
+          (stableKey.isNotEmpty && m.messageId == "push-$stableKey"))) {
+        continue;
+      }
+      final int tsMs = (item["ts"] as num?)?.toInt() ??
+          DateTime.now().millisecondsSinceEpoch;
       // 只跟「同一时刻附近」的助手消息做正文包含去重：WS 直投的卡 / 服务端留底
-      // 与这条透传是同一事件（时间戳相差几秒）；而每天同一句提醒（如「该睡觉啦」）
-      // 相隔一整天，不能被当成重复吞掉。
+      // 与这条透传是同一事件；相隔一整天的同一句提醒不能被当成重复吞掉。
       final bool alreadyThere = list.any((ChatMessage m) {
         if (m.role != "assistant") return false;
-        if ((m.timestamp.millisecondsSinceEpoch - tsMs).abs() > 15 * 60 * 1000) {
+        if ((m.timestamp.millisecondsSinceEpoch - tsMs).abs() >
+            15 * 60 * 1000) {
           return false;
         }
         final String lt = m.text.trim();
         if (lt.isEmpty) return false;
-        if (lt.length >= 8 && text.contains(lt)) return true;
-        if (text.length >= 8 && lt.contains(text)) return true;
+        if (lt.length >= 8 && rawText.contains(lt)) return true;
+        if (rawText.length >= 8 && lt.contains(rawText)) return true;
         return false;
       });
       if (alreadyThere) continue;
@@ -2221,11 +2396,15 @@ class MobileChatController extends ChangeNotifier {
         messageId: messageId,
         sessionId: _mainSessionKey,
         role: "assistant",
-        text: text,
+        text: rawText,
         timestamp: DateTime.fromMillisecondsSinceEpoch(tsMs),
+        mediaCards: _pushedMaps(payload["mediaCards"]),
+        renderBlocks: _pushedMaps(payload["renderBlocks"]),
+        envelopeBlocks: _pushedMaps(payload["envelopeBlocks"]),
       );
       // 按时间戳落位：透传可能比 App 启动早（TTL 内补来），不能一律追加到末尾
-      int idx = list.indexWhere((ChatMessage m) => m.timestamp.isAfter(msg.timestamp));
+      int idx = list
+          .indexWhere((ChatMessage m) => m.timestamp.isAfter(msg.timestamp));
       if (idx < 0) idx = list.length;
       list.insert(idx, msg);
       _persist(msg);
@@ -2241,8 +2420,7 @@ class MobileChatController extends ChangeNotifier {
   /// 播放事件内联 TTS（proactive_voice / voice.alarm / voice.speak 共用）。
   /// 未配置 TTS 时静默返回——文本已由对话流或系统通知承载。
   void _playEventTts(Map<String, dynamic> payload) {
-    final String? base64 =
-        PhoneCallController.extractTtsBase64(payload["tts"]);
+    final String? base64 = PhoneCallController.extractTtsBase64(payload["tts"]);
     if (base64 != null) {
       unawaited(TtsPlayer.instance.playFromBase64(base64));
     }
@@ -2263,7 +2441,8 @@ class MobileChatController extends ChangeNotifier {
     // 已落屏）就整条忽略——不重复落泡、不再触发决策半屏页；只把仍未过期的
     // 按钮回挂到已有气泡上（历史不持久化按钮，否则待拍板决策会静默失效）。
     if (serverMessageId.isNotEmpty &&
-        _mainThreadMessages.any((ChatMessage m) => m.messageId == serverMessageId)) {
+        _mainThreadMessages
+            .any((ChatMessage m) => m.messageId == serverMessageId)) {
       _reattachReplayActions(serverMessageId, payload);
       return;
     }
@@ -2281,9 +2460,10 @@ class MobileChatController extends ChangeNotifier {
     // 「通知即界面」（2026-11-13）：服务端随消息下发 actionIntent —— 同一批动作
     // 同时挂到**通知栏**与**对话气泡**。两个渲染面，同一个 actionId + 同一枚
     // token：在哪儿拍板都一样，服务端只认一次（幂等）。
-    final Map<String, dynamic>? intent = payload["actionIntent"] is Map<String, dynamic>
-        ? payload["actionIntent"] as Map<String, dynamic>
-        : null;
+    final Map<String, dynamic>? intent =
+        payload["actionIntent"] is Map<String, dynamic>
+            ? payload["actionIntent"] as Map<String, dynamic>
+            : null;
     final List<NotifyAction> actions = NotifyAction.listFromIntent(intent);
     final String intentId = intent?["intentId"]?.toString() ?? "";
     // §4.4 行 2「进程被杀、厂商通道可用」：厂商通知渲染不出按钮，点开只是把 App
@@ -2298,7 +2478,10 @@ class MobileChatController extends ChangeNotifier {
     if (decision != null && _decisionSheetShown.add(decision.intentId)) {
       onDecisionRequest?.call(decision);
     }
-    if (_appBackgrounded && !isReplay && !_bannerOnOtherDevice(payload) && text.trim().isNotEmpty) {
+    if (_appBackgrounded &&
+        !isReplay &&
+        !_bannerOnOtherDevice(payload) &&
+        text.trim().isNotEmpty) {
       // 手机后台（类微信常在线）：系统通知触达，点开回前台看气泡
       unawaited(LocalNotificationService.show(
         title: title,
@@ -2428,8 +2611,8 @@ class MobileChatController extends ChangeNotifier {
     final String? skippedReason = payload["skippedReason"]?.toString();
 
     // 去重：同 messageId 已在任意线程则不重复入列（重连/补投安全）。
-    if (_sessionMessages.values.any(
-        (list) => list.any((m) => m.messageId == messageId))) {
+    if (_sessionMessages.values
+        .any((list) => list.any((m) => m.messageId == messageId))) {
       return;
     }
 
@@ -2487,7 +2670,8 @@ class MobileChatController extends ChangeNotifier {
     for (int i = 0; i < messages.length; i++) {
       final List<NotifyAction>? acts = messages[i].notifyActions;
       if (acts == null) continue;
-      if (!acts.any((NotifyAction a) => a.actionId == action.actionId)) continue;
+      if (!acts.any((NotifyAction a) => a.actionId == action.actionId))
+        continue;
       messages[i] = messages[i].copyWith(notifyActions: const <NotifyAction>[]);
       break;
     }
@@ -2536,7 +2720,8 @@ class MobileChatController extends ChangeNotifier {
       while (_introQueue.isNotEmpty) {
         final DateTime? last = _lastIntroRevealAt;
         if (last != null) {
-          final Duration wait = _introRevealGap - DateTime.now().difference(last);
+          final Duration wait =
+              _introRevealGap - DateTime.now().difference(last);
           if (wait > Duration.zero) {
             await Future<void>.delayed(wait);
           }
@@ -2748,9 +2933,8 @@ class MobileChatController extends ChangeNotifier {
       _enqueueBubbleReveal(t.activeBubbleId!);
     }
     t.activeBubbleId = id;
-    t.activeBubbleTrace = (traceId != null && traceId.isNotEmpty)
-        ? traceId
-        : _bubbleTraceOf(id);
+    t.activeBubbleTrace =
+        (traceId != null && traceId.isNotEmpty) ? traceId : _bubbleTraceOf(id);
     _bubbleSessionOf.putIfAbsent(id, () => threadKey);
     _bubbleBuffers[id] = (_bubbleBuffers[id] ?? "") + chunk;
     // 占位消息缺失（无 turn_started 直接来 chunk）：补一个空占位当锚点
@@ -2770,11 +2954,8 @@ class MobileChatController extends ChangeNotifier {
     if (!_revealQueue.any((e) => e.bubbleId == bubbleId)) {
       _revealQueue.add(_PendingBubbleReveal(
         bubbleId: bubbleId,
-        traceId:
-            _bubbleTraceOf(bubbleId) ?? _activeTraceFor(bubbleId) ?? "",
-        sessionId: sessionId ??
-            _bubbleSessionOf[bubbleId] ??
-            _activeSessionKey,
+        traceId: _bubbleTraceOf(bubbleId) ?? _activeTraceFor(bubbleId) ?? "",
+        sessionId: sessionId ?? _bubbleSessionOf[bubbleId] ?? _activeSessionKey,
       ));
     }
     _scheduleNextBubbleReveal();
@@ -2795,9 +2976,8 @@ class MobileChatController extends ChangeNotifier {
     final Timer? pending = _revealTimer;
     if (pending != null && pending.isActive) return;
     final Duration since = DateTime.now().difference(_lastBubbleRevealAt);
-    final Duration wait = since >= _bubbleRevealGap
-        ? Duration.zero
-        : _bubbleRevealGap - since;
+    final Duration wait =
+        since >= _bubbleRevealGap ? Duration.zero : _bubbleRevealGap - since;
     _revealTimer = Timer(wait, () {
       _revealTimer = null;
       if (_revealQueue.isEmpty) return;
@@ -2810,11 +2990,10 @@ class MobileChatController extends ChangeNotifier {
   /// 整泡落屏一条：优先用 done 对账文本，其次用缓冲正文；只剩内部帧的
   /// 泡（清洗后为空）不落屏。
   void _revealOneBubble(_PendingBubbleReveal entry) {
-    final String text =
-        (_revealFinalText.remove(entry.bubbleId) ??
-                _bubbleBuffers.remove(entry.bubbleId) ??
-                "")
-            .trim();
+    final String text = (_revealFinalText.remove(entry.bubbleId) ??
+            _bubbleBuffers.remove(entry.bubbleId) ??
+            "")
+        .trim();
     final Map<String, dynamic>? attachments =
         _revealAttachments.remove(entry.bubbleId);
     _bubbleSessionOf.remove(entry.bubbleId);
@@ -2891,6 +3070,52 @@ class MobileChatController extends ChangeNotifier {
     }
   }
 
+  /// 整轮撤泡（2026-11-26 根因修复）：删掉该 trace 已落屏的全部分泡行——含揭示
+  /// 泵整泡落屏后 `streaming=false` 的定稿泡——并把各泡附件摘出来返回，交给
+  /// 本轮的单条收口续用。
+  ///
+  /// 协议契约（服务端 `bubble-tracker.reset` / `retractAndSuppressStream`）：
+  /// `chat.stream_reset` 的语义是「客户端删掉全部已落屏块，本轮回到单条车道，
+  /// done 不再带 bubbles」。此前撤回只清 `streaming` 行的正文，而分泡一旦整泡
+  /// 落屏就是 `streaming=false`，撤不掉 → 已落屏的分泡与 done 的整段单条并存，
+  /// 同一段正文（含表格）在屏上读两遍。一轮只能有一条呈现通道。
+  ({List<String> ids, Map<String, dynamic> attachments}) _retractTraceBubbles(
+    List<ChatMessage> list,
+    String traceId,
+  ) {
+    final List<ChatMessage> gone = <ChatMessage>[];
+    for (int i = list.length - 1; i >= 0; i--) {
+      final ChatMessage m = list[i];
+      if (!_isBubbleId(m.messageId)) continue;
+      if (_bubbleTraceOf(m.messageId) != traceId) continue;
+      gone.insert(0, m);
+      list.removeAt(i);
+    }
+    if (gone.isEmpty) {
+      return (ids: const <String>[], attachments: const <String, dynamic>{});
+    }
+    // 附件以末泡为准（揭示泵落屏时卡片就挂在末泡上）。
+    for (final ChatMessage m in gone) {
+      unawaited(_store.deleteMessage(m.messageId).catchError((Object e) {
+        debugPrint("[MobileChatController] 撤泡删除本地历史失败: $e");
+      }));
+    }
+    final ChatMessage last = gone.last;
+    return (
+      ids: gone.map((ChatMessage m) => m.messageId).toList(growable: false),
+      attachments: <String, dynamic>{
+        if (last.mediaCards != null) "mediaCards": last.mediaCards,
+        if (last.summaryCard != null) "summaryCard": last.summaryCard,
+        if (last.renderBlocks != null) "renderBlocks": last.renderBlocks,
+        if (last.replyBlocks != null) "replyBlocks": last.replyBlocks,
+        if (last.envelopeBlocks != null) "envelopeBlocks": last.envelopeBlocks,
+        if (last.followUpPrompts != null) "followUps": last.followUpPrompts,
+        if (last.notifyActions != null) "notifyActions": last.notifyActions,
+        if (last.why != null) "why": last.why,
+      },
+    );
+  }
+
   /// 会出卡片的轮次不流式（2026-10-08）：服务端确认本轮将携带结构化卡片
   /// （工具附卡/识图照片/模型自产标记）后，先撤回该 trace 已流出的正文并转
   /// 静默，最终内容由 `chat.assistant_done` 一次性结构化下发。这里清空本轮
@@ -2902,24 +3127,34 @@ class MobileChatController extends ChangeNotifier {
         ? "assistant-$traceId"
         : (_turnOf(threadKey).streamingMessageId ?? "");
     if (mainId.isEmpty) return;
+    // 无 traceId 的老帧：从当前流式泡 id 反推本轮 trace，保证撤的是同一轮。
+    final String trace = (traceId != null && traceId.isNotEmpty)
+        ? traceId
+        : (_bubbleTraceOf(mainId) ?? "");
     final List<ChatMessage> list = _sessionMessages.putIfAbsent(
       threadKey,
       () => <ChatMessage>[],
     );
     // 卡片轮转静默：还在揭示缓冲/队列里的同 trace 泡一并丢弃，
     // 防止出卡片的轮次后来又弹出文字泡
-    if (traceId != null && traceId.isNotEmpty) {
-      _dropHiddenBubblesForTrace(traceId);
+    if (trace.isNotEmpty) {
+      _dropHiddenBubblesForTrace(trace);
     }
-    bool changed = false;
+    // 已整泡落屏的分泡同样属于「已流正文」，必须随撤回一起消失，否则会与
+    // done 的整段单条并存；附件/照片先摘出来回落到占位泡壳。
+    final ({List<String> ids, Map<String, dynamic> attachments}) retracted =
+        trace.isEmpty
+            ? (ids: const <String>[], attachments: const <String, dynamic>{})
+            : _retractTraceBubbles(list, trace);
+    final Map<String, dynamic> att = retracted.attachments;
+    bool changed = retracted.ids.isNotEmpty;
     for (int i = 0; i < list.length; i++) {
       final ChatMessage m = list[i];
-      if (!m.streaming || m.text.isEmpty) continue;
-      final bool sameTrace = (m.messageId == mainId) ||
-          (traceId != null &&
-              traceId.isNotEmpty &&
-              _bubbleTraceOf(m.messageId) == traceId);
-      if (!sameTrace) continue;
+      if (!m.streaming) continue;
+      if (m.messageId != mainId &&
+          !(trace.isNotEmpty && _bubbleTraceOf(m.messageId) == trace)) {
+        continue;
+      }
       list[i] = ChatMessage(
         messageId: m.messageId,
         sessionId: m.sessionId,
@@ -2927,9 +3162,14 @@ class MobileChatController extends ChangeNotifier {
         text: "",
         timestamp: m.timestamp,
         streaming: true,
-        mediaCards: m.mediaCards,
-        renderBlocks: m.renderBlocks,
-        replyBlocks: m.replyBlocks,
+        mediaCards:
+            m.mediaCards ?? att["mediaCards"] as List<Map<String, dynamic>>?,
+        summaryCard:
+            m.summaryCard ?? att["summaryCard"] as Map<String, dynamic>?,
+        renderBlocks: m.renderBlocks ??
+            att["renderBlocks"] as List<Map<String, dynamic>>?,
+        replyBlocks:
+            m.replyBlocks ?? att["replyBlocks"] as List<Map<String, dynamic>>?,
         pendingMediaCards: m.pendingMediaCards,
       );
       changed = true;
@@ -3034,7 +3274,8 @@ class MobileChatController extends ChangeNotifier {
     // 后台触达（2026-11-10）：用户发完消息切走，回复到达时应用内气泡不可见
     // ——系统通知弹横幅（类微信会话新消息）。卡片轮正文为空不通知；
     // 主动消息/提醒有各自通知通道，这里只管「对话轮的回复」。
-    if (_appBackgrounded) {
+    // notifyOn 归属端（2026-11-26）：主动/通知回复的 done 也可能带它，非归属端不弹。
+    if (_appBackgrounded && !_bannerOnOtherDevice(payload)) {
       String notifyText =
           stripAssistantProtocolFrames(payload["finalText"]?.toString() ?? "")
               .trim();
@@ -3068,61 +3309,92 @@ class MobileChatController extends ChangeNotifier {
       _finalizeBubbles(payload, bubbles, threadKey);
       return;
     }
-    // 分泡轮的 done 应走 _finalizeBubbles；万一服务端不带 bubbles 对账
-    // 数组（旧版兼容），把揭示缓冲里的泡立即整泡落屏，不留黑洞。
-    _flushHiddenBubblesNow();
+    // 分泡轮的 done 应走 _finalizeBubbles；服务端不带 bubbles 对账数组时，本轮
+    // 由本单条路径收口。
     final String? traceId = payload["traceId"]?.toString();
-    // 撤回轮（chat.stream_reset，2026-11-25 车道架构）：服务端已撤回流式块并
-    // 清空气泡账本，done 不带 bubbles → 走本单条路径。把本 trace 遗留的空
-    // 流式占位泡（撤回清空后的泡壳）一并撤掉，finalText 以单条落屏——
-    // 不存在「泡壳在、单条又落一条」的并存。
-    if (traceId != null && traceId.isNotEmpty) {
-      list.removeWhere((ChatMessage m) =>
-          m.streaming &&
-          m.text.trim().isEmpty &&
-          _isBubbleId(m.messageId) &&
-          _bubbleTraceOf(m.messageId) == traceId);
+    final String? messageId = payload["messageId"]?.toString();
+    final String finalText =
+        stripAssistantProtocolFrames(payload["finalText"]?.toString() ?? "");
+    // 一轮一条呈现通道（2026-11-26 根因修复）：done 不带对账数组且 messageId 就是
+    // 本轮基础 id（撤回轮 `bubbleTracker.reset()` 后 `outboundDoneMessageId` 回退
+    // 到 baseMessageId），说明这一帧说的是整轮，finalText 是本轮唯一正文。同
+    // trace 已落屏的分泡与它是同一份内容的两种形态，并存即「表格读两遍」→ 先整轮
+    // 撤泡再单条落位。finalText 为空（纯卡轮/异常收口）不改分泡呈现，只撤空壳；
+    // messageId 属于别的消息（后台任务/子代理独立回复）也不撤，那是另一条消息。
+    final bool hasTrace = traceId != null && traceId.isNotEmpty;
+    final bool speaksForTurn = hasTrace &&
+        (messageId == null ||
+            messageId == "assistant-$traceId" ||
+            _bubbleTraceOf(messageId) == traceId);
+    ({List<String> ids, Map<String, dynamic> attachments}) retracted = (
+      ids: const <String>[],
+      attachments: const <String, dynamic>{},
+    );
+    if (speaksForTurn && finalText.trim().isNotEmpty) {
+      _dropHiddenBubblesForTrace(traceId);
+      retracted = _retractTraceBubbles(list, traceId);
       if (t.streamingMessageId != null &&
           _isBubbleId(t.streamingMessageId!) &&
           _bubbleTraceOf(t.streamingMessageId!) == traceId) {
         t.streamingMessageId = null;
       }
-    }
-    final String? messageId = payload["messageId"]?.toString();
-    // 优先用已经打开的流式消息;否则尝试按 trace 对齐
-    int idx;
-    if (t.streamingMessageId != null) {
-      idx = list.indexWhere((m) => m.messageId == t.streamingMessageId);
     } else {
-      final String traceKey = traceId != null && traceId.isNotEmpty
-          ? "assistant-$traceId"
-          : "assistant-final";
-      idx = list.indexWhere(
-        (m) =>
-            m.messageId == traceKey ||
-            (messageId != null && m.messageId == messageId),
-      );
+      // 分泡轮的 done 缺对账数组（旧版服务端）：把揭示缓冲里的泡立即整泡落屏，
+      // 不留黑洞；再撤掉本 trace 遗留的空泡壳，避免「泡壳在、单条又落一条」。
+      _flushHiddenBubblesNow();
+      if (hasTrace) {
+        list.removeWhere((ChatMessage m) =>
+            m.streaming &&
+            m.text.trim().isEmpty &&
+            _isBubbleId(m.messageId) &&
+            _bubbleTraceOf(m.messageId) == traceId);
+        if (t.streamingMessageId != null &&
+            _isBubbleId(t.streamingMessageId!) &&
+            _bubbleTraceOf(t.streamingMessageId!) == traceId) {
+          t.streamingMessageId = null;
+        }
+      }
     }
-    final String finalText =
-        stripAssistantProtocolFrames(payload["finalText"]?.toString() ?? "");
+    final Map<String, dynamic> retractedAtt = retracted.attachments;
+    // 优先用已经打开的流式消息；其次按本轮占位泡壳 / done 的 id 对齐
+    int idx = -1;
+    for (final String candidate in <String>[
+      if (t.streamingMessageId != null) t.streamingMessageId!,
+      if (hasTrace) "assistant-$traceId",
+      if (messageId != null) messageId,
+      if (!hasTrace) "assistant-final",
+    ]) {
+      idx = list.indexWhere((m) => m.messageId == candidate);
+      if (idx >= 0) break;
+    }
     // 结构化媒体卡片 / 交错渲染块 / 回复信封块：与桌面端一致，前端据此渲染
     // 卡片与图文交错，不再把 `[AGENT_RESULT_CARD_START]` 等标记当纯文本展示。
+    // done 缺字段时回落到撤泡摘出的附件——撤回不能把用户的照片/卡片一起吞掉。
     final List<Map<String, dynamic>>? mediaCards =
-        _parseStructuredList(payload, "mediaCards");
+        _parseStructuredList(payload, "mediaCards") ??
+            retractedAtt["mediaCards"] as List<Map<String, dynamic>>?;
     // 结构化摘要卡（CONTENT_SUMMARY 通道迁移）：随 done 下发的折叠卡载荷。
     final Map<String, dynamic>? summaryCard =
         payload["summaryCard"] is Map<String, dynamic>
             ? payload["summaryCard"] as Map<String, dynamic>
-            : null;
+            : retractedAtt["summaryCard"] as Map<String, dynamic>?;
     final List<Map<String, dynamic>>? renderBlocks =
-        _parseStructuredList(payload, "renderBlocks");
+        _parseStructuredList(payload, "renderBlocks") ??
+            retractedAtt["renderBlocks"] as List<Map<String, dynamic>>?;
     final List<Map<String, dynamic>>? replyBlocks =
-        _parseStructuredList(payload, "blocks");
+        _parseStructuredList(payload, "blocks") ??
+            retractedAtt["replyBlocks"] as List<Map<String, dynamic>>?;
     // v2 统一信封块（P4）：唯一权威序列，渲染层信封优先；非 v2 帧为 null，
     // 渲染回退旧字段链（零回归）。
     final List<Map<String, dynamic>>? envelopeBlocks =
-        extractEnvelopeBlocks(payload);
-    final List<String>? followUps = _parseFollowUps(payload);
+        extractEnvelopeBlocks(payload) ??
+            retractedAtt["envelopeBlocks"] as List<Map<String, dynamic>>?;
+    final List<String>? followUps =
+        _parseFollowUps(payload) ?? retractedAtt["followUps"] as List<String>?;
+    final List<NotifyAction>? proactiveActions = _proactiveActionsOf(payload) ??
+        retractedAtt["notifyActions"] as List<NotifyAction>?;
+    final String? why =
+        payload["why"]?.toString() ?? retractedAtt["why"]?.toString();
     if (idx < 0) {
       // 没有流式占位:直接落一条最终消息（整轮只剩内部帧 → 不落空白泡）
       if (finalText.trim().isEmpty &&
@@ -3148,8 +3420,8 @@ class MobileChatController extends ChangeNotifier {
         replyBlocks: replyBlocks,
         envelopeBlocks: envelopeBlocks,
         followUpPrompts: followUps,
-        notifyActions: _proactiveActionsOf(payload),
-        why: payload["why"]?.toString(),
+        notifyActions: proactiveActions,
+        why: why,
       ));
       _persist(list.last);
     } else {
@@ -3185,9 +3457,10 @@ class MobileChatController extends ChangeNotifier {
         renderBlocks: renderBlocks ?? prev.renderBlocks,
         replyBlocks: replyBlocks ?? prev.replyBlocks,
         envelopeBlocks: envelopeBlocks ?? prev.envelopeBlocks,
+        // pendingMediaCards 不带走：done 的媒体块/信封才是最终渲染口径
         followUpPrompts: followUps,
-        notifyActions: _proactiveActionsOf(payload) ?? prev.notifyActions,
-        why: payload["why"]?.toString() ?? prev.why,
+        notifyActions: proactiveActions ?? prev.notifyActions,
+        why: why ?? prev.why,
       );
       _persist(list[idx]);
     }
@@ -3311,11 +3584,13 @@ class MobileChatController extends ChangeNotifier {
                 followUps != null);
         if (text.trim().isEmpty && !hasAttachments) continue;
         if (isLast) {
-          final List<NotifyAction>? proactiveActions = _proactiveActionsOf(payload);
+          final List<NotifyAction>? proactiveActions =
+              _proactiveActionsOf(payload);
           _revealAttachments[id] = <String, dynamic>{
             if (mediaCards != null) "mediaCards": mediaCards,
             if (summaryCard != null) "summaryCard": summaryCard,
-            if (renderBlocksForLast != null) "renderBlocks": renderBlocksForLast,
+            if (renderBlocksForLast != null)
+              "renderBlocks": renderBlocksForLast,
             if (replyBlocksForLast != null) "replyBlocks": replyBlocksForLast,
             if (envelopeBlocksForLast != null)
               "envelopeBlocks": envelopeBlocksForLast,
@@ -3367,7 +3642,9 @@ class MobileChatController extends ChangeNotifier {
               : prev.envelopeBlocks,
           followUpPrompts: isLast ? followUps : null,
           pendingMediaCards: isLast ? null : prev.pendingMediaCards,
-          notifyActions: isLast ? (_proactiveActionsOf(payload) ?? prev.notifyActions) : prev.notifyActions,
+          notifyActions: isLast
+              ? (_proactiveActionsOf(payload) ?? prev.notifyActions)
+              : prev.notifyActions,
           why: isLast ? (payload["why"]?.toString() ?? prev.why) : prev.why,
           // streaming 不带 → false：定稿
         );

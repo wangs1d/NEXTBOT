@@ -48,7 +48,8 @@ export function registerImageFileRoutes(
         // 缩略图失败 → 落到原图，绝不让缩略图链路影响可用性
       }
 
-      void reply.header("Content-Type", "image/png");
+      // 2026-11 起新图默认落盘 WebP（旧图仍是 PNG），按扩展名给内容类型。
+      void reply.header("Content-Type", fullPath.toLowerCase().endsWith(".webp") ? "image/webp" : "image/png");
       void reply.header("Cache-Control", "public, max-age=2592000, immutable");
       void reply.header("Accept-Ranges", "bytes");
       return reply.send(deps.imageGenerationService.createReadStream(fullPath));

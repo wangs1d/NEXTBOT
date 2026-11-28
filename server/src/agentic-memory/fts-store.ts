@@ -26,7 +26,11 @@ import { isMemoryFtsEnabled, getMemoryFtsTopK } from "./env.js";
 import { openAgenticSqlite } from "./sqlite-store.js";
 import { actorIdVariants } from "./actor-key.js";
 import { tokenize } from "../services/memory-record-utils.js";
-import { classifyMemorySourceRole } from "../services/memory-source-role.js";
+import {
+  classifyMemorySourceRole,
+  normalizeMemorySourceRole,
+  type MemorySourceRole,
+} from "../services/memory-source-role.js";
 
 /** 单条 FTS 命中（rank 列表元素；score 仅排序语义） */
 export interface FtsMemoryCandidate {
@@ -39,6 +43,7 @@ export interface FtsMemoryCandidate {
   importance?: number;
   /** 原始 context 字段（可能缺失；缺省视为 main 的过滤由调用方语义决定，此处一并实现） */
   context?: string;
+  sourceRole?: MemorySourceRole;
 }
 
 export interface FtsIndexItem {
@@ -113,13 +118,16 @@ export class AgenticMemoryFtsStore {
       for (const item of rows) {
         const text = (item.memory ?? "").trim();
         if (!item.id || !text) continue;
-        // 助手自己的历史发言不进词法索引：读侧默认丢弃助手语气条目，索引进来
-        // 只会占满 topK（实测占候选 15%）。用户明确追问「你上次怎么说」仍走
-        // 语义路，词法路不是它的唯一来源。
-        if (classifyMemorySourceRole(text) === "assistant") continue;
+        // 助手时间线不进词法索引；用户事实与旧版未标色文本保留词法召回能力。
+        const meta = item.metadata ?? {};
+        const sourceRole =
+          normalizeMemorySourceRole(meta.sourceRole) ?? classifyMemorySourceRole(text);
+        if (sourceRole === "assistant") {
+          deleteById.run(item.id);
+          continue;
+        }
         const tokens = tokenize(text);
         if (tokens.length === 0) continue;
-        const meta = item.metadata ?? {};
         deleteById.run(item.id);
         insert.run(
           tokens.join(" "),
@@ -212,6 +220,7 @@ export class AgenticMemoryFtsStore {
             memoryId: String(row.memory_id ?? ""),
             content: String(row.content ?? ""),
             score,
+            sourceRole: classifyMemorySourceRole(String(row.content ?? "")),
             ...(typeof row.created_at === "string" && row.created_at ? { createdAt: row.created_at } : {}),
             ...(row.high_signal === 1 ? { highSignal: true } : {}),
             ...(Number.isFinite(Number(row.importance)) ? { importance: Number(row.importance) } : {}),

@@ -83,6 +83,22 @@ test("writeDecided: 单事件来源进入 Mem0 metadata（unified 与旧路径�
   assert.equal(calls[1]!.eventTime, "2026-10-30T11:00:00.000Z");
 });
 
+test("writeDecided: sourceRole 透传到 Mem0 metadata", async () => {
+  const calls: MetadataCalls = [];
+  const port = makePort(calls);
+
+  await port.writeDecided(
+    "u1",
+    "周末去公园散步",
+    "chat:timeline",
+    { context: "main", highSignal: true, sourceRole: "assistant" },
+    UNIFIED,
+  );
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.sourceRole, "assistant");
+});
+
 test("writeDecided: 无来源时不写空字段；批量来源保留 id 列表", async () => {
   const calls: MetadataCalls = [];
   const port = makePort(calls);
@@ -91,7 +107,9 @@ test("writeDecided: 无来源时不写空字段；批量来源保留 id 列表",
     context: "main",
     highSignal: false,
   });
-  assert.deepEqual(calls[0], {});
+  assert.equal(calls[0]!.sourceEventId, undefined);
+  assert.equal(calls[0]!.record?.sourceRole, "unknown");
+  assert.equal(calls[0]!.record?.sourceRef, "chat:low_signal_summary");
 
   await port.writeDecided(
     "u1",
